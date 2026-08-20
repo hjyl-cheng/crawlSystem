@@ -99,10 +99,14 @@ function jobFixture(source = target(), overrides = {}) {
   return { job, retried, source };
 }
 
-test("the compatibility selector requires the original recovery, old binding, and no Run", () => {
+test("the compatibility selector accepts pre-bind failures but still requires no Run", () => {
   assert.match(MIGRATION_BUSINESS_RUN_INTENT_TARGET_SQL, /dispatch_batch_id=\$1/);
   assert.match(MIGRATION_BUSINESS_RUN_INTENT_TARGET_SQL, /source_json #> \$2::text\[\]/);
   assert.match(MIGRATION_BUSINESS_RUN_INTENT_TARGET_SQL, /source_json #> \$3::text\[\]/);
+  assert.doesNotMatch(
+    MIGRATION_BUSINESS_RUN_INTENT_TARGET_SQL,
+    /source_json #> \$2::text\[\] IS NOT NULL/,
+  );
   assert.match(MIGRATION_BUSINESS_RUN_INTENT_TARGET_SQL, /business_run_bindings/);
   assert.match(MIGRATION_BUSINESS_RUN_INTENT_TARGET_SQL, /NOT EXISTS/);
 });
@@ -118,6 +122,19 @@ test("the exact old-Intent conflict is classified for one audited retry", async 
   assert.equal(inspection.candidate_id, candidateId);
   assert.equal(inspection.attempts_made_before, 4);
   assert.equal(inspection.binding_business_run_id, businessRunId);
+});
+
+test("a pre-bind legacy conflict does not require an unrelated BUG-043 marker", async () => {
+  const source = target({ original_recovery_marker: null });
+  const { job } = jobFixture(source);
+  delete job.data.business_run_key;
+  delete job.data.run_id;
+
+  const inspection = await classifyMigrationBusinessRunIntentRecoveryTarget(source, job);
+
+  assert.equal(inspection.action, "prepare_and_retry");
+  assert.equal(inspection.candidate_id, candidateId);
+  assert.equal(inspection.attempts_made_before, 4);
 });
 
 test("preparation changes only the Candidate state and appends a second audit marker", async () => {
@@ -151,6 +168,7 @@ test("preparation changes only the Candidate state and appends a second audit ma
   const update = calls.find(({ sql }) => sql.includes("UPDATE crawler.channel_candidates"));
   assert.match(update.sql, /status='queued'/);
   assert.match(update.sql, /NOT EXISTS/);
+  assert.match(update.sql, /IS NULL\s+OR/);
   assert.equal(update.params[0], candidateId);
   assert.equal(update.params[1], batchId);
   assert.equal(update.params[3], MIGRATION_BUSINESS_RUN_INTENT_RECOVERY_OPERATION_ID);

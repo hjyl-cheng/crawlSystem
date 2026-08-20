@@ -62,6 +62,17 @@ test("a candidate Full job resolves and caches one reserved Business Run", async
     ),
     false,
   );
+  for (const field of [
+    "publication_gap_domains",
+    "publication_gap_root_run_id",
+    "publication_gap_scope",
+  ]) {
+    assert.equal(
+      store.calls[0].intent[field],
+      null,
+      `ordinary Full intent must freeze ${field} as null`,
+    );
+  }
 });
 
 test("a redelivered candidate Full job reuses its reserved Business Run identity", async () => {
@@ -295,6 +306,9 @@ test("a frozen Publication Gap creates a child Business Run instead of reopening
   assert.equal(prepared.businessRunKey, "full-repair:auto:run:promotion:1:UC1");
   assert.equal(store.calls.length, 1);
   assert.equal(store.calls[0].explicitBusinessRunId, null);
+  assert.deepEqual(store.calls[0].intent.publication_gap_domains, ["channel", "video"]);
+  assert.equal(store.calls[0].intent.publication_gap_root_run_id, "run:promotion");
+  assert.equal(store.calls[0].intent.publication_gap_scope, null);
   assert.equal(job.data.candidate_id, undefined);
 });
 

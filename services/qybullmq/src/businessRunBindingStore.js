@@ -2,6 +2,13 @@ import { createHash, randomUUID as nodeRandomUUID } from "node:crypto";
 
 export const BUSINESS_RUN_INTENT_SCHEMA_VERSION = 1;
 
+const OPTIONAL_NULL_INTENT_FIELDS = Object.freeze([
+  "checkpoint_target_run_id",
+  "publication_gap_domains",
+  "publication_gap_root_run_id",
+  "publication_gap_scope",
+]);
+
 export class BusinessRunBindingConflictError extends Error {
   constructor(businessRunKey) {
     super(`BUSINESS_RUN_KEY_CONFLICT: ${businessRunKey}`);
@@ -37,6 +44,41 @@ export function businessRunIntentHash(value) {
   return `sha256:${createHash("sha256")
     .update(JSON.stringify(canonicalValue(value)))
     .digest("hex")}`;
+}
+
+function intentJson(value) {
+  if (typeof value === "string") {
+    try {
+      return JSON.parse(value);
+    } catch {
+      return null;
+    }
+  }
+  return value && typeof value === "object" && !Array.isArray(value) ? value : null;
+}
+
+function optionalNullCompatibleIntent(value) {
+  const immutableIntent = intentJson(value);
+  const nestedIntent = intentJson(immutableIntent?.intent);
+  if (!immutableIntent || !nestedIntent) return immutableIntent;
+  const normalizedIntent = { ...nestedIntent };
+  for (const field of OPTIONAL_NULL_INTENT_FIELDS) {
+    if (!Object.prototype.hasOwnProperty.call(normalizedIntent, field)) {
+      normalizedIntent[field] = null;
+    }
+  }
+  return canonicalValue({ ...immutableIntent, intent: normalizedIntent });
+}
+
+function sameImmutableIntent(row, value) {
+  if (row.intent_hash === value.intentHash) return true;
+  if (Number(row.intent_schema_version) !== BUSINESS_RUN_INTENT_SCHEMA_VERSION) return false;
+  const storedIntent = intentJson(row.intent_json);
+  if (!storedIntent || businessRunIntentHash(storedIntent) !== row.intent_hash) return false;
+
+  // These fields were added as optional nulls without changing task semantics.
+  return businessRunIntentHash(optionalNullCompatibleIntent(storedIntent))
+    === businessRunIntentHash(optionalNullCompatibleIntent(value.immutableIntent));
 }
 
 function normalizedInput(input) {
@@ -78,7 +120,7 @@ function normalizedInput(input) {
 }
 
 function assertSameBinding(row, value) {
-  if (row.intent_hash !== value.intentHash
+  if (!sameImmutableIntent(row, value)
       || row.identity_policy_id !== value.policy.id
       || Number(row.identity_policy_version) !== value.policy.version
       || row.identity_policy_hash !== value.policy.hash

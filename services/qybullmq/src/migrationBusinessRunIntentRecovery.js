@@ -55,7 +55,6 @@ WHERE candidate.dispatch_batch_id=$1
           || ': BUSINESS_RUN_KEY_CONFLICT'
       AND candidate.snapshot_attempts=0
       AND candidate.validation_started_at IS NULL
-      AND candidate.source_json #> $2::text[] IS NOT NULL
       AND candidate.source_json #> $3::text[] IS NULL
       AND NOT EXISTS (
         SELECT 1 FROM crawler.channel_runs run
@@ -149,7 +148,7 @@ function normalizedTarget(value) {
 
 function assertOriginalRecoveryMarker(target) {
   const marker = target.original_recovery_marker;
-  if (!marker) throw new Error("original BUG-043 recovery marker is missing");
+  if (!marker) return null;
   assertSame(
     marker.operation_id,
     MIGRATION_PROXY_CONTROL_RECOVERY_OPERATION_ID,
@@ -176,9 +175,21 @@ function assertOldBinding(target) {
     requiredText(target.binding_terminal_reason, "binding_terminal_reason");
   }
   const intent = object(target.binding_intent_json?.intent ?? {}, "binding intent");
-  if (Object.prototype.hasOwnProperty.call(intent, "checkpoint_target_run_id")) {
+  const postLegacyFields = [
+    "checkpoint_target_run_id",
+    "publication_gap_domains",
+    "publication_gap_root_run_id",
+    "publication_gap_scope",
+  ];
+  if (postLegacyFields.some((field) => Object.prototype.hasOwnProperty.call(intent, field))) {
     throw new Error("Business Run compatibility recovery requires an old-format Binding");
   }
+  assertSame(intent.job_name, "channel-snapshot", "binding intent job_name");
+  assertSame(intent.crawl_mode, "full", "binding intent crawl_mode");
+  assertSame(intent.repair_batch_id, null, "binding intent repair_batch_id");
+  assertSame(intent.repair_parent_run_id, null, "binding intent repair_parent_run_id");
+  assertSame(intent.repair_round ?? 0, 0, "binding intent repair_round");
+  assertSame(intent.repair_version, null, "binding intent repair_version");
   return { key, runId };
 }
 
@@ -191,8 +202,16 @@ function assertJobIdentity(target, job) {
   assertSame(job.data?.dispatch_batch_id, target.dispatch_batch_id, "dispatch_batch_id");
   assertSame(job.data?.pipeline_cycle_id, target.pipeline_cycle_id, "pipeline_cycle_id");
   assertSame(job.data?.channel_id, target.channel_id, "channel_id");
-  assertSame(job.data?.business_run_key, binding.key, "business_run_key");
-  assertSame(job.data?.run_id, binding.runId, "run_id");
+  const cachedKey = String(job.data?.business_run_key ?? "").trim() || null;
+  const cachedRunId = String(job.data?.run_id ?? "").trim() || null;
+  if ((cachedKey == null) !== (cachedRunId == null)) {
+    throw new Error("Business Run compatibility recovery Job has partial cached identity");
+  }
+  if (cachedKey) {
+    assertSame(cachedKey, binding.key, "business_run_key");
+    assertSame(cachedRunId, binding.runId, "run_id");
+  }
+  return { ...binding, cached: cachedKey != null };
 }
 
 function assertCompatibilityMarker(target) {
@@ -226,13 +245,12 @@ function assertCompatibilityMarker(target) {
 
 export async function classifyMigrationBusinessRunIntentRecoveryTarget(targetValue, job) {
   const target = normalizedTarget(targetValue);
-  assertOriginalRecoveryMarker(target);
+  const originalBaseline = assertOriginalRecoveryMarker(target);
   assertJobIdentity(target, job);
   const state = requiredText(await job.getState(), "BullMQ Job state");
   const attemptsMade = nonNegativeInteger(job.attemptsMade ?? 0, "attemptsMade");
 
   if (!target.compatibility_recovery_marker) {
-    const originalBaseline = assertOriginalRecoveryMarker(target);
     if (target.status !== "failed"
         || target.error_message !== expectedCandidateError(target.candidate_id)
         || target.snapshot_attempts !== 0
@@ -241,7 +259,8 @@ export async function classifyMigrationBusinessRunIntentRecoveryTarget(targetVal
         || target.binding_status !== "reserved"
         || state !== "failed"
         || job.failedReason !== expectedJobFailure(target.candidate_id)
-        || attemptsMade !== originalBaseline + 1) {
+        || attemptsMade === 0
+        || (originalBaseline != null && attemptsMade !== originalBaseline + 1)) {
       throw new Error(
         `Candidate is not an original compatibility failure: ${target.candidate_id}`,
       );
@@ -324,7 +343,7 @@ export async function classifyMigrationBusinessRunIntentRecoveryTarget(targetVal
 function recoveryMarker(inspection, preparedAt) {
   return {
     operation_id: MIGRATION_BUSINESS_RUN_INTENT_RECOVERY_OPERATION_ID,
-    reason: "worker_added_checkpoint_null_to_frozen_candidate_intent",
+    reason: "worker_added_optional_null_fields_to_frozen_candidate_intent",
     prepared_at: preparedAt,
     candidate_id: inspection.candidate_id,
     dispatch_batch_id: inspection.dispatch_batch_id,
@@ -338,6 +357,8 @@ function recoveryMarker(inspection, preparedAt) {
     binding_business_run_key: inspection.binding_business_run_key,
     binding_business_run_id: inspection.binding_business_run_id,
     binding_intent_hash: inspection.binding_intent_hash,
+    original_recovery_operation_id:
+      inspection.original_recovery_marker?.operation_id ?? null,
   };
 }
 
@@ -376,9 +397,12 @@ export async function prepareMigrationBusinessRunIntentRecoveryTargets(client, i
          AND candidate.error_message=$3
          AND candidate.snapshot_attempts=0
          AND candidate.validation_started_at IS NULL
-         AND candidate.source_json#>>ARRAY[
-           'controlled_recoveries',$7,'operation_id'
-         ]=$7
+         AND (
+           candidate.source_json#>ARRAY['controlled_recoveries',$7] IS NULL
+           OR candidate.source_json#>>ARRAY[
+             'controlled_recoveries',$7,'operation_id'
+           ]=$7
+         )
          AND NOT (COALESCE(candidate.source_json->'controlled_recoveries','{}'::jsonb) ? $4)
          AND NOT EXISTS (
            SELECT 1 FROM crawler.channel_runs run

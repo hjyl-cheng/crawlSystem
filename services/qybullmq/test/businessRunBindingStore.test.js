@@ -94,6 +94,54 @@ test("a replay resolves the same persistent Business Run without BullMQ state", 
   assert.equal(replay.binding.status, "reserved");
 });
 
+test("a legacy intent missing later optional null fields reuses the same Binding", async () => {
+  const { store } = fixture();
+  const legacyIntent = {
+    job_name: "channel-snapshot",
+    crawl_mode: "full",
+    repair_batch_id: null,
+    repair_parent_run_id: null,
+    repair_round: 0,
+    repair_version: null,
+  };
+  const first = await store.resolve(input({ intent: legacyIntent }));
+  const replay = await store.resolve(input({
+    intent: {
+      ...legacyIntent,
+      checkpoint_target_run_id: null,
+      publication_gap_domains: null,
+      publication_gap_root_run_id: null,
+      publication_gap_scope: null,
+    },
+  }));
+
+  assert.equal(replay.created, false);
+  assert.equal(replay.binding.business_run_id, first.binding.business_run_id);
+});
+
+test("optional compatibility never hides a real Publication Gap intent change", async () => {
+  const { store } = fixture();
+  await store.resolve(input({
+    intent: {
+      job_name: "channel-snapshot",
+      crawl_mode: "full",
+    },
+  }));
+
+  await assert.rejects(
+    store.resolve(input({
+      intent: {
+        job_name: "channel-snapshot",
+        crawl_mode: "full",
+        publication_gap_domains: ["channel"],
+        publication_gap_root_run_id: "run:promotion",
+        publication_gap_scope: "about_only",
+      },
+    })),
+    (error) => error instanceof BusinessRunBindingConflictError,
+  );
+});
+
 test("the same Business Run key cannot be rebound to a different immutable intent", async () => {
   const { store } = fixture();
   await store.resolve(input());
