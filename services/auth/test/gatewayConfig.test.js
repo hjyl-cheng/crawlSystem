@@ -19,6 +19,15 @@ function serverBlock(config, hostVariable) {
   return config.slice(start, next === -1 ? config.length : next);
 }
 
+function upstreamBlock(config, upstreamName) {
+  const marker = `upstream ${upstreamName} {`;
+  const start = config.indexOf(marker);
+  assert.notEqual(start, -1, `missing upstream ${upstreamName}`);
+  const end = config.indexOf("\n}", start);
+  assert.notEqual(end, -1, `unterminated upstream ${upstreamName}`);
+  return config.slice(start, end + 2);
+}
+
 function composeServiceBlock(config, service) {
   const marker = `\n  ${service}:\n`;
   const markerIndex = config.indexOf(marker);
@@ -51,6 +60,24 @@ test("portable QY hosts enforce one authentication boundary", async () => {
   assert.match(config, /auth_request_set \$qy_auth_cookie \$upstream_http_set_cookie;/);
   assert.equal(occurrences(proxyParams, "proxy_http_version 1.1;"), 1);
   assert.equal(occurrences(config, "proxy_http_version 1.1;"), 0);
+});
+
+test("gateway re-resolves Docker upstreams after a container replacement", async () => {
+  const config = await readFile(nginxPath, "utf8");
+  assert.match(config, /resolver 127\.0\.0\.11 valid=10s ipv6=off;/);
+
+  for (const upstream of [
+    "qy_dashboard",
+    "qy_bullmq",
+    "qy_auth",
+    "qy_rota_api",
+    "qy_rota_dashboard",
+    "qy_minio_console",
+  ]) {
+    const block = upstreamBlock(config, upstream);
+    assert.match(block, new RegExp(`zone ${upstream} 64k;`));
+    assert.match(block, /server [^;]+ resolve;/);
+  }
 });
 
 test("auth service consumes generated files and is not exposed directly", async () => {

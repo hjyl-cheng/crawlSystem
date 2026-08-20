@@ -8,12 +8,32 @@ map $http_x_forwarded_proto $original_proto {
     '' $scheme;
 }
 
-upstream qy_dashboard { server dashboard:3000; }
-upstream qy_bullmq { server qybullmq-api:3000; }
-upstream qy_auth { server auth:3000; }
-upstream qy_rota_api { server ${QY_ROTA_API_UPSTREAM}; }
-upstream qy_rota_dashboard { server rota-dashboard:3000; }
-upstream qy_minio_console { server ${QY_MINIO_CONSOLE_UPSTREAM}; }
+resolver 127.0.0.11 valid=10s ipv6=off;
+
+upstream qy_dashboard {
+    zone qy_dashboard 64k;
+    server dashboard:3000 resolve;
+}
+upstream qy_bullmq {
+    zone qy_bullmq 64k;
+    server qybullmq-api:3000 resolve;
+}
+upstream qy_auth {
+    zone qy_auth 64k;
+    server auth:3000 resolve;
+}
+upstream qy_rota_api {
+    zone qy_rota_api 64k;
+    server ${QY_ROTA_API_UPSTREAM} resolve;
+}
+upstream qy_rota_dashboard {
+    zone qy_rota_dashboard 64k;
+    server rota-dashboard:3000 resolve;
+}
+upstream qy_minio_console {
+    zone qy_minio_console 64k;
+    server ${QY_MINIO_CONSOLE_UPSTREAM} resolve;
+}
 
 server {
     listen 80;
