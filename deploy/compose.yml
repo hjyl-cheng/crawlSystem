@@ -13,7 +13,7 @@ x-build-args: &build-args
   QY_SOURCE_URL: ${QY_SOURCE_URL:-local:pachongsys}
 
 x-qybullmq-image: &qybullmq-image
-  image: qy-allpachong/qybullmq:${QY_IMAGE_TAG:-local}
+  image: qy-allpachong/qybullmq:${QYBULLMQ_IMAGE_TAG:-${QY_IMAGE_TAG:-local}}
   build:
     context: ..
     dockerfile: services/qybullmq/Dockerfile
@@ -229,7 +229,7 @@ services:
     logging: *default-logging
 
   rota-core:
-    image: qy-allpachong/rota-core:${QY_IMAGE_TAG:-local}
+    image: qy-allpachong/rota-core:${QY_ROTA_CORE_IMAGE_TAG:-${QY_IMAGE_TAG:-local}}
     build:
       context: ../services/rota/core
       dockerfile: Dockerfile
@@ -297,7 +297,7 @@ services:
     logging: *default-logging
 
   rota-dashboard:
-    image: qy-allpachong/rota-dashboard:${QY_IMAGE_TAG:-local}
+    image: qy-allpachong/rota-dashboard:${QY_ROTA_DASHBOARD_IMAGE_TAG:-${QY_IMAGE_TAG:-local}}
     build:
       context: ../services/rota/dashboard
       dockerfile: Dockerfile
@@ -500,7 +500,7 @@ services:
     logging: *default-logging
 
   feature-ingest:
-    image: qy-allpachong/feature-engine:${QY_IMAGE_TAG:-local}
+    image: qy-allpachong/feature-engine:${QY_FEATURE_ENGINE_IMAGE_TAG:-${QY_IMAGE_TAG:-local}}
     build:
       context: ../services/feature-engine
       dockerfile: Dockerfile
@@ -535,7 +535,7 @@ services:
     logging: *default-logging
 
   feature-scheduler-daily:
-    image: qy-allpachong/feature-engine:${QY_IMAGE_TAG:-local}
+    image: qy-allpachong/feature-engine:${QY_FEATURE_ENGINE_IMAGE_TAG:-${QY_IMAGE_TAG:-local}}
     build:
       context: ../services/feature-engine
       dockerfile: Dockerfile
@@ -569,7 +569,7 @@ services:
     logging: *default-logging
 
   feature-dispatch:
-    image: qy-allpachong/feature-dispatch:${QY_IMAGE_TAG:-local}
+    image: qy-allpachong/feature-dispatch:${QY_FEATURE_DISPATCH_IMAGE_TAG:-${QY_IMAGE_TAG:-local}}
     build:
       context: ../services/feature-dispatch
       dockerfile: Dockerfile
@@ -798,7 +798,7 @@ services:
     logging: *default-logging
 
   dashboard:
-    image: qy-allpachong/dashboard:${QY_IMAGE_TAG:-local}
+    image: qy-allpachong/dashboard:${QY_DASHBOARD_IMAGE_TAG:-${QY_IMAGE_TAG:-local}}
     build:
       context: ../services/dashboard
       dockerfile: Dockerfile
@@ -856,7 +856,7 @@ services:
     logging: *default-logging
 
   auth-secret-init:
-    image: qy-allpachong/auth:${QY_IMAGE_TAG:-local}
+    image: qy-allpachong/auth:${QY_AUTH_IMAGE_TAG:-${QY_IMAGE_TAG:-local}}
     build:
       context: ../services/auth
       dockerfile: Dockerfile
@@ -883,7 +883,7 @@ services:
     logging: *default-logging
 
   auth:
-    image: qy-allpachong/auth:${QY_IMAGE_TAG:-local}
+    image: qy-allpachong/auth:${QY_AUTH_IMAGE_TAG:-${QY_IMAGE_TAG:-local}}
     build:
       context: ../services/auth
       dockerfile: Dockerfile

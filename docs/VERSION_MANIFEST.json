@@ -21,7 +21,7 @@
       "uses Rota-owned identity policy catalog as the single source",
       "all queue and publication roles build from one image"
     ],
-    "single_image": "qy-allpachong/qybullmq:${QY_IMAGE_TAG}"
+    "single_image": "qy-allpachong/qybullmq:${QYBULLMQ_IMAGE_TAG:-${QY_IMAGE_TAG}}"
   },
   "local_agent": {
     "source_path": "services/local-agent",

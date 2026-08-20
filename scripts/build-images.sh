@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENVIRONMENT="${1:-}"
 IMAGE_TAG="${2:-}"
 if [[ -z "${ENVIRONMENT}" || -z "${IMAGE_TAG}" ]]; then
-  echo "usage: $0 <environment> <immutable-image-tag> [compose build arguments...]" >&2
+  echo "usage: $0 <environment> <immutable-image-tag> [build-service ...]" >&2
   exit 2
 fi
 shift 2
@@ -53,4 +53,23 @@ BUILD_SERVICES=(
   auth
 )
 
-exec "${ROOT_DIR}/scripts/compose.sh" "${ENVIRONMENT}" build "$@" "${BUILD_SERVICES[@]}"
+if (( $# > 0 )); then
+  REQUESTED_SERVICES=("$@")
+  for requested_service in "${REQUESTED_SERVICES[@]}"; do
+    supported=false
+    for build_service in "${BUILD_SERVICES[@]}"; do
+      if [[ "${requested_service}" == "${build_service}" ]]; then
+        supported=true
+        break
+      fi
+    done
+    if [[ "${supported}" != true ]]; then
+      echo "unsupported build service: ${requested_service}" >&2
+      echo "supported services: ${BUILD_SERVICES[*]}" >&2
+      exit 2
+    fi
+  done
+  BUILD_SERVICES=("${REQUESTED_SERVICES[@]}")
+fi
+
+exec "${ROOT_DIR}/scripts/compose.sh" "${ENVIRONMENT}" build "${BUILD_SERVICES[@]}"

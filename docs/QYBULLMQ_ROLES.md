@@ -24,7 +24,7 @@ Recommended starting scale is one replica per service. Increase only network
 workers for which Rota has ready capacity:
 
 ```bash
-QY_IMAGE_TAG=<immutable-tag> ./scripts/compose.sh production up -d \
+QYBULLMQ_IMAGE_TAG=<immutable-tag> ./scripts/compose.sh production up -d \
   --scale worker-channel=20 \
   --scale worker-incremental=5
 ```
