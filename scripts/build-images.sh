@@ -15,13 +15,24 @@ if [[ "${IMAGE_TAG}" == "latest" || "${IMAGE_TAG}" == "local" ]]; then
   exit 1
 fi
 
-if git -C "${ROOT_DIR}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-  QY_VCS_REF="$(git -C "${ROOT_DIR}" rev-parse HEAD)"
-  if [[ -n "$(git -C "${ROOT_DIR}" status --short)" ]]; then
-    QY_VCS_REF="${QY_VCS_REF}-dirty"
-  fi
-else
-  QY_VCS_REF="uncommitted"
+if ! git -C "${ROOT_DIR}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  echo "image builds must run from the committed pachongsys Git repository" >&2
+  exit 1
+fi
+
+SOURCE_STATUS="$(git -C "${ROOT_DIR}" status --short --untracked-files=all)"
+if [[ -n "${SOURCE_STATUS}" ]]; then
+  echo "refusing to build from an uncommitted pachongsys worktree:" >&2
+  echo "${SOURCE_STATUS}" >&2
+  exit 1
+fi
+
+QY_VCS_REF="$(git -C "${ROOT_DIR}" rev-parse HEAD)"
+QY_VCS_SHORT="$(git -C "${ROOT_DIR}" rev-parse --short=7 HEAD)"
+EXPECTED_TAG_PREFIX="pachongsys-${QY_VCS_SHORT}"
+if [[ "${IMAGE_TAG}" != "${EXPECTED_TAG_PREFIX}" && "${IMAGE_TAG}" != "${EXPECTED_TAG_PREFIX}-"* ]]; then
+  echo "image tag must be ${EXPECTED_TAG_PREFIX} or ${EXPECTED_TAG_PREFIX}-<variant>" >&2
+  exit 1
 fi
 
 export QY_IMAGE_TAG="${IMAGE_TAG}"

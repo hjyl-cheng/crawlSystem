@@ -14,18 +14,17 @@ bash -n \
   database/init/10-business.sh
 python3 scripts/verify_model_bundle.py
 
-if find . \
-  -path './runtime' -prune -o \
-  -path './backups' -prune -o \
-  -type d \( -name node_modules -o -name __pycache__ -o -name .pytest_cache -o -name '*.egg-info' \) \
-  -print -quit | grep -q .; then
-  echo "generated dependency or cache directory found in the source tree" >&2
-  exit 1
+if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  if git ls-files | grep -Eq '(^|/)(node_modules|__pycache__|\.pytest_cache|[^/]+\.egg-info)(/|$)'; then
+    echo "generated dependency or cache directory is tracked by Git" >&2
+    exit 1
+  fi
 fi
 
 if find . \
   -path './runtime' -prune -o \
   -path './backups' -prune -o \
+  -type d \( -name .git -o -name .venv -o -name node_modules \) -prune -o \
   -type f \( -name '.env' -o -name '*.pem' -o -name 'id_rsa' -o -name 'id_ed25519' \) \
   -print -quit | grep -q .; then
   echo "credential-shaped file found outside runtime/backups" >&2
@@ -35,6 +34,8 @@ fi
 if rg -l --hidden \
   --glob '!runtime/**' \
   --glob '!backups/**' \
+  --glob '!.venv/**' \
+  --glob '!**/node_modules/**' \
   --glob '!database/reference-snapshots/**' \
   --glob '!scripts/verify.sh' \
   -- '-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----' . | grep -q .; then

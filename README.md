@@ -50,7 +50,7 @@ Prerequisites: Docker Engine, Docker Compose v2, OpenSSL, Git, and Git LFS.
 ```bash
 ./scripts/bootstrap.sh smoke
 ./scripts/compose.sh smoke config --quiet
-./scripts/build-images.sh smoke smoke-$(date -u +%Y%m%d)-$(git rev-parse --short HEAD)
+./scripts/build-images.sh smoke pachongsys-$(git rev-parse --short=7 HEAD)-smoke
 QY_IMAGE_TAG=<the-same-tag> ./scripts/compose.sh smoke up -d
 ```
 
