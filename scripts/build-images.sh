@@ -36,6 +36,14 @@ if [[ "${IMAGE_TAG}" != "${EXPECTED_TAG_PREFIX}" && "${IMAGE_TAG}" != "${EXPECTE
 fi
 
 export QY_IMAGE_TAG="${IMAGE_TAG}"
+# Component-specific runtime pins must not override the immutable build target.
+export QYBULLMQ_IMAGE_TAG="${IMAGE_TAG}"
+export QY_ROTA_CORE_IMAGE_TAG="${IMAGE_TAG}"
+export QY_ROTA_DASHBOARD_IMAGE_TAG="${IMAGE_TAG}"
+export QY_FEATURE_ENGINE_IMAGE_TAG="${IMAGE_TAG}"
+export QY_FEATURE_DISPATCH_IMAGE_TAG="${IMAGE_TAG}"
+export QY_DASHBOARD_IMAGE_TAG="${IMAGE_TAG}"
+export QY_AUTH_IMAGE_TAG="${IMAGE_TAG}"
 export QY_BUILD_VERSION="${IMAGE_TAG}"
 export QY_VCS_REF
 export QY_BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
