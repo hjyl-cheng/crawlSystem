@@ -1,0 +1,69 @@
+services:
+  local-agent-config:
+    profiles: !reset []
+    depends_on: !reset {}
+    environment:
+      REDIS_PASSWORD: ""
+    networks: !override [internal, qy_crawler]
+
+  controller:
+    profiles: !reset []
+    depends_on: !override
+      local-agent-config:
+        condition: service_completed_successfully
+    environment:
+      REDIS_PASSWORD: ""
+    networks: !override [internal, qy_crawler, qy_rota]
+
+  worker-channel:
+    profiles: !reset []
+    depends_on: !reset {}
+    environment:
+      REDIS_PASSWORD: ""
+    networks: !override [internal, qy_crawler, qy_rota]
+    deploy:
+      replicas: ${QY_CHANNEL_WORKER_REPLICAS:-20}
+
+  worker-incremental:
+    profiles: !reset []
+    depends_on: !reset {}
+    environment:
+      REDIS_PASSWORD: ""
+    networks: !override [internal, qy_crawler, qy_rota]
+    deploy:
+      replicas: ${QY_INCREMENTAL_WORKER_REPLICAS:-5}
+
+  worker-discover:
+    profiles: !reset []
+    depends_on: !reset {}
+    environment:
+      REDIS_PASSWORD: ""
+    networks: !override [internal, qy_crawler, qy_rota]
+
+  worker-query-quality:
+    profiles: !reset []
+    depends_on: !reset {}
+    environment:
+      REDIS_PASSWORD: ""
+    networks: !override [internal, qy_crawler, qy_rota]
+
+  worker-data-api:
+    profiles: !reset []
+    depends_on: !reset {}
+    environment:
+      REDIS_PASSWORD: ""
+    networks: !override [internal, qy_crawler]
+
+  worker-agent:
+    profiles: !reset []
+    depends_on: !reset {}
+    environment:
+      REDIS_PASSWORD: ""
+    networks: !override [internal, qy_crawler]
+
+  worker-finalize:
+    profiles: !reset []
+    depends_on: !reset {}
+    environment:
+      REDIS_PASSWORD: ""
+    networks: !override [internal, qy_crawler]

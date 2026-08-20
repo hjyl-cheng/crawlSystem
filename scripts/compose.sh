@@ -37,6 +37,12 @@ case "${DEPLOYMENT_MODE}" in
   shared-qy)
     COMPOSE_FILES+=(-f "${ROOT_DIR}/deploy/compose.shared-qy.yml")
     ;;
+  shared-qy-workers)
+    COMPOSE_FILES+=(
+      -f "${ROOT_DIR}/deploy/compose.shared-qy.yml"
+      -f "${ROOT_DIR}/deploy/compose.shared-qy-workers.yml"
+    )
+    ;;
   *)
     echo "unsupported QY_DEPLOYMENT_MODE: ${DEPLOYMENT_MODE}" >&2
     exit 1

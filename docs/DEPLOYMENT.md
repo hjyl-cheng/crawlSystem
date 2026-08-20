@@ -114,3 +114,23 @@ consumption, proxy reconciliation, and business projection.
 Credentials remain in the ignored runtime environment. The adoption command
 reads them from existing containers without printing their values. It does not
 start, stop, or recreate a container and does not modify any database row.
+
+## 9. Shared QY Worker Takeover
+
+Use `shared-qy-workers` only after the existing QYBullMQ consumers have
+gracefully stopped. PostgreSQL, Redis, MinIO, Business PostgreSQL, and Rota
+remain shared, while the new project starts Controller and every QYBullMQ queue
+Worker from one immutable `pachongsys` image:
+
+```bash
+QY_DEPLOYMENT_MODE=shared-qy-workers \
+  ./scripts/compose.sh newcrawler up -d --no-build \
+    local-agent-config controller \
+    worker-channel worker-incremental worker-discover worker-query-quality \
+    worker-data-api worker-agent worker-finalize
+```
+
+The default persistent scale is 20 Full workers and 5 Incremental workers.
+Override `QY_CHANNEL_WORKER_REPLICAS` and `QY_INCREMENTAL_WORKER_REPLICAS` in
+the ignored runtime environment when Rota capacity changes. Never run the old
+and new consumers together against the shared Redis queues.

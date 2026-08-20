@@ -61,6 +61,14 @@ if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; 
       -f deploy/compose.yml \
       -f deploy/compose.shared-qy.yml \
       config --quiet
+  QY_RUNTIME_ROOT="${ROOT_DIR}/runtime/verify-template" \
+  QY_DEPLOYMENT_MODE=shared-qy-workers \
+  QY_SHARED_BUSINESS_AUDIT_DATABASE_URL_FILE=/tmp/qy-business-audit-dsn \
+    docker compose --env-file .env.example \
+      -f deploy/compose.yml \
+      -f deploy/compose.shared-qy.yml \
+      -f deploy/compose.shared-qy-workers.yml \
+      config --quiet
 else
   echo "docker compose unavailable; skipped Compose validation" >&2
 fi
