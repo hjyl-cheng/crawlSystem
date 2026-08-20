@@ -46,7 +46,7 @@ discouraged because they can accidentally mix environments.
 ## 4. Build Immutable Images
 
 ```bash
-./scripts/build-images.sh smoke source-smoke-20260820-a1b2c3d
+./scripts/build-images.sh smoke pachongsys-$(git rev-parse --short=7 HEAD)-smoke
 ```
 
 The build writes version, Git revision, build time, and source repository into
@@ -61,7 +61,7 @@ not export the large QYBullMQ image repeatedly.
 For a fresh isolated environment:
 
 ```bash
-QY_IMAGE_TAG=source-smoke-20260820-a1b2c3d \
+QY_IMAGE_TAG=pachongsys-$(git rev-parse --short=7 HEAD)-smoke \
   ./scripts/compose.sh smoke up -d
 ```
 
