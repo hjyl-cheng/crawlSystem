@@ -26,4 +26,6 @@ The initial empty PostgreSQL, Redis, MinIO, and Rota volumes validate fresh
 bootstrap behavior. To reuse the existing QY state without copying it, run
 `ops/adopt-qy-shared-runtime.sh newcrawler`. Shared mode starts only the new
 control plane and connects it to the existing QY Docker networks; all bundled
-state and writer services are excluded by default.
+state and writer services are excluded by default. The adoption step also
+aligns the ignored runtime credentials used by the MinIO and Rota consoles with
+the shared QY services.
