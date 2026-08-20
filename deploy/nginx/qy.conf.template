@@ -11,9 +11,9 @@ map $http_x_forwarded_proto $original_proto {
 upstream qy_dashboard { server dashboard:3000; }
 upstream qy_bullmq { server qybullmq-api:3000; }
 upstream qy_auth { server auth:3000; }
-upstream qy_rota_api { server rota-core:8001; }
+upstream qy_rota_api { server ${QY_ROTA_API_UPSTREAM}; }
 upstream qy_rota_dashboard { server rota-dashboard:3000; }
-upstream qy_minio_console { server minio:9001; }
+upstream qy_minio_console { server ${QY_MINIO_CONSOLE_UPSTREAM}; }
 
 server {
     listen 80;

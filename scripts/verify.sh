@@ -10,6 +10,7 @@ bash -n \
   scripts/compose.sh \
   scripts/setup-dev.sh \
   scripts/test.sh \
+  ops/adopt-qy-shared-runtime.sh \
   database/init/10-crawler.sh \
   database/init/10-business.sh
 python3 scripts/verify_model_bundle.py
@@ -53,6 +54,13 @@ fi
 if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
   QY_RUNTIME_ROOT="${ROOT_DIR}/runtime/verify-template" \
     docker compose --env-file .env.example -f deploy/compose.yml config --quiet
+  QY_RUNTIME_ROOT="${ROOT_DIR}/runtime/verify-template" \
+  QY_DEPLOYMENT_MODE=shared-qy \
+  QY_SHARED_BUSINESS_AUDIT_DATABASE_URL_FILE=/tmp/qy-business-audit-dsn \
+    docker compose --env-file .env.example \
+      -f deploy/compose.yml \
+      -f deploy/compose.shared-qy.yml \
+      config --quiet
 else
   echo "docker compose unavailable; skipped Compose validation" >&2
 fi

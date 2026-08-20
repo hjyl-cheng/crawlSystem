@@ -91,3 +91,26 @@ The repository contains schemas, not production rows. Channel/video/comment
 data, query terms, Redis jobs, MinIO objects, Rota proxy inventory, and
 publication ownership must be restored through separately controlled backups.
 Source plus runtime credentials alone does not recreate production data.
+
+## 8. Shared QY Control Plane
+
+An environment can display and operate the existing QY state without copying
+PostgreSQL, Redis, MinIO, Business PostgreSQL, or Rota data. Configure the
+ignored runtime from the running QY containers, then validate the reduced
+service set:
+
+```bash
+./ops/adopt-qy-shared-runtime.sh newcrawler
+./scripts/compose.sh newcrawler config --services
+./scripts/compose.sh newcrawler up -d --no-build nginx
+```
+
+In `shared-qy` mode only Auth, QYBullMQ API, Dashboard, Rota Dashboard, and
+Nginx run in the new project. They join the existing QY Docker networks. The
+bundled empty databases, MinIO, Redis, Rota Core, Workers, Feature services,
+and publication writers are excluded by default, preventing duplicate queue
+consumption, proxy reconciliation, and business projection.
+
+Credentials remain in the ignored runtime environment. The adoption command
+reads them from existing containers without printing their values. It does not
+start, stop, or recreate a container and does not modify any database row.

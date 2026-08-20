@@ -1,0 +1,84 @@
+services:
+  crawler-postgres: &disabled-in-shared-qy
+    profiles: [bundled-state-disabled-in-shared-qy]
+  crawler-pgbouncer: *disabled-in-shared-qy
+  redis: *disabled-in-shared-qy
+  minio: *disabled-in-shared-qy
+  minio-init: *disabled-in-shared-qy
+  rota-db: *disabled-in-shared-qy
+  rota-core: *disabled-in-shared-qy
+  business-postgres: *disabled-in-shared-qy
+  local-agent-config: *disabled-in-shared-qy
+  controller: *disabled-in-shared-qy
+  worker-channel: *disabled-in-shared-qy
+  worker-incremental: *disabled-in-shared-qy
+  worker-discover: *disabled-in-shared-qy
+  worker-query-quality: *disabled-in-shared-qy
+  worker-data-api: *disabled-in-shared-qy
+  worker-agent: *disabled-in-shared-qy
+  worker-finalize: *disabled-in-shared-qy
+  feature-ingest: *disabled-in-shared-qy
+  feature-scheduler-daily: *disabled-in-shared-qy
+  feature-dispatch: *disabled-in-shared-qy
+  feature-relay: *disabled-in-shared-qy
+  crawler-outbox-publisher: *disabled-in-shared-qy
+  business-publication-ingress: *disabled-in-shared-qy
+  publication-publisher: *disabled-in-shared-qy
+  business-publication-reconciler: *disabled-in-shared-qy
+  business-publication-projector: *disabled-in-shared-qy
+
+  qybullmq-api:
+    depends_on: !reset {}
+    environment:
+      REDIS_PASSWORD: ""
+    networks: !override [internal, qy_crawler]
+
+  dashboard:
+    depends_on: !override
+      qybullmq-api:
+        condition: service_healthy
+    environment:
+      REDIS_PASSWORD: ""
+    networks: !override [internal, qy_crawler, qy_business, qy_rota]
+
+  auth-secret-init:
+    networks: !override [internal]
+
+  auth:
+    depends_on: !override
+      auth-secret-init:
+        condition: service_completed_successfully
+    environment:
+      REDIS_PASSWORD: ""
+    networks: !override [internal, qy_crawler]
+
+  rota-dashboard:
+    depends_on: !reset {}
+    networks: !override [internal]
+
+  nginx:
+    depends_on: !override
+      dashboard:
+        condition: service_healthy
+      qybullmq-api:
+        condition: service_healthy
+      auth:
+        condition: service_healthy
+      rota-dashboard:
+        condition: service_started
+    networks: !override [internal, qy_crawler, qy_rota]
+
+networks:
+  qy_crawler:
+    external: true
+    name: ${QY_SHARED_CRAWLER_NETWORK:-bullmq-crawler}
+  qy_business:
+    external: true
+    name: ${QY_SHARED_BUSINESS_NETWORK:-yewu_business_network}
+  qy_rota:
+    external: true
+    name: ${QY_SHARED_ROTA_NETWORK:-youtube-rota-qy-internal}
+
+secrets:
+  business_publication_audit_database_url:
+    file: ${QY_SHARED_BUSINESS_AUDIT_DATABASE_URL_FILE:?QY_SHARED_BUSINESS_AUDIT_DATABASE_URL_FILE is required in shared-qy mode}

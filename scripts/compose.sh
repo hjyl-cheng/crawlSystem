@@ -24,7 +24,26 @@ if [[ ! -f "${ENV_FILE}" ]]; then
 fi
 
 export QY_RUNTIME_ROOT="${RUNTIME_ROOT}"
+DEPLOYMENT_MODE="${QY_DEPLOYMENT_MODE:-}"
+if [[ -z "${DEPLOYMENT_MODE}" ]]; then
+  DEPLOYMENT_MODE="$(awk -F= '$1 == "QY_DEPLOYMENT_MODE" { print $2; exit }' "${ENV_FILE}")"
+fi
+DEPLOYMENT_MODE="${DEPLOYMENT_MODE:-bundled}"
+
+COMPOSE_FILES=(-f "${ROOT_DIR}/deploy/compose.yml")
+case "${DEPLOYMENT_MODE}" in
+  bundled)
+    ;;
+  shared-qy)
+    COMPOSE_FILES+=(-f "${ROOT_DIR}/deploy/compose.shared-qy.yml")
+    ;;
+  *)
+    echo "unsupported QY_DEPLOYMENT_MODE: ${DEPLOYMENT_MODE}" >&2
+    exit 1
+    ;;
+esac
+
 exec docker compose \
   --env-file "${ENV_FILE}" \
-  -f "${ROOT_DIR}/deploy/compose.yml" \
+  "${COMPOSE_FILES[@]}" \
   "$@"

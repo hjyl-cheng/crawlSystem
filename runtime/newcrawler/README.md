@@ -23,6 +23,7 @@ Agent workers, or publication workers. Runtime credentials remain under this
 directory and are ignored by Git.
 
 The initial empty PostgreSQL, Redis, MinIO, and Rota volumes validate fresh
-bootstrap behavior. Existing production PostgreSQL and MinIO data must be
-integrated later through an explicit, separately reviewed migration or
-read-only connection plan.
+bootstrap behavior. To reuse the existing QY state without copying it, run
+`ops/adopt-qy-shared-runtime.sh newcrawler`. Shared mode starts only the new
+control plane and connects it to the existing QY Docker networks; all bundled
+state and writer services are excluded by default.
