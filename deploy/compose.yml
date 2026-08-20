@@ -495,7 +495,7 @@ services:
       <<: [*crawler-database, *crawler-storage]
       NODE_ENV: production
       WORKER_QUEUES: youtube-finalize
-      YOUTUBE_FINALIZE_CONCURRENCY: 4
+      YOUTUBE_FINALIZE_CONCURRENCY: 1
     networks: [internal]
     logging: *default-logging
 

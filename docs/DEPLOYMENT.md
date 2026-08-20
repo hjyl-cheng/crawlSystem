@@ -130,7 +130,8 @@ QY_DEPLOYMENT_MODE=shared-qy-workers \
     worker-data-api worker-agent worker-finalize
 ```
 
-The default persistent scale is 20 Full workers and 5 Incremental workers.
+The default persistent scale is 20 Full workers and 20 Incremental workers,
+matching the last stable QY production topology.
 Override `QY_CHANNEL_WORKER_REPLICAS` and `QY_INCREMENTAL_WORKER_REPLICAS` in
 the ignored runtime environment when Rota capacity changes. Never run the old
 and new consumers together against the shared Redis queues.

@@ -33,4 +33,5 @@ the shared QY services.
 After the legacy QYBullMQ consumers have gracefully stopped, set
 `QY_DEPLOYMENT_MODE=shared-qy-workers` to run Controller and all queue Workers
 from the new project while continuing to share QY PostgreSQL, Redis, MinIO, and
-Rota. The default scale is 20 Full workers and 5 Incremental workers.
+Rota. The default scale is 20 Full workers and 20 Incremental workers, matching
+the last stable QY production topology.

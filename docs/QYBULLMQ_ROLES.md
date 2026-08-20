@@ -26,7 +26,7 @@ workers for which Rota has ready capacity:
 ```bash
 QYBULLMQ_IMAGE_TAG=<immutable-tag> ./scripts/compose.sh production up -d \
   --scale worker-channel=20 \
-  --scale worker-incremental=5
+  --scale worker-incremental=20
 ```
 
 Do not add `container_name` to scalable workers. With no explicit

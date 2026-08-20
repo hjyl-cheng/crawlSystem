@@ -31,7 +31,7 @@ services:
       REDIS_PASSWORD: ""
     networks: !override [internal, qy_crawler, qy_rota]
     deploy:
-      replicas: ${QY_INCREMENTAL_WORKER_REPLICAS:-5}
+      replicas: ${QY_INCREMENTAL_WORKER_REPLICAS:-20}
 
   worker-discover:
     profiles: !reset []
