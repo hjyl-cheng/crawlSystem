@@ -1,0 +1,8 @@
+[Unit]
+Description=Renew the newcrawler Dashboard TLS certificate
+Requires=docker.service
+After=docker.service network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/nginx-proxy/renew-newcrawler-dashboard-certificate.sh

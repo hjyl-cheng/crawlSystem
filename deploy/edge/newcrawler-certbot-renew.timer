@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily newcrawler Dashboard TLS certificate renewal check
+
+[Timer]
+OnCalendar=*-*-* 04:17:00 UTC
+Persistent=true
+RandomizedDelaySec=30m
+
+[Install]
+WantedBy=timers.target
