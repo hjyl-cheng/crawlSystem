@@ -1,0 +1,4 @@
+# Python runtime dependencies shared by the crawler image and local integration tests.
+aiohttp==3.14.3
+curl-cffi==0.15.0
+yt-dlp[curl-cffi]==2026.7.4

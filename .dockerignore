@@ -1,0 +1,14 @@
+.git
+.env
+secrets
+runtime
+backups
+deploy/generated
+**/node_modules
+**/.venv
+**/__pycache__
+**/.pytest_cache
+**/*.pyc
+**/*.log
+docs
+database/reference-snapshots

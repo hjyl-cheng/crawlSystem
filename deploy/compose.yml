@@ -1,0 +1,986 @@
+name: qy-allpachong
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+x-build-args: &build-args
+  QY_BUILD_VERSION: ${QY_BUILD_VERSION:-development}
+  QY_VCS_REF: ${QY_VCS_REF:-uncommitted}
+  QY_BUILD_DATE: ${QY_BUILD_DATE:-unknown}
+  QY_SOURCE_URL: ${QY_SOURCE_URL:-local:pachongsys}
+
+x-qybullmq-image: &qybullmq-image
+  image: qy-allpachong/qybullmq:${QY_IMAGE_TAG:-local}
+  build:
+    context: ..
+    dockerfile: services/qybullmq/Dockerfile
+    args:
+      <<: *build-args
+
+x-crawler-database: &crawler-database
+  POSTGRES_HOST: crawler-pgbouncer
+  POSTGRES_PORT: 6432
+  POSTGRES_USER: ${CRAWLER_DB_USER:-bullmq}
+  POSTGRES_PASSWORD: ${CRAWLER_DB_PASSWORD:?CRAWLER_DB_PASSWORD is required}
+  POSTGRES_DB: ${CRAWLER_DB_NAME:-bullmq_crawler_migration}
+  POSTGRES_POOL_MIN: 0
+  POSTGRES_POOL_MAX: 4
+  POSTGRES_IDLE_TIMEOUT_MS: 300000
+  REDIS_HOST: redis
+  REDIS_PORT: 6379
+  REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
+  SKIP_SCHEMA_MIGRATION: "true"
+
+x-crawler-storage: &crawler-storage
+  S3_ENDPOINT: http://minio:9000
+  S3_BUCKET: ${MINIO_BUCKET:-crawler-raw-migration}
+  S3_ACCESS_KEY: ${MINIO_ROOT_USER:-crawler}
+  S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD is required}
+  S3_REGION: local
+  S3_MAX_SOCKETS: 4
+  RAW_STORE_VIDEO_WATCH_HTML: "false"
+  RAW_STORE_GZIP: "true"
+  RAW_STORE_GZIP_MIN_BYTES: 1024
+
+x-crawl-policy: &crawl-policy
+  YOUTUBE_LANGUAGE: ${YOUTUBE_LANGUAGE:-pt-BR}
+  YOUTUBE_CONTROL_LANGUAGE: ${YOUTUBE_CONTROL_LANGUAGE:-en}
+  YOUTUBE_COUNTRY: ${YOUTUBE_COUNTRY:-BR}
+  BROWSER_PROFILE_TIMEZONE: ${BROWSER_PROFILE_TIMEZONE:-America/Sao_Paulo}
+  MIN_SUBSCRIBER_COUNT: ${MIN_SUBSCRIBER_COUNT:-1000}
+  YOUTUBE_CHANNEL_CONTENT_LIMIT: ${YOUTUBE_CHANNEL_CONTENT_LIMIT:-30}
+  YOUTUBE_CONTENT_MAX_AGE_DAYS: ${YOUTUBE_CONTENT_MAX_AGE_DAYS:-90}
+  YOUTUBE_CHANNEL_INLINE_DETAILS: "true"
+  YOUTUBE_DETAIL_MAX_ATTEMPTS: 3
+  YOUTUBE_DETAIL_CONCURRENCY: 2
+  YOUTUBEJS_EXTRACTOR_MODE: channel
+  YOUTUBEJS_TIMEOUT_MS: 30000
+  YOUTUBEJS_MAX_TAB_PAGES: 20
+  YOUTUBE_DATA_API_FALLBACK_MODE: emergency
+  YTDLP_COMMENT_FIRST_PAGE_MAX: ${YTDLP_COMMENT_FIRST_PAGE_MAX:-20}
+
+x-rota-worker: &rota-worker
+  ROTA_PROXY_BASE_URL: http://rota-core:8000
+  ROTA_PROXY_CONTROL_URL: http://rota-core:8001/api/v1/proxy-control
+  ROTA_PROXY_CONTROL_TOKEN: ${ROTA_PROXY_CONTROL_TOKEN:?ROTA_PROXY_CONTROL_TOKEN is required}
+  ROTA_BULLMQ_PROXY_PASSWORD: ${ROTA_BULLMQ_PROXY_PASSWORD:?ROTA_BULLMQ_PROXY_PASSWORD is required}
+  ROTA_WORKLOAD_SCOPE_EXPECTED: ${ROTA_WORKLOAD_SCOPE:-qy-production}
+  PROXY_SLOT_POLL_MS: 5000
+
+x-qybullmq-worker: &qybullmq-worker
+  <<: *qybullmq-image
+  restart: unless-stopped
+  stop_grace_period: 5m
+  depends_on:
+    crawler-pgbouncer:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+    minio-init:
+      condition: service_completed_successfully
+    rota-core:
+      condition: service_healthy
+  command: ["node", "src/worker.js"]
+  networks: [internal]
+  logging: *default-logging
+
+services:
+  crawler-postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    command: ["postgres", "-c", "timezone=UTC"]
+    environment:
+      POSTGRES_USER: ${CRAWLER_DB_USER:-bullmq}
+      POSTGRES_PASSWORD: ${CRAWLER_DB_PASSWORD:?CRAWLER_DB_PASSWORD is required}
+      POSTGRES_DB: ${CRAWLER_DB_NAME:-bullmq_crawler_migration}
+      FEATURE_DB_PASSWORD: ${FEATURE_DB_PASSWORD:?FEATURE_DB_PASSWORD is required}
+      PUBLICATION_DB_PASSWORD: ${PUBLICATION_DB_PASSWORD:?PUBLICATION_DB_PASSWORD is required}
+      TZ: UTC
+    volumes:
+      - crawler-postgres-data:/var/lib/postgresql/data
+      - ../database/bootstrap/crawler.sql:/bootstrap/crawler.sql:ro
+      - ../database/init/10-crawler.sh:/docker-entrypoint-initdb.d/10-crawler.sh:ro
+    networks: [internal]
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          PGPASSWORD="$$POSTGRES_PASSWORD"
+          psql -h 127.0.0.1 -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"
+          -X -v ON_ERROR_STOP=1
+          -c 'SELECT 1 FROM crawler.channels LIMIT 0' >/dev/null
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    logging: *default-logging
+
+  crawler-pgbouncer:
+    image: edoburu/pgbouncer@sha256:4c1ca296ef525f108f5d3552cc337c0c09587cf8dae7f0067fd93349e47dc1cd
+    restart: unless-stopped
+    depends_on:
+      crawler-postgres:
+        condition: service_healthy
+    environment:
+      DB_HOST: crawler-postgres
+      DB_PORT: 5432
+      DB_USER: ${CRAWLER_DB_USER:-bullmq}
+      DB_PASSWORD: ${CRAWLER_DB_PASSWORD:?CRAWLER_DB_PASSWORD is required}
+      DB_NAME: ${CRAWLER_DB_NAME:-bullmq_crawler_migration}
+      LISTEN_PORT: 6432
+      AUTH_TYPE: scram-sha-256
+      AUTH_QUERY: "SELECT usename,passwd FROM pg_shadow WHERE usename=$$1 AND usename IN ('bullmq','feature_user','publication_publisher')"
+      POOL_MODE: transaction
+      MAX_CLIENT_CONN: ${PGBOUNCER_MAX_CLIENT_CONN:-500}
+      DEFAULT_POOL_SIZE: ${PGBOUNCER_DEFAULT_POOL_SIZE:-40}
+      MIN_POOL_SIZE: 2
+      RESERVE_POOL_SIZE: 10
+      MAX_DB_CONNECTIONS: 70
+      MAX_USER_CONNECTIONS: 60
+      MAX_PREPARED_STATEMENTS: 100
+      IGNORE_STARTUP_PARAMETERS: extra_float_digits,options
+      SERVER_IDLE_TIMEOUT: 60
+      SERVER_LIFETIME: 3600
+      QUERY_WAIT_TIMEOUT: 120
+      ADMIN_USERS: ${CRAWLER_DB_USER:-bullmq}
+      STATS_USERS: ${CRAWLER_DB_USER:-bullmq}
+    networks: [internal]
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - PGPASSWORD="$$DB_PASSWORD" psql -h 127.0.0.1 -p 6432 -U "$$DB_USER" -d "$$DB_NAME" -X -v ON_ERROR_STOP=1 -c 'SELECT 1' >/dev/null
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    logging: *default-logging
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --requirepass
+      - ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
+    volumes:
+      - redis-data:/data
+    networks: [internal]
+    healthcheck:
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$$REDIS_PASSWORD\" redis-cli ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
+    logging: *default-logging
+
+  minio:
+    image: minio/minio:RELEASE.2025-07-23T15-54-02Z
+    restart: unless-stopped
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-crawler}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD is required}
+      MINIO_BROWSER_REDIRECT_URL: https://${QY_MINIO_HOST}
+    volumes:
+      - minio-data:/data
+    networks: [internal]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    logging: *default-logging
+
+  minio-init:
+    image: minio/mc:RELEASE.2025-07-21T05-28-08Z
+    restart: "no"
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MC_HOST_qy: http://${MINIO_ROOT_USER:-crawler}:${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD is required}@minio:9000
+      MINIO_BUCKET: ${MINIO_BUCKET:-crawler-raw-migration}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - mc mb --ignore-existing "qy/$$MINIO_BUCKET" && mc anonymous set none "qy/$$MINIO_BUCKET"
+    networks: [internal]
+    logging: *default-logging
+
+  rota-db:
+    image: timescale/timescaledb:2.22.1-pg17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${ROTA_DB_USER:-rota}
+      POSTGRES_PASSWORD: ${ROTA_DB_PASSWORD:?ROTA_DB_PASSWORD is required}
+      POSTGRES_DB: ${ROTA_DB_NAME:-rota}
+      TIMESCALEDB_TELEMETRY: "off"
+    volumes:
+      - rota-postgres-data:/var/lib/postgresql/data
+    networks: [internal]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${ROTA_DB_USER:-rota} -d ${ROTA_DB_NAME:-rota}"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    logging: *default-logging
+
+  rota-core:
+    image: qy-allpachong/rota-core:${QY_IMAGE_TAG:-local}
+    build:
+      context: ../services/rota/core
+      dockerfile: Dockerfile
+      args:
+        <<: *build-args
+    restart: unless-stopped
+    depends_on:
+      rota-db:
+        condition: service_healthy
+    environment:
+      PROXY_PORT: 8000
+      API_PORT: 8001
+      LOG_LEVEL: info
+      DB_HOST: rota-db
+      DB_PORT: 5432
+      DB_USER: ${ROTA_DB_USER:-rota}
+      DB_PASSWORD: ${ROTA_DB_PASSWORD:?ROTA_DB_PASSWORD is required}
+      DB_NAME: ${ROTA_DB_NAME:-rota}
+      DB_SSLMODE: disable
+      ROTA_ADMIN_USER: ${ROTA_ADMIN_USER:-admin}
+      ROTA_ADMIN_PASSWORD: ${ROTA_ADMIN_PASSWORD:?ROTA_ADMIN_PASSWORD is required}
+      ROTA_PROXY_CONTROL_ENABLED: "true"
+      ROTA_PROXY_CONTROL_TOKEN: ${ROTA_PROXY_CONTROL_TOKEN:?ROTA_PROXY_CONTROL_TOKEN is required}
+      ROTA_BULLMQ_PROXY_PASSWORD: ${ROTA_BULLMQ_PROXY_PASSWORD:?ROTA_BULLMQ_PROXY_PASSWORD is required}
+      ROTA_WORKLOAD_SCOPE: ${ROTA_WORKLOAD_SCOPE:-qy-production}
+      ROTA_DISCOVER_SLOTS: ${ROTA_DISCOVER_SLOTS:-2}
+      ROTA_CHANNEL_SLOTS: ${ROTA_CHANNEL_SLOTS:-40}
+      ROTA_QUERY_QUALITY_SLOTS: ${ROTA_QUERY_QUALITY_SLOTS:-1}
+      ROTA_DETAIL_SLOTS: ${ROTA_DETAIL_SLOTS:-0}
+      ROTA_PROXY_LEASE_SECONDS: 60
+      ROTA_PROXY_RECONCILE_INTERVAL_MS: 5000
+      ROTA_PROXY_RESOURCE_SYNC_MINUTES: 10
+      ROTA_PROXY_MIN_RESERVE_PERCENT: 25
+      ROTA_PROXY_MIN_RESERVE_COUNT: 3
+      ROTA_PROXY_FAILURE_COOLDOWN_MINUTES: 30
+      ROTA_PROXY_NETWORK_COOLDOWN_MINUTES: 5
+      ROTA_PERIODIC_HEALTH_CHECK_ENABLED: "true"
+      ROTA_PERIODIC_HEALTH_CHECK_INTERVAL_SECONDS: 60
+      ROTA_PERIODIC_HEALTH_CHECK_BATCH_SIZE: 20
+      ROTA_PERIODIC_HEALTH_CHECK_WORKERS: 4
+      ROTA_HEALTH_PROBE_MAX_CONCURRENCY: 4
+      ROTA_SOURCE_INVENTORY_MODE: shadow
+      ROTA_SOURCE_INVENTORY_MINIMUM_MISSES: 3
+      ROTA_LIFECYCLE_AUDIT_INTERVAL_SECONDS: 300
+      ROTA_LIFECYCLE_REPAIR_ENABLED: "false"
+      ROTA_LIFECYCLE_REPAIR_BATCH_SIZE: 25
+      ROTA_LIFECYCLE_REPAIR_SPREAD_SECONDS: 3600
+      ROTA_LIFECYCLE_CONSTRAINTS_ENABLED: "false"
+      ROTA_HEALTH_EVIDENCE_RETENTION_ENABLED: "false"
+      ROTA_HEALTH_EVIDENCE_RETENTION_DAYS: 14
+      ROTA_HEALTH_EVIDENCE_RETENTION_BATCH_SIZE: 2000
+      ROTA_HEALTH_EVIDENCE_RETENTION_INTERVAL_SECONDS: 60
+      CORS_ALLOWED_ORIGINS: https://${QY_ROTA_HOST}
+      TRUST_PROXY_HEADERS: "true"
+    volumes:
+      - rota-geoip-data:/app/geoip/managed
+    ports:
+      - "127.0.0.1:${ROTA_PROXY_HOST_PORT:-19284}:8000"
+    networks: [internal]
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:8001/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    logging: *default-logging
+
+  rota-dashboard:
+    image: qy-allpachong/rota-dashboard:${QY_IMAGE_TAG:-local}
+    build:
+      context: ../services/rota/dashboard
+      dockerfile: Dockerfile
+      args:
+        <<: *build-args
+        NEXT_PUBLIC_API_URL: ${QY_ROTA_PUBLIC_URL}
+    restart: unless-stopped
+    depends_on:
+      rota-core:
+        condition: service_healthy
+    networks: [internal]
+    logging: *default-logging
+
+  qybullmq-api:
+    <<: *qybullmq-image
+    restart: unless-stopped
+    depends_on:
+      crawler-pgbouncer:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    command: ["node", "src/server.js"]
+    environment:
+      <<: [*crawler-database, *crawler-storage]
+      NODE_ENV: production
+      PORT: 3000
+      BULL_BOARD_BASE_PATH: /queues
+      YOUTUBE_LANGUAGE: ${YOUTUBE_LANGUAGE:-pt-BR}
+      YOUTUBE_COUNTRY: ${YOUTUBE_COUNTRY:-BR}
+      MIN_SUBSCRIBER_COUNT: ${MIN_SUBSCRIBER_COUNT:-1000}
+    networks: [internal]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:3000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    logging: *default-logging
+
+  local-agent-config:
+    <<: *qybullmq-image
+    restart: "no"
+    depends_on:
+      crawler-pgbouncer:
+        condition: service_healthy
+    command: ["node", "scripts/ensureLocalOfflineAgentConfig.mjs", "--apply"]
+    environment:
+      <<: *crawler-database
+      NODE_ENV: production
+    networks: [internal]
+    logging: *default-logging
+
+  controller:
+    <<: *qybullmq-image
+    restart: unless-stopped
+    depends_on:
+      crawler-pgbouncer:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      local-agent-config:
+        condition: service_completed_successfully
+      rota-core:
+        condition: service_healthy
+    command: ["node", "src/controller.js"]
+    environment:
+      <<: [*crawler-database, *crawler-storage, *rota-worker]
+      NODE_ENV: production
+      CONTROLLER_INTERVAL_MS: 15000
+      CONTROLLER_TICK_SAMPLE_MS: 60000
+      CONTROLLER_TICK_RETENTION_DAYS: 7
+      TASK_EVENT_RETENTION_DAYS: 30
+      CONTENT_REPAIR_BATCH_SIZE: 20
+      CONTENT_REPAIR_INTERVAL_MS: 30000
+      FINAL_REPAIR_BATCH_SIZE: 50
+      AGENT_BATCH_SIZE: 30
+      AGENT_MAX_BATCHES_PER_TICK: 20
+      INCREMENTAL_AGENT_CONFIG_ID: ${INCREMENTAL_AGENT_CONFIG_ID:-0}
+      LOCAL_PROFILE_PYTHON_BIN: python3
+      LOCAL_PROFILE_MODEL_BUNDLE: /opt/qy-channel-profile/model-bundle
+    networks: [internal]
+    logging: *default-logging
+
+  worker-channel:
+    <<: *qybullmq-worker
+    environment:
+      <<: [*crawler-database, *crawler-storage, *crawl-policy, *rota-worker]
+      NODE_ENV: production
+      WORKER_QUEUES: youtube-channel-crawl
+      YOUTUBE_CHANNEL_CRAWL_CONCURRENCY: 1
+      YTDLP_PERSISTENT_POOL_ENABLED: "true"
+      PROXY_SLOT_ROLE: channel
+      ROTA_IDENTITY_POLICY_ID: qy-br-channel-anonymous-v1
+      FINGERPRINT_TRANSPORT_REQUIRED: "true"
+      FINGERPRINT_GATEWAY_PORT: 3099
+      TZ: ${BROWSER_PROFILE_TIMEZONE:-America/Sao_Paulo}
+
+  worker-incremental:
+    <<: *qybullmq-worker
+    environment:
+      <<: [*crawler-database, *crawler-storage, *crawl-policy, *rota-worker]
+      NODE_ENV: production
+      WORKER_QUEUES: youtube-channel-incremental
+      YOUTUBE_CHANNEL_INCREMENTAL_CONCURRENCY: 1
+      YTDLP_PERSISTENT_POOL_ENABLED: "true"
+      PROXY_SLOT_ROLE: channel
+      ROTA_IDENTITY_POLICY_ID: qy-br-channel-anonymous-v1
+      FINGERPRINT_TRANSPORT_REQUIRED: "true"
+      FINGERPRINT_GATEWAY_PORT: 3099
+      TZ: ${BROWSER_PROFILE_TIMEZONE:-America/Sao_Paulo}
+
+  worker-discover:
+    <<: *qybullmq-worker
+    environment:
+      <<: [*crawler-database, *crawler-storage, *crawl-policy, *rota-worker]
+      NODE_ENV: production
+      WORKER_QUEUES: youtube-discover-page
+      YOUTUBE_DISCOVER_PAGE_CONCURRENCY: 1
+      PROXY_SLOT_ROLE: discover
+      ROTA_IDENTITY_POLICY_ID: qy-br-discover-anonymous-v1
+      TZ: ${BROWSER_PROFILE_TIMEZONE:-America/Sao_Paulo}
+
+  worker-query-quality:
+    <<: *qybullmq-worker
+    environment:
+      <<: [*crawler-database, *crawler-storage, *crawl-policy, *rota-worker]
+      NODE_ENV: production
+      WORKER_QUEUES: youtube-query-quality
+      YOUTUBE_QUERY_QUALITY_CONCURRENCY: 1
+      PROXY_SLOT_ROLE: query_quality
+      ROTA_IDENTITY_POLICY_ID: qy-br-query-quality-anonymous-v1
+      TZ: ${BROWSER_PROFILE_TIMEZONE:-America/Sao_Paulo}
+
+  worker-data-api:
+    <<: *qybullmq-image
+    restart: unless-stopped
+    depends_on:
+      crawler-pgbouncer:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    command: ["node", "src/worker.js"]
+    environment:
+      <<: [*crawler-database, *crawler-storage]
+      NODE_ENV: production
+      WORKER_QUEUES: youtube-data-api-batch
+      YOUTUBE_DATA_API_BATCH_CONCURRENCY: 1
+      YOUTUBE_DATA_API_DAILY_REQUEST_LIMIT: 500
+      YOUTUBE_DATA_API_KEYS: ${YOUTUBE_DATA_API_KEYS:-}
+    networks: [internal]
+    logging: *default-logging
+
+  worker-agent:
+    <<: *qybullmq-image
+    restart: unless-stopped
+    stop_grace_period: 15m
+    depends_on:
+      crawler-pgbouncer:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      local-agent-config:
+        condition: service_completed_successfully
+    command: ["node", "src/worker.js"]
+    environment:
+      <<: *crawler-database
+      NODE_ENV: production
+      WORKER_QUEUES: youtube-agent-batch,youtube-agent-incremental
+      YOUTUBE_AGENT_BATCH_CONCURRENCY: 1
+      YOUTUBE_AGENT_INCREMENTAL_CONCURRENCY: 1
+      INCREMENTAL_AGENT_MAX_ATTEMPTS: 8
+      LOCAL_PROFILE_PYTHON_BIN: python3
+      LOCAL_PROFILE_MODEL_BUNDLE: /opt/qy-channel-profile/model-bundle
+      LOCAL_PROFILE_CONTENT_LIMIT: 30
+      LOCAL_PROFILE_DB_TIMEOUT_SECONDS: 60
+      LOCAL_PROFILE_TIMEOUT_MS: 600000
+    networks: [internal]
+    logging: *default-logging
+
+  worker-finalize:
+    <<: *qybullmq-image
+    restart: unless-stopped
+    depends_on:
+      crawler-pgbouncer:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    command: ["node", "src/worker.js"]
+    environment:
+      <<: [*crawler-database, *crawler-storage]
+      NODE_ENV: production
+      WORKER_QUEUES: youtube-finalize
+      YOUTUBE_FINALIZE_CONCURRENCY: 4
+    networks: [internal]
+    logging: *default-logging
+
+  feature-ingest:
+    image: qy-allpachong/feature-engine:${QY_IMAGE_TAG:-local}
+    build:
+      context: ../services/feature-engine
+      dockerfile: Dockerfile
+      args:
+        <<: *build-args
+    restart: unless-stopped
+    depends_on:
+      crawler-pgbouncer:
+        condition: service_healthy
+    command: ["feature-ingest"]
+    environment:
+      FEATURE_DATABASE_URL_FILE: /run/secrets/feature_database_url
+      EXPECTED_FEATURE_DATABASE: ${CRAWLER_DB_NAME:-bullmq_crawler_migration}
+      EXPECTED_FEATURE_DATABASE_USER: feature_user
+      FEATURE_INGEST_HOST: 0.0.0.0
+      FEATURE_INGEST_PORT: 8090
+      FEATURE_INGEST_TOKEN_FILE: /run/secrets/feature_ingest_token
+      TZ: UTC
+    secrets:
+      - feature_database_url
+      - feature_ingest_token
+    networks: [internal]
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/readyz', timeout=3).read()"
+      interval: 5s
+      timeout: 4s
+      retries: 30
+    logging: *default-logging
+
+  feature-scheduler-daily:
+    image: qy-allpachong/feature-engine:${QY_IMAGE_TAG:-local}
+    build:
+      context: ../services/feature-engine
+      dockerfile: Dockerfile
+      args:
+        <<: *build-args
+    restart: unless-stopped
+    depends_on:
+      feature-ingest:
+        condition: service_healthy
+    command: ["python", "/app/deployment/run_daily_scheduler.py"]
+    environment:
+      FEATURE_DATABASE_URL_FILE: /run/secrets/feature_database_url
+      EXPECTED_FEATURE_DATABASE: ${CRAWLER_DB_NAME:-bullmq_crawler_migration}
+      EXPECTED_FEATURE_DATABASE_USER: feature_user
+      SCHEDULER_PLANNER_CONFIG_VERSION: video-plan-1
+      SCHEDULER_CAPACITY_VERSION: capacity-v1
+      SCHEDULER_CAPACITY_FACTOR: 1
+      SCHEDULER_PLAYER_CAP: ${SCHEDULER_PLAYER_CAP:-20}
+      SCHEDULER_NEXT_CAP: ${SCHEDULER_NEXT_CAP:-8}
+      SCHEDULER_BATCH_SIZE: 100
+      SCHEDULER_MAX_PLANS: ${SCHEDULER_MAX_PLANS:-100000}
+      SCHEDULER_QUEUE_NAME: youtube-channel-incremental
+      SCHEDULER_DAILY_HOUR_UTC: ${SCHEDULER_DAILY_HOUR_UTC:-0}
+      SCHEDULER_DAILY_MINUTE_UTC: ${SCHEDULER_DAILY_MINUTE_UTC:-30}
+      SCHEDULER_RETRY_SECONDS: 300
+      SCHEDULER_REFRESH_SECONDS: 300
+      TZ: UTC
+    secrets:
+      - feature_database_url
+    networks: [internal]
+    logging: *default-logging
+
+  feature-dispatch:
+    image: qy-allpachong/feature-dispatch:${QY_IMAGE_TAG:-local}
+    build:
+      context: ../services/feature-dispatch
+      dockerfile: Dockerfile
+      args:
+        <<: *build-args
+    restart: unless-stopped
+    depends_on:
+      crawler-pgbouncer:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rota-core:
+        condition: service_healthy
+    environment:
+      FEATURE_DATABASE_URL_FILE: /run/secrets/feature_database_url
+      EXPECTED_FEATURE_DATABASE: ${CRAWLER_DB_NAME:-bullmq_crawler_migration}
+      EXPECTED_FEATURE_DATABASE_USER: feature_user
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
+      INCREMENTAL_QUEUE_NAME: youtube-channel-incremental
+      DISPATCH_PROXY_CAPACITY_URL: http://rota-core:8001/api/v1/proxy-control
+      DISPATCH_PROXY_CAPACITY_TOKEN: ${ROTA_PROXY_CONTROL_TOKEN:?ROTA_PROXY_CONTROL_TOKEN is required}
+      DISPATCH_PUBLISH_POLL_MS: 1000
+      DISPATCH_RELEASE_BATCH_SIZE: 100
+      DISPATCH_BUFFER_PER_WORKER: 2
+      DISPATCH_MAX_QUEUE_BUFFER: 200
+      DISPATCH_INCREMENTAL_MIN_SHARE: 0.7
+      DISPATCH_AGENT_SHARE: 0.3
+      DISPATCH_AGENT_BATCH_SIZE: 30
+      DISPATCH_AGENT_BUFFER_BATCHES: 2
+      TZ: UTC
+    secrets:
+      - feature_database_url
+    networks: [internal]
+    logging: *default-logging
+
+  feature-relay:
+    <<: *qybullmq-image
+    restart: unless-stopped
+    depends_on:
+      feature-ingest:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: ["node", "src/runFeatureRecalcRelay.js"]
+    environment:
+      NODE_ENV: production
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
+      FEATURE_RECALC_QUEUE: feature-recalc
+      FEATURE_INGEST_URL: http://feature-ingest:8090/v1/crawler-observations
+      FEATURE_INGEST_TOKEN_FILE: /run/secrets/feature_ingest_token
+      FEATURE_RECALC_CONCURRENCY: 4
+      TZ: UTC
+    secrets:
+      - feature_ingest_token
+    networks: [internal]
+    logging: *default-logging
+
+  crawler-outbox-publisher:
+    <<: *qybullmq-image
+    restart: unless-stopped
+    depends_on:
+      crawler-pgbouncer:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      feature-relay:
+        condition: service_started
+    command: ["node", "src/runCrawlerOutboxPublisher.js"]
+    environment:
+      <<: *crawler-database
+      NODE_ENV: production
+      EXPECTED_CRAWLER_DATABASE: ${CRAWLER_DB_NAME:-bullmq_crawler_migration}
+      FEATURE_RECALC_QUEUE: feature-recalc
+      OUTBOX_PUBLISH_BATCH_SIZE: 50
+      OUTBOX_PUBLISH_POLL_MS: 1000
+      TZ: UTC
+    networks: [internal]
+    logging: *default-logging
+
+  business-postgres:
+    image: postgres:18.4-alpine
+    restart: unless-stopped
+    command: ["postgres", "-c", "timezone=UTC"]
+    environment:
+      POSTGRES_USER: ${BUSINESS_DB_USER:-business}
+      POSTGRES_PASSWORD: ${BUSINESS_DB_PASSWORD:?BUSINESS_DB_PASSWORD is required}
+      POSTGRES_DB: ${BUSINESS_DB_NAME:-yewu_business}
+      TZ: UTC
+    volumes:
+      - business-postgres-data:/var/lib/postgresql
+      - ../database/bootstrap/business.sql:/bootstrap/business.sql:ro
+      - ../database/init/10-business.sh:/docker-entrypoint-initdb.d/10-business.sh:ro
+    networks: [business_database]
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          PGPASSWORD="$$POSTGRES_PASSWORD"
+          psql -h 127.0.0.1 -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"
+          -X -v ON_ERROR_STOP=1
+          -c 'SELECT 1 FROM public.channels LIMIT 0' >/dev/null
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    logging: *default-logging
+
+  business-publication-ingress:
+    <<: *qybullmq-image
+    restart: unless-stopped
+    depends_on:
+      business-postgres:
+        condition: service_healthy
+    command: ["node", "src/runBusinessPublicationIngress.js"]
+    environment:
+      NODE_ENV: production
+      BUSINESS_DATABASE_URL_FILE: /run/secrets/business_database_url
+      EXPECTED_BUSINESS_DATABASE: ${BUSINESS_DB_NAME:-yewu_business}
+      BUSINESS_PUBLICATION_INGRESS_HOST: 0.0.0.0
+      BUSINESS_PUBLICATION_INGRESS_PORT: 8081
+      BUSINESS_PUBLICATION_INGRESS_TOKEN_FILE: /run/secrets/business_publication_ingress_token
+      TZ: UTC
+    secrets:
+      - business_database_url
+      - business_publication_ingress_token
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    networks: [business_database, publication_transport]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:8081/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    logging: *default-logging
+
+  publication-publisher:
+    <<: *qybullmq-image
+    restart: unless-stopped
+    depends_on:
+      crawler-pgbouncer:
+        condition: service_healthy
+      business-publication-ingress:
+        condition: service_healthy
+    command: ["node", "src/runPublicationPublisher.js"]
+    environment:
+      NODE_ENV: production
+      DATABASE_URL_FILE: /run/secrets/crawler_publication_database_url
+      POSTGRES_POOL_MIN: 0
+      POSTGRES_POOL_MAX: 4
+      POSTGRES_IDLE_TIMEOUT_MS: 300000
+      SKIP_SCHEMA_MIGRATION: "true"
+      EXPECTED_CRAWLER_DATABASE: ${CRAWLER_DB_NAME:-bullmq_crawler_migration}
+      PUBLICATION_DESTINATION: ${PUBLICATION_DESTINATION:-business}
+      BUSINESS_PUBLICATION_INGRESS_URL: http://business-publication-ingress:8081/internal/publications/v1/shards
+      BUSINESS_PUBLICATION_INGRESS_TRUSTED_HTTP_HOSTNAME: business-publication-ingress
+      BUSINESS_PUBLICATION_INGRESS_TOKEN_FILE: /run/secrets/business_publication_ingress_token
+      PUBLICATION_PUBLISH_POLL_MS: 1000
+      PUBLICATION_PUBLISH_BATCH_SIZE: 100
+      PUBLICATION_PUBLISH_LEASE_SECONDS: 120
+      PUBLICATION_PUBLISH_MAX_ATTEMPTS: 20
+      PUBLICATION_SHARD_MAX_BYTES: 4194304
+      TZ: UTC
+    secrets:
+      - crawler_publication_database_url
+      - business_publication_ingress_token
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    networks: [internal, publication_transport]
+    logging: *default-logging
+
+  business-publication-reconciler:
+    <<: *qybullmq-image
+    restart: unless-stopped
+    depends_on:
+      business-postgres:
+        condition: service_healthy
+    command: ["node", "src/runBusinessPublicationReconciler.js"]
+    environment:
+      NODE_ENV: production
+      BUSINESS_DATABASE_URL_FILE: /run/secrets/business_database_url
+      EXPECTED_BUSINESS_DATABASE: ${BUSINESS_DB_NAME:-yewu_business}
+      BUSINESS_PUBLICATION_RECONCILE_POLL_MS: 1000
+      BUSINESS_PUBLICATION_RECONCILE_BATCH_SIZE: 100
+      BUSINESS_PUBLICATION_RECONCILE_CONCURRENCY: 4
+      BUSINESS_PUBLICATION_RECONCILE_LEASE_SECONDS: 120
+      TZ: UTC
+    secrets:
+      - business_database_url
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    networks: [business_database]
+    logging: *default-logging
+
+  business-publication-projector:
+    <<: *qybullmq-image
+    restart: unless-stopped
+    depends_on:
+      business-postgres:
+        condition: service_healthy
+    command: ["node", "src/runBusinessPublicationProjector.js"]
+    environment:
+      NODE_ENV: production
+      BUSINESS_DATABASE_URL_FILE: /run/secrets/business_database_url
+      EXPECTED_BUSINESS_DATABASE: ${BUSINESS_DB_NAME:-yewu_business}
+      EXPECTED_BUSINESS_PROJECTOR_ROLE: ${BUSINESS_DB_USER:-business}
+      BUSINESS_PUBLICATION_PROJECT_POLL_MS: 1000
+      BUSINESS_PUBLICATION_PROJECT_BATCH_SIZE: 100
+      BUSINESS_PUBLICATION_PROJECT_LEASE_SECONDS: 120
+      TZ: UTC
+    secrets:
+      - business_database_url
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    networks: [business_database]
+    logging: *default-logging
+
+  dashboard:
+    image: qy-allpachong/dashboard:${QY_IMAGE_TAG:-local}
+    build:
+      context: ../services/dashboard
+      dockerfile: Dockerfile
+      args:
+        <<: *build-args
+    restart: unless-stopped
+    depends_on:
+      qybullmq-api:
+        condition: service_healthy
+      business-postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      PORT: 3000
+      POSTGRES_HOST: crawler-pgbouncer
+      POSTGRES_PORT: 6432
+      POSTGRES_USER: ${CRAWLER_DB_USER:-bullmq}
+      POSTGRES_PASSWORD: ${CRAWLER_DB_PASSWORD:?CRAWLER_DB_PASSWORD is required}
+      POSTGRES_DB: ${CRAWLER_DB_NAME:-bullmq_crawler_migration}
+      POSTGRES_POOL_MAX: 8
+      MIGRATION_POSTGRES_HOST: crawler-pgbouncer
+      MIGRATION_POSTGRES_PORT: 6432
+      MIGRATION_POSTGRES_USER: ${CRAWLER_DB_USER:-bullmq}
+      MIGRATION_POSTGRES_PASSWORD: ${CRAWLER_DB_PASSWORD:?CRAWLER_DB_PASSWORD is required}
+      MIGRATION_POSTGRES_DB: ${CRAWLER_DB_NAME:-bullmq_crawler_migration}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
+      S3_ENDPOINT: http://minio:9000
+      S3_BUCKET: ${MINIO_BUCKET:-crawler-raw-migration}
+      S3_ACCESS_KEY: ${MINIO_ROOT_USER:-crawler}
+      S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD is required}
+      S3_REGION: local
+      CRAWLER_API_URL: http://qybullmq-api:3000
+      BULLMQ_QUEUES_URL: https://${QY_BULLMQ_HOST}/queues
+      MINIO_CONSOLE_URL: https://${QY_MINIO_HOST}
+      PROXY_DASHBOARD_URL: https://${QY_ROTA_HOST}
+      ROTA_PROXY_CONTROL_URL: http://rota-core:8001/api/v1/proxy-control
+      BUSINESS_PUBLICATION_AUDIT_DATABASE_URL_FILE: /run/secrets/business_publication_audit_database_url
+      EXPECTED_BUSINESS_DATABASE: ${BUSINESS_DB_NAME:-yewu_business}
+      EXPECTED_BUSINESS_AUDITOR_ROLE: ${BUSINESS_DB_USER:-business}
+      PUBLICATION_DESTINATION: ${PUBLICATION_DESTINATION:-business}
+      YOUTUBE_CHANNEL_CONTENT_LIMIT: ${YOUTUBE_CHANNEL_CONTENT_LIMIT:-30}
+      YOUTUBE_CONTENT_MAX_AGE_DAYS: ${YOUTUBE_CONTENT_MAX_AGE_DAYS:-90}
+      MIN_SUBSCRIBER_COUNT: ${MIN_SUBSCRIBER_COUNT:-1000}
+    secrets:
+      - business_publication_audit_database_url
+    networks: [internal, business_database]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:3000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    logging: *default-logging
+
+  auth-secret-init:
+    image: qy-allpachong/auth:${QY_IMAGE_TAG:-local}
+    build:
+      context: ../services/auth
+      dockerfile: Dockerfile
+      args:
+        <<: *build-args
+    user: "0:0"
+    restart: "no"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        if [ ! -s /run/qy-auth-secrets/qy_auth_password_hash ]; then
+          test -s /run/qy-auth-secrets/qy_auth_initial_password
+          node src/hashPassword.js \
+            < /run/qy-auth-secrets/qy_auth_initial_password \
+            > /run/qy-auth-secrets/qy_auth_password_hash.tmp
+          mv /run/qy-auth-secrets/qy_auth_password_hash.tmp /run/qy-auth-secrets/qy_auth_password_hash
+          rm -f /run/qy-auth-secrets/qy_auth_initial_password
+        fi
+        chmod 0444 /run/qy-auth-secrets/qy_auth_username /run/qy-auth-secrets/qy_auth_password_hash
+    volumes:
+      - ${QY_RUNTIME_ROOT:?QY_RUNTIME_ROOT is required}/secrets:/run/qy-auth-secrets
+    networks: [internal]
+    logging: *default-logging
+
+  auth:
+    image: qy-allpachong/auth:${QY_IMAGE_TAG:-local}
+    build:
+      context: ../services/auth
+      dockerfile: Dockerfile
+      args:
+        <<: *build-args
+    restart: unless-stopped
+    depends_on:
+      auth-secret-init:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    environment:
+      PORT: 3000
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
+      QY_AUTH_USERNAME_FILE: /run/qy-auth-secrets/username
+      QY_AUTH_PASSWORD_HASH_FILE: /run/qy-auth-secrets/password_hash
+      QY_AUTH_COOKIE_NAME: ${QY_AUTH_COOKIE_NAME:-__Secure-qy_session}
+      QY_AUTH_COOKIE_DOMAIN: ${QY_AUTH_COOKIE_DOMAIN}
+      QY_AUTH_DASHBOARD_ORIGIN: ${QY_DASHBOARD_ORIGIN}
+      QY_AUTH_ALLOWED_HOSTS: ${QY_DASHBOARD_HOST},${QY_BULLMQ_HOST},${QY_ROTA_HOST},${QY_MINIO_HOST}
+      QY_AUTH_SESSION_TTL_SECONDS: 604800
+      QY_AUTH_RENEW_THRESHOLD_SECONDS: 259200
+    volumes:
+      - ${QY_RUNTIME_ROOT:?QY_RUNTIME_ROOT is required}/secrets/qy_auth_username:/run/qy-auth-secrets/username:ro
+      - ${QY_RUNTIME_ROOT:?QY_RUNTIME_ROOT is required}/secrets/qy_auth_password_hash:/run/qy-auth-secrets/password_hash:ro
+    networks: [internal]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:3000/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    logging: *default-logging
+
+  nginx:
+    image: nginx:1.29-alpine
+    restart: unless-stopped
+    depends_on:
+      dashboard:
+        condition: service_healthy
+      qybullmq-api:
+        condition: service_healthy
+      auth:
+        condition: service_healthy
+      rota-core:
+        condition: service_healthy
+      rota-dashboard:
+        condition: service_started
+      minio:
+        condition: service_healthy
+    environment:
+      QY_DASHBOARD_HOST: ${QY_DASHBOARD_HOST}
+      QY_BULLMQ_HOST: ${QY_BULLMQ_HOST}
+      QY_ROTA_HOST: ${QY_ROTA_HOST}
+      QY_MINIO_HOST: ${QY_MINIO_HOST}
+    volumes:
+      - ./nginx/qy.conf.template:/etc/nginx/templates/default.conf.template:ro
+      - ./nginx/proxy_params:/etc/nginx/proxy_params:ro
+    ports:
+      - "${QY_PUBLIC_HTTP_PORT:-8080}:80"
+    networks: [internal]
+    healthcheck:
+      test: ["CMD", "nginx", "-t"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    logging: *default-logging
+
+networks:
+  internal:
+    driver: bridge
+  business_database:
+    driver: bridge
+    internal: true
+  publication_transport:
+    driver: bridge
+    internal: true
+
+secrets:
+  crawler_publication_database_url:
+    file: ${QY_RUNTIME_ROOT:?QY_RUNTIME_ROOT is required}/secrets/crawler_publication_database_url
+  business_database_url:
+    file: ${QY_RUNTIME_ROOT:?QY_RUNTIME_ROOT is required}/secrets/business_database_url
+  business_publication_audit_database_url:
+    file: ${QY_RUNTIME_ROOT:?QY_RUNTIME_ROOT is required}/secrets/business_publication_audit_database_url
+  business_publication_ingress_token:
+    file: ${QY_RUNTIME_ROOT:?QY_RUNTIME_ROOT is required}/secrets/business_publication_ingress_token
+  feature_database_url:
+    file: ${QY_RUNTIME_ROOT:?QY_RUNTIME_ROOT is required}/secrets/feature_database_url
+  feature_ingest_token:
+    file: ${QY_RUNTIME_ROOT:?QY_RUNTIME_ROOT is required}/secrets/feature_ingest_token
+
+volumes:
+  crawler-postgres-data:
+  business-postgres-data:
+  redis-data:
+  minio-data:
+  rota-postgres-data:
+  rota-geoip-data:

@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "qy-rule-clock-feature-engine"
+version = "0.1.0"
+description = "Deterministic V16 rolling features and rule clocks"
+requires-python = ">=3.12"
+dependencies = ["pydantic>=2.10,<3"]
+
+[project.optional-dependencies]
+postgres = ["psycopg[binary]>=3.2,<4"]
+
+[project.scripts]
+feature-ingest = "feature_engine.ingest_service:main"
+feature-schedule-day = "feature_engine.scheduler_service:main"
+feature-export-observation-schema = "feature_engine.contracts:main"
+feature-refresh-references = "feature_engine.reference_service:main"
+feature-rebuild-policy = "feature_engine.rebuild_service:main"
+feature-bootstrap = "feature_engine.bootstrap_service:main"
+feature-repair-agent-clocks = "feature_engine.agent_clock_repair:main"
+feature-rebase-agent-clocks = "feature_engine.agent_clock_semantic_rebase:main"
+feature-repair-daily-plan-statuses = "feature_engine.daily_plan_status_repair:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

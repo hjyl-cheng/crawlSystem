@@ -1,0 +1,16 @@
+{
+  "name": "qy-auth-gateway",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "hash-password": "node src/hashPassword.js",
+    "start": "node src/server.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "bcryptjs": "^3.0.2",
+    "express": "^4.21.2",
+    "ioredis": "^5.7.0"
+  }
+}

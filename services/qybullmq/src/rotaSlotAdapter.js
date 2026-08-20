@@ -1,0 +1,707 @@
+import { randomUUID as nodeRandomUUID } from "node:crypto";
+
+const READY_KEEP_ROUTE = "READY_KEEP_ROUTE";
+const READY_NEW_ROUTE = "READY_NEW_ROUTE";
+const PENDING_NEW_ROUTE = "PENDING_NEW_ROUTE";
+const PAUSED_NO_RESERVE = "PAUSED_NO_RESERVE";
+const RETRYABLE_OBSERVATIONS = new Set([
+  "proxy_transport",
+  "youtube_rate_limited",
+  "youtube_challenge",
+]);
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+export class RotaSlotDeferredError extends Error {
+  constructor(reason, { retryAfterMs = 5000 } = {}) {
+    super(`Rota Slot job deferred: ${reason}`);
+    this.name = "RotaSlotDeferredError";
+    this.reason = reason;
+    this.retryAfterMs = retryAfterMs;
+  }
+}
+
+export class RotaSlotContractError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "RotaSlotContractError";
+  }
+}
+
+function positiveInteger(value, field) {
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+    throw new RotaSlotContractError(`${field} must be a positive integer`);
+  }
+  return parsed;
+}
+
+function nonNegativeInteger(value, field) {
+  if (value === null || value === undefined || value === "") {
+    throw new RotaSlotContractError(`${field} must be a non-negative integer`);
+  }
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 0) {
+    throw new RotaSlotContractError(`${field} must be a non-negative integer`);
+  }
+  return parsed;
+}
+
+function requiredString(value, field) {
+  const normalized = String(value ?? "").trim();
+  if (!normalized) throw new RotaSlotContractError(`${field} is required`);
+  return normalized;
+}
+
+function proxyUrl({ baseUrl, proxyUser, password }) {
+  const url = new URL(baseUrl);
+  if (!["http:", "https:"].includes(url.protocol)) {
+    throw new RotaSlotContractError(`unsupported Rota proxy protocol: ${url.protocol}`);
+  }
+  url.username = requiredString(proxyUser, "assignment.proxy_user");
+  url.password = requiredString(password, "ROTA_BULLMQ_PROXY_PASSWORD");
+  return url.toString();
+}
+
+function jobExecutionId(job) {
+  const queue = requiredString(job?.queueName, "job.queueName");
+  const id = requiredString(job?.id, "job.id");
+  const execution = Math.max(1, Number(job?.attemptsMade ?? 0) + 1);
+  return `${queue}:${id}:${execution}`;
+}
+
+function completionOutcome(result) {
+  if (result?.kind === "retryable_network_failure") return "failed";
+  if (result?.kind === "cancelled") return "cancelled";
+  if (result?.kind === "business_terminal") return "success";
+  if (result?.kind === "managed_work_complete") return "success";
+  throw new RotaSlotContractError(`unsupported attempt result kind: ${result?.kind ?? "missing"}`);
+}
+
+function businessComplete(result) {
+  if (result?.kind === "business_terminal") return true;
+  return result?.kind === "managed_work_complete" && result.businessState === "terminal";
+}
+
+function cloneAssignment(value) {
+  return value ? Object.freeze({ ...value }) : null;
+}
+
+class ControlCommandLane {
+  constructor() {
+    this.tail = Promise.resolve();
+    this.sequence = 0;
+    this.closed = false;
+  }
+
+  enqueue(kind, command, { allowClosing = false } = {}) {
+    if (this.closed && !allowClosing) {
+      return Promise.reject(new RotaSlotContractError(`control lane is closing; cannot enqueue ${kind}`));
+    }
+    const sequence = ++this.sequence;
+    const result = this.tail.then(() => command(sequence));
+    this.tail = result.catch(() => {});
+    return result;
+  }
+
+  beginClose() {
+    this.closed = true;
+  }
+
+  drain() {
+    return this.tail;
+  }
+}
+
+export class RotaSlotAdapter {
+  constructor({
+    client,
+    role,
+    workerId,
+    workerInstanceId = nodeRandomUUID(),
+    resolvedPolicy,
+    proxyBaseUrl,
+    proxyPassword,
+    identityRuntime,
+    renewIntervalMs = 5000,
+    leaseSafetyMarginMs = 10_000,
+    routeReadyWaitMs = 10_000,
+    maxRouteSwitchesPerExecution = 2,
+    maxCompletionAttempts = 3,
+    completionRetryDelayMs = 100,
+    sleepImpl = sleep,
+    randomUUID = nodeRandomUUID,
+    monotonicNow = () => performance.now(),
+    setTimeoutImpl = setTimeout,
+    clearTimeoutImpl = clearTimeout,
+  } = {}) {
+    this.client = client;
+    this.role = requiredString(role, "role").toLowerCase();
+    this.workerId = requiredString(workerId, "workerId");
+    this.workerInstanceId = requiredString(workerInstanceId, "workerInstanceId");
+    this.resolvedPolicy = resolvedPolicy;
+    this.policy = resolvedPolicy?.policy;
+    this.proxyBaseUrl = requiredString(proxyBaseUrl, "proxyBaseUrl");
+    this.proxyPassword = requiredString(proxyPassword, "proxyPassword");
+    this.identityRuntime = identityRuntime;
+    this.renewIntervalMs = Math.max(1000, Number(renewIntervalMs) || 5000);
+    this.leaseSafetyMarginMs = Math.max(0, Number(leaseSafetyMarginMs) || 0);
+    this.routeReadyWaitMs = Math.max(1, Number(routeReadyWaitMs) || 10_000);
+    this.maxRouteSwitchesPerExecution = Math.max(0, Number(maxRouteSwitchesPerExecution) || 0);
+    this.maxCompletionAttempts = Math.max(1, Number(maxCompletionAttempts) || 3);
+    this.completionRetryDelayMs = Math.max(1, Number(completionRetryDelayMs) || 100);
+    this.sleepImpl = sleepImpl;
+    this.randomUUID = randomUUID;
+    this.monotonicNow = monotonicNow;
+    this.setTimeoutImpl = setTimeoutImpl;
+    this.clearTimeoutImpl = clearTimeoutImpl;
+    this.lane = new ControlCommandLane();
+    this.assignment = null;
+    this.slotReady = false;
+    this.controlState = null;
+    this.leaseSafeUntil = 0;
+    this.activeTask = null;
+    this.activeRuntime = null;
+    this.activeAttemptController = null;
+    this.pendingCompletion = null;
+    this.idleRuntime = null;
+    this.renewTimer = null;
+    this.renewPromise = null;
+    this.started = false;
+    this.closing = false;
+    this.activeJob = false;
+    this.activeJobCompletion = null;
+    this.closePromise = null;
+  }
+
+  async start() {
+    if (this.started) return this.status();
+    if (!this.client || !this.policy || this.policy.role !== this.role) {
+      throw new RotaSlotContractError("Rota Slot Adapter requires a role-matched identity policy");
+    }
+    let result;
+    do {
+      const requestStarted = this.monotonicNow();
+      result = await this.lane.enqueue("claim", () => this.client.claim({
+        claim_request_id: this.randomUUID(),
+        protocol_version: 2,
+        role: this.role,
+        worker_id: this.workerId,
+        worker_instance_id: this.workerInstanceId,
+        identity_policy_id: this.policy.id,
+        identity_policy_version: this.policy.version,
+      }));
+      if (!result?.ready) {
+        const retryAfterMs = Math.max(100, Number(result?.retry_after_ms) || 1000);
+        await this.sleepImpl(retryAfterMs);
+      } else {
+        this.#acceptAssignment(result, { requestStarted, expectedGeneration: null });
+      }
+    } while (!result?.ready && !this.closing);
+    if (this.closing) throw new RotaSlotContractError("Rota Slot Adapter closed during Claim");
+    this.started = true;
+    this.#scheduleRenew();
+    return this.status();
+  }
+
+  async executeJob(job, { prepare, executeAttempt } = {}) {
+    if (!this.started || !this.assignment || !this.slotReady || this.closing) {
+      throw new RotaSlotDeferredError("slot_not_ready");
+    }
+    if (this.activeJob) throw new RotaSlotDeferredError("local_capacity");
+    if (typeof prepare !== "function" || typeof executeAttempt !== "function") {
+      throw new TypeError("prepare and executeAttempt callbacks are required");
+    }
+    this.activeJob = true;
+    let resolveActiveJob;
+    const activeJobDone = new Promise((resolve) => { resolveActiveJob = resolve; });
+    this.activeJobCompletion = { promise: activeJobDone, resolve: resolveActiveJob };
+    try {
+      const prepared = await prepare();
+      if (prepared?.kind === "skip") return prepared.result;
+      if (prepared?.kind === "defer") {
+        throw new RotaSlotDeferredError(prepared.reason, {
+          retryAfterMs: Math.max(1, Date.parse(prepared.retryAt) - Date.now()),
+        });
+      }
+      this.#validatePrepared(prepared);
+
+      const executionId = jobExecutionId(job);
+      let routeSwitches = 0;
+      let resumeMode = prepared.initialResumeMode ?? "initial";
+      while (!this.closing) {
+        this.#requireLeaseSafety();
+        const frozen = this.assignment;
+        const task = await this.#beginTask({ prepared, executionId, frozen });
+        this.activeTask = task;
+        const controller = new AbortController();
+        this.activeAttemptController = controller;
+        const reusableRuntime = this.idleRuntime;
+        this.idleRuntime = null;
+        let runtime;
+        try {
+          runtime = await this.identityRuntime.acquire({
+            assignment: frozen,
+            policy: this.policy,
+            proxyUrl: proxyUrl({
+              baseUrl: this.proxyBaseUrl,
+              proxyUser: frozen.proxy_user,
+              password: this.proxyPassword,
+            }),
+            task,
+            prepared,
+            abortSignal: controller.signal,
+            reusableRuntime,
+          });
+        } catch (error) {
+          await this.#completeTask({
+            prepared,
+            frozen,
+            task,
+            outcome: "failed",
+            durationMs: 0,
+            businessComplete: false,
+            observationIDs: [],
+            activeManagedRequests: 0,
+          });
+          this.activeTask = null;
+          this.activeAttemptController = null;
+          throw error;
+        }
+        this.activeRuntime = runtime;
+        const startedAt = this.monotonicNow();
+        let attemptResult;
+        let thrown = null;
+        const attemptContext = Object.freeze({
+          businessRunId: prepared.businessRunId,
+          jobExecutionId: executionId,
+          number: task.attempt_number,
+          resumeMode,
+          abortSignal: controller.signal,
+          routeGeneration: frozen.route_generation,
+        });
+        try {
+          const invoke = () => executeAttempt(prepared, attemptContext);
+          attemptResult = typeof runtime?.execute === "function"
+            ? await runtime.execute({ job, prepared, attempt: attemptContext }, invoke)
+            : await invoke();
+          if (this.closing && controller.signal.aborted) {
+            attemptResult = { kind: "cancelled", error: controller.signal.reason };
+          }
+        } catch (error) {
+          thrown = error;
+          attemptResult = this.closing && controller.signal.aborted
+            ? { kind: "cancelled", error: controller.signal.reason ?? error }
+            : { kind: "unexpected_failure", error };
+        }
+
+        const quiesced = await this.identityRuntime.quiesce(runtime, controller.signal);
+        const observationIDs = [];
+        if (attemptResult.kind === "retryable_network_failure") {
+          if (!attemptResult.checkpointPersisted || !RETRYABLE_OBSERVATIONS.has(attemptResult.observation)) {
+            throw new RotaSlotContractError("retryable network failure lacks a durable checkpoint or valid observation");
+          }
+          observationIDs.push(await this.#observe({
+            prepared,
+            frozen,
+            task,
+            result: attemptResult,
+          }));
+        }
+        const outcome = attemptResult.kind === "unexpected_failure"
+          ? "failed"
+          : completionOutcome(attemptResult);
+        const completion = await this.#completeTask({
+          prepared,
+          frozen,
+          task,
+          outcome,
+          durationMs: Math.max(0, Math.round(this.monotonicNow() - startedAt)),
+          businessComplete: businessComplete(attemptResult),
+          observationIDs,
+          activeManagedRequests: Number(quiesced?.active_managed_requests ?? 0),
+        });
+        this.activeTask = null;
+        this.activeAttemptController = null;
+
+        if (attemptResult.kind === "managed_work_complete" || attemptResult.kind === "business_terminal") {
+          await this.identityRuntime.checkpoint(runtime, attemptResult);
+          this.activeRuntime = null;
+          this.idleRuntime = runtime;
+          if (attemptResult.kind === "business_terminal") return attemptResult.result ?? null;
+          return attemptResult.result;
+        }
+        if (attemptResult.kind === "unexpected_failure") {
+          await this.identityRuntime.retire(runtime, frozen);
+          this.activeRuntime = null;
+          throw thrown;
+        }
+        if (attemptResult.kind === "cancelled") {
+          await this.identityRuntime.retire(runtime, frozen);
+          this.activeRuntime = null;
+          throw attemptResult.error ?? new RotaSlotDeferredError("adapter_closing");
+        }
+
+        await this.identityRuntime.retire(runtime, frozen);
+        this.activeRuntime = null;
+        routeSwitches += 1;
+        if (routeSwitches > this.maxRouteSwitchesPerExecution) {
+          throw new RotaSlotDeferredError("execution_route_budget");
+        }
+        await this.#waitForNewRoute(completion, frozen);
+        resumeMode = "network_attempt_resume";
+      }
+      throw new RotaSlotDeferredError("adapter_closing");
+    } finally {
+      this.activeJob = false;
+      if (this.activeJobCompletion?.promise === activeJobDone) {
+        this.activeJobCompletion = null;
+      }
+      resolveActiveJob();
+    }
+  }
+
+  close() {
+    if (!this.closePromise) this.closePromise = this.#close();
+    return this.closePromise;
+  }
+
+  async #close() {
+    this.closing = true;
+    if (this.renewTimer) this.clearTimeoutImpl(this.renewTimer);
+    this.renewTimer = null;
+    const activeJob = this.activeJobCompletion?.promise ?? null;
+    if (this.activeAttemptController && !this.activeAttemptController.signal.aborted) {
+      this.activeAttemptController.abort(new RotaSlotDeferredError("adapter_closing"));
+    }
+    if (activeJob) await activeJob;
+    let releaseSafe = this.activeTask === null;
+    if (this.pendingCompletion) {
+      try {
+        await this.#sendCompletionRequest(this.pendingCompletion);
+        this.pendingCompletion = null;
+        this.activeTask = null;
+        releaseSafe = true;
+      } catch {
+        releaseSafe = false;
+      }
+    }
+    this.lane.beginClose();
+    if (this.activeRuntime) {
+      const runtime = this.activeRuntime;
+      const frozen = this.assignment;
+      await this.identityRuntime.quiesce(runtime, new AbortController().signal);
+      await this.identityRuntime.retire(runtime, frozen);
+      this.activeRuntime = null;
+    }
+    this.activeAttemptController = null;
+    if (this.idleRuntime) {
+      await this.identityRuntime.retire(this.idleRuntime, this.assignment);
+      this.idleRuntime = null;
+    }
+    if (releaseSafe && this.assignment?.lease_id) {
+      const frozen = this.assignment;
+      await this.lane.enqueue("release", () => this.client.release({
+        release_request_id: this.randomUUID(),
+        slot_name: frozen.slot_name,
+        worker_id: this.workerId,
+        worker_instance_id: this.workerInstanceId,
+        lease_id: frozen.lease_id,
+        known_route_generation: frozen.route_generation,
+        reason: "worker_shutdown",
+      }), { allowClosing: true });
+    }
+    this.assignment = null;
+    this.slotReady = false;
+    this.controlState = null;
+    await this.lane.drain();
+  }
+
+  status() {
+    return Object.freeze({
+      started: this.started,
+      closing: this.closing,
+      active_job: this.activeJob,
+      active_task_id: this.activeTask?.task_id ?? null,
+      assignment: this.assignment ? {
+        ready: this.slotReady,
+        control_state: this.controlState,
+        workload_scope: this.assignment.workload_scope,
+        role: this.assignment.role,
+        slot_name: this.assignment.slot_name,
+        lease_id: this.assignment.lease_id,
+        route_generation: this.assignment.route_generation,
+        credential_generation: this.assignment.credential_generation,
+        network_identity_key: this.assignment.network_identity_key,
+        profile_epoch: this.assignment.profile_epoch,
+        identity_policy_id: this.assignment.identity_policy_id,
+        identity_policy_version: this.assignment.identity_policy_version,
+        identity_policy_hash: this.assignment.identity_policy_hash,
+      } : null,
+    });
+  }
+
+  #validatePrepared(prepared) {
+    if (prepared?.kind !== "ready") throw new RotaSlotContractError("prepare returned an invalid result");
+    requiredString(prepared.businessRunId, "prepared.businessRunId");
+    requiredString(prepared.workloadKind, "prepared.workloadKind");
+    if (prepared.identityPolicyId !== this.policy.id
+        || Number(prepared.identityPolicyVersion) !== this.policy.version
+        || prepared.identityPolicyHash !== this.policy.hash) {
+      throw new RotaSlotDeferredError("policy_unavailable");
+    }
+  }
+
+  async #beginTask({ prepared, executionId, frozen }) {
+    try {
+      return await this.lane.enqueue("begin", () => this.client.beginTask({
+        slot_name: frozen.slot_name,
+        worker_id: this.workerId,
+        worker_instance_id: this.workerInstanceId,
+        lease_id: frozen.lease_id,
+        route_generation: frozen.route_generation,
+        attempt_request_id: this.randomUUID(),
+        business_run_id: prepared.businessRunId,
+        job_execution_id: executionId,
+        task_kind: prepared.workloadKind,
+      }));
+    } catch (error) {
+      if ([
+        "BUSINESS_RUN_ACTIVE",
+        "SLOT_TASK_ACTIVE",
+        "EXECUTION_ROUTE_BUDGET",
+        "EXECUTION_ROUTE_BUDGET_EXHAUSTED",
+        "BUSINESS_RUN_BUDGET",
+        "BUSINESS_RUN_BUDGET_EXHAUSTED",
+      ].includes(error?.code)) {
+        throw new RotaSlotDeferredError(String(error.code).toLowerCase(), {
+          retryAfterMs: Math.max(1000, Number(error?.payload?.retry_after_ms) || 5000),
+        });
+      }
+      throw error;
+    }
+  }
+
+  async #observe({ prepared, frozen, task, result }) {
+    const observationID = `${task.task_id}:${this.randomUUID()}`;
+    const observed = await this.lane.enqueue("observe", () => this.client.observe({
+      slot_name: frozen.slot_name,
+      worker_id: this.workerId,
+      worker_instance_id: this.workerInstanceId,
+      lease_id: frozen.lease_id,
+      route_generation: frozen.route_generation,
+      task_id: task.task_id,
+      business_run_id: prepared.businessRunId,
+      observation_id: observationID,
+      kind: result.observation,
+      source: requiredString(result.source ?? result.failedStage, "observation.source").slice(0, 255),
+      occurred_at: new Date().toISOString(),
+      payload: { failed_stage: String(result.failedStage ?? "").slice(0, 120) },
+    }));
+    if (observed.observation_id !== observationID || observed.task_id !== task.task_id) {
+      throw new RotaSlotContractError("Rota returned a mismatched Observation receipt");
+    }
+    return observationID;
+  }
+
+  async #completeTask({
+    prepared,
+    frozen,
+    task,
+    outcome,
+    durationMs,
+    businessComplete: completed,
+    observationIDs,
+    activeManagedRequests,
+  }) {
+    if (activeManagedRequests !== 0) {
+      throw new RotaSlotContractError("identity runtime did not quiesce all managed requests");
+    }
+    const request = Object.freeze({
+      completion_request_id: this.randomUUID(),
+      slot_name: frozen.slot_name,
+      worker_id: this.workerId,
+      worker_instance_id: this.workerInstanceId,
+      lease_id: frozen.lease_id,
+      route_generation: frozen.route_generation,
+      task_id: task.task_id,
+      business_run_id: prepared.businessRunId,
+      outcome,
+      duration_ms: durationMs,
+      business_complete: completed,
+      observation_ids: [...new Set(observationIDs)].sort(),
+      attempt_quiesced: true,
+      active_managed_requests: 0,
+    });
+    this.pendingCompletion = request;
+    try {
+      const completed = await this.#sendCompletionRequest(request);
+      if (this.pendingCompletion === request) this.pendingCompletion = null;
+      return completed;
+    } catch (error) {
+      this.#fenceSlot("COMPLETE_UNCERTAIN", error);
+      throw error;
+    }
+  }
+
+  async #sendCompletionRequest(request) {
+    let lastError = null;
+    for (let attempt = 1; attempt <= this.maxCompletionAttempts; attempt += 1) {
+      try {
+        return await this.lane.enqueue("complete", () => this.client.completeTask(request));
+      } catch (error) {
+        lastError = error;
+        if (error?.retryable !== true || attempt >= this.maxCompletionAttempts) throw error;
+        await this.sleepImpl(this.completionRetryDelayMs * attempt);
+      }
+    }
+    throw lastError;
+  }
+
+  async #waitForNewRoute(completion, frozen) {
+    if (completion?.slot_name !== frozen.slot_name || completion?.lease_id !== frozen.lease_id) {
+      throw new RotaSlotContractError("CompleteTask returned a mismatched Lease fence");
+    }
+    if (![PENDING_NEW_ROUTE, PAUSED_NO_RESERVE, READY_NEW_ROUTE].includes(completion.control_state)) {
+      throw new RotaSlotContractError(`failed Attempt did not enter a new Route state: ${completion.control_state}`);
+    }
+    const deadline = this.monotonicNow() + this.routeReadyWaitMs;
+    let delayMs = Math.max(1, Number(completion.retry_after_ms) || 100);
+    while (!this.closing && this.monotonicNow() <= deadline) {
+      if (this.slotReady
+          && this.assignment?.slot_name === frozen.slot_name
+          && this.assignment?.lease_id === frozen.lease_id
+          && this.assignment.route_generation > frozen.route_generation) {
+        return;
+      }
+      await this.sleepImpl(delayMs);
+      const renewed = await this.#renewAssignment(frozen);
+      if (renewed?.ready) {
+        if (this.assignment.route_generation < frozen.route_generation + 1) {
+          throw new RotaSlotContractError("Rota did not advance the Route generation");
+        }
+        return;
+      }
+      delayMs = Math.min(1000, Math.max(100, delayMs * 2));
+      if (renewed?.control_state === PAUSED_NO_RESERVE && this.monotonicNow() >= deadline) break;
+    }
+    throw new RotaSlotDeferredError(
+      completion.control_state === PAUSED_NO_RESERVE ? "no_reserve" : "route_not_ready",
+      { retryAfterMs: Math.max(1000, Number(completion.retry_after_ms) || 1000) },
+    );
+  }
+
+  #acceptAssignment(value, { requestStarted, expectedGeneration }) {
+    if (!value?.ready || value.protocol_version !== 2) {
+      throw new RotaSlotContractError("Rota returned an incomplete or unsupported Assignment");
+    }
+    const generation = positiveInteger(value.route_generation, "assignment.route_generation");
+    const remainingMs = positiveInteger(value.lease_remaining_ms, "assignment.lease_remaining_ms");
+    const profileEpoch = nonNegativeInteger(value.profile_epoch, "assignment.profile_epoch");
+    const fields = [
+      "slot_name", "worker_id", "worker_instance_id", "lease_id", "proxy_user",
+      "network_identity_key", "identity_policy_id", "identity_policy_hash",
+      "workload_scope", "role",
+    ];
+    for (const field of fields) requiredString(value[field], `assignment.${field}`);
+    if (value.worker_id !== this.workerId || value.worker_instance_id !== this.workerInstanceId
+        || value.role !== this.role || value.workload_scope !== this.resolvedPolicy.workload_scope
+        || value.identity_policy_id !== this.policy.id
+        || Number(value.identity_policy_version) !== this.policy.version
+        || value.identity_policy_hash !== this.policy.hash) {
+      throw new RotaSlotContractError("Rota Assignment conflicts with the Worker identity policy");
+    }
+    if (this.assignment) {
+      if (value.slot_name !== this.assignment.slot_name || value.lease_id !== this.assignment.lease_id) {
+        throw new RotaSlotContractError("Rota changed Slot or Lease during a live Worker Lease");
+      }
+      if (generation < this.assignment.route_generation) {
+        return false;
+      }
+    }
+    if (expectedGeneration !== null && generation < expectedGeneration) {
+      throw new RotaSlotContractError("Rota did not advance the Route generation");
+    }
+    this.assignment = cloneAssignment({
+      ...value,
+      route_generation: generation,
+      profile_epoch: profileEpoch,
+    });
+    this.slotReady = true;
+    this.controlState = value.control_state;
+    this.leaseSafeUntil = requestStarted + Math.max(0, remainingMs - this.leaseSafetyMarginMs);
+    return true;
+  }
+
+  #fenceSlot(controlState, reason = new RotaSlotDeferredError("slot_not_ready")) {
+    this.slotReady = false;
+    this.controlState = controlState;
+    this.leaseSafeUntil = 0;
+    if (this.activeAttemptController && !this.activeAttemptController.signal.aborted) {
+      this.activeAttemptController.abort(reason);
+    }
+  }
+
+  #requireLeaseSafety() {
+    if (!this.assignment || this.monotonicNow() >= this.leaseSafeUntil) {
+      throw new RotaSlotDeferredError("lease_safety_window");
+    }
+  }
+
+  #renewAssignment(frozen) {
+    if (this.renewPromise) return this.renewPromise;
+    const requestStarted = this.monotonicNow();
+    const request = Object.freeze({
+      renew_request_id: this.randomUUID(),
+      slot_name: frozen.slot_name,
+      worker_id: this.workerId,
+      worker_instance_id: this.workerInstanceId,
+      lease_id: frozen.lease_id,
+      known_route_generation: frozen.route_generation,
+    });
+    const command = this.lane.enqueue("renew", async () => {
+      const renewed = await this.client.renew(request);
+      if (this.assignment?.slot_name !== frozen.slot_name
+          || this.assignment?.lease_id !== frozen.lease_id) return renewed;
+      if (!renewed?.ready) {
+        this.#fenceSlot(
+          renewed?.control_state || "RENEW_NOT_READY",
+          new RotaSlotDeferredError("renew_not_ready", {
+            retryAfterMs: Math.max(1000, Number(renewed?.retry_after_ms) || 1000),
+          }),
+        );
+        return renewed;
+      }
+      this.#acceptAssignment(renewed, {
+        requestStarted,
+        expectedGeneration: frozen.route_generation,
+      });
+      return renewed;
+    });
+    const shared = command.finally(() => {
+      if (this.renewPromise === shared) this.renewPromise = null;
+    });
+    this.renewPromise = shared;
+    return shared;
+  }
+
+  #scheduleRenew() {
+    if (this.closing || !this.started || this.renewTimer) return;
+    this.renewTimer = this.setTimeoutImpl(() => {
+      this.renewTimer = null;
+      if (this.closing || !this.assignment) return;
+      const frozen = this.assignment;
+      let retryable = true;
+      void this.#renewAssignment(frozen).catch((error) => {
+        retryable = error?.retryable === true;
+        if (this.assignment?.slot_name === frozen.slot_name
+            && this.assignment?.lease_id === frozen.lease_id) {
+          this.#fenceSlot("RENEW_FAILED", error);
+        }
+      }).finally(() => {
+        if (retryable) this.#scheduleRenew();
+      });
+    }, this.renewIntervalMs);
+    this.renewTimer.unref?.();
+  }
+}

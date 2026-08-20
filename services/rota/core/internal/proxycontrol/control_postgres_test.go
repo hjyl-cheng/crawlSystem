@@ -1,0 +1,809 @@
+package proxycontrol
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/alpkeskin/rota/core/internal/database"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+)
+
+func TestClaimV2IsIdempotentAndFencesWorkerInstances(t *testing.T) {
+	manager, pool := newProxyControlPostgres(t)
+	ctx := context.Background()
+
+	_ = insertControlProxy(t, pool, "claim-v2.example:8080", 10)
+	manager.SetCacheInvalidator(func(string) {})
+	if err := manager.syncResources(ctx); err != nil {
+		t.Fatalf("sync managed resources: %v", err)
+	}
+	if _, err := manager.reconcile(ctx); err != nil {
+		t.Fatalf("reconcile initial assignments: %v", err)
+	}
+
+	request := testClaimRequest("claim-v2-request", "worker-v2", "instance-v2")
+	first, err := manager.Claim(ctx, request)
+	if err != nil {
+		t.Fatalf("first claim: %v", err)
+	}
+	replayed, err := manager.Claim(ctx, request)
+	if err != nil {
+		t.Fatalf("replayed claim: %v", err)
+	}
+	if first.LeaseID == "" || replayed.LeaseID != first.LeaseID || replayed.SlotName != first.SlotName {
+		t.Fatalf("first=%+v replayed=%+v", first, replayed)
+	}
+	if first.WorkerInstanceID != request.WorkerInstanceID ||
+		first.IdentityPolicyID != request.IdentityPolicyID ||
+		first.IdentityPolicyVersion != request.IdentityPolicyVersion ||
+		first.IdentityPolicyHash != "sha256:test-channel-v1" ||
+		first.ProtocolVersion != ProtocolVersionV2 || first.WorkloadScope != "qy-test" {
+		t.Fatalf("claim assignment identity = %+v", first)
+	}
+
+	otherInstance := testClaimRequest("claim-v2-other-instance", "worker-v2", "instance-v2-other")
+	if _, err := manager.Claim(ctx, otherInstance); !errors.Is(err, ErrLeaseConflict) {
+		t.Fatalf("other instance claim error = %v, want lease conflict", err)
+	}
+	reusedID := testClaimRequest("claim-v2-request", "worker-v2-other", "instance-v2-other")
+	if _, err := manager.Claim(ctx, reusedID); !errors.Is(err, ErrIdempotencyConflict) {
+		t.Fatalf("reused request id error = %v, want idempotency conflict", err)
+	}
+
+	var leaseCount int
+	if err := pool.QueryRow(ctx, `
+		SELECT COUNT(*) FROM proxy_control_leases
+		WHERE workload_scope='qy-test' AND claim_request_id='claim-v2-request'
+	`).Scan(&leaseCount); err != nil {
+		t.Fatalf("count persisted leases: %v", err)
+	}
+	if leaseCount != 1 {
+		t.Fatalf("persisted lease count = %d, want 1", leaseCount)
+	}
+
+	encoded, err := json.Marshal(first)
+	if err != nil {
+		t.Fatalf("encode assignment: %v", err)
+	}
+	if strings.Contains(string(encoded), "proxy_id") || strings.Contains(string(encoded), "proxy_address_hash") {
+		t.Fatalf("assignment leaked internal proxy identity: %s", encoded)
+	}
+}
+
+func TestQueryQualitySlotCanBeProvisionedClaimedAndReportedInCapacity(t *testing.T) {
+	manager, pool := newProxyControlPostgresWithOptions(t, func(options *Options) {
+		options.ChannelSlots = 0
+		options.QueryQualitySlots = 1
+		options.IdentityPolicies = map[string]IdentityPolicy{
+			"qy-test-query-quality-v1": {
+				ID: "qy-test-query-quality-v1", Version: 1,
+				Hash: "sha256:test-query-quality-v1", Role: RoleQueryQuality,
+			},
+		}
+	})
+	ctx := context.Background()
+
+	_ = insertControlProxy(t, pool, "query-quality.example:8080", 10)
+	manager.SetCacheInvalidator(func(string) {})
+	if err := manager.syncResources(ctx); err != nil {
+		t.Fatalf("sync query quality resources: %v", err)
+	}
+	if _, err := manager.reconcile(ctx); err != nil {
+		t.Fatalf("reconcile query quality assignment: %v", err)
+	}
+
+	claim, err := manager.Claim(ctx, ClaimRequest{
+		ClaimRequestID: "claim-query-quality", ProtocolVersion: ProtocolVersionV2,
+		Role: RoleQueryQuality, WorkerID: "worker-query-quality",
+		WorkerInstanceID: "instance-query-quality",
+		IdentityPolicyID: "qy-test-query-quality-v1", IdentityPolicyVersion: 1,
+	})
+	if err != nil {
+		t.Fatalf("claim query quality slot: %v", err)
+	}
+	if !claim.Ready || claim.Role != RoleQueryQuality || claim.SlotName != "bullmq-query_quality-01" {
+		t.Fatalf("query quality claim = %+v", claim)
+	}
+
+	capacity, err := manager.Capacity(ctx)
+	if err != nil {
+		t.Fatalf("query quality capacity: %v", err)
+	}
+	role := capacity.Roles[RoleQueryQuality]
+	if role.Desired != 1 || role.Provisioned != 1 || role.Assigned != 1 || role.Ready != 1 || role.Claimed != 1 {
+		t.Fatalf("query quality role capacity = %+v", role)
+	}
+}
+
+func TestPolicyPreferencesOrderCandidatesWithoutReducingCapacity(t *testing.T) {
+	manager, pool := newProxyControlPostgresWithOptions(t, func(options *Options) {
+		options.ChannelSlots = 2
+		options.CatalogVersion = 7
+		options.CatalogDigest = "sha256:test-catalog-v7"
+		options.IdentityPolicies["qy-test-channel-v1"] = IdentityPolicy{
+			ID: "qy-test-channel-v1", Version: 1, Hash: "sha256:test-channel-v1",
+			Role: RoleChannel, RequiredEgressCountry: "BR",
+			AllowedProxyTags:   []string{"role:channel"},
+			GeoFreshnessWindow: 2 * time.Hour, AttemptSafetyWindow: 10 * time.Minute,
+		}
+	})
+	ctx := context.Background()
+	now := time.Now()
+
+	wrongCountryID := insertControlProxy(t, pool, "capacity-us.example:8080", 10)
+	staleGeoID := insertControlProxy(t, pool, "capacity-stale-geo.example:8080", 20)
+	rotatingID := insertControlProxy(t, pool, "capacity-rotating.example:8080", 30)
+	expiringID := insertControlProxy(t, pool, "capacity-expiring.example:8080", 40)
+	eligibleID := insertControlProxy(t, pool, "capacity-eligible.example:8080", 50)
+	for _, proxyID := range []int{wrongCountryID, staleGeoID, rotatingID, expiringID, eligibleID} {
+		if _, err := pool.Exec(ctx, `
+			UPDATE proxies
+			SET tags=ARRAY['role:channel'],country_code='BR',country_verified_at=$2,
+			    egress_identity_mode='static',identity_valid_until=$3,last_identity_verified_at=$2
+			WHERE id=$1
+		`, proxyID, now, now.Add(time.Hour)); err != nil {
+			t.Fatalf("configure proxy %d identity: %v", proxyID, err)
+		}
+	}
+	if _, err := pool.Exec(ctx, `UPDATE proxies SET country_code='US' WHERE id=$1`, wrongCountryID); err != nil {
+		t.Fatalf("configure wrong-country proxy: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE proxies SET country_verified_at=$2 WHERE id=$1`, staleGeoID, now.Add(-3*time.Hour)); err != nil {
+		t.Fatalf("configure stale-geo proxy: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE proxies SET egress_identity_mode='rotating_per_connect' WHERE id=$1`, rotatingID); err != nil {
+		t.Fatalf("configure rotating proxy: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE proxies SET identity_valid_until=$2 WHERE id=$1`, expiringID, now.Add(5*time.Minute)); err != nil {
+		t.Fatalf("configure expiring proxy: %v", err)
+	}
+
+	manager.SetCacheInvalidator(func(string) {})
+	if err := manager.syncResources(ctx); err != nil {
+		t.Fatalf("sync managed resources: %v", err)
+	}
+	if _, err := manager.reconcile(ctx); err != nil {
+		t.Fatalf("reconcile policy assignments: %v", err)
+	}
+
+	var assigned []int
+	rows, err := pool.Query(ctx, `
+		SELECT proxy_id FROM proxy_running_slots
+		WHERE role='channel' AND proxy_id IS NOT NULL ORDER BY slot_no
+	`)
+	if err != nil {
+		t.Fatalf("load policy assignments: %v", err)
+	}
+	for rows.Next() {
+		var proxyID int
+		if err := rows.Scan(&proxyID); err != nil {
+			rows.Close()
+			t.Fatalf("scan policy assignment: %v", err)
+		}
+		assigned = append(assigned, proxyID)
+	}
+	rows.Close()
+	if len(assigned) != 2 || assigned[0] != eligibleID {
+		t.Fatalf("assigned proxies = %v, want preferred proxy %d first and a healthy fallback", assigned, eligibleID)
+	}
+
+	capacity, err := manager.Capacity(ctx)
+	if err != nil {
+		t.Fatalf("load policy capacity: %v", err)
+	}
+	channel := capacity.Roles[RoleChannel]
+	if capacity.WorkloadScope != "qy-test" || capacity.CatalogVersion != 7 ||
+		capacity.CatalogDigest != "sha256:test-catalog-v7" || capacity.Active != 5 ||
+		channel.IdentityPolicyID != "qy-test-channel-v1" || channel.IdentityPolicyVersion != 1 ||
+		channel.IdentityPolicyHash != "sha256:test-channel-v1" || channel.Eligible != 5 ||
+		channel.Desired != 2 || channel.Provisioned != 2 || channel.Assigned != 2 ||
+		channel.Ready != 2 || channel.Claimed != 0 || channel.Reserve != 3 {
+		t.Fatalf("policy capacity = %+v, channel = %+v", capacity, channel)
+	}
+
+	claim, err := manager.Claim(ctx, testClaimRequest(
+		"claim-policy-capacity-1", "worker-policy-capacity-1", "instance-policy-capacity-1",
+	))
+	if err != nil || !claim.Ready || claim.ProxyID == nil || *claim.ProxyID != eligibleID {
+		t.Fatalf("eligible claim = %+v, err = %v", claim, err)
+	}
+	second, err := manager.Claim(ctx, testClaimRequest(
+		"claim-policy-capacity-2", "worker-policy-capacity-2", "instance-policy-capacity-2",
+	))
+	if err != nil || !second.Ready || second.ProxyID == nil || *second.ProxyID == eligibleID {
+		t.Fatalf("healthy fallback claim = %+v, err = %v", second, err)
+	}
+}
+
+func TestPolicyPreferencesNeverExcludeALegacyHealthyProxy(t *testing.T) {
+	manager, pool := newProxyControlPostgresWithOptions(t, func(options *Options) {
+		options.ChannelSlots = 1
+		options.IdentityPolicies["qy-test-channel-v1"] = IdentityPolicy{
+			ID: "qy-test-channel-v1", Version: 1, Hash: "sha256:test-channel-v1",
+			Role: RoleChannel, RequiredEgressCountry: "BR",
+			AllowedProxyTags:   []string{"role:channel"},
+			GeoFreshnessWindow: 2 * time.Hour, AttemptSafetyWindow: 10 * time.Minute,
+		}
+	})
+	ctx := context.Background()
+	proxyID := insertControlProxy(t, pool, "legacy-healthy.example:8080", 10)
+
+	manager.SetCacheInvalidator(func(string) {})
+	if err := manager.syncResources(ctx); err != nil {
+		t.Fatalf("sync managed resources: %v", err)
+	}
+	if _, err := manager.reconcile(ctx); err != nil {
+		t.Fatalf("reconcile legacy healthy proxy: %v", err)
+	}
+
+	capacity, err := manager.Capacity(ctx)
+	if err != nil {
+		t.Fatalf("load capacity: %v", err)
+	}
+	channel := capacity.Roles[RoleChannel]
+	if capacity.Active != 1 || channel.Eligible != 1 || channel.Assigned != 1 {
+		t.Fatalf("legacy healthy proxy was hard-filtered: capacity=%+v channel=%+v", capacity, channel)
+	}
+
+	claim, err := manager.Claim(ctx, testClaimRequest(
+		"claim-legacy-healthy", "worker-legacy-healthy", "instance-legacy-healthy",
+	))
+	if err != nil || !claim.Ready || claim.ProxyID == nil || *claim.ProxyID != proxyID {
+		t.Fatalf("legacy healthy proxy claim = %+v, err = %v", claim, err)
+	}
+}
+
+func TestPostgresProxyControlFullFlow(t *testing.T) {
+	manager, pool := newProxyControlPostgres(t)
+	ctx := context.Background()
+
+	firstID := insertControlProxy(t, pool, "first.example:8080", 10)
+	secondID := insertControlProxy(t, pool, "second.example:8080", 20)
+
+	var (
+		invalidatedMu sync.Mutex
+		invalidated   []string
+	)
+	manager.SetCacheInvalidator(func(username string) {
+		invalidatedMu.Lock()
+		invalidated = append(invalidated, username)
+		invalidatedMu.Unlock()
+	})
+	if err := manager.syncResources(ctx); err != nil {
+		t.Fatalf("sync managed resources: %v", err)
+	}
+	if _, err := manager.reconcile(ctx); err != nil {
+		t.Fatalf("reconcile initial assignments: %v", err)
+	}
+
+	claim, err := manager.Claim(ctx, testClaimRequest("claim-worker-1", "worker-1", "instance-1"))
+	if err != nil {
+		t.Fatalf("claim proxy: %v", err)
+	}
+	if !claim.Ready || claim.ProxyID == nil || *claim.ProxyID != firstID || claim.LeaseID == "" {
+		t.Fatalf("claim = %+v", claim)
+	}
+	if claim.ProxyUser == claim.SlotName || !strings.HasPrefix(claim.ProxyUser, claim.SlotName+"-g") {
+		t.Fatalf("claim proxy user = %q, slot = %q", claim.ProxyUser, claim.SlotName)
+	}
+
+	// Periodic resource convergence must preserve the active lease generation.
+	if err := manager.syncResources(ctx); err != nil {
+		t.Fatalf("resync managed resources: %v", err)
+	}
+	var proxyUserAfterSync string
+	if err := pool.QueryRow(ctx, `
+		SELECT u.username
+		FROM proxy_running_slots s JOIN proxy_users u ON u.id=s.user_id
+		WHERE s.slot_name=$1
+	`, claim.SlotName).Scan(&proxyUserAfterSync); err != nil {
+		t.Fatalf("read proxy user after sync: %v", err)
+	}
+	if proxyUserAfterSync != claim.ProxyUser {
+		t.Fatalf("resource sync changed leased user from %q to %q", claim.ProxyUser, proxyUserAfterSync)
+	}
+
+	renewRequest := RenewRequest{
+		RenewRequestID:       "renew-worker-1-initial",
+		SlotName:             claim.SlotName,
+		WorkerID:             claim.WorkerID,
+		WorkerInstanceID:     claim.WorkerInstanceID,
+		LeaseID:              claim.LeaseID,
+		KnownRouteGeneration: claim.AssignmentVersion,
+	}
+	renewed, err := manager.Renew(ctx, renewRequest)
+	if err != nil || renewed.ProxyUser != claim.ProxyUser || !renewed.Ready {
+		t.Fatalf("renewed = %+v, err = %v", renewed, err)
+	}
+
+	success, err := manager.Report(ctx, ReportRequest{
+		Outcome:           "success",
+		ProxyID:           claim.ProxyID,
+		ProxyUser:         claim.ProxyUser,
+		LeaseID:           claim.LeaseID,
+		AssignmentVersion: &claim.AssignmentVersion,
+		SampleCount:       2,
+		DurationMS:        120,
+	})
+	if err != nil || success.Action != "performance_recorded" {
+		t.Fatalf("success report = %+v, err = %v", success, err)
+	}
+
+	status := 429
+	failureRequest := ReportRequest{
+		Outcome:           "failure",
+		ProxyID:           claim.ProxyID,
+		ProxyUser:         claim.ProxyUser,
+		LeaseID:           claim.LeaseID,
+		AssignmentVersion: &claim.AssignmentVersion,
+		IncidentID:        "channel:42:attempt:1",
+		Status:            &status,
+		ErrorType:         "ip_blocked_or_rate_limited",
+		Sample:            "rate limited",
+	}
+	failure, err := manager.Report(ctx, failureRequest)
+	if err != nil || failure.Action != "cooldown" || !failure.Confirmed {
+		t.Fatalf("failure report = %+v, err = %v", failure, err)
+	}
+	duplicate, err := manager.Report(ctx, failureRequest)
+	if err != nil || duplicate.Action != "duplicate_incident" {
+		t.Fatalf("duplicate report = %+v, err = %v", duplicate, err)
+	}
+
+	swapped, err := manager.Swap(ctx, SwapRequest{
+		WorkerID:          claim.WorkerID,
+		LeaseID:           claim.LeaseID,
+		AssignmentVersion: claim.AssignmentVersion,
+		FailedProxyID:     firstID,
+	})
+	if err != nil {
+		t.Fatalf("swap proxy: %v", err)
+	}
+	if !swapped.Ready || swapped.ProxyID == nil || *swapped.ProxyID != secondID ||
+		swapped.AssignmentVersion != claim.AssignmentVersion+1 || swapped.ProxyUser == claim.ProxyUser {
+		t.Fatalf("swapped = %+v", swapped)
+	}
+	renewRequest.RenewRequestID = "renew-worker-1-after-swap"
+	routeDiscovery, err := manager.Renew(ctx, renewRequest)
+	if err != nil || !routeDiscovery.RouteChanged ||
+		routeDiscovery.AssignmentVersion != swapped.AssignmentVersion {
+		t.Fatalf("route discovery = %+v, err = %v", routeDiscovery, err)
+	}
+
+	capacity, err := manager.Capacity(ctx)
+	if err != nil {
+		t.Fatalf("load capacity: %v", err)
+	}
+	if capacity.Running != 1 || capacity.Reserve != 0 ||
+		capacity.Roles[RoleChannel].Desired != 1 ||
+		capacity.Roles[RoleChannel].Provisioned != 1 ||
+		capacity.Roles[RoleChannel].Assigned != 1 ||
+		capacity.Roles[RoleChannel].Ready != 1 ||
+		capacity.Roles[RoleChannel].Claimed != 1 {
+		t.Fatalf("capacity = %+v", capacity)
+	}
+
+	released, err := manager.Release(ctx, ReleaseRequest{
+		ReleaseRequestID:     "release-worker-1",
+		SlotName:             swapped.SlotName,
+		WorkerID:             swapped.WorkerID,
+		WorkerInstanceID:     swapped.WorkerInstanceID,
+		LeaseID:              swapped.LeaseID,
+		KnownRouteGeneration: swapped.AssignmentVersion,
+		Reason:               "worker_shutdown",
+	})
+	if err != nil || !released.Released {
+		t.Fatalf("release = %+v, err = %v", released, err)
+	}
+	assertProxyUsernameGone(t, pool, swapped.ProxyUser)
+
+	workerTwo, err := manager.Claim(ctx, testClaimRequest("claim-worker-2", "worker-2", "instance-2"))
+	if err != nil || !workerTwo.Ready {
+		t.Fatalf("worker two claim = %+v, err = %v", workerTwo, err)
+	}
+	if _, err := pool.Exec(ctx, `
+		UPDATE proxy_running_slots SET lease_until=NOW()-interval '1 second'
+		WHERE worker_id=$1
+	`, workerTwo.WorkerID); err != nil {
+		t.Fatalf("expire worker two lease: %v", err)
+	}
+	workerThree, err := manager.Claim(ctx, testClaimRequest("claim-worker-3", "worker-3", "instance-3"))
+	if err != nil || !workerThree.Ready || workerThree.ProxyUser == workerTwo.ProxyUser {
+		t.Fatalf("worker three claim = %+v, err = %v", workerThree, err)
+	}
+	assertProxyUsernameGone(t, pool, workerTwo.ProxyUser)
+	if _, err := manager.Renew(ctx, RenewRequest{
+		RenewRequestID:       "renew-expired-worker-2",
+		SlotName:             workerTwo.SlotName,
+		WorkerID:             workerTwo.WorkerID,
+		WorkerInstanceID:     workerTwo.WorkerInstanceID,
+		LeaseID:              workerTwo.LeaseID,
+		KnownRouteGeneration: workerTwo.AssignmentVersion,
+	}); !errors.Is(err, ErrLeaseGone) {
+		t.Fatalf("expired worker renew error = %v, want lease gone", err)
+	}
+
+	invalidatedMu.Lock()
+	defer invalidatedMu.Unlock()
+	if len(invalidated) == 0 {
+		t.Fatal("no proxy user cache invalidations were emitted")
+	}
+}
+
+func newProxyControlPostgres(t *testing.T) (*Manager, *pgxpool.Pool) {
+	return newProxyControlPostgresWithOptions(t, nil)
+}
+
+func newProxyControlPostgresWithOptions(
+	t *testing.T,
+	configure func(*Options),
+) (*Manager, *pgxpool.Pool) {
+	t.Helper()
+	dsn := os.Getenv("ROTA_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("ROTA_TEST_DATABASE_URL is not set")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	admin, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("open PostgreSQL admin pool: %v", err)
+	}
+	schema := fmt.Sprintf("rota_proxy_control_test_%d", time.Now().UnixNano())
+	quotedSchema := pgx.Identifier{schema}.Sanitize()
+	if _, err := admin.Exec(ctx, "CREATE SCHEMA "+quotedSchema); err != nil {
+		admin.Close()
+		t.Fatalf("create test schema: %v", err)
+	}
+
+	config, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		admin.Close()
+		t.Fatalf("parse PostgreSQL config: %v", err)
+	}
+	config.ConnConfig.RuntimeParams["search_path"] = schema
+	pool, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil {
+		_, _ = admin.Exec(context.Background(), "DROP SCHEMA "+quotedSchema+" CASCADE")
+		admin.Close()
+		t.Fatalf("open schema-scoped pool: %v", err)
+	}
+	t.Cleanup(func() {
+		pool.Close()
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cleanupCancel()
+		if _, err := admin.Exec(cleanupCtx, "DROP SCHEMA "+quotedSchema+" CASCADE"); err != nil {
+			t.Errorf("drop test schema: %v", err)
+		}
+		admin.Close()
+	})
+
+	if _, err := pool.Exec(ctx, proxyControlTestSchema); err != nil {
+		t.Fatalf("create proxy control schema: %v", err)
+	}
+	options := Options{
+		Enabled:              true,
+		WorkloadScope:        "qy-test",
+		WorkerPassword:       "worker-password-secret",
+		ChannelSlots:         1,
+		LeaseDuration:        time.Minute,
+		ReconcileInterval:    time.Second,
+		ResourceSyncInterval: time.Minute,
+		MinReservePercent:    25,
+		MinReserveCount:      1,
+		FailureCooldown:      30 * time.Minute,
+		NetworkCooldown:      5 * time.Minute,
+		IdentityPolicies: map[string]IdentityPolicy{
+			"qy-test-channel-v1": {
+				ID: "qy-test-channel-v1", Version: 1, Hash: "sha256:test-channel-v1",
+				Role: RoleChannel,
+			},
+		},
+	}
+	if configure != nil {
+		configure(&options)
+	}
+	manager := New(
+		&database.DB{Pool: pool},
+		nil,
+		nil,
+		options,
+		nil,
+	)
+	return manager, pool
+}
+
+func testClaimRequest(requestID, workerID, instanceID string) ClaimRequest {
+	return ClaimRequest{
+		ClaimRequestID:        requestID,
+		ProtocolVersion:       ProtocolVersionV2,
+		Role:                  RoleChannel,
+		WorkerID:              workerID,
+		WorkerInstanceID:      instanceID,
+		IdentityPolicyID:      "qy-test-channel-v1",
+		IdentityPolicyVersion: 1,
+	}
+}
+
+func insertControlProxy(t *testing.T, pool *pgxpool.Pool, address string, responseTime int) int {
+	t.Helper()
+	var id int
+	if err := pool.QueryRow(context.Background(), `
+		INSERT INTO proxies (
+		  address, protocol, status, base_health_status, youtube_health_status,
+		  last_youtube_status, last_rota_youtube_status, avg_response_time
+		) VALUES ($1,'http','active','passed','passed',200,200,$2)
+		RETURNING id
+	`, address, responseTime).Scan(&id); err != nil {
+		t.Fatalf("insert control proxy: %v", err)
+	}
+	return id
+}
+
+func assertProxyUsernameGone(t *testing.T, pool *pgxpool.Pool, username string) {
+	t.Helper()
+	var exists bool
+	if err := pool.QueryRow(context.Background(), `
+		SELECT EXISTS (SELECT 1 FROM proxy_users WHERE username=$1)
+	`, username).Scan(&exists); err != nil {
+		t.Fatalf("check proxy username %q: %v", username, err)
+	}
+	if exists {
+		t.Fatalf("stale proxy username %q still exists", username)
+	}
+}
+
+const proxyControlTestSchema = `
+CREATE TABLE proxies (
+  id SERIAL PRIMARY KEY,
+  address TEXT NOT NULL,
+  protocol TEXT NOT NULL DEFAULT 'http',
+  status TEXT NOT NULL DEFAULT 'idle',
+  tags TEXT[] NOT NULL DEFAULT '{}',
+  avg_response_time INTEGER NOT NULL DEFAULT 0,
+  base_health_status TEXT,
+  youtube_health_status TEXT,
+  last_youtube_status INTEGER,
+  last_youtube_error TEXT,
+  last_youtube_check TIMESTAMPTZ,
+  last_rota_youtube_status INTEGER,
+  last_rota_youtube_error TEXT,
+  last_rota_youtube_check TIMESTAMPTZ,
+  cooldown_until TIMESTAMPTZ,
+  next_health_check_at TIMESTAMPTZ,
+  health_check_not_before TIMESTAMPTZ,
+  revalidation_required BOOLEAN NOT NULL DEFAULT false,
+  health_generation BIGINT NOT NULL DEFAULT 0,
+  youtube_successful_requests BIGINT NOT NULL DEFAULT 0,
+  youtube_failed_requests BIGINT NOT NULL DEFAULT 0,
+  youtube_avg_response_time INTEGER,
+  youtube_avg_detail_time INTEGER,
+  youtube_failure_score DOUBLE PRECISION NOT NULL DEFAULT 0,
+  last_youtube_success TIMESTAMPTZ,
+  last_youtube_failure TIMESTAMPTZ,
+	country_code TEXT,
+	country_verified_at TIMESTAMPTZ,
+	egress_identity_mode TEXT NOT NULL DEFAULT 'static',
+	sticky_session_key_encrypted BYTEA,
+	identity_valid_until TIMESTAMPTZ,
+	network_identity_key TEXT NOT NULL DEFAULT ('net-' || gen_random_uuid()::text),
+	last_identity_verified_at TIMESTAMPTZ,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE TABLE proxy_pools (
+  id SERIAL PRIMARY KEY,
+  name TEXT NOT NULL,
+  description TEXT,
+  rotation_method TEXT NOT NULL DEFAULT 'roundrobin',
+  stick_count INTEGER NOT NULL DEFAULT 1,
+  health_check_url TEXT NOT NULL,
+  health_check_cron TEXT NOT NULL,
+  health_check_enabled BOOLEAN NOT NULL DEFAULT false,
+  auto_sync BOOLEAN NOT NULL DEFAULT false,
+  sync_mode TEXT NOT NULL DEFAULT 'manual',
+  enabled BOOLEAN NOT NULL DEFAULT true,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE TABLE proxy_users (
+  id SERIAL PRIMARY KEY,
+  username TEXT NOT NULL UNIQUE,
+  password_hash TEXT NOT NULL,
+  enabled BOOLEAN NOT NULL DEFAULT true,
+  main_pool_id INTEGER REFERENCES proxy_pools(id) ON DELETE SET NULL,
+  fallback_pool_ids INTEGER[] NOT NULL DEFAULT '{}',
+  max_retries INTEGER NOT NULL DEFAULT 1,
+  requests_per_minute INTEGER NOT NULL DEFAULT 0,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE TABLE pool_proxies (
+  pool_id INTEGER NOT NULL REFERENCES proxy_pools(id) ON DELETE CASCADE,
+  proxy_id INTEGER NOT NULL REFERENCES proxies(id) ON DELETE CASCADE,
+  added_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (pool_id, proxy_id)
+);
+CREATE TABLE proxy_running_slots (
+  slot_name TEXT PRIMARY KEY,
+  role TEXT NOT NULL,
+  slot_no INTEGER NOT NULL,
+  pool_id INTEGER NOT NULL REFERENCES proxy_pools(id) ON DELETE CASCADE,
+  user_id INTEGER NOT NULL REFERENCES proxy_users(id) ON DELETE CASCADE,
+  proxy_id INTEGER REFERENCES proxies(id) ON DELETE SET NULL,
+  assignment_version BIGINT NOT NULL DEFAULT 0,
+  credential_generation BIGINT NOT NULL DEFAULT 0,
+  assigned_at TIMESTAMPTZ,
+  ready_after TIMESTAMPTZ,
+  worker_id TEXT,
+  lease_id TEXT,
+  lease_until TIMESTAMPTZ,
+  last_heartbeat_at TIMESTAMPTZ,
+	worker_instance_id TEXT,
+	current_lease_id TEXT,
+	identity_policy_id TEXT,
+	identity_policy_version INTEGER,
+	identity_policy_hash TEXT,
+	required_egress_country TEXT,
+	network_identity_key TEXT,
+	profile_epoch BIGINT NOT NULL DEFAULT 0,
+	active_task_id TEXT,
+	active_task_started_at TIMESTAMPTZ,
+	pending_action TEXT,
+	pending_incident_id TEXT,
+	control_state TEXT NOT NULL DEFAULT 'unleased',
+	rotation_deadline_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (role, slot_no)
+);
+CREATE UNIQUE INDEX proxy_running_slots_proxy_unique
+  ON proxy_running_slots(proxy_id) WHERE proxy_id IS NOT NULL;
+CREATE UNIQUE INDEX proxy_running_slots_worker_unique
+  ON proxy_running_slots(worker_id) WHERE worker_id IS NOT NULL;
+CREATE TABLE proxy_control_reports (
+  id BIGSERIAL PRIMARY KEY,
+  incident_id TEXT UNIQUE,
+  proxy_id INTEGER REFERENCES proxies(id) ON DELETE SET NULL,
+  proxy_user TEXT,
+  outcome TEXT NOT NULL,
+  payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+  result JSONB,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  completed_at TIMESTAMPTZ
+);
+CREATE TABLE proxy_control_leases (
+  lease_id TEXT PRIMARY KEY,
+  workload_scope TEXT NOT NULL,
+  slot_name TEXT NOT NULL REFERENCES proxy_running_slots(slot_name),
+  role TEXT NOT NULL,
+  worker_id TEXT NOT NULL,
+  worker_instance_id TEXT NOT NULL,
+  identity_policy_id TEXT NOT NULL,
+  identity_policy_version INTEGER NOT NULL,
+  identity_policy_hash TEXT NOT NULL,
+  status TEXT NOT NULL,
+  claim_request_id TEXT NOT NULL,
+  claim_request_hash TEXT NOT NULL,
+  last_renew_sequence BIGINT NOT NULL DEFAULT 0,
+  lease_until TIMESTAMPTZ NOT NULL,
+  released_at TIMESTAMPTZ,
+  release_reason TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (workload_scope, claim_request_id)
+);
+CREATE UNIQUE INDEX proxy_control_leases_one_active_slot
+  ON proxy_control_leases(workload_scope, slot_name) WHERE status='active';
+CREATE UNIQUE INDEX proxy_control_leases_one_active_worker_instance
+  ON proxy_control_leases(workload_scope, worker_id, worker_instance_id) WHERE status='active';
+CREATE TABLE proxy_control_command_receipts (
+  workload_scope TEXT NOT NULL,
+  command_kind TEXT NOT NULL,
+  request_id TEXT NOT NULL,
+  request_hash TEXT NOT NULL,
+  resource_kind TEXT NOT NULL,
+  resource_id TEXT NOT NULL,
+  result_kind TEXT NOT NULL,
+  sanitized_result JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  retain_until TIMESTAMPTZ NOT NULL,
+  PRIMARY KEY (workload_scope, command_kind, request_id)
+);
+CREATE TABLE proxy_control_business_runs (
+  workload_scope TEXT NOT NULL,
+  business_run_id TEXT NOT NULL,
+  next_attempt_number INTEGER NOT NULL DEFAULT 1,
+  retry_policy_id TEXT NOT NULL,
+  retry_policy_version INTEGER NOT NULL,
+  max_route_switches_per_execution INTEGER NOT NULL,
+  max_network_attempts_per_business_run INTEGER NOT NULL,
+  budget_exhausted_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (workload_scope, business_run_id)
+);
+CREATE TABLE proxy_control_tasks (
+  task_id TEXT PRIMARY KEY,
+  attempt_request_id TEXT NOT NULL,
+  request_hash TEXT NOT NULL,
+  workload_scope TEXT NOT NULL,
+  business_run_id TEXT NOT NULL,
+  job_execution_id TEXT NOT NULL,
+  attempt_number INTEGER NOT NULL,
+  slot_name TEXT NOT NULL REFERENCES proxy_running_slots(slot_name),
+  worker_id TEXT NOT NULL,
+	worker_instance_id TEXT NOT NULL DEFAULT 'legacy',
+  lease_id TEXT NOT NULL,
+  route_generation BIGINT NOT NULL,
+  task_kind TEXT NOT NULL,
+	identity_policy_id TEXT NOT NULL DEFAULT 'legacy',
+	identity_policy_version INTEGER NOT NULL DEFAULT 1,
+	identity_policy_hash TEXT NOT NULL DEFAULT 'legacy',
+  status TEXT NOT NULL,
+  outcome TEXT,
+	failed_stage TEXT,
+  started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  completed_at TIMESTAMPTZ,
+	completion_request_id TEXT,
+	completion_request_hash TEXT,
+	completion_result JSONB,
+  UNIQUE (workload_scope, attempt_request_id),
+	UNIQUE (workload_scope, business_run_id, attempt_number),
+	UNIQUE (workload_scope, completion_request_id)
+);
+CREATE INDEX proxy_control_tasks_job_execution
+  ON proxy_control_tasks(workload_scope, job_execution_id, started_at);
+CREATE UNIQUE INDEX proxy_control_tasks_one_active_slot
+  ON proxy_control_tasks(slot_name) WHERE status='active';
+CREATE UNIQUE INDEX proxy_control_tasks_one_active_business_run
+  ON proxy_control_tasks(workload_scope, business_run_id) WHERE status='active';
+CREATE TABLE proxy_control_observations (
+  observation_id TEXT NOT NULL,
+  workload_scope TEXT NOT NULL,
+  request_hash TEXT NOT NULL,
+  task_id TEXT NOT NULL REFERENCES proxy_control_tasks(task_id),
+  slot_name TEXT NOT NULL REFERENCES proxy_running_slots(slot_name),
+  worker_id TEXT NOT NULL,
+  worker_instance_id TEXT NOT NULL,
+  lease_id TEXT NOT NULL,
+  route_generation BIGINT NOT NULL,
+  business_run_id TEXT NOT NULL,
+  network_identity_key TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  source TEXT NOT NULL,
+  http_status INTEGER,
+  occurred_at TIMESTAMPTZ NOT NULL,
+  payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+  action TEXT NOT NULL DEFAULT 'none',
+  incident_id TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (workload_scope, observation_id),
+  UNIQUE (task_id, observation_id)
+);
+CREATE TABLE proxy_control_incident_observations (
+  workload_scope TEXT NOT NULL,
+  incident_id TEXT NOT NULL,
+  observation_id TEXT NOT NULL,
+  PRIMARY KEY (workload_scope,incident_id,observation_id),
+  UNIQUE (workload_scope,observation_id)
+);
+CREATE TABLE proxy_identity_profile_epochs (
+  identity_policy_id TEXT NOT NULL,
+  network_identity_key TEXT NOT NULL,
+  profile_epoch BIGINT NOT NULL,
+  status TEXT NOT NULL,
+  retired_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (identity_policy_id,network_identity_key)
+);
+`

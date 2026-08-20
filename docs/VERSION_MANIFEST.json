@@ -1,0 +1,64 @@
+{
+  "baseline_captured_at": "2026-08-19T00:00:00Z",
+  "repository_kind": "authoritative_source_of_truth",
+  "canonical_path": "/root/workspace/agent/pachongsys",
+  "baseline": {
+    "origin": "reconciled_running_qy_runtime",
+    "online_runtime_modified_during_capture": false,
+    "source_bundle_predecessor": "staging/allpachongSystemSrc"
+  },
+  "qybullmq": {
+    "canonical_path": "services/qybullmq",
+    "captured_source_file_count": 185,
+    "runtime_exact_capture_files": 183,
+    "canonical_source_file_count": 175,
+    "tested_merged_files": [
+      "src/commentFirstPageBackfill.js",
+      "src/contentRepair.js"
+    ],
+    "cleanup": [
+      "removed obsolete Worker-side Proxy Guard/Reconciler implementation",
+      "uses Rota-owned identity policy catalog as the single source",
+      "all queue and publication roles build from one image"
+    ],
+    "single_image": "qy-allpachong/qybullmq:${QY_IMAGE_TAG}"
+  },
+  "local_agent": {
+    "source_path": "services/local-agent",
+    "model_path": "services/local-agent/models",
+    "manifest": "services/local-agent/models/manifest.json",
+    "artifact_transport": "git_lfs"
+  },
+  "feature_engine": {
+    "source_path": "services/feature-engine",
+    "runtime_contract": "unresolved-video-compatible",
+    "tested_canonical_fixes": [
+      "independent detail success/failure count bounds"
+    ]
+  },
+  "runtime_material": {
+    "path": "runtime/<environment>",
+    "tracked_by_git": false,
+    "included_in_images": false,
+    "contains_secrets_cookies_and_proxy_credentials": true
+  },
+  "image_provenance": {
+    "immutable_tags_required": true,
+    "oci_revision_labels_required": true,
+    "build_entrypoint": "scripts/build-images.sh"
+  },
+  "schemas": {
+    "crawler_bootstrap": "database/bootstrap/crawler.sql",
+    "business_bootstrap": "database/bootstrap/business.sql",
+    "feature_reference": "database/reference-snapshots/feature.sql",
+    "rota_reference": "database/reference-snapshots/rota.sql"
+  },
+  "runtime_dependencies": {
+    "pgbouncer": {
+      "version": "1.25.2",
+      "image": "edoburu/pgbouncer@sha256:4c1ca296ef525f108f5d3552cc337c0c09587cf8dae7f0067fd93349e47dc1cd"
+    }
+  },
+  "contains_production_data_in_git": false,
+  "contains_production_secrets_in_git": false
+}

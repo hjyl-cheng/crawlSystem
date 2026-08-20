@@ -1,0 +1,1691 @@
+{
+  "version": "bootstrap-shadow-v2.3-grok-audience-shape",
+  "production_eligible": false,
+  "provenance": {
+    "source": "Category and creator-gender audience age/gender tables are mean 12-cell shapes aggregated from 22,011 frozen historical Grok estimates. They are estimate-to-estimate priors, not YouTube Analytics.",
+    "license": "Internal shadow evaluation only",
+    "quality_grade": "bootstrap_unvalidated",
+    "intended_use": "Pipeline integration, sensitivity tests, and frozen Agent agreement only",
+    "observed_from": null,
+    "observed_to": null,
+    "sample_size": null,
+    "transportability_grade": "unassessed"
+  },
+  "language_markets": {
+    "Portuguese": {
+      "Brazil": 78,
+      "Portugal": 9,
+      "Angola": 4,
+      "Mozambique": 3,
+      "United States": 2,
+      "Other": 4
+    },
+    "Spanish": {
+      "Mexico": 25,
+      "Spain": 13,
+      "Argentina": 11,
+      "Colombia": 10,
+      "United States": 9,
+      "Other": 32
+    },
+    "English": {
+      "United States": 35,
+      "United Kingdom": 10,
+      "Canada": 7,
+      "Australia": 5,
+      "India": 5,
+      "Other": 38
+    },
+    "Chinese": {
+      "China": 35,
+      "Taiwan": 18,
+      "Hong Kong": 15,
+      "Singapore": 7,
+      "Malaysia": 5,
+      "Other": 20
+    },
+    "Hindi": {
+      "India": 86,
+      "United States": 3,
+      "United Arab Emirates": 3,
+      "United Kingdom": 2,
+      "Canada": 1,
+      "Other": 5
+    },
+    "Arabic": {
+      "Egypt": 18,
+      "Saudi Arabia": 15,
+      "Algeria": 10,
+      "Morocco": 9,
+      "Iraq": 8,
+      "Other": 40
+    },
+    "French": {
+      "France": 42,
+      "Canada": 9,
+      "Belgium": 7,
+      "Morocco": 5,
+      "Algeria": 5,
+      "Other": 32
+    },
+    "German": {
+      "Germany": 70,
+      "Austria": 10,
+      "Switzerland": 8,
+      "United States": 3,
+      "Netherlands": 2,
+      "Other": 7
+    },
+    "Italian": {
+      "Italy": 82,
+      "Switzerland": 5,
+      "United States": 3,
+      "Germany": 2,
+      "France": 2,
+      "Other": 6
+    },
+    "Japanese": {
+      "Japan": 89,
+      "United States": 3,
+      "Taiwan": 2,
+      "South Korea": 1,
+      "Thailand": 1,
+      "Other": 4
+    },
+    "Korean": {
+      "South Korea": 82,
+      "United States": 5,
+      "Japan": 3,
+      "Indonesia": 2,
+      "Philippines": 2,
+      "Other": 6
+    },
+    "Russian": {
+      "Russia": 65,
+      "Kazakhstan": 9,
+      "Belarus": 6,
+      "Ukraine": 5,
+      "Germany": 3,
+      "Other": 12
+    },
+    "Indonesian": {
+      "Indonesia": 87,
+      "Malaysia": 4,
+      "Singapore": 2,
+      "United States": 1,
+      "Australia": 1,
+      "Other": 5
+    },
+    "Turkish": {
+      "Turkey": 87,
+      "Germany": 4,
+      "Azerbaijan": 2,
+      "Netherlands": 1,
+      "United States": 1,
+      "Other": 5
+    },
+    "Vietnamese": {
+      "Vietnam": 89,
+      "United States": 4,
+      "Australia": 1,
+      "Canada": 1,
+      "Japan": 1,
+      "Other": 4
+    },
+    "Thai": {
+      "Thailand": 90,
+      "United States": 2,
+      "Japan": 1,
+      "South Korea": 1,
+      "Australia": 1,
+      "Other": 5
+    },
+    "Other": {
+      "United States": 18,
+      "India": 10,
+      "Brazil": 8,
+      "Indonesia": 7,
+      "Mexico": 5,
+      "Other": 52
+    }
+  },
+  "age_gender": {
+    "default": {
+      "18-24_male": 11.504,
+      "18-24_female": 8.852,
+      "25-34_male": 16.34,
+      "25-34_female": 13.257,
+      "35-44_male": 13.515,
+      "35-44_female": 11.154,
+      "45-54_male": 8.33,
+      "45-54_female": 6.733,
+      "55-64_male": 4.068,
+      "55-64_female": 3.23,
+      "65+_male": 1.578,
+      "65+_female": 1.439
+    },
+    "Gaming": {
+      "18-24_male": 25.49,
+      "18-24_female": 8.886,
+      "25-34_male": 24.154,
+      "25-34_female": 8.502,
+      "35-44_male": 12.962,
+      "35-44_female": 4.841,
+      "45-54_male": 6.301,
+      "45-54_female": 2.562,
+      "55-64_male": 2.885,
+      "55-64_female": 1.267,
+      "65+_male": 1.342,
+      "65+_female": 0.806
+    },
+    "Fashion": {
+      "18-24_male": 5.41,
+      "18-24_female": 15.591,
+      "25-34_male": 7.966,
+      "25-34_female": 23.462,
+      "35-44_male": 6.166,
+      "35-44_female": 17.525,
+      "45-54_male": 3.648,
+      "45-54_female": 9.88,
+      "55-64_male": 1.91,
+      "55-64_female": 4.897,
+      "65+_male": 0.862,
+      "65+_female": 2.682
+    },
+    "Beauty Creators": {
+      "18-24_male": 8,
+      "18-24_female": 21,
+      "25-34_male": 9,
+      "25-34_female": 28,
+      "35-44_male": 6,
+      "35-44_female": 15,
+      "45-54_male": 3,
+      "45-54_female": 6,
+      "55-64_male": 1,
+      "55-64_female": 2,
+      "65+_male": 0.5,
+      "65+_female": 0.5
+    },
+    "Tech": {
+      "18-24_male": 14.503,
+      "18-24_female": 5.209,
+      "25-34_male": 23.121,
+      "25-34_female": 8.372,
+      "35-44_male": 18.52,
+      "35-44_female": 6.914,
+      "45-54_male": 10.477,
+      "45-54_female": 4.003,
+      "55-64_male": 4.6,
+      "55-64_female": 1.833,
+      "65+_male": 1.621,
+      "65+_female": 0.826
+    },
+    "Sports & Outdoors": {
+      "18-24_male": 16.139,
+      "18-24_female": 5.625,
+      "25-34_male": 22.388,
+      "25-34_female": 8.118,
+      "35-44_male": 17.448,
+      "35-44_female": 6.538,
+      "45-54_male": 10.234,
+      "45-54_female": 3.922,
+      "55-64_male": 4.83,
+      "55-64_female": 1.94,
+      "65+_male": 1.841,
+      "65+_female": 0.978
+    },
+    "Parenting": {
+      "18-24_male": 4.776,
+      "18-24_female": 10.734,
+      "25-34_male": 8.729,
+      "25-34_female": 22.488,
+      "35-44_male": 8.626,
+      "35-44_female": 19.914,
+      "45-54_male": 4.988,
+      "45-54_female": 9.507,
+      "55-64_male": 2.424,
+      "55-64_female": 4.325,
+      "65+_male": 1.14,
+      "65+_female": 2.35
+    },
+    "Education": {
+      "18-24_male": 11.543,
+      "18-24_female": 11.358,
+      "25-34_male": 15.205,
+      "25-34_female": 14.828,
+      "35-44_male": 12.26,
+      "35-44_female": 11.713,
+      "45-54_male": 7.358,
+      "45-54_female": 6.561,
+      "55-64_male": 3.559,
+      "55-64_female": 2.948,
+      "65+_male": 1.41,
+      "65+_female": 1.256
+    },
+    "Casual Vlogs": {
+      "18-24_male": 12.271,
+      "18-24_female": 11.338,
+      "25-34_male": 15.397,
+      "25-34_female": 14.802,
+      "35-44_male": 11.78,
+      "35-44_female": 11.158,
+      "45-54_male": 7.147,
+      "45-54_female": 6.506,
+      "55-64_male": 3.543,
+      "55-64_female": 3.114,
+      "65+_male": 1.459,
+      "65+_female": 1.486
+    },
+    "Music": {
+      "18-24_male": 12.056,
+      "18-24_female": 9.99,
+      "25-34_male": 15.534,
+      "25-34_female": 13.585,
+      "35-44_male": 12.469,
+      "35-44_female": 11.088,
+      "45-54_male": 8.004,
+      "45-54_female": 6.878,
+      "55-64_male": 4.052,
+      "55-64_female": 3.322,
+      "65+_male": 1.615,
+      "65+_female": 1.407
+    },
+    "General Humanities & Society": {
+      "18-24_male": 9.213,
+      "18-24_female": 7.761,
+      "25-34_male": 14.507,
+      "25-34_female": 12.219,
+      "35-44_male": 13.881,
+      "35-44_female": 11.458,
+      "45-54_male": 9.891,
+      "45-54_female": 7.976,
+      "55-64_male": 5.341,
+      "55-64_female": 4.115,
+      "65+_male": 2.04,
+      "65+_female": 1.599
+    },
+    "Self Improvement": {
+      "18-24_male": 8.029,
+      "18-24_female": 7.613,
+      "25-34_male": 15.432,
+      "25-34_female": 13.785,
+      "35-44_male": 14.494,
+      "35-44_female": 12.623,
+      "45-54_male": 9.155,
+      "45-54_female": 7.835,
+      "55-64_male": 4.362,
+      "55-64_female": 3.663,
+      "65+_male": 1.567,
+      "65+_female": 1.442
+    },
+    "Food": {
+      "18-24_male": 5.904,
+      "18-24_female": 9.097,
+      "25-34_male": 10.548,
+      "25-34_female": 16.644,
+      "35-44_male": 10.565,
+      "35-44_female": 16.233,
+      "45-54_male": 7.206,
+      "45-54_female": 10.426,
+      "55-64_male": 3.789,
+      "55-64_female": 5.356,
+      "65+_male": 1.596,
+      "65+_female": 2.636
+    },
+    "Home": {
+      "18-24_male": 5.875,
+      "18-24_female": 6.847,
+      "25-34_male": 12.354,
+      "25-34_female": 14.282,
+      "35-44_male": 13.885,
+      "35-44_female": 15.296,
+      "45-54_male": 9.352,
+      "45-54_female": 9.699,
+      "55-64_male": 4.464,
+      "55-64_female": 4.564,
+      "65+_male": 1.527,
+      "65+_female": 1.854
+    },
+    "Software & Internet": {
+      "18-24_male": 14.519,
+      "18-24_female": 7.122,
+      "25-34_male": 23.228,
+      "25-34_female": 11.301,
+      "35-44_male": 16.515,
+      "35-44_female": 8.144,
+      "45-54_male": 8.26,
+      "45-54_female": 4.069,
+      "55-64_male": 3.364,
+      "55-64_female": 1.647,
+      "65+_male": 1.171,
+      "65+_female": 0.659
+    },
+    "Travel": {
+      "18-24_male": 8.57,
+      "18-24_female": 8.379,
+      "25-34_male": 15.268,
+      "25-34_female": 14.753,
+      "35-44_male": 13.85,
+      "35-44_female": 12.623,
+      "45-54_male": 8.552,
+      "45-54_female": 7.354,
+      "55-64_male": 4.187,
+      "55-64_female": 3.372,
+      "65+_male": 1.648,
+      "65+_female": 1.445
+    },
+    "Health & Wellness": {
+      "18-24_male": 5.68,
+      "18-24_female": 7.753,
+      "25-34_male": 11.313,
+      "25-34_female": 15.291,
+      "35-44_male": 12.322,
+      "35-44_female": 15.296,
+      "45-54_male": 9.043,
+      "45-54_female": 10.082,
+      "55-64_male": 4.82,
+      "55-64_female": 4.791,
+      "65+_male": 1.81,
+      "65+_female": 1.798
+    },
+    "Automotive": {
+      "18-24_male": 13.157,
+      "18-24_female": 3.491,
+      "25-34_male": 23.382,
+      "25-34_female": 5.764,
+      "35-44_male": 21.751,
+      "35-44_female": 5.436,
+      "45-54_male": 13.123,
+      "45-54_female": 3.385,
+      "55-64_male": 6.015,
+      "55-64_female": 1.642,
+      "65+_male": 2.11,
+      "65+_female": 0.744
+    },
+    "Dance": {
+      "18-24_male": 10.623,
+      "18-24_female": 15.416,
+      "25-34_male": 12.201,
+      "25-34_female": 18.084,
+      "35-44_male": 8.851,
+      "35-44_female": 12.604,
+      "45-54_male": 5.221,
+      "45-54_female": 7.169,
+      "55-64_male": 2.721,
+      "55-64_female": 3.662,
+      "65+_male": 1.273,
+      "65+_female": 2.175
+    },
+    "Pets & Animals": {
+      "18-24_male": 8.997,
+      "18-24_female": 7.508,
+      "25-34_male": 15.101,
+      "25-34_female": 12.136,
+      "35-44_male": 15.269,
+      "35-44_female": 11.392,
+      "45-54_male": 10.286,
+      "45-54_female": 7.095,
+      "55-64_male": 5.244,
+      "55-64_female": 3.497,
+      "65+_male": 1.962,
+      "65+_female": 1.513
+    }
+  },
+  "creator_age_intervals": {
+    "default": [
+      25,
+      44
+    ],
+    "Gaming": [
+      18,
+      34
+    ],
+    "Fashion": [
+      18,
+      34
+    ],
+    "Beauty Creators": [
+      18,
+      34
+    ],
+    "Parenting": [
+      25,
+      44
+    ],
+    "Education": [
+      25,
+      54
+    ],
+    "Tech": [
+      25,
+      44
+    ],
+    "Sports & Outdoors": [
+      18,
+      44
+    ]
+  },
+  "audience_market_model": {
+    "creator_country_blend": {
+      "explicit": 0.3,
+      "strong": 0.22,
+      "weak": 0.1,
+      "prior_only": 0.0
+    },
+    "regional_topic_max_blend": 0.06,
+    "content_language_weight": 0.74,
+    "region_language_weight": 0.22,
+    "bridge_language": "English",
+    "bridge_language_weight": 0.04,
+    "category_cross_language_reach": {
+      "default": 0.2,
+      "Music": 0.45,
+      "Gaming": 0.38,
+      "Dance": 0.4,
+      "Travel": 0.35,
+      "Tech": 0.3,
+      "Software & Internet": 0.34,
+      "Casual Vlogs": 0.18,
+      "Education": 0.14,
+      "Parenting": 0.1
+    },
+    "format_cross_language_reach": {
+      "short": 0.18,
+      "longform": 0.06,
+      "live": 0.02
+    },
+    "language_propagation": {
+      "Portuguese": {
+        "Portuguese": 0.94,
+        "English": 0.04,
+        "Spanish": 0.01,
+        "Other": 0.01
+      },
+      "Spanish": {
+        "Spanish": 0.92,
+        "English": 0.06,
+        "Portuguese": 0.01,
+        "Other": 0.01
+      },
+      "English": {
+        "English": 0.95,
+        "Spanish": 0.02,
+        "Other": 0.03
+      },
+      "Chinese": {
+        "Chinese": 0.93,
+        "English": 0.05,
+        "Other": 0.02
+      },
+      "Hindi": {
+        "Hindi": 0.83,
+        "English": 0.14,
+        "Other": 0.03
+      },
+      "Arabic": {
+        "Arabic": 0.9,
+        "English": 0.07,
+        "French": 0.01,
+        "Other": 0.02
+      },
+      "French": {
+        "French": 0.91,
+        "English": 0.07,
+        "Other": 0.02
+      },
+      "German": {
+        "German": 0.92,
+        "English": 0.06,
+        "Other": 0.02
+      },
+      "Italian": {
+        "Italian": 0.93,
+        "English": 0.05,
+        "Other": 0.02
+      },
+      "Japanese": {
+        "Japanese": 0.94,
+        "English": 0.04,
+        "Other": 0.02
+      },
+      "Korean": {
+        "Korean": 0.93,
+        "English": 0.05,
+        "Other": 0.02
+      },
+      "Russian": {
+        "Russian": 0.91,
+        "English": 0.06,
+        "Other": 0.03
+      },
+      "Indonesian": {
+        "Indonesian": 0.91,
+        "English": 0.06,
+        "Other": 0.03
+      },
+      "Turkish": {
+        "Turkish": 0.92,
+        "English": 0.06,
+        "Other": 0.02
+      },
+      "Vietnamese": {
+        "Vietnamese": 0.92,
+        "English": 0.05,
+        "Other": 0.03
+      },
+      "Thai": {
+        "Thai": 0.92,
+        "English": 0.05,
+        "Other": 0.03
+      },
+      "Other": {
+        "Other": 0.8,
+        "English": 0.2
+      }
+    },
+    "region_languages": {
+      "Brazil": {
+        "Portuguese": 0.94,
+        "English": 0.04,
+        "Spanish": 0.01,
+        "Other": 0.01
+      },
+      "Portugal": {
+        "Portuguese": 0.9,
+        "English": 0.08,
+        "Spanish": 0.01,
+        "Other": 0.01
+      },
+      "Angola": {
+        "Portuguese": 0.7,
+        "English": 0.08,
+        "Other": 0.22
+      },
+      "Mozambique": {
+        "Portuguese": 0.65,
+        "English": 0.1,
+        "Other": 0.25
+      },
+      "Mexico": {
+        "Spanish": 0.9,
+        "English": 0.08,
+        "Other": 0.02
+      },
+      "Spain": {
+        "Spanish": 0.88,
+        "English": 0.08,
+        "Catalan": 0.02,
+        "Other": 0.02
+      },
+      "Argentina": {
+        "Spanish": 0.92,
+        "English": 0.05,
+        "Other": 0.03
+      },
+      "Colombia": {
+        "Spanish": 0.92,
+        "English": 0.05,
+        "Other": 0.03
+      },
+      "United States": {
+        "English": 0.78,
+        "Spanish": 0.15,
+        "Chinese": 0.02,
+        "Other": 0.05
+      },
+      "United Kingdom": {
+        "English": 0.92,
+        "Other": 0.08
+      },
+      "Canada": {
+        "English": 0.7,
+        "French": 0.23,
+        "Other": 0.07
+      },
+      "Australia": {
+        "English": 0.92,
+        "Other": 0.08
+      },
+      "India": {
+        "Hindi": 0.35,
+        "English": 0.3,
+        "Bengali": 0.1,
+        "Tamil": 0.07,
+        "Telugu": 0.06,
+        "Other": 0.12
+      },
+      "China": {
+        "Chinese": 0.92,
+        "Other": 0.08
+      },
+      "Taiwan": {
+        "Chinese": 0.88,
+        "English": 0.08,
+        "Other": 0.04
+      },
+      "Hong Kong": {
+        "Chinese": 0.72,
+        "English": 0.24,
+        "Other": 0.04
+      },
+      "Singapore": {
+        "English": 0.55,
+        "Chinese": 0.3,
+        "Malay": 0.08,
+        "Tamil": 0.03,
+        "Other": 0.04
+      },
+      "Malaysia": {
+        "Malay": 0.5,
+        "Chinese": 0.25,
+        "English": 0.2,
+        "Other": 0.05
+      },
+      "France": {
+        "French": 0.91,
+        "English": 0.06,
+        "Other": 0.03
+      },
+      "Belgium": {
+        "French": 0.45,
+        "Dutch": 0.45,
+        "English": 0.06,
+        "Other": 0.04
+      },
+      "Germany": {
+        "German": 0.91,
+        "English": 0.06,
+        "Other": 0.03
+      },
+      "Austria": {
+        "German": 0.92,
+        "English": 0.05,
+        "Other": 0.03
+      },
+      "Switzerland": {
+        "German": 0.58,
+        "French": 0.23,
+        "Italian": 0.08,
+        "English": 0.07,
+        "Other": 0.04
+      },
+      "Italy": {
+        "Italian": 0.93,
+        "English": 0.05,
+        "Other": 0.02
+      },
+      "Japan": {
+        "Japanese": 0.95,
+        "English": 0.03,
+        "Other": 0.02
+      },
+      "South Korea": {
+        "Korean": 0.95,
+        "English": 0.03,
+        "Other": 0.02
+      },
+      "Russia": {
+        "Russian": 0.94,
+        "Other": 0.06
+      },
+      "Indonesia": {
+        "Indonesian": 0.93,
+        "English": 0.04,
+        "Other": 0.03
+      },
+      "Turkey": {
+        "Turkish": 0.94,
+        "English": 0.04,
+        "Other": 0.02
+      },
+      "Vietnam": {
+        "Vietnamese": 0.95,
+        "English": 0.03,
+        "Other": 0.02
+      },
+      "Thailand": {
+        "Thai": 0.94,
+        "English": 0.04,
+        "Other": 0.02
+      },
+      "Other": {
+        "Other": 0.65,
+        "English": 0.2,
+        "Spanish": 0.08,
+        "Portuguese": 0.07
+      }
+    }
+  },
+  "age_gender_adjustments": {
+    "format_age_multipliers": {
+      "short": {
+        "18-24": 1.18,
+        "25-34": 1.08,
+        "35-44": 0.92,
+        "45-54": 0.82,
+        "55-64": 0.72,
+        "65+": 0.68
+      },
+      "longform": {
+        "18-24": 0.96,
+        "25-34": 1.03,
+        "35-44": 1.05,
+        "45-54": 1.04,
+        "55-64": 1.02,
+        "65+": 1.0
+      },
+      "live": {
+        "18-24": 0.92,
+        "25-34": 1.06,
+        "35-44": 1.08,
+        "45-54": 1.04,
+        "55-64": 1.0,
+        "65+": 0.96
+      }
+    },
+    "tag_gender_multipliers": {
+      "Makeup": {
+        "male": 0.88,
+        "female": 1.12
+      },
+      "Skincare": {
+        "male": 0.92,
+        "female": 1.08
+      },
+      "Parenting Life": {
+        "male": 0.94,
+        "female": 1.06
+      },
+      "Football": {
+        "male": 1.08,
+        "female": 0.92
+      },
+      "Gaming": {
+        "male": 1.06,
+        "female": 0.94
+      },
+      "Fitness": {
+        "male": 1.03,
+        "female": 0.97
+      },
+      "Lifestyle Vlogs": {
+        "male": 0.94,
+        "female": 1.06
+      },
+      "Clothing": {
+        "male": 0.9,
+        "female": 1.1
+      },
+      "Cooking Tutorials": {
+        "male": 0.9,
+        "female": 1.1
+      },
+      "Family Life": {
+        "male": 0.93,
+        "female": 1.07
+      },
+      "Singing": {
+        "male": 0.97,
+        "female": 1.03
+      },
+      "Anime": {
+        "male": 1.08,
+        "female": 0.92
+      },
+      "Photography": {
+        "male": 1.06,
+        "female": 0.94
+      },
+      "Automotive": {
+        "male": 1.1,
+        "female": 0.9
+      },
+      "Cars & Vehicles": {
+        "male": 1.1,
+        "female": 0.9
+      }
+    },
+    "maximum_adjustment_log": 0.25
+  },
+  "comment_evidence": {
+    "version": "comment-fusion-bootstrap-v1",
+    "calibration_status": "uncalibrated_top_comments",
+    "sampling_warning": "Only the first Top comments page is observed; commenters are not a random audience sample and subscription status is unknown",
+    "audience_market": {
+      "language_max_blend": 0.55,
+      "language_shrinkage_authors": 40,
+      "region_max_blend": 0.45,
+      "region_shrinkage_authors": 12
+    },
+    "age_gender": {
+      "age_max_blend": 0.3,
+      "age_shrinkage_authors": 20,
+      "gender_max_blend": 0.25,
+      "gender_shrinkage_authors": 30,
+      "joint_max_blend": 0.15,
+      "joint_shrinkage_authors": 15
+    },
+    "active_audience": {
+      "maximum_evidence_weight": 0.6,
+      "shrinkage_authors": 75,
+      "minimum_unique_authors": 10,
+      "meaningful_ratio_reference": 0.55,
+      "returning_author_ratio_reference": 0.08,
+      "unique_author_ratio_reference": 0.85,
+      "spam_ratio_penalty": 1.5,
+      "component_log_cap": 0.7,
+      "maximum_adjustment_log": 0.1
+    }
+  },
+  "active_audience": {
+    "window_days": 30,
+    "maximum_content_age_days": 90,
+    "growth_curve_exponent": {
+      "short": 0.34,
+      "longform": 0.52,
+      "live": 0.58
+    },
+    "maximum_projection_multiplier": 3.0,
+    "legacy_window_share": {
+      "short": 0.04,
+      "longform": 0.08,
+      "live": 0.06
+    },
+    "subscribed_view_share": {
+      "short": 0.1,
+      "longform": 0.34,
+      "live": 0.42
+    },
+    "additional_upload_unique_share": {
+      "short": 0.16,
+      "longform": 0.28,
+      "live": 0.24
+    },
+    "cross_format_overlap": 0.18,
+    "winsor_mad_multiplier": 6.0,
+    "winsor_minimum_relative_spread": 0.1,
+    "size_adjustment": {
+      "under_50000": 1.0,
+      "50000_to_500000": 0.85,
+      "over_500000": 0.65
+    },
+    "cohort_prior_center": {
+      "under_50000": 22,
+      "50000_to_500000": 17,
+      "over_500000": 12
+    },
+    "shrinkage_observations": 8,
+    "estimated_subscriber_max_evidence_weight": 0.2,
+    "inactivity_half_life_days": 45,
+    "engagement_reference": {
+      "like_view": 0.035,
+      "comment_view": 0.003
+    },
+    "engagement_signal_weight": 0.2,
+    "engagement_adjustment_bounds": [
+      0.85,
+      1.15
+    ],
+    "minimum_ratio": 0,
+    "maximum_ratio": 95
+  },
+  "age_gender_by_creator_gender": {
+    "Music": {
+      "brand_team": {
+        "18-24_male": 11.024,
+        "18-24_female": 9.972,
+        "25-34_male": 14.642,
+        "25-34_female": 14.178,
+        "35-44_male": 12.209,
+        "35-44_female": 11.938,
+        "45-54_male": 7.97,
+        "45-54_female": 7.379,
+        "55-64_male": 4.059,
+        "55-64_female": 3.553,
+        "65+_male": 1.599,
+        "65+_female": 1.477
+      },
+      "male": {
+        "18-24_male": 14.16,
+        "18-24_female": 9.437,
+        "25-34_male": 17.575,
+        "25-34_female": 12.118,
+        "35-44_male": 13.412,
+        "35-44_female": 9.46,
+        "45-54_male": 8.34,
+        "45-54_female": 5.823,
+        "55-64_male": 4.132,
+        "55-64_female": 2.756,
+        "65+_male": 1.651,
+        "65+_female": 1.137
+      },
+      "female": {
+        "18-24_male": 7.463,
+        "18-24_female": 13.105,
+        "25-34_male": 10.358,
+        "25-34_female": 17.633,
+        "35-44_male": 9.07,
+        "35-44_female": 14.301,
+        "45-54_male": 6.402,
+        "45-54_female": 9.293,
+        "55-64_male": 3.572,
+        "55-64_female": 4.869,
+        "65+_male": 1.528,
+        "65+_female": 2.406
+      }
+    },
+    "Self Improvement": {
+      "male": {
+        "18-24_male": 9.466,
+        "18-24_female": 6.336,
+        "25-34_male": 18.247,
+        "25-34_female": 11.644,
+        "35-44_male": 16.605,
+        "35-44_female": 10.708,
+        "45-54_male": 10.099,
+        "45-54_female": 6.576,
+        "55-64_male": 4.648,
+        "55-64_female": 2.977,
+        "65+_male": 1.618,
+        "65+_female": 1.077
+      },
+      "brand_team": {
+        "18-24_male": 7.662,
+        "18-24_female": 7.255,
+        "25-34_male": 15.028,
+        "25-34_female": 13.323,
+        "35-44_male": 14.751,
+        "35-44_female": 12.73,
+        "45-54_male": 9.632,
+        "45-54_female": 8.168,
+        "55-64_male": 4.645,
+        "55-64_female": 3.787,
+        "65+_male": 1.616,
+        "65+_female": 1.403
+      },
+      "female": {
+        "18-24_male": 5.249,
+        "18-24_female": 11.476,
+        "25-34_male": 9.354,
+        "25-34_female": 19.973,
+        "35-44_male": 8.793,
+        "35-44_female": 17.104,
+        "45-54_male": 5.871,
+        "45-54_female": 10.245,
+        "55-64_male": 3.086,
+        "55-64_female": 5.094,
+        "65+_male": 1.341,
+        "65+_female": 2.417
+      }
+    },
+    "Casual Vlogs": {
+      "brand_team": {
+        "18-24_male": 12.164,
+        "18-24_female": 10.608,
+        "25-34_male": 15.607,
+        "25-34_female": 14.048,
+        "35-44_male": 12.408,
+        "35-44_female": 11.09,
+        "45-54_male": 7.716,
+        "45-54_female": 6.657,
+        "55-64_male": 3.808,
+        "55-64_female": 3.103,
+        "65+_male": 1.492,
+        "65+_female": 1.298
+      },
+      "male": {
+        "18-24_male": 15.369,
+        "18-24_female": 9.397,
+        "25-34_male": 18.775,
+        "25-34_female": 11.865,
+        "35-44_male": 13.732,
+        "35-44_female": 8.812,
+        "45-54_male": 8.027,
+        "45-54_female": 5.118,
+        "55-64_male": 3.874,
+        "55-64_female": 2.385,
+        "65+_male": 1.574,
+        "65+_female": 1.071
+      },
+      "female": {
+        "18-24_male": 6.874,
+        "18-24_female": 16.298,
+        "25-34_male": 8.863,
+        "25-34_female": 21.612,
+        "35-44_male": 6.998,
+        "35-44_female": 15.54,
+        "45-54_male": 4.423,
+        "45-54_female": 8.719,
+        "55-64_male": 2.42,
+        "55-64_female": 4.456,
+        "65+_male": 1.188,
+        "65+_female": 2.608
+      }
+    },
+    "Gaming": {
+      "male": {
+        "18-24_male": 26.322,
+        "18-24_female": 7.939,
+        "25-34_male": 25.002,
+        "25-34_female": 7.788,
+        "35-44_male": 13.366,
+        "35-44_female": 4.441,
+        "45-54_male": 6.486,
+        "45-54_female": 2.363,
+        "55-64_male": 2.97,
+        "55-64_female": 1.176,
+        "65+_male": 1.387,
+        "65+_female": 0.76
+      },
+      "brand_team": {
+        "18-24_male": 25.054,
+        "18-24_female": 8.831,
+        "25-34_male": 23.992,
+        "25-34_female": 8.826,
+        "35-44_male": 12.95,
+        "35-44_female": 5.244,
+        "45-54_male": 6.252,
+        "45-54_female": 2.777,
+        "55-64_male": 2.785,
+        "55-64_female": 1.331,
+        "65+_male": 1.236,
+        "65+_female": 0.723
+      },
+      "female": {
+        "18-24_male": 16.126,
+        "18-24_female": 20.958,
+        "25-34_male": 13.895,
+        "25-34_female": 16.663,
+        "35-44_male": 7.905,
+        "35-44_female": 8.853,
+        "45-54_male": 4.105,
+        "45-54_female": 4.516,
+        "55-64_male": 2.074,
+        "55-64_female": 2.253,
+        "65+_male": 1.053,
+        "65+_female": 1.6
+      }
+    },
+    "General Humanities & Society": {
+      "brand_team": {
+        "18-24_male": 8.798,
+        "18-24_female": 7.358,
+        "25-34_male": 14.138,
+        "25-34_female": 11.948,
+        "35-44_male": 13.978,
+        "35-44_female": 11.698,
+        "45-54_male": 10.181,
+        "45-54_female": 8.338,
+        "55-64_male": 5.547,
+        "55-64_female": 4.327,
+        "65+_male": 2.094,
+        "65+_female": 1.594
+      },
+      "male": {
+        "18-24_male": 10.884,
+        "18-24_female": 7.091,
+        "25-34_male": 16.717,
+        "25-34_female": 10.916,
+        "35-44_male": 15.175,
+        "35-44_female": 9.927,
+        "45-54_male": 10.372,
+        "45-54_female": 6.728,
+        "55-64_male": 5.435,
+        "55-64_female": 3.37,
+        "65+_male": 2.061,
+        "65+_female": 1.324
+      },
+      "female": {
+        "18-24_male": 6.426,
+        "18-24_female": 13.852,
+        "25-34_male": 9.261,
+        "25-34_female": 19.583,
+        "35-44_male": 8.07,
+        "35-44_female": 15.235,
+        "45-54_male": 5.513,
+        "45-54_female": 9.591,
+        "55-64_male": 3.174,
+        "55-64_female": 5.113,
+        "65+_male": 1.487,
+        "65+_female": 2.696
+      }
+    },
+    "Sports & Outdoors": {
+      "brand_team": {
+        "18-24_male": 16.725,
+        "18-24_female": 5.474,
+        "25-34_male": 22.768,
+        "25-34_female": 7.786,
+        "35-44_male": 17.574,
+        "35-44_female": 6.279,
+        "45-54_male": 10.227,
+        "45-54_female": 3.769,
+        "55-64_male": 4.794,
+        "55-64_female": 1.861,
+        "65+_male": 1.838,
+        "65+_female": 0.903
+      },
+      "male": {
+        "18-24_male": 16.462,
+        "18-24_female": 4.948,
+        "25-34_male": 23.272,
+        "25-34_female": 7.13,
+        "35-44_male": 18.289,
+        "35-44_female": 5.801,
+        "45-54_male": 10.801,
+        "45-54_female": 3.56,
+        "55-64_male": 5.11,
+        "55-64_female": 1.773,
+        "65+_male": 1.924,
+        "65+_female": 0.93
+      },
+      "female": {
+        "18-24_male": 6.831,
+        "18-24_female": 13.964,
+        "25-34_male": 9.602,
+        "25-34_female": 21.458,
+        "35-44_male": 7.723,
+        "35-44_female": 16.59,
+        "45-54_male": 4.614,
+        "45-54_female": 9.133,
+        "55-64_male": 2.398,
+        "55-64_female": 4.422,
+        "65+_male": 1.036,
+        "65+_female": 2.229
+      }
+    },
+    "Education": {
+      "brand_team": {
+        "18-24_male": 11.158,
+        "18-24_female": 10.876,
+        "25-34_male": 15.037,
+        "25-34_female": 14.655,
+        "35-44_male": 12.541,
+        "35-44_female": 11.952,
+        "45-54_male": 7.639,
+        "45-54_female": 6.74,
+        "55-64_male": 3.711,
+        "55-64_female": 3.012,
+        "65+_male": 1.45,
+        "65+_female": 1.229
+      },
+      "male": {
+        "18-24_male": 13.772,
+        "18-24_female": 10.615,
+        "25-34_male": 17.518,
+        "25-34_female": 12.919,
+        "35-44_male": 13.437,
+        "35-44_female": 9.669,
+        "45-54_male": 7.886,
+        "45-54_female": 5.46,
+        "55-64_male": 3.774,
+        "55-64_female": 2.447,
+        "65+_male": 1.476,
+        "65+_female": 1.027
+      },
+      "female": {
+        "18-24_male": 8.179,
+        "18-24_female": 14.763,
+        "25-34_male": 10.848,
+        "25-34_female": 19.589,
+        "35-44_male": 8.674,
+        "35-44_female": 15.228,
+        "45-54_male": 5.17,
+        "45-54_female": 8.268,
+        "55-64_male": 2.527,
+        "55-64_female": 3.786,
+        "65+_male": 1.116,
+        "65+_female": 1.853
+      }
+    },
+    "Fashion": {
+      "female": {
+        "18-24_male": 3.823,
+        "18-24_female": 17.343,
+        "25-34_male": 5.417,
+        "25-34_female": 25.689,
+        "35-44_male": 4.348,
+        "35-44_female": 19.042,
+        "45-54_male": 2.746,
+        "45-54_female": 10.77,
+        "55-64_male": 1.553,
+        "55-64_female": 5.415,
+        "65+_male": 0.774,
+        "65+_female": 3.08
+      },
+      "brand_team": {
+        "18-24_male": 6.339,
+        "18-24_female": 13.052,
+        "25-34_male": 10.165,
+        "25-34_female": 21.096,
+        "35-44_male": 8.235,
+        "35-44_female": 16.522,
+        "45-54_male": 4.913,
+        "45-54_female": 9.478,
+        "55-64_male": 2.47,
+        "55-64_female": 4.487,
+        "65+_male": 0.991,
+        "65+_female": 2.252
+      },
+      "male": {
+        "18-24_male": 12.67,
+        "18-24_female": 9.174,
+        "25-34_male": 18.881,
+        "25-34_female": 14.394,
+        "35-44_male": 13.422,
+        "35-44_female": 10.706,
+        "45-54_male": 7.0,
+        "45-54_female": 5.679,
+        "55-64_male": 3.174,
+        "55-64_female": 2.642,
+        "65+_male": 1.183,
+        "65+_female": 1.073
+      }
+    },
+    "Automotive": {
+      "male": {
+        "18-24_male": 13.514,
+        "18-24_female": 3.365,
+        "25-34_male": 23.627,
+        "25-34_female": 5.493,
+        "35-44_male": 21.78,
+        "35-44_female": 5.175,
+        "45-54_male": 13.1,
+        "45-54_female": 3.241,
+        "55-64_male": 6.107,
+        "55-64_female": 1.599,
+        "65+_male": 2.228,
+        "65+_female": 0.772
+      },
+      "brand_team": {
+        "18-24_male": 12.641,
+        "18-24_female": 3.415,
+        "25-34_male": 23.286,
+        "25-34_female": 5.799,
+        "35-44_male": 22.107,
+        "35-44_female": 5.59,
+        "45-54_male": 13.436,
+        "45-54_female": 3.509,
+        "55-64_male": 5.962,
+        "55-64_female": 1.662,
+        "65+_male": 1.927,
+        "65+_female": 0.667
+      }
+    },
+    "Tech": {
+      "male": {
+        "18-24_male": 15.918,
+        "18-24_female": 5.03,
+        "25-34_male": 24.276,
+        "25-34_female": 7.771,
+        "35-44_male": 18.408,
+        "35-44_female": 6.159,
+        "45-54_male": 10.219,
+        "45-54_female": 3.55,
+        "55-64_male": 4.532,
+        "55-64_female": 1.662,
+        "65+_male": 1.644,
+        "65+_female": 0.831
+      },
+      "brand_team": {
+        "18-24_male": 12.243,
+        "18-24_female": 5.23,
+        "25-34_male": 21.443,
+        "25-34_female": 9.022,
+        "35-44_male": 19.0,
+        "35-44_female": 8.009,
+        "45-54_male": 11.083,
+        "45-54_female": 4.704,
+        "55-64_male": 4.787,
+        "55-64_female": 2.1,
+        "65+_male": 1.591,
+        "65+_female": 0.787
+      }
+    },
+    "Home": {
+      "brand_team": {
+        "18-24_male": 6.462,
+        "18-24_female": 6.115,
+        "25-34_male": 13.992,
+        "25-34_female": 12.928,
+        "35-44_male": 15.933,
+        "35-44_female": 13.813,
+        "45-54_male": 10.738,
+        "45-54_female": 8.503,
+        "55-64_male": 5.015,
+        "55-64_female": 3.674,
+        "65+_male": 1.621,
+        "65+_female": 1.205
+      },
+      "female": {
+        "18-24_male": 2.943,
+        "18-24_female": 9.907,
+        "25-34_male": 5.61,
+        "25-34_female": 20.615,
+        "35-44_male": 6.279,
+        "35-44_female": 21.773,
+        "45-54_male": 4.643,
+        "45-54_female": 13.964,
+        "55-64_male": 2.628,
+        "55-64_female": 7.062,
+        "65+_male": 1.23,
+        "65+_female": 3.346
+      },
+      "male": {
+        "18-24_male": 8.369,
+        "18-24_female": 4.372,
+        "25-34_male": 17.785,
+        "25-34_female": 8.986,
+        "35-44_male": 19.793,
+        "35-44_female": 9.986,
+        "45-54_male": 12.882,
+        "45-54_female": 6.438,
+        "55-64_male": 5.829,
+        "55-64_female": 2.857,
+        "65+_male": 1.744,
+        "65+_female": 0.959
+      }
+    },
+    "Travel": {
+      "brand_team": {
+        "18-24_male": 8.17,
+        "18-24_female": 8.448,
+        "25-34_male": 14.899,
+        "25-34_female": 15.227,
+        "35-44_male": 13.683,
+        "35-44_female": 13.196,
+        "45-54_male": 8.351,
+        "45-54_female": 7.603,
+        "55-64_male": 4.028,
+        "55-64_female": 3.433,
+        "65+_male": 1.554,
+        "65+_female": 1.407
+      },
+      "male": {
+        "18-24_male": 9.978,
+        "18-24_female": 6.935,
+        "25-34_male": 17.442,
+        "25-34_female": 12.214,
+        "35-44_male": 15.612,
+        "35-44_female": 10.667,
+        "45-54_male": 9.739,
+        "45-54_female": 6.442,
+        "55-64_male": 4.826,
+        "55-64_female": 3.007,
+        "65+_male": 1.891,
+        "65+_female": 1.246
+      },
+      "female": {
+        "18-24_male": 6.284,
+        "18-24_female": 12.02,
+        "25-34_male": 10.784,
+        "25-34_female": 19.824,
+        "35-44_male": 9.716,
+        "35-44_female": 15.735,
+        "45-54_male": 6.108,
+        "45-54_female": 8.873,
+        "55-64_male": 3.059,
+        "55-64_female": 4.127,
+        "65+_male": 1.343,
+        "65+_female": 2.127
+      }
+    },
+    "Food": {
+      "female": {
+        "18-24_male": 3.712,
+        "18-24_female": 10.489,
+        "25-34_male": 6.517,
+        "25-34_female": 19.559,
+        "35-44_male": 6.96,
+        "35-44_female": 19.655,
+        "45-54_male": 5.113,
+        "45-54_female": 12.912,
+        "55-64_male": 2.963,
+        "55-64_female": 7.003,
+        "65+_male": 1.429,
+        "65+_female": 3.686
+      },
+      "male": {
+        "18-24_male": 8.554,
+        "18-24_female": 7.478,
+        "25-34_male": 15.188,
+        "25-34_female": 13.188,
+        "35-44_male": 14.554,
+        "35-44_female": 12.33,
+        "45-54_male": 9.438,
+        "45-54_female": 7.634,
+        "55-64_male": 4.665,
+        "55-64_female": 3.594,
+        "65+_male": 1.817,
+        "65+_female": 1.562
+      },
+      "brand_team": {
+        "18-24_male": 6.892,
+        "18-24_female": 8.395,
+        "25-34_male": 12.643,
+        "25-34_female": 15.249,
+        "35-44_male": 12.632,
+        "35-44_female": 14.411,
+        "45-54_male": 8.508,
+        "45-54_female": 9.049,
+        "55-64_male": 4.308,
+        "55-64_female": 4.341,
+        "65+_male": 1.649,
+        "65+_female": 1.924
+      }
+    },
+    "Software & Internet": {
+      "male": {
+        "18-24_male": 16.129,
+        "18-24_female": 6.583,
+        "25-34_male": 24.739,
+        "25-34_female": 10.138,
+        "35-44_male": 16.776,
+        "35-44_female": 7.083,
+        "45-54_male": 8.273,
+        "45-54_female": 3.54,
+        "55-64_male": 3.42,
+        "55-64_female": 1.475,
+        "65+_male": 1.209,
+        "65+_female": 0.635
+      },
+      "brand_team": {
+        "18-24_male": 12.568,
+        "18-24_female": 6.968,
+        "25-34_male": 22.074,
+        "25-34_female": 11.816,
+        "35-44_male": 17.116,
+        "35-44_female": 9.158,
+        "45-54_male": 8.753,
+        "45-54_female": 4.616,
+        "55-64_male": 3.453,
+        "55-64_female": 1.774,
+        "65+_male": 1.116,
+        "65+_female": 0.589
+      },
+      "female": {
+        "18-24_male": 9.848,
+        "18-24_female": 13.333,
+        "25-34_male": 14.939,
+        "25-34_female": 19.818,
+        "35-44_male": 10.485,
+        "35-44_female": 12.788,
+        "45-54_male": 5.303,
+        "45-54_female": 6.152,
+        "55-64_male": 2.303,
+        "55-64_female": 2.606,
+        "65+_male": 1.121,
+        "65+_female": 1.303
+      }
+    },
+    "Health & Wellness": {
+      "male": {
+        "18-24_male": 6.623,
+        "18-24_female": 6.578,
+        "25-34_male": 13.156,
+        "25-34_female": 12.984,
+        "35-44_male": 14.316,
+        "35-44_female": 13.361,
+        "45-54_male": 10.611,
+        "45-54_female": 9.037,
+        "55-64_male": 5.627,
+        "55-64_female": 4.217,
+        "65+_male": 2.057,
+        "65+_female": 1.434
+      },
+      "brand_team": {
+        "18-24_male": 5.659,
+        "18-24_female": 7.415,
+        "25-34_male": 11.595,
+        "25-34_female": 14.888,
+        "35-44_male": 12.805,
+        "35-44_female": 15.132,
+        "45-54_male": 9.361,
+        "45-54_female": 10.088,
+        "55-64_male": 4.951,
+        "55-64_female": 4.751,
+        "65+_male": 1.79,
+        "65+_female": 1.566
+      },
+      "female": {
+        "18-24_male": 4.007,
+        "18-24_female": 10.393,
+        "25-34_male": 7.556,
+        "25-34_female": 20.074,
+        "35-44_male": 7.985,
+        "35-44_female": 19.044,
+        "45-54_male": 5.726,
+        "45-54_female": 11.963,
+        "55-64_male": 3.163,
+        "55-64_female": 5.889,
+        "65+_male": 1.393,
+        "65+_female": 2.807
+      }
+    },
+    "Pets & Animals": {
+      "brand_team": {
+        "18-24_male": 8.858,
+        "18-24_female": 7.94,
+        "25-34_male": 14.644,
+        "25-34_female": 12.936,
+        "35-44_male": 14.575,
+        "35-44_female": 12.009,
+        "45-54_male": 9.734,
+        "45-54_female": 7.296,
+        "55-64_male": 4.961,
+        "55-64_female": 3.579,
+        "65+_male": 1.906,
+        "65+_female": 1.562
+      },
+      "male": {
+        "18-24_male": 9.636,
+        "18-24_female": 6.035,
+        "25-34_male": 16.671,
+        "25-34_female": 9.804,
+        "35-44_male": 17.322,
+        "35-44_female": 9.706,
+        "45-54_male": 11.839,
+        "45-54_female": 6.364,
+        "55-64_male": 6.028,
+        "55-64_female": 3.147,
+        "65+_male": 2.161,
+        "65+_female": 1.287
+      },
+      "female": {
+        "18-24_male": 6.318,
+        "18-24_female": 12.5,
+        "25-34_male": 9.727,
+        "25-34_female": 18.818,
+        "35-44_male": 9.273,
+        "35-44_female": 15.818,
+        "45-54_male": 6.045,
+        "45-54_female": 9.727,
+        "55-64_male": 3.136,
+        "55-64_female": 4.909,
+        "65+_male": 1.273,
+        "65+_female": 2.455
+      }
+    },
+    "Parenting": {
+      "brand_team": {
+        "18-24_male": 5.532,
+        "18-24_female": 9.364,
+        "25-34_male": 10.286,
+        "25-34_female": 20.332,
+        "35-44_male": 10.436,
+        "35-44_female": 19.114,
+        "45-54_male": 5.941,
+        "45-54_female": 9.032,
+        "55-64_male": 2.782,
+        "55-64_female": 3.945,
+        "65+_male": 1.259,
+        "65+_female": 1.977
+      },
+      "female": {
+        "18-24_male": 3.494,
+        "18-24_female": 12.747,
+        "25-34_male": 6.247,
+        "25-34_female": 25.918,
+        "35-44_male": 5.847,
+        "35-44_female": 21.412,
+        "45-54_male": 3.488,
+        "45-54_female": 10.259,
+        "55-64_male": 1.835,
+        "55-64_female": 4.9,
+        "65+_male": 0.947,
+        "65+_female": 2.906
+      }
+    },
+    "Dance": {
+      "brand_team": {
+        "18-24_male": 11.365,
+        "18-24_female": 15.041,
+        "25-34_male": 13.216,
+        "25-34_female": 17.392,
+        "35-44_male": 9.595,
+        "35-44_female": 11.973,
+        "45-54_male": 5.595,
+        "45-54_female": 6.649,
+        "55-64_male": 2.811,
+        "55-64_female": 3.216,
+        "65+_male": 1.324,
+        "65+_female": 1.824
+      },
+      "female": {
+        "18-24_male": 6.071,
+        "18-24_female": 17.452,
+        "25-34_male": 7.571,
+        "25-34_female": 21.429,
+        "35-44_male": 5.929,
+        "35-44_female": 15.571,
+        "45-54_male": 3.929,
+        "45-54_female": 9.548,
+        "55-64_male": 2.381,
+        "55-64_female": 5.452,
+        "65+_male": 1.19,
+        "65+_female": 3.476
+      },
+      "male": {
+        "18-24_male": 14.211,
+        "18-24_female": 13.895,
+        "25-34_male": 15.342,
+        "25-34_female": 15.737,
+        "35-44_male": 10.632,
+        "35-44_female": 10.553,
+        "45-54_male": 5.921,
+        "45-54_female": 5.553,
+        "55-64_male": 2.921,
+        "55-64_female": 2.553,
+        "65+_male": 1.263,
+        "65+_female": 1.421
+      }
+    }
+  },
+  "age_gender_fit": {
+    "source": "artifacts/snapshots/current-agent-cohort-comments-v0.4.jsonl",
+    "rows": 22011,
+    "min_category_n": 50,
+    "min_category_gender_n": 20,
+    "label_quality": "historical_grok_estimate_aggregate_not_analytics"
+  }
+}

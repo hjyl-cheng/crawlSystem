@@ -1,0 +1,55 @@
+{
+  "schema_version": 1,
+  "catalog_version": 1,
+  "workload_scope": "qy-production",
+  "policies": [
+    {
+      "id": "qy-br-channel-anonymous-v1",
+      "version": 1,
+      "role": "channel",
+      "youtube_language": "pt-BR",
+      "youtube_control_language": "en",
+      "youtube_country": "BR",
+      "browser_profile_timezone": "America/Sao_Paulo",
+      "required_egress_country": "BR",
+      "allowed_proxy_tags": [
+        "role:channel"
+      ],
+      "geo_freshness_window_seconds": 86400,
+      "attempt_safety_window_seconds": 7200,
+      "hash": "sha256:379cb1cc65143db992f12edbfbcbe63dc5fec3981c52ab1e387d93798b1e9365"
+    },
+    {
+      "id": "qy-br-discover-anonymous-v1",
+      "version": 1,
+      "role": "discover",
+      "youtube_language": "pt-BR",
+      "youtube_control_language": "en",
+      "youtube_country": "BR",
+      "browser_profile_timezone": "America/Sao_Paulo",
+      "required_egress_country": "BR",
+      "allowed_proxy_tags": [
+        "role:discover"
+      ],
+      "geo_freshness_window_seconds": 86400,
+      "attempt_safety_window_seconds": 7200,
+      "hash": "sha256:f82d0fca865b2a2de9cc161171c7f6d87f40646192001e4c3f64b883acebce82"
+    },
+    {
+      "id": "qy-br-query-quality-anonymous-v1",
+      "version": 1,
+      "role": "query_quality",
+      "youtube_language": "pt-BR",
+      "youtube_control_language": "en",
+      "youtube_country": "BR",
+      "browser_profile_timezone": "America/Sao_Paulo",
+      "required_egress_country": "BR",
+      "allowed_proxy_tags": [
+        "role:query_quality"
+      ],
+      "geo_freshness_window_seconds": 86400,
+      "attempt_safety_window_seconds": 7200,
+      "hash": "sha256:282070775512c114396a76c763b90bd58c70e23cf29ead8281421a49bba91032"
+    }
+  ]
+}

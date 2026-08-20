@@ -1,0 +1,2291 @@
+{
+  "artifacts": [
+    {
+      "artifact_id": "creator_language.fasttext",
+      "classes": [],
+      "field": "creator_language",
+      "kind": "fasttext_language",
+      "label_quality": "pretrained_public",
+      "metadata": {
+        "license": "CC-BY-SA-3.0",
+        "upstream_url": "https://dl.fbaipublicfiles.com/fasttext/supervised-models/lid.176.ftz"
+      },
+      "metrics": {},
+      "relative_path": "artifacts/lid.176.ftz",
+      "sha256": "sha256:8f3472cfe8738a7b6099e8e999c3cbfae0dcd15696aac7d7738a8039db603e83",
+      "status": "active",
+      "training_source": "Meta FastText language identification lid.176.ftz"
+    },
+    {
+      "artifact_id": "categories.level1",
+      "classes": [
+        "Automotive",
+        "Casual Vlogs",
+        "Dance",
+        "Education",
+        "Fashion",
+        "Food",
+        "Gaming",
+        "General Humanities & Society",
+        "Health & Wellness",
+        "Home",
+        "Music",
+        "Parenting",
+        "Pets & Animals",
+        "Self Improvement",
+        "Software & Internet",
+        "Sports & Outdoors",
+        "Tech",
+        "Travel"
+      ],
+      "field": "channel_categories",
+      "kind": "sklearn_text_classifier",
+      "label_quality": "high_precision_weak_supervision",
+      "metadata": {
+        "character_features": false,
+        "temperature": 0.6,
+        "trainer_version": "agent-free-model-builder-v4-field-routing"
+      },
+      "metrics": {
+        "accuracy": 0.912795,
+        "cohen_kappa": 0.904465,
+        "evaluation_fit_rows": 6950,
+        "label_counts": {
+          "Automotive": 421,
+          "Beauty Creators": 10,
+          "Casual Vlogs": 224,
+          "Dance": 83,
+          "Education": 791,
+          "Fashion": 384,
+          "Food": 407,
+          "Gaming": 826,
+          "General Humanities & Society": 560,
+          "Health & Wellness": 152,
+          "Home": 398,
+          "Music": 1212,
+          "Parenting": 247,
+          "Pets & Animals": 174,
+          "Self Improvement": 313,
+          "Software & Internet": 322,
+          "Sports & Outdoors": 1096,
+          "Tech": 279,
+          "Travel": 288
+        },
+        "log_loss": 0.3375,
+        "macro_f1": 0.888443,
+        "production_refit_rows": 8177,
+        "rows": 1227,
+        "split": "channel_unique_hash_70_15_15",
+        "test_rows": 1227,
+        "train_rows": 5723,
+        "validation_evidence_coverage": 1.0,
+        "validation_evidence_precision": 0.901385,
+        "validation_rows": 1227
+      },
+      "relative_path": "artifacts/categories_level1.joblib",
+      "sha256": "sha256:57f2d65abcd45044d4a232718c842425d24c86defb798b91789b42d80a78d0e5",
+      "status": "active",
+      "training_source": "high-precision taxonomy rules; no Agent labels"
+    },
+    {
+      "artifact_id": "categories.level2",
+      "classes": [
+        "Accessories",
+        "Action Games",
+        "Adventure Games",
+        "Animal Welfare",
+        "Artificial Intelligence",
+        "Arts & Culture",
+        "Auto Repair",
+        "Ball Sports",
+        "Car Care & Styling",
+        "Car Electronics",
+        "Career Skills",
+        "Cars & Vehicles",
+        "Casual Games",
+        "Cats",
+        "Children",
+        "Clothing",
+        "Computer Software",
+        "Computers & PCs",
+        "Consumer Electronics",
+        "Cooking Tutorials",
+        "Cycling",
+        "DIY Crafts",
+        "Dance Styles",
+        "Digital Devices",
+        "Dogs",
+        "Emotions & Psychology",
+        "Exams & Certifications",
+        "Fishing",
+        "Fitness",
+        "Food Knowledge",
+        "Food Reviews",
+        "Footwear",
+        "Furniture & Appliances",
+        "Gadgets & Devices",
+        "Gardening & Flowers",
+        "Hair & Wigs",
+        "Hotels & Stays",
+        "Interior Design",
+        "K-12 Education",
+        "Life Hacks",
+        "Lifestyle Vlogs",
+        "Makeup",
+        "Maternity & Baby",
+        "Mobile Apps",
+        "Mobile Games",
+        "Mobile Tech",
+        "Motorcycles",
+        "Music Knowledge",
+        "Oral Care",
+        "Other Animals",
+        "Other Campus Content",
+        "Other Fashion",
+        "Other Pets",
+        "Outdoor Adventure",
+        "Parenting Life",
+        "Personal Health & Care",
+        "Pet Supplies",
+        "Photography",
+        "Primary & Secondary School",
+        "Role-Playing Games",
+        "Singing",
+        "Skincare",
+        "Supplements",
+        "Swimming & Water Sports",
+        "Tattoo",
+        "Tech News",
+        "Tools & Hardware",
+        "Traditional Instruments",
+        "Travel Guides",
+        "Travel Vlogs",
+        "Web3",
+        "Western Instruments"
+      ],
+      "field": "channel_categories",
+      "kind": "sklearn_multilabel_classifier",
+      "label_quality": "high_precision_weak_supervision",
+      "metadata": {
+        "character_features": false,
+        "maximum_text_characters": 12000,
+        "threshold": 0.137579,
+        "threshold_diagnostics": {
+          "Accessories": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 5,
+            "threshold": 1.000001
+          },
+          "Action Games": {
+            "precision": 0.854545,
+            "selected": 55,
+            "support": 58,
+            "threshold": 0.856232
+          },
+          "Adventure Games": {
+            "precision": 0.857143,
+            "selected": 35,
+            "support": 41,
+            "threshold": 0.927151
+          },
+          "Animal Welfare": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 1,
+            "threshold": 1.000001
+          },
+          "Artificial Intelligence": {
+            "precision": 0.85,
+            "selected": 40,
+            "support": 37,
+            "threshold": 0.870427
+          },
+          "Arts & Culture": {
+            "precision": 0.858974,
+            "selected": 78,
+            "support": 80,
+            "threshold": 0.740194
+          },
+          "Auto Repair": {
+            "precision": 0.888889,
+            "selected": 9,
+            "support": 16,
+            "threshold": 0.999187
+          },
+          "Ball Sports": {
+            "precision": 0.855072,
+            "selected": 138,
+            "support": 118,
+            "threshold": 0.164357
+          },
+          "Car Care & Styling": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 2,
+            "threshold": 1.000001
+          },
+          "Car Electronics": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 7,
+            "threshold": 1.000001
+          },
+          "Career Skills": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 18,
+            "threshold": 1.000001
+          },
+          "Cars & Vehicles": {
+            "precision": 0.854839,
+            "selected": 62,
+            "support": 56,
+            "threshold": 0.545928
+          },
+          "Casual Games": {
+            "precision": 0.850467,
+            "selected": 107,
+            "support": 97,
+            "threshold": 0.696836
+          },
+          "Cats": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 10,
+            "threshold": 1.000001
+          },
+          "Children": {
+            "precision": 0.864865,
+            "selected": 37,
+            "support": 39,
+            "threshold": 0.605754
+          },
+          "Clothing": {
+            "precision": 0.875,
+            "selected": 8,
+            "support": 18,
+            "threshold": 0.999874
+          },
+          "Computer Software": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 15,
+            "threshold": 1.000001
+          },
+          "Computers & PCs": {
+            "precision": 0.857143,
+            "selected": 7,
+            "support": 22,
+            "threshold": 0.999861
+          },
+          "Consumer Electronics": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 6,
+            "threshold": 1.000001
+          },
+          "Cooking Tutorials": {
+            "precision": 0.850746,
+            "selected": 67,
+            "support": 58,
+            "threshold": 0.137579
+          },
+          "Cycling": {
+            "precision": 0.9,
+            "selected": 10,
+            "support": 10,
+            "threshold": 0.658344
+          },
+          "DIY Crafts": {
+            "precision": 0.861111,
+            "selected": 36,
+            "support": 32,
+            "threshold": 0.814576
+          },
+          "Dance Styles": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 10,
+            "threshold": 1.000001
+          },
+          "Digital Devices": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 2,
+            "threshold": 1.000001
+          },
+          "Dogs": {
+            "precision": 0.909091,
+            "selected": 11,
+            "support": 13,
+            "threshold": 0.98803
+          },
+          "Emotions & Psychology": {
+            "precision": 0.861111,
+            "selected": 36,
+            "support": 39,
+            "threshold": 0.85493
+          },
+          "Exams & Certifications": {
+            "precision": 0.857143,
+            "selected": 63,
+            "support": 62,
+            "threshold": 0.708327
+          },
+          "Fishing": {
+            "precision": 0.863636,
+            "selected": 22,
+            "support": 23,
+            "threshold": 0.854407
+          },
+          "Fitness": {
+            "precision": 0.857143,
+            "selected": 21,
+            "support": 35,
+            "threshold": 0.981112
+          },
+          "Food Knowledge": {
+            "precision": 0.857143,
+            "selected": 7,
+            "support": 22,
+            "threshold": 0.999775
+          },
+          "Food Reviews": {
+            "precision": 0.9,
+            "selected": 10,
+            "support": 19,
+            "threshold": 0.999307
+          },
+          "Footwear": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 8,
+            "threshold": 1.000001
+          },
+          "Furniture & Appliances": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 8,
+            "threshold": 1.000001
+          },
+          "Gadgets & Devices": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 9,
+            "threshold": 1.000001
+          },
+          "Gardening & Flowers": {
+            "precision": 0.866667,
+            "selected": 15,
+            "support": 16,
+            "threshold": 0.991844
+          },
+          "Hair & Wigs": {
+            "precision": 0.857143,
+            "selected": 14,
+            "support": 22,
+            "threshold": 0.997226
+          },
+          "Hotels & Stays": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 10,
+            "threshold": 1.000001
+          },
+          "Interior Design": {
+            "precision": 0.862069,
+            "selected": 29,
+            "support": 27,
+            "threshold": 0.726558
+          },
+          "K-12 Education": {
+            "precision": 0.853659,
+            "selected": 82,
+            "support": 100,
+            "threshold": 0.859679
+          },
+          "Life Hacks": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 4,
+            "threshold": 1.000001
+          },
+          "Lifestyle Vlogs": {
+            "precision": 0.882353,
+            "selected": 17,
+            "support": 24,
+            "threshold": 0.918559
+          },
+          "Makeup": {
+            "precision": 0.851852,
+            "selected": 27,
+            "support": 24,
+            "threshold": 0.797242
+          },
+          "Maternity & Baby": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 9,
+            "threshold": 1.000001
+          },
+          "Mobile Apps": {
+            "precision": 0.857143,
+            "selected": 7,
+            "support": 15,
+            "threshold": 0.998948
+          },
+          "Mobile Games": {
+            "precision": 0.888889,
+            "selected": 18,
+            "support": 18,
+            "threshold": 0.972341
+          },
+          "Mobile Tech": {
+            "precision": 0.866667,
+            "selected": 30,
+            "support": 31,
+            "threshold": 0.916838
+          },
+          "Motorcycles": {
+            "precision": 0.888889,
+            "selected": 9,
+            "support": 16,
+            "threshold": 0.990493
+          },
+          "Music Knowledge": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 15,
+            "threshold": 1.000001
+          },
+          "Oral Care": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 3,
+            "threshold": 1.000001
+          },
+          "Other Animals": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 6,
+            "threshold": 1.000001
+          },
+          "Other Campus Content": {
+            "precision": 0.909091,
+            "selected": 11,
+            "support": 34,
+            "threshold": 0.96787
+          },
+          "Other Fashion": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 4,
+            "threshold": 1.000001
+          },
+          "Other Pets": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 3,
+            "threshold": 1.000001
+          },
+          "Outdoor Adventure": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 9,
+            "threshold": 1.000001
+          },
+          "Parenting Life": {
+            "precision": 0.888889,
+            "selected": 9,
+            "support": 25,
+            "threshold": 0.996162
+          },
+          "Personal Health & Care": {
+            "precision": 0.888889,
+            "selected": 18,
+            "support": 24,
+            "threshold": 0.990334
+          },
+          "Pet Supplies": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 4,
+            "threshold": 1.000001
+          },
+          "Photography": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 5,
+            "threshold": 1.000001
+          },
+          "Primary & Secondary School": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 13,
+            "threshold": 1.000001
+          },
+          "Role-Playing Games": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 13,
+            "threshold": 1.000001
+          },
+          "Singing": {
+            "precision": 0.851852,
+            "selected": 216,
+            "support": 190,
+            "threshold": 0.151322
+          },
+          "Skincare": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 19,
+            "threshold": 1.000001
+          },
+          "Supplements": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 8,
+            "threshold": 1.000001
+          },
+          "Swimming & Water Sports": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 4,
+            "threshold": 1.000001
+          },
+          "Tattoo": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 5,
+            "threshold": 1.000001
+          },
+          "Tech News": {
+            "precision": 0.857143,
+            "selected": 21,
+            "support": 31,
+            "threshold": 0.967659
+          },
+          "Tools & Hardware": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 15,
+            "threshold": 1.000001
+          },
+          "Traditional Instruments": {
+            "precision": 0.852941,
+            "selected": 34,
+            "support": 53,
+            "threshold": 0.945104
+          },
+          "Travel Guides": {
+            "precision": 0.857143,
+            "selected": 14,
+            "support": 15,
+            "threshold": 0.895334
+          },
+          "Travel Vlogs": {
+            "precision": 0.851852,
+            "selected": 27,
+            "support": 38,
+            "threshold": 0.856614
+          },
+          "Web3": {
+            "precision": 0.875,
+            "selected": 8,
+            "support": 12,
+            "threshold": 0.999163
+          },
+          "Western Instruments": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 14,
+            "threshold": 1.000001
+          }
+        },
+        "thresholds": {
+          "Accessories": 1.000001,
+          "Action Games": 0.856232,
+          "Adventure Games": 0.927151,
+          "Animal Welfare": 1.000001,
+          "Artificial Intelligence": 0.870427,
+          "Arts & Culture": 0.740194,
+          "Auto Repair": 0.999187,
+          "Ball Sports": 0.164357,
+          "Car Care & Styling": 1.000001,
+          "Car Electronics": 1.000001,
+          "Career Skills": 1.000001,
+          "Cars & Vehicles": 0.545928,
+          "Casual Games": 0.696836,
+          "Cats": 1.000001,
+          "Children": 0.605754,
+          "Clothing": 0.999874,
+          "Computer Software": 1.000001,
+          "Computers & PCs": 0.999861,
+          "Consumer Electronics": 1.000001,
+          "Cooking Tutorials": 0.137579,
+          "Cycling": 0.658344,
+          "DIY Crafts": 0.814576,
+          "Dance Styles": 1.000001,
+          "Digital Devices": 1.000001,
+          "Dogs": 0.98803,
+          "Emotions & Psychology": 0.85493,
+          "Exams & Certifications": 0.708327,
+          "Fishing": 0.854407,
+          "Fitness": 0.981112,
+          "Food Knowledge": 0.999775,
+          "Food Reviews": 0.999307,
+          "Footwear": 1.000001,
+          "Furniture & Appliances": 1.000001,
+          "Gadgets & Devices": 1.000001,
+          "Gardening & Flowers": 0.991844,
+          "Hair & Wigs": 0.997226,
+          "Hotels & Stays": 1.000001,
+          "Interior Design": 0.726558,
+          "K-12 Education": 0.859679,
+          "Life Hacks": 1.000001,
+          "Lifestyle Vlogs": 0.918559,
+          "Makeup": 0.797242,
+          "Maternity & Baby": 1.000001,
+          "Mobile Apps": 0.998948,
+          "Mobile Games": 0.972341,
+          "Mobile Tech": 0.916838,
+          "Motorcycles": 0.990493,
+          "Music Knowledge": 1.000001,
+          "Oral Care": 1.000001,
+          "Other Animals": 1.000001,
+          "Other Campus Content": 0.96787,
+          "Other Fashion": 1.000001,
+          "Other Pets": 1.000001,
+          "Outdoor Adventure": 1.000001,
+          "Parenting Life": 0.996162,
+          "Personal Health & Care": 0.990334,
+          "Pet Supplies": 1.000001,
+          "Photography": 1.000001,
+          "Primary & Secondary School": 1.000001,
+          "Role-Playing Games": 1.000001,
+          "Singing": 0.151322,
+          "Skincare": 1.000001,
+          "Supplements": 1.000001,
+          "Swimming & Water Sports": 1.000001,
+          "Tattoo": 1.000001,
+          "Tech News": 0.967659,
+          "Tools & Hardware": 1.000001,
+          "Traditional Instruments": 0.945104,
+          "Travel Guides": 0.895334,
+          "Travel Vlogs": 0.856614,
+          "Web3": 0.999163,
+          "Western Instruments": 1.000001
+        },
+        "trainer_version": "agent-free-model-builder-v4-field-routing"
+      },
+      "metrics": {
+        "enabled_label_count": 40,
+        "evaluation_fit_rows": 6937,
+        "label_counts": {
+          "Accessories": 36,
+          "Action Games": 392,
+          "Adventure Games": 285,
+          "Animal Welfare": 21,
+          "Artificial Intelligence": 248,
+          "Arts & Culture": 560,
+          "Auto Parts & Accessories": 12,
+          "Auto Repair": 81,
+          "Bags & Luggage": 19,
+          "Ball Sports": 743,
+          "Campus Life": 2,
+          "Car Care & Styling": 23,
+          "Car Electronics": 43,
+          "Career Skills": 116,
+          "Cars & Vehicles": 352,
+          "Casual Games": 617,
+          "Cats": 85,
+          "Children": 210,
+          "Clothing": 138,
+          "Computer Software": 112,
+          "Computers & PCs": 113,
+          "Consumer Electronics": 35,
+          "Cooking Tutorials": 394,
+          "Cycling": 68,
+          "DIY Crafts": 246,
+          "Dance Styles": 79,
+          "Digital Devices": 24,
+          "Dogs": 105,
+          "Emotions & Psychology": 261,
+          "Exams & Certifications": 405,
+          "Fashion News": 2,
+          "First Aid Supplies": 10,
+          "Fishing": 148,
+          "Fitness": 269,
+          "Food Knowledge": 138,
+          "Food Reviews": 85,
+          "Footwear": 62,
+          "Furniture & Appliances": 77,
+          "Gadgets & Devices": 55,
+          "Gaming Hardware & Accessories": 2,
+          "Gardening & Flowers": 142,
+          "Hair & Wigs": 178,
+          "Handsome Men": 10,
+          "Hotels & Stays": 77,
+          "Interior Design": 192,
+          "K-12 Education": 688,
+          "Kitchen Appliances & Dining": 1,
+          "Life Hacks": 39,
+          "Lifestyle Vlogs": 189,
+          "Makeup": 144,
+          "Maternity & Baby": 54,
+          "Mobile Apps": 90,
+          "Mobile Games": 125,
+          "Mobile Tech": 177,
+          "Motorcycles": 125,
+          "Mukbang": 12,
+          "Music Knowledge": 103,
+          "Oral Care": 31,
+          "Other Animals": 47,
+          "Other Campus Content": 182,
+          "Other Fashion": 35,
+          "Other Pets": 25,
+          "Outdoor Adventure": 65,
+          "Parenting Life": 140,
+          "Personal Health & Care": 139,
+          "Pet News": 1,
+          "Pet Supplies": 24,
+          "Photography": 49,
+          "Portrait Clips": 8,
+          "Primary & Secondary School": 117,
+          "Role-Playing Games": 94,
+          "Sexual Health & Wellness": 11,
+          "Singing": 1190,
+          "Skincare": 131,
+          "Square Dance": 6,
+          "Strategy Games": 8,
+          "Supplements": 27,
+          "Swimming & Water Sports": 45,
+          "Tattoo": 28,
+          "Tech News": 206,
+          "Tools & Hardware": 109,
+          "Tour Guide Content": 19,
+          "Traditional Instruments": 319,
+          "Travel Guides": 142,
+          "Travel Photography": 2,
+          "Travel Vlogs": 285,
+          "Underwear & Loungewear": 5,
+          "Web3": 87,
+          "Western Instruments": 91,
+          "Wilderness Cooking": 1,
+          "Winter Sports": 1
+        },
+        "mean_jaccard": 0.642313,
+        "precision_at_5": 0.293551,
+        "production_refit_rows": 8162,
+        "recall_at_10": 0.983401,
+        "rows": 8162,
+        "split": "channel_unique_hash_70_15_15",
+        "test_rows": 1225,
+        "train_rows": 5713,
+        "validation_channel_coverage": 0.859477,
+        "validation_micro_precision": 0.863071,
+        "validation_rows": 1224
+      },
+      "relative_path": "artifacts/categories_level2.joblib",
+      "sha256": "sha256:0d29dad0e4e496e5ee20f48a9ca30b1e060a655e0f65892d6f25359b757093b3",
+      "status": "active",
+      "training_source": "high-precision rules from crawler text; no Agent labels"
+    },
+    {
+      "artifact_id": "channel_tags.multilabel",
+      "classes": [
+        "Accessories",
+        "Action Games",
+        "Adventure Games",
+        "Animal Welfare",
+        "Anime",
+        "Anime Commentary",
+        "Artificial Intelligence",
+        "Arts & Culture",
+        "Audiovisual Services",
+        "Auto Repair",
+        "Automotive",
+        "Bags & Luggage",
+        "Ball Sports",
+        "Brazilian Politics",
+        "Car Care & Styling",
+        "Car Electronics",
+        "Career Skills",
+        "Cars & Vehicles",
+        "Casual Games",
+        "Casual Vlogs",
+        "Cats",
+        "Challenges",
+        "Channel Series",
+        "Children",
+        "Clothing",
+        "Comedy",
+        "Community Discussions",
+        "Computer Software",
+        "Computers & PCs",
+        "Consumer Electronics",
+        "Cooking Tutorials",
+        "Curiosities",
+        "Curl Definition Routines",
+        "Current Events",
+        "Cycling",
+        "DIY Crafts",
+        "Dance",
+        "Dance Styles",
+        "Digital Culture",
+        "Digital Devices",
+        "Documentary",
+        "Dogs",
+        "Education",
+        "Educational Content",
+        "Emotions & Psychology",
+        "Exams & Certifications",
+        "Family Life",
+        "Fashion",
+        "First Aid Supplies",
+        "Fishing",
+        "Fitness",
+        "Food",
+        "Food Knowledge",
+        "Food Reviews",
+        "Football",
+        "Footwear",
+        "Furniture & Appliances",
+        "Gadgets & Devices",
+        "Gameplay",
+        "Gaming",
+        "Gardening & Flowers",
+        "General Humanities & Society",
+        "Hair & Wigs",
+        "Hair Care",
+        "Hair Care Products",
+        "Hair Styling Tutorials",
+        "Handsome Men",
+        "Health & Wellness",
+        "Home",
+        "Home Workouts",
+        "Horror Stories",
+        "Hotels & Stays",
+        "How-to Content",
+        "Interior Design",
+        "K-12 Education",
+        "Life Hacks",
+        "Lifestyle Vlogs",
+        "Live Streaming",
+        "Long-form Video",
+        "Makeup",
+        "Makeup Tutorials",
+        "Manga",
+        "Maternity & Baby",
+        "Minecraft",
+        "Mobile Apps",
+        "Mobile Games",
+        "Mobile Tech",
+        "Motorcycles",
+        "Mukbang",
+        "Music",
+        "Music Knowledge",
+        "Mystery Stories",
+        "Natural Hair Care",
+        "News Commentary",
+        "Oral Care",
+        "Otaku Culture",
+        "Other Animals",
+        "Other Campus Content",
+        "Other Fashion",
+        "Other Pets",
+        "Outdoor Adventure",
+        "Parenting",
+        "Parenting Life",
+        "Personal Health & Care",
+        "Pet Supplies",
+        "Pets & Animals",
+        "Photography",
+        "Portrait Clips",
+        "Primary & Secondary School",
+        "Product Demonstrations",
+        "Product Reviews",
+        "Reaction Videos",
+        "Roblox",
+        "Role-Playing Games",
+        "Self Improvement",
+        "Short-form Video",
+        "Singing",
+        "Skincare",
+        "Software & Internet",
+        "Sports & Outdoors",
+        "Square Dance",
+        "Storytelling",
+        "Strategy Games",
+        "Supplements",
+        "Suspense Stories",
+        "Swimming & Water Sports",
+        "Tattoo",
+        "Tech",
+        "Tech News",
+        "Technology",
+        "Tools & Hardware",
+        "Tour Guide Content",
+        "Traditional Instruments",
+        "Travel",
+        "Travel Guides",
+        "Travel Vlogs",
+        "True Crime",
+        "Tutorials",
+        "Video Commentary",
+        "Video Editing",
+        "Web3",
+        "Western Instruments"
+      ],
+      "field": "channel_tags",
+      "kind": "sklearn_multilabel_classifier",
+      "label_quality": "high_precision_weak_supervision",
+      "metadata": {
+        "character_features": false,
+        "maximum_text_characters": 12000,
+        "threshold": 0.527859,
+        "threshold_diagnostics": {
+          "Accessories": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 37,
+            "threshold": 1.000001
+          },
+          "Action Games": {
+            "precision": 0.851852,
+            "selected": 81,
+            "support": 111,
+            "threshold": 0.948144
+          },
+          "Adventure Games": {
+            "precision": 0.857143,
+            "selected": 70,
+            "support": 132,
+            "threshold": 0.913267
+          },
+          "Animal Welfare": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 5,
+            "threshold": 1.000001
+          },
+          "Anime": {
+            "precision": 0.857143,
+            "selected": 49,
+            "support": 67,
+            "threshold": 0.942924
+          },
+          "Anime Commentary": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 6,
+            "threshold": 1.000001
+          },
+          "Artificial Intelligence": {
+            "precision": 0.854167,
+            "selected": 48,
+            "support": 108,
+            "threshold": 0.990506
+          },
+          "Arts & Culture": {
+            "precision": 0.850526,
+            "selected": 475,
+            "support": 810,
+            "threshold": 0.753032
+          },
+          "Audiovisual Services": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 4,
+            "threshold": 1.000001
+          },
+          "Auto Repair": {
+            "precision": 0.857143,
+            "selected": 21,
+            "support": 47,
+            "threshold": 0.995997
+          },
+          "Automotive": {
+            "precision": 0.852174,
+            "selected": 115,
+            "support": 201,
+            "threshold": 0.855454
+          },
+          "Bags & Luggage": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 13,
+            "threshold": 1.000001
+          },
+          "Ball Sports": {
+            "precision": 0.852459,
+            "selected": 244,
+            "support": 280,
+            "threshold": 0.588716
+          },
+          "Brazilian Politics": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 27,
+            "threshold": 1.000001
+          },
+          "Car Care & Styling": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 2,
+            "threshold": 1.000001
+          },
+          "Car Electronics": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 19,
+            "threshold": 1.000001
+          },
+          "Career Skills": {
+            "precision": 0.854545,
+            "selected": 55,
+            "support": 219,
+            "threshold": 0.958906
+          },
+          "Cars & Vehicles": {
+            "precision": 0.854962,
+            "selected": 131,
+            "support": 218,
+            "threshold": 0.821236
+          },
+          "Casual Games": {
+            "precision": 0.850515,
+            "selected": 194,
+            "support": 232,
+            "threshold": 0.90053
+          },
+          "Casual Vlogs": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 19,
+            "threshold": 1.000001
+          },
+          "Cats": {
+            "precision": 0.85,
+            "selected": 20,
+            "support": 65,
+            "threshold": 0.950059
+          },
+          "Challenges": {
+            "precision": 0.863636,
+            "selected": 22,
+            "support": 101,
+            "threshold": 0.963211
+          },
+          "Channel Series": {
+            "precision": 0.859375,
+            "selected": 64,
+            "support": 488,
+            "threshold": 0.892498
+          },
+          "Children": {
+            "precision": 0.853107,
+            "selected": 177,
+            "support": 319,
+            "threshold": 0.821499
+          },
+          "Clothing": {
+            "precision": 0.863636,
+            "selected": 44,
+            "support": 131,
+            "threshold": 0.976033
+          },
+          "Comedy": {
+            "precision": 0.853333,
+            "selected": 150,
+            "support": 241,
+            "threshold": 0.818826
+          },
+          "Community Discussions": {
+            "precision": 0.85124,
+            "selected": 121,
+            "support": 256,
+            "threshold": 0.920153
+          },
+          "Computer Software": {
+            "precision": 0.864865,
+            "selected": 37,
+            "support": 88,
+            "threshold": 0.970239
+          },
+          "Computers & PCs": {
+            "precision": 0.857143,
+            "selected": 21,
+            "support": 57,
+            "threshold": 0.994817
+          },
+          "Consumer Electronics": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 22,
+            "threshold": 1.000001
+          },
+          "Cooking Tutorials": {
+            "precision": 0.852941,
+            "selected": 170,
+            "support": 229,
+            "threshold": 0.802758
+          },
+          "Curiosities": {
+            "precision": 0.850746,
+            "selected": 134,
+            "support": 290,
+            "threshold": 0.875437
+          },
+          "Curl Definition Routines": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 12,
+            "threshold": 1.000001
+          },
+          "Current Events": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 19,
+            "threshold": 1.000001
+          },
+          "Cycling": {
+            "precision": 0.888889,
+            "selected": 18,
+            "support": 29,
+            "threshold": 0.921423
+          },
+          "DIY Crafts": {
+            "precision": 0.85,
+            "selected": 80,
+            "support": 104,
+            "threshold": 0.816192
+          },
+          "Dance": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 7,
+            "threshold": 1.000001
+          },
+          "Dance Styles": {
+            "precision": 0.852941,
+            "selected": 34,
+            "support": 75,
+            "threshold": 0.978622
+          },
+          "Digital Culture": {
+            "precision": 0.853211,
+            "selected": 109,
+            "support": 309,
+            "threshold": 0.906322
+          },
+          "Digital Devices": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 10,
+            "threshold": 1.000001
+          },
+          "Documentary": {
+            "precision": 0.85,
+            "selected": 20,
+            "support": 80,
+            "threshold": 0.989827
+          },
+          "Dogs": {
+            "precision": 0.869565,
+            "selected": 23,
+            "support": 96,
+            "threshold": 0.976319
+          },
+          "Education": {
+            "precision": 0.85,
+            "selected": 380,
+            "support": 596,
+            "threshold": 0.756045
+          },
+          "Educational Content": {
+            "precision": 0.858974,
+            "selected": 78,
+            "support": 260,
+            "threshold": 0.962769
+          },
+          "Emotions & Psychology": {
+            "precision": 0.859375,
+            "selected": 64,
+            "support": 170,
+            "threshold": 0.949404
+          },
+          "Exams & Certifications": {
+            "precision": 0.851064,
+            "selected": 94,
+            "support": 108,
+            "threshold": 0.720331
+          },
+          "Family Life": {
+            "precision": 0.852679,
+            "selected": 224,
+            "support": 463,
+            "threshold": 0.860816
+          },
+          "Fashion": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 37,
+            "threshold": 1.000001
+          },
+          "First Aid Supplies": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 3,
+            "threshold": 1.000001
+          },
+          "Fishing": {
+            "precision": 0.88,
+            "selected": 25,
+            "support": 39,
+            "threshold": 0.932408
+          },
+          "Fitness": {
+            "precision": 0.85,
+            "selected": 80,
+            "support": 148,
+            "threshold": 0.893236
+          },
+          "Food": {
+            "precision": 0.853659,
+            "selected": 41,
+            "support": 51,
+            "threshold": 0.989172
+          },
+          "Food Knowledge": {
+            "precision": 0.869565,
+            "selected": 23,
+            "support": 56,
+            "threshold": 0.996984
+          },
+          "Food Reviews": {
+            "precision": 0.863636,
+            "selected": 22,
+            "support": 51,
+            "threshold": 0.991273
+          },
+          "Football": {
+            "precision": 0.852321,
+            "selected": 237,
+            "support": 264,
+            "threshold": 0.567321
+          },
+          "Footwear": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 29,
+            "threshold": 1.000001
+          },
+          "Furniture & Appliances": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 26,
+            "threshold": 1.000001
+          },
+          "Gadgets & Devices": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 20,
+            "threshold": 1.000001
+          },
+          "Gameplay": {
+            "precision": 0.852349,
+            "selected": 149,
+            "support": 199,
+            "threshold": 0.9358
+          },
+          "Gaming": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 76,
+            "threshold": 1.000001
+          },
+          "Gardening & Flowers": {
+            "precision": 0.875,
+            "selected": 32,
+            "support": 56,
+            "threshold": 0.987462
+          },
+          "General Humanities & Society": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 50,
+            "threshold": 1.000001
+          },
+          "Hair & Wigs": {
+            "precision": 0.859649,
+            "selected": 57,
+            "support": 120,
+            "threshold": 0.957039
+          },
+          "Hair Care": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 6,
+            "threshold": 1.000001
+          },
+          "Hair Care Products": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 13,
+            "threshold": 1.000001
+          },
+          "Hair Styling Tutorials": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 5,
+            "threshold": 1.000001
+          },
+          "Handsome Men": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 15,
+            "threshold": 1.000001
+          },
+          "Health & Wellness": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 24,
+            "threshold": 1.000001
+          },
+          "Home": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 40,
+            "threshold": 1.000001
+          },
+          "Home Workouts": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 8,
+            "threshold": 1.000001
+          },
+          "Horror Stories": {
+            "precision": 0.868421,
+            "selected": 38,
+            "support": 81,
+            "threshold": 0.958485
+          },
+          "Hotels & Stays": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 18,
+            "threshold": 1.000001
+          },
+          "How-to Content": {
+            "precision": 0.853448,
+            "selected": 116,
+            "support": 294,
+            "threshold": 0.950822
+          },
+          "Interior Design": {
+            "precision": 0.857143,
+            "selected": 49,
+            "support": 69,
+            "threshold": 0.939963
+          },
+          "K-12 Education": {
+            "precision": 0.850816,
+            "selected": 429,
+            "support": 692,
+            "threshold": 0.751973
+          },
+          "Life Hacks": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 29,
+            "threshold": 1.000001
+          },
+          "Lifestyle Vlogs": {
+            "precision": 0.850746,
+            "selected": 201,
+            "support": 310,
+            "threshold": 0.807613
+          },
+          "Live Streaming": {
+            "precision": 0.85,
+            "selected": 540,
+            "support": 783,
+            "threshold": 0.705667
+          },
+          "Long-form Video": {
+            "precision": 0.850492,
+            "selected": 1525,
+            "support": 2039,
+            "threshold": 0.624882
+          },
+          "Makeup": {
+            "precision": 0.864865,
+            "selected": 37,
+            "support": 48,
+            "threshold": 0.935245
+          },
+          "Makeup Tutorials": {
+            "precision": 0.870968,
+            "selected": 31,
+            "support": 46,
+            "threshold": 0.977639
+          },
+          "Manga": {
+            "precision": 0.875,
+            "selected": 16,
+            "support": 33,
+            "threshold": 0.998757
+          },
+          "Maternity & Baby": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 32,
+            "threshold": 1.000001
+          },
+          "Minecraft": {
+            "precision": 0.88,
+            "selected": 25,
+            "support": 37,
+            "threshold": 0.97337
+          },
+          "Mobile Apps": {
+            "precision": 0.857143,
+            "selected": 21,
+            "support": 101,
+            "threshold": 0.990946
+          },
+          "Mobile Games": {
+            "precision": 0.882353,
+            "selected": 17,
+            "support": 21,
+            "threshold": 0.980478
+          },
+          "Mobile Tech": {
+            "precision": 0.857143,
+            "selected": 70,
+            "support": 153,
+            "threshold": 0.918356
+          },
+          "Motorcycles": {
+            "precision": 0.85,
+            "selected": 40,
+            "support": 60,
+            "threshold": 0.923835
+          },
+          "Mukbang": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 1,
+            "threshold": 1.000001
+          },
+          "Music": {
+            "precision": 0.850716,
+            "selected": 489,
+            "support": 506,
+            "threshold": 0.548947
+          },
+          "Music Knowledge": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 24,
+            "threshold": 1.000001
+          },
+          "Mystery Stories": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 50,
+            "threshold": 1.000001
+          },
+          "Natural Hair Care": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 7,
+            "threshold": 1.000001
+          },
+          "News Commentary": {
+            "precision": 0.850993,
+            "selected": 302,
+            "support": 360,
+            "threshold": 0.719386
+          },
+          "Oral Care": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 8,
+            "threshold": 1.000001
+          },
+          "Otaku Culture": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 10,
+            "threshold": 1.000001
+          },
+          "Other Animals": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 13,
+            "threshold": 1.000001
+          },
+          "Other Campus Content": {
+            "precision": 0.882353,
+            "selected": 17,
+            "support": 100,
+            "threshold": 0.995822
+          },
+          "Other Fashion": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 12,
+            "threshold": 1.000001
+          },
+          "Other Pets": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 17,
+            "threshold": 1.000001
+          },
+          "Outdoor Adventure": {
+            "precision": 0.882353,
+            "selected": 17,
+            "support": 65,
+            "threshold": 0.991457
+          },
+          "Parenting": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 28,
+            "threshold": 1.000001
+          },
+          "Parenting Life": {
+            "precision": 0.854369,
+            "selected": 103,
+            "support": 318,
+            "threshold": 0.932825
+          },
+          "Personal Health & Care": {
+            "precision": 0.852349,
+            "selected": 149,
+            "support": 306,
+            "threshold": 0.896237
+          },
+          "Pet Supplies": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 10,
+            "threshold": 1.000001
+          },
+          "Pets & Animals": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 15,
+            "threshold": 1.000001
+          },
+          "Photography": {
+            "precision": 0.862069,
+            "selected": 29,
+            "support": 54,
+            "threshold": 0.985884
+          },
+          "Portrait Clips": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 5,
+            "threshold": 1.000001
+          },
+          "Primary & Secondary School": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 26,
+            "threshold": 1.000001
+          },
+          "Product Demonstrations": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 52,
+            "threshold": 1.000001
+          },
+          "Product Reviews": {
+            "precision": 0.850515,
+            "selected": 194,
+            "support": 331,
+            "threshold": 0.833724
+          },
+          "Reaction Videos": {
+            "precision": 0.857143,
+            "selected": 35,
+            "support": 75,
+            "threshold": 0.964318
+          },
+          "Roblox": {
+            "precision": 0.860465,
+            "selected": 43,
+            "support": 44,
+            "threshold": 0.867281
+          },
+          "Role-Playing Games": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 20,
+            "threshold": 1.000001
+          },
+          "Self Improvement": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 37,
+            "threshold": 1.000001
+          },
+          "Short-form Video": {
+            "precision": 0.850823,
+            "selected": 972,
+            "support": 1608,
+            "threshold": 0.661901
+          },
+          "Singing": {
+            "precision": 0.85086,
+            "selected": 523,
+            "support": 537,
+            "threshold": 0.527859
+          },
+          "Skincare": {
+            "precision": 0.857143,
+            "selected": 21,
+            "support": 31,
+            "threshold": 0.992744
+          },
+          "Software & Internet": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 27,
+            "threshold": 1.000001
+          },
+          "Sports & Outdoors": {
+            "precision": 0.857143,
+            "selected": 28,
+            "support": 128,
+            "threshold": 0.993306
+          },
+          "Square Dance": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 13,
+            "threshold": 1.000001
+          },
+          "Storytelling": {
+            "precision": 0.851064,
+            "selected": 235,
+            "support": 583,
+            "threshold": 0.836949
+          },
+          "Strategy Games": {
+            "precision": 0.875,
+            "selected": 16,
+            "support": 100,
+            "threshold": 0.993571
+          },
+          "Supplements": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 27,
+            "threshold": 1.000001
+          },
+          "Suspense Stories": {
+            "precision": 0.85,
+            "selected": 20,
+            "support": 35,
+            "threshold": 0.99773
+          },
+          "Swimming & Water Sports": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 17,
+            "threshold": 1.000001
+          },
+          "Tattoo": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 7,
+            "threshold": 1.000001
+          },
+          "Tech": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 22,
+            "threshold": 1.000001
+          },
+          "Tech News": {
+            "precision": 0.85,
+            "selected": 80,
+            "support": 201,
+            "threshold": 0.958526
+          },
+          "Technology": {
+            "precision": 0.85,
+            "selected": 80,
+            "support": 167,
+            "threshold": 0.933417
+          },
+          "Tools & Hardware": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 91,
+            "threshold": 1.000001
+          },
+          "Tour Guide Content": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 4,
+            "threshold": 1.000001
+          },
+          "Traditional Instruments": {
+            "precision": 0.851852,
+            "selected": 27,
+            "support": 73,
+            "threshold": 0.987958
+          },
+          "Travel": {
+            "precision": 0.851351,
+            "selected": 148,
+            "support": 253,
+            "threshold": 0.866927
+          },
+          "Travel Guides": {
+            "precision": 0.857143,
+            "selected": 21,
+            "support": 28,
+            "threshold": 0.969672
+          },
+          "Travel Vlogs": {
+            "precision": 0.851852,
+            "selected": 162,
+            "support": 288,
+            "threshold": 0.858032
+          },
+          "True Crime": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 5,
+            "threshold": 1.000001
+          },
+          "Tutorials": {
+            "precision": 0.851528,
+            "selected": 229,
+            "support": 357,
+            "threshold": 0.846636
+          },
+          "Video Commentary": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 157,
+            "threshold": 1.000001
+          },
+          "Video Editing": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 13,
+            "threshold": 1.000001
+          },
+          "Web3": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 16,
+            "threshold": 1.000001
+          },
+          "Western Instruments": {
+            "precision": 0.0,
+            "selected": 0,
+            "support": 61,
+            "threshold": 1.000001
+          }
+        },
+        "thresholds": {
+          "Accessories": 1.000001,
+          "Action Games": 0.948144,
+          "Adventure Games": 0.913267,
+          "Animal Welfare": 1.000001,
+          "Anime": 0.942924,
+          "Anime Commentary": 1.000001,
+          "Artificial Intelligence": 0.990506,
+          "Arts & Culture": 0.753032,
+          "Audiovisual Services": 1.000001,
+          "Auto Repair": 0.995997,
+          "Automotive": 0.855454,
+          "Bags & Luggage": 1.000001,
+          "Ball Sports": 0.588716,
+          "Brazilian Politics": 1.000001,
+          "Car Care & Styling": 1.000001,
+          "Car Electronics": 1.000001,
+          "Career Skills": 0.958906,
+          "Cars & Vehicles": 0.821236,
+          "Casual Games": 0.90053,
+          "Casual Vlogs": 1.000001,
+          "Cats": 0.950059,
+          "Challenges": 0.963211,
+          "Channel Series": 0.892498,
+          "Children": 0.821499,
+          "Clothing": 0.976033,
+          "Comedy": 0.818826,
+          "Community Discussions": 0.920153,
+          "Computer Software": 0.970239,
+          "Computers & PCs": 0.994817,
+          "Consumer Electronics": 1.000001,
+          "Cooking Tutorials": 0.802758,
+          "Curiosities": 0.875437,
+          "Curl Definition Routines": 1.000001,
+          "Current Events": 1.000001,
+          "Cycling": 0.921423,
+          "DIY Crafts": 0.816192,
+          "Dance": 1.000001,
+          "Dance Styles": 0.978622,
+          "Digital Culture": 0.906322,
+          "Digital Devices": 1.000001,
+          "Documentary": 0.989827,
+          "Dogs": 0.976319,
+          "Education": 0.756045,
+          "Educational Content": 0.962769,
+          "Emotions & Psychology": 0.949404,
+          "Exams & Certifications": 0.720331,
+          "Family Life": 0.860816,
+          "Fashion": 1.000001,
+          "First Aid Supplies": 1.000001,
+          "Fishing": 0.932408,
+          "Fitness": 0.893236,
+          "Food": 0.989172,
+          "Food Knowledge": 0.996984,
+          "Food Reviews": 0.991273,
+          "Football": 0.567321,
+          "Footwear": 1.000001,
+          "Furniture & Appliances": 1.000001,
+          "Gadgets & Devices": 1.000001,
+          "Gameplay": 0.9358,
+          "Gaming": 1.000001,
+          "Gardening & Flowers": 0.987462,
+          "General Humanities & Society": 1.000001,
+          "Hair & Wigs": 0.957039,
+          "Hair Care": 1.000001,
+          "Hair Care Products": 1.000001,
+          "Hair Styling Tutorials": 1.000001,
+          "Handsome Men": 1.000001,
+          "Health & Wellness": 1.000001,
+          "Home": 1.000001,
+          "Home Workouts": 1.000001,
+          "Horror Stories": 0.958485,
+          "Hotels & Stays": 1.000001,
+          "How-to Content": 0.950822,
+          "Interior Design": 0.939963,
+          "K-12 Education": 0.751973,
+          "Life Hacks": 1.000001,
+          "Lifestyle Vlogs": 0.807613,
+          "Live Streaming": 0.705667,
+          "Long-form Video": 0.624882,
+          "Makeup": 0.935245,
+          "Makeup Tutorials": 0.977639,
+          "Manga": 0.998757,
+          "Maternity & Baby": 1.000001,
+          "Minecraft": 0.97337,
+          "Mobile Apps": 0.990946,
+          "Mobile Games": 0.980478,
+          "Mobile Tech": 0.918356,
+          "Motorcycles": 0.923835,
+          "Mukbang": 1.000001,
+          "Music": 0.548947,
+          "Music Knowledge": 1.000001,
+          "Mystery Stories": 1.000001,
+          "Natural Hair Care": 1.000001,
+          "News Commentary": 0.719386,
+          "Oral Care": 1.000001,
+          "Otaku Culture": 1.000001,
+          "Other Animals": 1.000001,
+          "Other Campus Content": 0.995822,
+          "Other Fashion": 1.000001,
+          "Other Pets": 1.000001,
+          "Outdoor Adventure": 0.991457,
+          "Parenting": 1.000001,
+          "Parenting Life": 0.932825,
+          "Personal Health & Care": 0.896237,
+          "Pet Supplies": 1.000001,
+          "Pets & Animals": 1.000001,
+          "Photography": 0.985884,
+          "Portrait Clips": 1.000001,
+          "Primary & Secondary School": 1.000001,
+          "Product Demonstrations": 1.000001,
+          "Product Reviews": 0.833724,
+          "Reaction Videos": 0.964318,
+          "Roblox": 0.867281,
+          "Role-Playing Games": 1.000001,
+          "Self Improvement": 1.000001,
+          "Short-form Video": 0.661901,
+          "Singing": 0.527859,
+          "Skincare": 0.992744,
+          "Software & Internet": 1.000001,
+          "Sports & Outdoors": 0.993306,
+          "Square Dance": 1.000001,
+          "Storytelling": 0.836949,
+          "Strategy Games": 0.993571,
+          "Supplements": 1.000001,
+          "Suspense Stories": 0.99773,
+          "Swimming & Water Sports": 1.000001,
+          "Tattoo": 1.000001,
+          "Tech": 1.000001,
+          "Tech News": 0.958526,
+          "Technology": 0.933417,
+          "Tools & Hardware": 1.000001,
+          "Tour Guide Content": 1.000001,
+          "Traditional Instruments": 0.987958,
+          "Travel": 0.866927,
+          "Travel Guides": 0.969672,
+          "Travel Vlogs": 0.858032,
+          "True Crime": 1.000001,
+          "Tutorials": 0.846636,
+          "Video Commentary": 1.000001,
+          "Video Editing": 1.000001,
+          "Web3": 1.000001,
+          "Western Instruments": 1.000001
+        },
+        "trainer_version": "agent-free-model-builder-v4-field-routing"
+      },
+      "metrics": {
+        "enabled_label_count": 81,
+        "evaluation_fit_rows": 17725,
+        "label_counts": {
+          "3 AM Challenges": 6,
+          "Accessories": 243,
+          "Action Games": 724,
+          "Adventure Games": 948,
+          "Animal Welfare": 45,
+          "Anime": 415,
+          "Anime Commentary": 24,
+          "Anime Reactions": 1,
+          "Artificial Intelligence": 666,
+          "Arts & Culture": 5229,
+          "Audiovisual Services": 24,
+          "Auto Parts & Accessories": 18,
+          "Auto Repair": 230,
+          "Automotive": 1411,
+          "Bags & Luggage": 102,
+          "Ball Sports": 1762,
+          "Beautiful Women": 11,
+          "Beauty Creators": 8,
+          "Body Transformation": 4,
+          "Brazilian Politics": 183,
+          "Campus Activities": 2,
+          "Campus Life": 5,
+          "Car Care & Styling": 26,
+          "Car Electronics": 99,
+          "Career Skills": 1459,
+          "Cars & Vehicles": 1556,
+          "Casual Games": 1517,
+          "Casual Vlogs": 165,
+          "Cats": 465,
+          "Challenges": 650,
+          "Channel Series": 3234,
+          "Children": 2217,
+          "Clothing": 879,
+          "Comedy": 1756,
+          "Community Discussions": 1628,
+          "Computer Software": 557,
+          "Computers & PCs": 356,
+          "Consumer Electronics": 116,
+          "Cooking Tutorials": 1557,
+          "Creative Squad": 7,
+          "Curiosities": 1824,
+          "Curl Definition Routines": 72,
+          "Current Events": 139,
+          "Cycling": 201,
+          "DIY Crafts": 675,
+          "Dance": 79,
+          "Dance Styles": 511,
+          "Digital Culture": 2012,
+          "Digital Devices": 72,
+          "Documentary": 531,
+          "Dogs": 642,
+          "Education": 3873,
+          "Educational Content": 1796,
+          "Emotions & Psychology": 1160,
+          "Exams & Certifications": 703,
+          "Family Life": 3080,
+          "Fashion": 283,
+          "Fashion News": 5,
+          "Film Production": 16,
+          "First Aid Supplies": 23,
+          "Fishing": 283,
+          "Fitness": 1018,
+          "Food": 366,
+          "Food Knowledge": 335,
+          "Food Reviews": 322,
+          "Football": 1646,
+          "Footwear": 207,
+          "Furniture & Appliances": 181,
+          "Gadgets & Devices": 116,
+          "Gameplay": 1278,
+          "Gaming": 522,
+          "Gaming Hardware & Accessories": 14,
+          "Gardening & Flowers": 405,
+          "General Humanities & Society": 376,
+          "Hair & Wigs": 765,
+          "Hair Care": 36,
+          "Hair Care Products": 82,
+          "Hair Styling Tutorials": 36,
+          "Handsome Men": 119,
+          "Health & Wellness": 138,
+          "Home": 321,
+          "Home Workouts": 57,
+          "Horror Stories": 488,
+          "Hotels & Stays": 171,
+          "How-to Content": 1779,
+          "Interior Design": 515,
+          "K-12 Education": 4436,
+          "Kitchen Appliances & Dining": 11,
+          "Life Hacks": 260,
+          "Lifestyle Vlogs": 2135,
+          "Live Streaming": 5040,
+          "Long-form Video": 13671,
+          "Makeup": 313,
+          "Makeup Tutorials": 297,
+          "Manga": 220,
+          "Maternity & Baby": 195,
+          "Media Company": 6,
+          "Minecraft": 272,
+          "Minecraft Series": 7,
+          "Mobile Apps": 603,
+          "Mobile Games": 166,
+          "Mobile Tech": 1113,
+          "Motorcycles": 467,
+          "Mukbang": 23,
+          "Music": 3506,
+          "Music Knowledge": 169,
+          "Mystery Stories": 321,
+          "Natural Hair Care": 41,
+          "News Commentary": 2325,
+          "Oral Care": 75,
+          "Otaku Culture": 69,
+          "Other Animals": 142,
+          "Other Campus Content": 707,
+          "Other Fashion": 58,
+          "Other Pets": 134,
+          "Outdoor Adventure": 404,
+          "Parenting": 194,
+          "Parenting Life": 2062,
+          "Personal Health & Care": 2096,
+          "Pet News": 1,
+          "Pet Supplies": 79,
+          "Pets & Animals": 144,
+          "Photography": 425,
+          "Photography Equipment": 14,
+          "Portrait Clips": 27,
+          "Primary & Secondary School": 203,
+          "Product Demonstrations": 354,
+          "Product Reviews": 2198,
+          "Reaction Videos": 476,
+          "Roblox": 285,
+          "Role-Playing Games": 150,
+          "Science Facts": 5,
+          "Self Improvement": 265,
+          "Sexual Health & Wellness": 15,
+          "Short-form Video": 10508,
+          "Singing": 3745,
+          "Skincare": 204,
+          "Software & Internet": 201,
+          "Sports & Outdoors": 883,
+          "Square Dance": 74,
+          "Storytelling": 3616,
+          "Strategy Games": 528,
+          "Supplements": 128,
+          "Suspense Stories": 195,
+          "Swimming & Water Sports": 137,
+          "Tattoo": 62,
+          "Tech": 146,
+          "Tech News": 1440,
+          "Technology": 1241,
+          "Tools & Hardware": 569,
+          "Tour Guide Content": 35,
+          "Traditional Instruments": 512,
+          "Travel": 1754,
+          "Travel Guides": 265,
+          "Travel Photography": 6,
+          "Travel Vlogs": 1955,
+          "True Crime": 70,
+          "Tutorials": 2308,
+          "Underwear & Loungewear": 7,
+          "Video Commentary": 1034,
+          "Video Editing": 81,
+          "Web3": 179,
+          "Weight Loss for Women": 9,
+          "Western Instruments": 387,
+          "Wilderness Cooking": 2,
+          "Winter Sports": 12,
+          "Women Fitness": 15
+        },
+        "mean_jaccard": 0.443543,
+        "precision_at_5": 0.669309,
+        "production_refit_rows": 20853,
+        "recall_at_10": 0.791684,
+        "rows": 20853,
+        "split": "channel_unique_hash_70_15_15",
+        "test_rows": 3128,
+        "train_rows": 14597,
+        "validation_channel_coverage": 0.977621,
+        "validation_micro_precision": 0.853624,
+        "validation_rows": 3128
+      },
+      "relative_path": "artifacts/channel_tags_multilabel.joblib",
+      "sha256": "sha256:f6a826bdfe2a0a0f935ded61a36fc5384a715b8fac3cc9c4dded43ecff653508",
+      "status": "active",
+      "training_source": "high-precision rules from crawler text; no Agent labels"
+    }
+  ],
+  "build_metadata": {
+    "active_artifact_ids": [
+      "categories.level1",
+      "categories.level2",
+      "channel_tags.multilabel",
+      "creator_language.fasttext"
+    ],
+    "agent_reference_used_for_training": false,
+    "deployment_minimum_kappa": 0.7,
+    "deployment_quality_gate_version": "deployment-quality-gate-v1",
+    "deployment_source_bundle": "agent-free-20260813-v0.5-field-routing-candidate",
+    "deployment_source_bundle_hash": "sha256:f649aefbac026c59111f31ad6811285d108fd2332e4346a26547188ff4e21d36",
+    "deployment_target_precision": 0.85,
+    "excluded_candidate_artifacts": [
+      {
+        "artifact_id": "gender.entity_type",
+        "field": "creator_gender",
+        "metrics": {
+          "accuracy": 0.957965,
+          "cohen_kappa": 0.575356,
+          "evaluation_fit_rows": 2559,
+          "label_counts": {
+            "brand_or_team": 2891,
+            "single_creator": 120
+          },
+          "log_loss": 0.111626,
+          "macro_f1": 0.786787,
+          "production_refit_rows": 3011,
+          "rows": 452,
+          "split": "channel_unique_hash_70_15_15",
+          "test_rows": 452,
+          "train_rows": 2107,
+          "validation_evidence_coverage": 1.0,
+          "validation_evidence_precision": 0.957965,
+          "validation_rows": 452
+        },
+        "reason": "Cohen kappa 0.575356 is below 0.700000"
+      }
+    ],
+    "feature_store_rows": 22011,
+    "feature_store_sha256": "sha256:b163b237c155538dbb44cd18219d848ff1fae11a4046697213242f4bb1379e00",
+    "holdout_channel_count": 1000,
+    "holdout_snapshot_path": "/root/workspace/agent/artifacts/snapshots/current-agent-cohort-comments-holdout-1000-v0.4.jsonl",
+    "label_policy": "explicit_facts_and_per_label_high_precision_rules_only_no_agent_labels-v2",
+    "output_label_language": "English",
+    "prior_catalog_hash": "sha256:fa5b2afe43ef366b844703f3f1584786543e3ec41a32b912097ada9ab8abc04d",
+    "prior_catalog_version": "bootstrap-shadow-v2.1-comments",
+    "production_ineligibility_reasons": [
+      "audience distributions are not calibrated against Analytics truth",
+      "active subscriber ratio is not calibrated against subscribed-viewer Analytics",
+      "weak-supervision category/tag models require manual test-set validation",
+      "Top comments are a ranked sample and comment fusion weights are uncalibrated"
+    ],
+    "skipped_artifacts": {
+      "country.text": "country_label has insufficient eligible labels: rows=20167, classes=2, required_classes=5",
+      "creator_age.ordinal": "creator_age_range has only 141 explicit/strong labels",
+      "creator_gender.two_stage": "gender_label has insufficient eligible labels: rows=120, classes=2, required_classes=2"
+    },
+    "trainer_version": "agent-free-model-builder-v4-field-routing",
+    "training_rows_after_holdout": 21011
+  },
+  "bundle_version": "agent-free-20260813-v0.5-field-routing-deployment",
+  "compatible_processor_major": 1,
+  "created_at": "2026-08-13T04:10:08.037856Z",
+  "decision_policies": {
+    "channel_categories": {
+      "complete_min_probability": 0.0,
+      "evidence_min_margin": 0.0,
+      "evidence_min_probability": 0.137579,
+      "metadata": {
+        "validation_coverage": 0.859477,
+        "validation_precision": 0.863071
+      },
+      "minimum_input_count": 1,
+      "target_precision": 0.85,
+      "version": "channel_categories-decision-v1"
+    },
+    "channel_tags": {
+      "complete_min_probability": 0.0,
+      "evidence_min_margin": 0.0,
+      "evidence_min_probability": 0.527859,
+      "metadata": {
+        "validation_coverage": 0.977621,
+        "validation_precision": 0.853624
+      },
+      "minimum_input_count": 1,
+      "target_precision": 0.85,
+      "version": "channel_tags-decision-v1"
+    }
+  },
+  "dependency_manifest": {
+    "channel_stats_hash": [
+      "active_subscriber_ratio",
+      "audience_age_gender"
+    ],
+    "comment_stats_hash": [
+      "audience_region",
+      "audience_age_gender",
+      "audience_language",
+      "active_subscriber_ratio"
+    ],
+    "comment_text_hash": [
+      "creator_gender",
+      "channel_tags",
+      "audience_region",
+      "audience_age_gender",
+      "audience_language"
+    ],
+    "content_stats_hash": [
+      "active_subscriber_ratio",
+      "channel_tags",
+      "audience_age_gender"
+    ],
+    "content_text_hash": [
+      "creator_language",
+      "channel_tags",
+      "channel_categories",
+      "audience_region",
+      "audience_age_gender",
+      "audience_language"
+    ],
+    "media_asset_hash": [],
+    "profile_text_hash": [
+      "country",
+      "creator_gender",
+      "creator_age_range",
+      "creator_language",
+      "channel_tags",
+      "channel_categories",
+      "audience_region",
+      "audience_age_gender",
+      "audience_language"
+    ]
+  },
+  "feature_schema_version": "channel-features-v6-source-content-type-field-routing",
+  "field_status": {
+    "active_subscriber_ratio": "uncalibrated_public_proxy",
+    "audience_age_gender": "uncalibrated_public_estimate",
+    "audience_language": "uncalibrated_public_estimate",
+    "audience_region": "uncalibrated_public_estimate",
+    "channel_categories": "trained_weak_supervision",
+    "channel_tags": "trained_weak_supervision",
+    "country": "fallback_only_candidate_model_below_gate",
+    "creator_age_range": "fallback_only_candidate_model_below_gate",
+    "creator_gender": "fallback_only_candidate_models_below_gate",
+    "creator_language": "pretrained_public_model"
+  },
+  "output_label_language": "English",
+  "production_eligible": false,
+  "schema_version": "qy-channel-profile-model-bundle-v1",
+  "taxonomy_version": "qy-taxonomy-v1",
+  "training_cutoff": "2026-08-11T06:28:26.476000Z"
+}

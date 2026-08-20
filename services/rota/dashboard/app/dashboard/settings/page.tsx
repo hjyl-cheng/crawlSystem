@@ -1,0 +1,1239 @@
+"use client"
+
+import * as React from "react"
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
+import { Label } from "@/components/ui/label"
+import { Input } from "@/components/ui/input"
+import { Button } from "@/components/ui/button"
+import { Switch } from "@/components/ui/switch"
+import { Textarea } from "@/components/ui/textarea"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
+import {
+  DropdownMenu,
+  DropdownMenuCheckboxItem,
+  DropdownMenuContent,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu"
+import {
+  Shield,
+  RotateCw,
+  Gauge,
+  Activity,
+  Save,
+  Loader2,
+  Database,
+  ChevronDown,
+  KeyRound,
+  Eye,
+  EyeOff,
+  Archive,
+  Globe2,
+  Download,
+  RefreshCw,
+} from "lucide-react"
+import { api } from "@/lib/api"
+import { GeoIPStatus, Settings } from "@/lib/types"
+import { toast } from "sonner"
+
+const SUPPORTED_PROXY_PROTOCOLS = [
+  "http", "https", "socks4", "socks4a", "socks5",
+  "vless", "vmess", "trojan", "shadowsocks",
+]
+
+export default function SettingsPage() {
+  const [settings, setSettings] = React.useState<Settings | null>(null)
+  const [geoIPStatus, setGeoIPStatus] = React.useState<GeoIPStatus | null>(null)
+  const [isLoading, setIsLoading] = React.useState(true)
+  const [isSaving, setIsSaving] = React.useState(false)
+  const [isUpdatingGeoIP, setIsUpdatingGeoIP] = React.useState(false)
+
+  // Admin account state
+  const [adminUsername, setAdminUsername] = React.useState("")
+  const [newUsername, setNewUsername] = React.useState("")
+  const [currentPass, setCurrentPass] = React.useState("")
+  const [newPass, setNewPass] = React.useState("")
+  const [confirmPass, setConfirmPass] = React.useState("")
+  const [showPass, setShowPass] = React.useState(false)
+  const [changingPass, setChangingPass] = React.useState(false)
+
+  React.useEffect(() => {
+    const fetchSettings = async () => {
+      try {
+        const [data, adminInfo, geoStatus] = await Promise.all([
+          api.getSettings(),
+          api.getAdminInfo(),
+          api.getGeoIPStatus(),
+        ])
+        setSettings(data)
+        setGeoIPStatus(geoStatus)
+        setAdminUsername(adminInfo.username)
+        setNewUsername(adminInfo.username)
+      } catch (error) {
+        console.error("Failed to fetch settings:", error)
+      } finally {
+        setIsLoading(false)
+      }
+    }
+
+    fetchSettings()
+  }, [])
+
+  const handleChangePassword = async () => {
+    if (!currentPass) { toast.error("Enter your current password"); return }
+    if (!newPass) { toast.error("Enter a new password"); return }
+    if (newPass.length < 6) { toast.error("New password must be at least 6 characters"); return }
+    if (newPass !== confirmPass) { toast.error("Passwords don't match"); return }
+
+    setChangingPass(true)
+    try {
+      const opts: { current_password: string; new_password: string; new_username?: string } = {
+        current_password: currentPass,
+        new_password: newPass,
+      }
+      if (newUsername && newUsername !== adminUsername) {
+        opts.new_username = newUsername
+      }
+      const res = await api.changePassword(opts)
+      setAdminUsername(res.username)
+      setNewUsername(res.username)
+      setCurrentPass("")
+      setNewPass("")
+      setConfirmPass("")
+      toast.success("Credentials updated successfully")
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Failed to change password")
+    } finally {
+      setChangingPass(false)
+    }
+  }
+
+  const handleSave = async () => {
+    if (!settings) return
+
+    try {
+      setIsSaving(true)
+      const response = await api.updateSettings(settings)
+      setSettings(response.config)
+      setGeoIPStatus(await api.getGeoIPStatus())
+      toast.success("Settings saved successfully")
+    } catch (error) {
+      console.error("Failed to save settings:", error)
+      toast.error(error instanceof Error ? error.message : "Failed to save settings")
+    } finally {
+      setIsSaving(false)
+    }
+  }
+
+  const handleUpdateGeoIP = async () => {
+    setIsUpdatingGeoIP(true)
+    try {
+      const response = await api.updateGeoIPDatabase()
+      setGeoIPStatus(response.status)
+      const refreshedSettings = await api.getSettings()
+      setSettings(refreshedSettings)
+      toast.success("GeoIP database updated successfully")
+    } catch (error) {
+      setGeoIPStatus(await api.getGeoIPStatus().catch(() => geoIPStatus))
+      toast.error(error instanceof Error ? error.message : "Failed to update GeoIP database")
+    } finally {
+      setIsUpdatingGeoIP(false)
+    }
+  }
+
+  const refreshGeoIPStatus = async () => {
+    try {
+      setGeoIPStatus(await api.getGeoIPStatus())
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to refresh GeoIP status")
+    }
+  }
+
+  const handleReset = async () => {
+    if (!confirm("Are you sure you want to reset all settings to defaults?")) return
+
+    try {
+      setIsSaving(true)
+      const response = await api.resetSettings()
+      setSettings(response.config)
+      toast.success("Settings reset to defaults")
+    } catch (error) {
+      console.error("Failed to reset settings:", error)
+      toast.error("Failed to reset settings")
+    } finally {
+      setIsSaving(false)
+    }
+  }
+
+  if (isLoading || !settings) {
+    return (
+      <div className="flex items-center justify-center h-96">
+        <Loader2 className="h-8 w-8 animate-spin" />
+      </div>
+    )
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-3xl font-bold tracking-tight">Settings</h1>
+          <p className="text-muted-foreground">
+            Configure your Rota proxy rotation system
+          </p>
+        </div>
+        <div className="flex gap-2">
+          <Button variant="outline" size="lg" onClick={handleReset} disabled={isSaving}>
+            Reset to Defaults
+          </Button>
+          <Button size="lg" onClick={handleSave} disabled={isSaving}>
+            {isSaving ? (
+              <>
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                Saving...
+              </>
+            ) : (
+              <>
+                <Save className="mr-2 h-4 w-4" />
+                Save Configuration
+              </>
+            )}
+          </Button>
+        </div>
+      </div>
+
+      {/* Admin Account */}
+      <Card>
+        <CardHeader>
+          <div className="flex items-center gap-2">
+            <KeyRound className="h-5 w-5" />
+            <CardTitle>Admin Account</CardTitle>
+          </div>
+          <CardDescription>
+            Change the dashboard login credentials. Current user: <strong>{adminUsername}</strong>
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="grid gap-4 max-w-md">
+            <div className="space-y-1.5">
+              <Label>Username</Label>
+              <Input
+                value={newUsername}
+                onChange={e => setNewUsername(e.target.value)}
+                placeholder="New username (leave unchanged to keep)"
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label>Current password <span className="text-destructive">*</span></Label>
+              <div className="relative">
+                <Input
+                  type={showPass ? "text" : "password"}
+                  value={currentPass}
+                  onChange={e => setCurrentPass(e.target.value)}
+                  placeholder="Required to confirm any change"
+                  className="pr-10"
+                />
+                <button
+                  type="button"
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                  onClick={() => setShowPass(v => !v)}
+                >
+                  {showPass ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                </button>
+              </div>
+            </div>
+            <div className="space-y-1.5">
+              <Label>New password</Label>
+              <Input
+                type={showPass ? "text" : "password"}
+                value={newPass}
+                onChange={e => setNewPass(e.target.value)}
+                placeholder="Min 6 characters"
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label>Confirm new password</Label>
+              <Input
+                type={showPass ? "text" : "password"}
+                value={confirmPass}
+                onChange={e => setConfirmPass(e.target.value)}
+                placeholder="Repeat new password"
+              />
+            </div>
+            <Button
+              onClick={handleChangePassword}
+              disabled={changingPass || !currentPass || !newPass}
+              className="w-fit"
+            >
+              {changingPass
+                ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Saving…</>
+                : <><KeyRound className="mr-2 h-4 w-4" />Update credentials</>}
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Proxy Rotation Settings - Full Width (Most Important) */}
+      <Card>
+          <CardHeader>
+            <div className="flex items-center gap-2">
+              <RotateCw className="h-5 w-5" />
+              <CardTitle>Proxy Rotation</CardTitle>
+            </div>
+            <CardDescription>
+              Configure proxy rotation strategy and behavior
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="grid gap-6 md:grid-cols-2">
+              {/* Left Column */}
+              <div className="space-y-4">
+                <div className="space-y-2">
+                  <Label htmlFor="rotation-method">Rotation Method</Label>
+                  <Select
+                    value={settings.rotation.method}
+                    onValueChange={(value: string) =>
+                      setSettings({
+                        ...settings,
+                        rotation: { ...settings.rotation, method: value as Settings["rotation"]["method"] },
+                      })
+                    }
+                  >
+                    <SelectTrigger id="rotation-method">
+                      <SelectValue placeholder="Select method" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="random">Random</SelectItem>
+                      <SelectItem value="roundrobin">Round Robin</SelectItem>
+                      <SelectItem value="least_conn">Least Connections</SelectItem>
+                      <SelectItem value="time_based">Time Based</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                {settings.rotation.method === "time_based" && (
+                  <div className="space-y-2">
+                    <Label htmlFor="rotation-interval">Time Based Interval (seconds)</Label>
+                    <Input
+                      id="rotation-interval"
+                      type="number"
+                      value={settings.rotation.time_based?.interval || 120}
+                      onChange={(e) =>
+                        setSettings({
+                          ...settings,
+                          rotation: {
+                            ...settings.rotation,
+                            time_based: { interval: parseInt(e.target.value) },
+                          },
+                        })
+                      }
+                    />
+                  </div>
+                )}
+
+                <div className="space-y-2">
+                  <Label htmlFor="rotation-timeout">Timeout (seconds)</Label>
+                  <Input
+                    id="rotation-timeout"
+                    type="number"
+                    value={settings.rotation.timeout}
+                    onChange={(e) =>
+                      setSettings({
+                        ...settings,
+                        rotation: { ...settings.rotation, timeout: parseInt(e.target.value) },
+                      })
+                    }
+                  />
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="rotation-retries">Retries</Label>
+                  <Input
+                    id="rotation-retries"
+                    type="number"
+                    value={settings.rotation.retries}
+                    onChange={(e) =>
+                      setSettings({
+                        ...settings,
+                        rotation: { ...settings.rotation, retries: parseInt(e.target.value) },
+                      })
+                    }
+                  />
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="fallback-retries">Fallback Max Retries</Label>
+                  <Input
+                    id="fallback-retries"
+                    type="number"
+                    value={settings.rotation.fallback_max_retries}
+                    onChange={(e) =>
+                      setSettings({
+                        ...settings,
+                        rotation: { ...settings.rotation, fallback_max_retries: parseInt(e.target.value) },
+                      })
+                    }
+                  />
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="max-response-time">Max Response Time (ms)</Label>
+                  <Input
+                    id="max-response-time"
+                    type="number"
+                    value={settings.rotation.max_response_time || 0}
+                    onChange={(e) =>
+                      setSettings({
+                        ...settings,
+                        rotation: { ...settings.rotation, max_response_time: parseInt(e.target.value) || 0 },
+                      })
+                    }
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    0 means no limit. Only use proxies faster than this.
+                  </p>
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="min-success-rate">Min Success Rate (%)</Label>
+                  <Input
+                    id="min-success-rate"
+                    type="number"
+                    min="0"
+                    max="100"
+                    step="1"
+                    value={settings.rotation.min_success_rate || 0}
+                    onChange={(e) =>
+                      setSettings({
+                        ...settings,
+                        rotation: { ...settings.rotation, min_success_rate: parseFloat(e.target.value) || 0 },
+                      })
+                    }
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    0 means no minimum. Only use proxies with success rate above this.
+                  </p>
+                </div>
+              </div>
+
+              {/* Right Column */}
+              <div className="space-y-4">
+                <div className="flex items-center justify-between">
+                  <div className="space-y-0.5">
+                    <Label htmlFor="remove-unhealthy">Remove Unhealthy</Label>
+                    <p className="text-xs text-muted-foreground">
+                      Remove unhealthy proxies from rotation
+                    </p>
+                  </div>
+                  <Switch
+                    id="remove-unhealthy"
+                    checked={settings.rotation.remove_unhealthy}
+                    onCheckedChange={(checked) =>
+                      setSettings({
+                        ...settings,
+                        rotation: { ...settings.rotation, remove_unhealthy: checked },
+                      })
+                    }
+                  />
+                </div>
+
+                <div className="flex items-center justify-between">
+                  <div className="space-y-0.5">
+                    <Label htmlFor="fallback">Enable Fallback</Label>
+                    <p className="text-xs text-muted-foreground">
+                      Continuous operation in case of failures
+                    </p>
+                  </div>
+                  <Switch
+                    id="fallback"
+                    checked={settings.rotation.fallback}
+                    onCheckedChange={(checked) =>
+                      setSettings({
+                        ...settings,
+                        rotation: { ...settings.rotation, fallback: checked },
+                      })
+                    }
+                  />
+                </div>
+
+                <div className="flex items-center justify-between">
+                  <div className="space-y-0.5">
+                    <Label htmlFor="follow-redirect">Follow Redirect</Label>
+                    <p className="text-xs text-muted-foreground">
+                      Follow HTTP redirections
+                    </p>
+                  </div>
+                  <Switch
+                    id="follow-redirect"
+                    checked={settings.rotation.follow_redirect}
+                    onCheckedChange={(checked) =>
+                      setSettings({
+                        ...settings,
+                        rotation: { ...settings.rotation, follow_redirect: checked },
+                      })
+                    }
+                  />
+                </div>
+
+                <div className="space-y-2">
+                  <Label>Allowed Protocols</Label>
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <Button variant="outline" className="w-full justify-between">
+                        <span>
+                          {settings.rotation.allowed_protocols?.length === SUPPORTED_PROXY_PROTOCOLS.length
+                            ? "All Protocols"
+                            : settings.rotation.allowed_protocols?.length > 0
+                            ? `${settings.rotation.allowed_protocols.length} selected`
+                            : "Select protocols"}
+                        </span>
+                        <ChevronDown className="ml-2 h-4 w-4" />
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent className="w-56">
+                      <DropdownMenuLabel>Select Protocols</DropdownMenuLabel>
+                      <DropdownMenuSeparator />
+                      {SUPPORTED_PROXY_PROTOCOLS.map((protocol) => (
+                        <DropdownMenuCheckboxItem
+                          key={protocol}
+                          checked={settings.rotation.allowed_protocols?.includes(protocol)}
+                          onCheckedChange={(checked) => {
+                            const current = settings.rotation.allowed_protocols || [];
+                            const updated = checked
+                              ? [...current, protocol]
+                              : current.filter(p => p !== protocol);
+                            setSettings({
+                              ...settings,
+                              rotation: { ...settings.rotation, allowed_protocols: updated },
+                            });
+                          }}
+                        >
+                          {protocol.toUpperCase()}
+                        </DropdownMenuCheckboxItem>
+                      ))}
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                  <p className="text-xs text-muted-foreground">
+                    Select which protocols to use for proxy rotation
+                  </p>
+                </div>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+
+      {/* Other Settings in 2-column grid */}
+      <div className="grid gap-4 md:grid-cols-2">
+        {/* Authentication Settings */}
+        <Card>
+          <CardHeader>
+            <div className="flex items-center gap-2">
+              <Shield className="h-5 w-5" />
+              <CardTitle>Authentication</CardTitle>
+            </div>
+            <CardDescription>
+              Basic authentication settings for your proxy server
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="flex items-center justify-between">
+              <div className="space-y-0.5">
+                <Label htmlFor="auth-enabled">Enable Authentication</Label>
+                <p className="text-xs text-muted-foreground">
+                  Require username and password for proxy connections
+                </p>
+              </div>
+              <Switch
+                id="auth-enabled"
+                checked={settings.authentication.enabled}
+                onCheckedChange={(checked) =>
+                  setSettings({
+                    ...settings,
+                    authentication: { ...settings.authentication, enabled: checked },
+                  })
+                }
+              />
+            </div>
+            {settings.authentication.enabled && (
+              <>
+                <div className="space-y-2">
+                  <Label htmlFor="auth-username">Username</Label>
+                  <Input
+                    id="auth-username"
+                    type="text"
+                    value={settings.authentication.username}
+                    onChange={(e) =>
+                      setSettings({
+                        ...settings,
+                        authentication: { ...settings.authentication, username: e.target.value },
+                      })
+                    }
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="auth-password">Password</Label>
+                  <Input
+                    id="auth-password"
+                    type="password"
+                    placeholder="Enter new password"
+                    onChange={(e) =>
+                      setSettings({
+                        ...settings,
+                        authentication: { ...settings.authentication, password: e.target.value },
+                      })
+                    }
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Leave empty to keep current password
+                  </p>
+                </div>
+              </>
+            )}
+          </CardContent>
+        </Card>
+
+        {/* Rate Limit Settings */}
+        <Card>
+          <CardHeader>
+            <div className="flex items-center gap-2">
+              <Gauge className="h-5 w-5" />
+              <CardTitle>Rate Limiting</CardTitle>
+            </div>
+            <CardDescription>
+              Control request rate limits
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="flex items-center justify-between">
+              <div className="space-y-0.5">
+                <Label htmlFor="rate-limit-enabled">Enable Rate Limiting</Label>
+                <p className="text-xs text-muted-foreground">
+                  Limit number of requests per interval
+                </p>
+              </div>
+              <Switch
+                id="rate-limit-enabled"
+                checked={settings.rate_limit.enabled}
+                onCheckedChange={(checked) =>
+                  setSettings({
+                    ...settings,
+                    rate_limit: { ...settings.rate_limit, enabled: checked },
+                  })
+                }
+              />
+            </div>
+
+            {settings.rate_limit.enabled && (
+              <>
+                <div className="space-y-2">
+                  <Label htmlFor="rate-limit-interval">Interval (seconds)</Label>
+                  <Input
+                    id="rate-limit-interval"
+                    type="number"
+                    value={settings.rate_limit.interval}
+                    onChange={(e) =>
+                      setSettings({
+                        ...settings,
+                        rate_limit: { ...settings.rate_limit, interval: parseInt(e.target.value) },
+                      })
+                    }
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="rate-limit-max">Max Requests per Interval</Label>
+                  <Input
+                    id="rate-limit-max"
+                    type="number"
+                    value={settings.rate_limit.max_requests}
+                    onChange={(e) =>
+                      setSettings({
+                        ...settings,
+                        rate_limit: { ...settings.rate_limit, max_requests: parseInt(e.target.value) },
+                      })
+                    }
+                  />
+                </div>
+              </>
+            )}
+          </CardContent>
+        </Card>
+
+        {/* Health Check Settings */}
+        <Card>
+          <CardHeader>
+            <div className="flex items-center gap-2">
+              <Activity className="h-5 w-5" />
+              <CardTitle>Health Check</CardTitle>
+            </div>
+            <CardDescription>
+              Configure proxy health monitoring
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="space-y-2">
+              <Label htmlFor="healthcheck-timeout">Timeout (seconds)</Label>
+              <Input
+                id="healthcheck-timeout"
+                type="number"
+                value={settings.healthcheck.timeout}
+                onChange={(e) =>
+                  setSettings({
+                    ...settings,
+                    healthcheck: { ...settings.healthcheck, timeout: parseInt(e.target.value) },
+                  })
+                }
+              />
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="healthcheck-workers">Number of Workers</Label>
+              <Input
+                id="healthcheck-workers"
+                type="number"
+                value={settings.healthcheck.workers}
+                onChange={(e) =>
+                  setSettings({
+                    ...settings,
+                    healthcheck: { ...settings.healthcheck, workers: parseInt(e.target.value) },
+                  })
+                }
+              />
+              <p className="text-xs text-muted-foreground">
+                Number of concurrent workers to check proxies
+              </p>
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="healthcheck-base-url">Base Connectivity URL</Label>
+              <Input
+                id="healthcheck-base-url"
+                type="url"
+                value={settings.healthcheck.base_url}
+                onChange={(e) =>
+                  setSettings({
+                    ...settings,
+                    healthcheck: { ...settings.healthcheck, base_url: e.target.value },
+                  })
+                }
+              />
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="healthcheck-base-status">Base Expected Status Code</Label>
+              <Input
+                id="healthcheck-base-status"
+                type="number"
+                min={100}
+                max={599}
+                value={settings.healthcheck.base_status}
+                onChange={(e) =>
+                  setSettings({
+                    ...settings,
+                    healthcheck: { ...settings.healthcheck, base_status: parseInt(e.target.value) },
+                  })
+                }
+              />
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="healthcheck-url">YouTube Check URL</Label>
+              <Input
+                id="healthcheck-url"
+                type="url"
+                value={settings.healthcheck.url}
+                onChange={(e) =>
+                  setSettings({
+                    ...settings,
+                    healthcheck: { ...settings.healthcheck, url: e.target.value },
+                  })
+                }
+              />
+              <p className="text-xs text-muted-foreground">
+                Only GET method is supported
+              </p>
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="healthcheck-status">YouTube Expected Status Code</Label>
+              <Input
+                id="healthcheck-status"
+                type="number"
+                value={settings.healthcheck.status}
+                onChange={(e) =>
+                  setSettings({
+                    ...settings,
+                    healthcheck: { ...settings.healthcheck, status: parseInt(e.target.value) },
+                  })
+                }
+              />
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="healthcheck-headers">Headers</Label>
+              <Textarea
+                id="healthcheck-headers"
+                placeholder="Content-Type: application/json&#10;User-Agent: Rota/1.0"
+                value={settings.healthcheck.headers.join("\n")}
+                onChange={(e) =>
+                  setSettings({
+                    ...settings,
+                    healthcheck: {
+                      ...settings.healthcheck,
+                      headers: e.target.value.split("\n").filter((h) => h.trim()),
+                    },
+                  })
+                }
+                rows={4}
+                className="font-mono text-sm"
+              />
+              <p className="text-xs text-muted-foreground">
+                One header per line in format: Key: Value
+              </p>
+            </div>
+
+            <div className="flex items-center justify-between gap-4">
+              <div className="space-y-0.5">
+                <Label htmlFor="healthcheck-strict-tls">Strict TLS Validation</Label>
+                <p className="text-xs text-muted-foreground">
+                  Require valid destination certificates during self-checks
+                </p>
+              </div>
+              <Switch
+                id="healthcheck-strict-tls"
+                checked={settings.healthcheck.strict_tls ?? false}
+                onCheckedChange={(checked) =>
+                  setSettings({
+                    ...settings,
+                    healthcheck: { ...settings.healthcheck, strict_tls: checked },
+                  })
+                }
+              />
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* Proxy Lifecycle Settings */}
+        <Card>
+          <CardHeader>
+            <div className="flex items-center gap-2">
+              <Archive className="h-5 w-5" />
+              <CardTitle>Proxy Lifecycle</CardTitle>
+            </div>
+            <CardDescription>
+              Configure failure observation windows and archival
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="flex items-center justify-between gap-4">
+              <Label htmlFor="auto-archive-enabled">Automatic Archival</Label>
+              <Switch
+                id="auto-archive-enabled"
+                checked={settings.proxy_lifecycle.auto_archive_enabled}
+                onCheckedChange={(checked) =>
+                  setSettings({
+                    ...settings,
+                    proxy_lifecycle: {
+                      ...settings.proxy_lifecycle,
+                      auto_archive_enabled: checked,
+                    },
+                  })
+                }
+              />
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="hard-unreachable-hours">Hard Unreachable Window (hours)</Label>
+              <Input
+                id="hard-unreachable-hours"
+                type="number"
+                min={1}
+                max={168}
+                value={settings.proxy_lifecycle.hard_unreachable_after_hours}
+                onChange={(e) =>
+                  setSettings({
+                    ...settings,
+                    proxy_lifecycle: {
+                      ...settings.proxy_lifecycle,
+                      hard_unreachable_after_hours: parseInt(e.target.value),
+                    },
+                  })
+                }
+              />
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="soft-unreachable-hours">Soft Unreachable Window (hours)</Label>
+              <Input
+                id="soft-unreachable-hours"
+                type="number"
+                min={1}
+                max={336}
+                value={settings.proxy_lifecycle.soft_unreachable_after_hours}
+                onChange={(e) =>
+                  setSettings({
+                    ...settings,
+                    proxy_lifecycle: {
+                      ...settings.proxy_lifecycle,
+                      soft_unreachable_after_hours: parseInt(e.target.value),
+                    },
+                  })
+                }
+              />
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="youtube-unusable-hours">YouTube Unusable Window (hours)</Label>
+              <Input
+                id="youtube-unusable-hours"
+                type="number"
+                min={1}
+                max={720}
+                value={settings.proxy_lifecycle.youtube_unusable_after_hours}
+                onChange={(e) =>
+                  setSettings({
+                    ...settings,
+                    proxy_lifecycle: {
+                      ...settings.proxy_lifecycle,
+                      youtube_unusable_after_hours: parseInt(e.target.value),
+                    },
+                  })
+                }
+              />
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* Log Retention Settings */}
+        <Card>
+          <CardHeader>
+            <div className="flex items-center gap-2">
+              <Database className="h-5 w-5" />
+              <CardTitle>Log Retention</CardTitle>
+            </div>
+            <CardDescription>
+              Configure automatic proxy log cleanup and compression
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="flex items-center justify-between">
+              <div className="space-y-0.5">
+                <Label htmlFor="log-retention-enabled">Enable Auto Cleanup</Label>
+                <p className="text-xs text-muted-foreground">
+                  Automatically delete old logs based on retention policy
+                </p>
+              </div>
+              <Switch
+                id="log-retention-enabled"
+                checked={settings.log_retention?.enabled ?? true}
+                onCheckedChange={(checked) =>
+                  setSettings({
+                    ...settings,
+                    log_retention: { ...settings.log_retention, enabled: checked },
+                  })
+                }
+              />
+            </div>
+
+            {settings.log_retention?.enabled && (
+              <>
+                <div className="space-y-2">
+                  <Label htmlFor="retention-days">Retention Period</Label>
+                  <Select
+                    value={settings.log_retention.retention_days?.toString() || "30"}
+                    onValueChange={(value) =>
+                      setSettings({
+                        ...settings,
+                        log_retention: {
+                          ...settings.log_retention,
+                          retention_days: parseInt(value),
+                        },
+                      })
+                    }
+                  >
+                    <SelectTrigger id="retention-days">
+                      <SelectValue placeholder="Select retention period" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="7">7 days</SelectItem>
+                      <SelectItem value="15">15 days</SelectItem>
+                      <SelectItem value="30">30 days (Recommended)</SelectItem>
+                      <SelectItem value="60">60 days</SelectItem>
+                      <SelectItem value="90">90 days</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <p className="text-xs text-muted-foreground">
+                    Proxy logs older than this will be permanently deleted
+                  </p>
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="compression-days">Compression After</Label>
+                  <Select
+                    value={settings.log_retention.compression_after_days?.toString() || "7"}
+                    onValueChange={(value) =>
+                      setSettings({
+                        ...settings,
+                        log_retention: {
+                          ...settings.log_retention,
+                          compression_after_days: parseInt(value),
+                        },
+                      })
+                    }
+                  >
+                    <SelectTrigger id="compression-days">
+                      <SelectValue placeholder="Select compression period" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="1">1 day</SelectItem>
+                      <SelectItem value="3">3 days</SelectItem>
+                      <SelectItem value="7">7 days (Recommended)</SelectItem>
+                      <SelectItem value="14">14 days</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <p className="text-xs text-muted-foreground">
+                    Logs older than this will be compressed to save space
+                  </p>
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="cleanup-interval">Cleanup Interval</Label>
+                  <Select
+                    value={settings.log_retention.cleanup_interval_hours?.toString() || "24"}
+                    onValueChange={(value) =>
+                      setSettings({
+                        ...settings,
+                        log_retention: {
+                          ...settings.log_retention,
+                          cleanup_interval_hours: parseInt(value),
+                        },
+                      })
+                    }
+                  >
+                    <SelectTrigger id="cleanup-interval">
+                      <SelectValue placeholder="Select cleanup interval" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="1">Every 1 hour</SelectItem>
+                      <SelectItem value="6">Every 6 hours</SelectItem>
+                      <SelectItem value="12">Every 12 hours</SelectItem>
+                      <SelectItem value="24">Every 24 hours (Recommended)</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <p className="text-xs text-muted-foreground">
+                    How often to run the cleanup job
+                  </p>
+                </div>
+
+                <div className="rounded-lg bg-muted p-3 text-sm">
+                  <p className="font-medium mb-1">Current Configuration:</p>
+                  <ul className="space-y-1 text-muted-foreground">
+                    <li>• Logs kept for {settings.log_retention.retention_days} days</li>
+                    <li>• Compressed after {settings.log_retention.compression_after_days} days</li>
+                    <li>• Cleanup runs every {settings.log_retention.cleanup_interval_hours} hours</li>
+                  </ul>
+                </div>
+              </>
+            )}
+          </CardContent>
+        </Card>
+
+        {/* GeoIP database management */}
+        <Card className="md:col-span-2">
+          <CardHeader>
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="flex items-center gap-2">
+                <Globe2 className="h-5 w-5" />
+                <CardTitle>GeoIP Database</CardTitle>
+              </div>
+              <div className="flex items-center gap-2">
+                <Button
+                  variant="outline"
+                  size="icon"
+                  onClick={refreshGeoIPStatus}
+                  disabled={isSaving || isUpdatingGeoIP}
+                  title="Refresh GeoIP status"
+                >
+                  <RefreshCw className="h-4 w-4" />
+                </Button>
+                {settings.geoip.provider === "maxmind" && geoIPStatus?.provider === "maxmind" && (
+                  <Button
+                    variant="outline"
+                    onClick={handleUpdateGeoIP}
+                    disabled={isSaving || isUpdatingGeoIP || geoIPStatus?.updating}
+                  >
+                    {isUpdatingGeoIP || geoIPStatus?.updating ? (
+                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                    ) : (
+                      <Download className="mr-2 h-4 w-4" />
+                    )}
+                    Update Database
+                  </Button>
+                )}
+              </div>
+            </div>
+            <CardDescription>Local IP location database and update policy</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-5">
+            <div className="grid gap-3 border-y py-4 text-sm sm:grid-cols-2 lg:grid-cols-4">
+              <div>
+                <div className="text-xs text-muted-foreground">Runtime</div>
+                <div className="font-medium">
+                  {geoIPStatus?.database_loaded ? "Database loaded" : "No database loaded"}
+                </div>
+              </div>
+              <div>
+                <div className="text-xs text-muted-foreground">Active source</div>
+                <div className="font-medium capitalize">{geoIPStatus?.source || "-"}</div>
+              </div>
+              <div>
+                <div className="text-xs text-muted-foreground">Database type</div>
+                <div className="font-medium">{geoIPStatus?.database_type || "-"}</div>
+              </div>
+              <div>
+                <div className="text-xs text-muted-foreground">Last managed update</div>
+                <div className="font-medium" suppressHydrationWarning>
+                  {geoIPStatus?.last_updated_at
+                    ? new Date(geoIPStatus.last_updated_at).toLocaleString()
+                    : "-"}
+                </div>
+              </div>
+            </div>
+
+            {geoIPStatus?.active_database_path && (
+              <div className="text-xs text-muted-foreground">
+                Active file: <code className="text-foreground">{geoIPStatus.active_database_path}</code>
+              </div>
+            )}
+            {geoIPStatus?.database_build_time && (
+              <div className="text-xs text-muted-foreground" suppressHydrationWarning>
+                Database build: {new Date(geoIPStatus.database_build_time).toLocaleString()}
+              </div>
+            )}
+            {geoIPStatus?.last_error && (
+              <div className="border-l-2 border-red-500 pl-3 text-sm text-red-500">
+                {geoIPStatus.last_error}
+              </div>
+            )}
+
+            <div className="grid gap-4 md:grid-cols-2">
+              <div className="space-y-2">
+                <Label htmlFor="geoip-provider">Provider</Label>
+                <Select
+                  value={settings.geoip.provider}
+                  onValueChange={(provider: "local" | "maxmind") =>
+                    setSettings({
+                      ...settings,
+                      geoip: { ...settings.geoip, provider },
+                    })
+                  }
+                >
+                  <SelectTrigger id="geoip-provider">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="local">Local bundled DB</SelectItem>
+                    <SelectItem value="maxmind">Managed MaxMind</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+
+              {settings.geoip.provider === "maxmind" && (
+                <div className="space-y-2">
+                  <Label htmlFor="geoip-db-path">Database path</Label>
+                  <Input
+                    id="geoip-db-path"
+                    value={settings.geoip.maxmind_db_path}
+                    onChange={(event) =>
+                      setSettings({
+                        ...settings,
+                        geoip: { ...settings.geoip, maxmind_db_path: event.target.value },
+                      })
+                    }
+                  />
+                </div>
+              )}
+            </div>
+
+            {settings.geoip.provider === "maxmind" && (
+              <div className="grid gap-4 border-t pt-4 md:grid-cols-2">
+                <div className="space-y-2">
+                  <Label htmlFor="maxmind-license">MaxMind license key</Label>
+                  <Input
+                    id="maxmind-license"
+                    type="password"
+                    value={settings.geoip.maxmind_license_key}
+                    placeholder={geoIPStatus?.license_configured ? "Configured; leave empty to keep" : "License key"}
+                    onChange={(event) =>
+                      setSettings({
+                        ...settings,
+                        geoip: { ...settings.geoip, maxmind_license_key: event.target.value },
+                      })
+                    }
+                  />
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="maxmind-url">Custom HTTPS download URL</Label>
+                  <Input
+                    id="maxmind-url"
+                    type="url"
+                    value={settings.geoip.maxmind_url}
+                    placeholder="https://..."
+                    onChange={(event) =>
+                      setSettings({
+                        ...settings,
+                        geoip: { ...settings.geoip, maxmind_url: event.target.value },
+                      })
+                    }
+                  />
+                </div>
+
+                <div className="flex items-center justify-between gap-4">
+                  <Label htmlFor="geoip-auto-update">Automatic updates</Label>
+                  <Switch
+                    id="geoip-auto-update"
+                    checked={settings.geoip.auto_update}
+                    onCheckedChange={(auto_update) =>
+                      setSettings({
+                        ...settings,
+                        geoip: { ...settings.geoip, auto_update },
+                      })
+                    }
+                  />
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="geoip-update-hours">Update interval (hours)</Label>
+                  <Input
+                    id="geoip-update-hours"
+                    type="number"
+                    min={1}
+                    max={8760}
+                    disabled={!settings.geoip.auto_update}
+                    value={settings.geoip.update_interval_hours}
+                    onChange={(event) =>
+                      setSettings({
+                        ...settings,
+                        geoip: {
+                          ...settings.geoip,
+                          update_interval_hours: parseInt(event.target.value) || 168,
+                        },
+                      })
+                    }
+                  />
+                </div>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      </div>
+    </div>
+  )
+}
