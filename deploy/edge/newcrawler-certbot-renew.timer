@@ -1,5 +1,5 @@
 [Unit]
-Description=Daily newcrawler Dashboard TLS certificate renewal check
+Description=Daily newcrawler control-plane TLS certificate renewal check
 
 [Timer]
 OnCalendar=*-*-* 04:17:00 UTC

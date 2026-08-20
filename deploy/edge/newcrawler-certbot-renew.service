@@ -1,5 +1,5 @@
 [Unit]
-Description=Renew the newcrawler Dashboard TLS certificate
+Description=Renew the newcrawler control-plane TLS certificate
 Requires=docker.service
 After=docker.service network-online.target
 
