@@ -2,8 +2,9 @@
 
 This ignored runtime hosts the isolated `qy-newcrawler` deployment.
 
-- Application source revision: `3890ea35a22d3610faaa0e562d27da87579a8568`
-- Immutable image tag: `pachongsys-3890ea3`
+- Immutable image tag: pinned by `QY_IMAGE_TAG` in the ignored runtime environment
+- Application source revision: recorded in each image's
+  `org.opencontainers.image.revision` OCI label
 - Dashboard: `https://newcrawdashboard.137-175-93-199.nip.io`
 - BullMQ: `https://newcrawqueues.137-175-93-199.nip.io/queues`
 - Rota: `https://newcrawrota.137-175-93-199.nip.io`
