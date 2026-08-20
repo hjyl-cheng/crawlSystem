@@ -2,7 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   DEFAULT_MANUAL_MIGRATION_BATCH_ID,
+  dispatchManualMigrationBatch,
   dispatchManualMigrationChannel,
+  normalizeManualMigrationBatchSelection,
+  prepareManualMigrationBatch,
   prepareManualMigration,
   schedulerConflict,
 } from "../src/manualMigrationDispatch.js";
@@ -66,6 +69,90 @@ test("manual migration does not replace another active crawler pipeline", () => 
   );
   assert.equal(schedulerConflict({ status: "stopped", pipeline_cycle_id: "old-batch" }), null);
   assert.equal(schedulerConflict({ status: "paused", pipeline_cycle_id: DEFAULT_MANUAL_MIGRATION_BATCH_ID }).code, "pipeline_paused");
+});
+
+test("manual batch migration accepts the dashboard selections including 500", () => {
+  assert.deepEqual(normalizeManualMigrationBatchSelection("500"), { selection: "500", limit: 500 });
+  assert.deepEqual(normalizeManualMigrationBatchSelection("all"), { selection: "all", limit: null });
+  assert.throws(
+    () => normalizeManualMigrationBatchSelection("499"),
+    (error) => error.code === "invalid_batch_selection",
+  );
+});
+
+test("a manual migration batch atomically rehomes eligible legacy Candidates for the Controller", async () => {
+  const batchCandidates = [
+    candidate(),
+    candidate({
+      candidate_id: 43,
+      channel_id: "UC2234567890123456789012",
+      channel_url: "https://www.youtube.com/channel/UC2234567890123456789012",
+      status: "failed",
+      snapshot_attempts: 4,
+    }),
+  ];
+  const queries = [];
+  const client = {
+    async query(sql, params = []) {
+      queries.push({ sql, params });
+      if (sql.includes("FROM crawler.settings") && sql.includes("FOR UPDATE")) {
+        return { rows: [{ value_json: { status: "stopped" } }] };
+      }
+      if (sql.includes("FROM crawler.channel_candidates") && sql.includes("ORDER BY priority")) {
+        return { rows: batchCandidates };
+      }
+      if (sql.includes("UPDATE crawler.channel_candidates") && sql.includes("RETURNING candidate_id")) {
+        return { rows: batchCandidates.map(({ candidate_id }) => ({ candidate_id })), rowCount: 2 };
+      }
+      return { rows: [], rowCount: 1 };
+    },
+  };
+
+  const result = await prepareManualMigrationBatch(client, {
+    selection: "500",
+    batchId: "manual-batch-500-test",
+  });
+
+  assert.equal(result.targetCount, 2);
+  assert.equal(result.batchId, "manual-batch-500-test");
+  assert.equal(result.firstCandidateId, 42);
+  assert.equal(result.lastCandidateId, 43);
+  assert.equal(
+    queries.some(({ sql }) => sql.includes("status='discovered'") && sql.includes("mode','dashboard_batch'")),
+    true,
+  );
+  assert.equal(
+    queries.some(({ sql }) => sql.includes("'status','finishing'") && sql.includes("manual_migration_batch_dispatch")),
+    true,
+  );
+});
+
+test("an empty manual migration batch does not activate the crawler pipeline", async () => {
+  const queries = [];
+  const client = {
+    async query(sql, params = []) {
+      queries.push({ sql, params });
+      if (sql.includes("FROM crawler.settings") && sql.includes("FOR UPDATE")) {
+        return { rows: [{ value_json: { status: "stopped" } }] };
+      }
+      if (sql.includes("FROM crawler.channel_candidates") && sql.includes("ORDER BY priority")) {
+        return { rows: [] };
+      }
+      return { rows: [], rowCount: 1 };
+    },
+  };
+
+  const result = await dispatchManualMigrationBatch({
+    selection: "500",
+    batchId: "manual-batch-empty-test",
+    transaction: (action) => action(client),
+  });
+
+  assert.equal(result.created, false);
+  assert.equal(result.target_count, 0);
+  assert.equal(result.batch_id, null);
+  assert.equal(queries.some(({ sql }) => sql.includes("INSERT INTO crawler.query_dispatch_batches")), false);
+  assert.equal(queries.some(({ sql }) => sql.includes("manual_migration_batch_dispatch")), false);
 });
 
 test("an in-progress Candidate makes a repeated click idempotent", async () => {

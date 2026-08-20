@@ -3432,6 +3432,7 @@ function migrationChannelListPage(migration) {
   const finalOptions = ["", "pending", "pending_detail", "pending_api", "pending_agent", "ready_auto", "ready_partial", "failed"];
   const batchOptions = [
     ["all", "all"],
+    ["500", "500"],
     ["1000", "1000"],
     ["2000", "2000"],
     ["5000", "5000"],
@@ -3490,7 +3491,7 @@ function migrationChannelListPage(migration) {
       <div class="field">
         <label for="batch-migration-selection">迁移数量</label>
         <select id="batch-migration-selection" name="selection">
-          ${batchOptions.map(([value, label]) => `<option value="${value}" ${value === "1000" ? "selected" : ""}>${label}</option>`).join("")}
+          ${batchOptions.map(([value, label]) => `<option value="${value}" ${value === "500" ? "selected" : ""}>${label}</option>`).join("")}
         </select>
       </div>
       <button class="btn btn-primary" type="submit">批量迁移</button>

@@ -12,7 +12,10 @@ import {
   updateDefaultAgentConfig,
 } from "./agentConfig.js";
 import { closeDb, ensureSchema, query, withTransaction } from "./db.js";
-import { dispatchManualMigrationChannel } from "./manualMigrationDispatch.js";
+import {
+  dispatchManualMigrationBatch,
+  dispatchManualMigrationChannel,
+} from "./manualMigrationDispatch.js";
 import {
   ManagedJobOutboxDispatcher,
   PostgresManagedJobDispatchRepository,
@@ -266,6 +269,11 @@ app.get("/api/queues", async (_req, res) => {
   const rows = Object.entries(stats).map(([name, counts]) => ({ name, counts }));
   res.json({ ok: true, queues: rows });
 });
+
+app.post("/api/migration/channels/batch", asyncRoute(async (req, res) => {
+  const result = await dispatchManualMigrationBatch({ selection: req.body?.selection });
+  res.status(result.created ? 201 : 200).json(result);
+}));
 
 app.post("/api/migration/channels/:channelId", asyncRoute(async (req, res) => {
   const result = await dispatchManualMigrationChannel({

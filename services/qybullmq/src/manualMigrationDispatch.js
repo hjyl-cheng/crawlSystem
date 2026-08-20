@@ -1,8 +1,10 @@
+import { randomUUID } from "node:crypto";
 import { query, withTransaction } from "./db.js";
 import { channelSnapshotPayload } from "./migrationDispatchPolicy.js";
 import { safeJobId } from "./queues.js";
 
 export const DEFAULT_MANUAL_MIGRATION_BATCH_ID = "legacy-results-manual-v1";
+export const MANUAL_MIGRATION_BATCH_SELECTIONS = Object.freeze([500, 1000, 2000, 5000, 10000]);
 
 const ACTIVE_SCHEDULER_STATUSES = new Set(["running", "finishing", "repairing"]);
 const IN_PROGRESS_CANDIDATE_STATUSES = new Set(["queued", "validating"]);
@@ -68,6 +70,22 @@ export function schedulerConflict(scheduler = {}, batchId = DEFAULT_MANUAL_MIGRA
   return null;
 }
 
+export function normalizeManualMigrationBatchSelection(value) {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  if (normalized === "all") return { selection: "all", limit: null };
+  const limit = Number(normalized);
+  if (!Number.isSafeInteger(limit) || !MANUAL_MIGRATION_BATCH_SELECTIONS.includes(limit)) {
+    throw new ManualMigrationDispatchError("selection must be one of: 500, 1000, 2000, 5000, 10000, all", {
+      code: "invalid_batch_selection",
+    });
+  }
+  return { selection: String(limit), limit };
+}
+
+function generatedManualBatchId() {
+  return `legacy-results-manual-${Date.now()}-${randomUUID().slice(0, 8)}`;
+}
+
 function manualPageId(batchId) {
   return `${batchId}:page:1`;
 }
@@ -123,6 +141,203 @@ async function loadCandidateForUpdate(client, channelId, candidateId) {
     [channelId, candidateId],
   );
   return result.rows[0] ?? null;
+}
+
+export async function prepareManualMigrationBatch(client, {
+  selection,
+  batchId = generatedManualBatchId(),
+  minSubscriberCount = 1000,
+} = {}) {
+  const normalizedSelection = normalizeManualMigrationBatchSelection(selection);
+  const normalizedBatchId = nonemptyText(batchId, "batch_id");
+
+  await client.query(
+    "SELECT pg_advisory_xact_lock(hashtext($1))",
+    ["manual-migration-batch-dispatch"],
+  );
+  const schedulerRows = await client.query(
+    `SELECT value_json
+     FROM crawler.settings
+     WHERE setting_key='query_scheduler'
+     LIMIT 1
+     FOR UPDATE`,
+  );
+  if (schedulerRows.rows.length === 0) {
+    throw new ManualMigrationDispatchError("query_scheduler setting is missing", {
+      statusCode: 503,
+      code: "scheduler_missing",
+    });
+  }
+  const conflict = schedulerConflict(schedulerRows.rows[0].value_json, normalizedBatchId);
+  if (conflict) {
+    throw new ManualMigrationDispatchError(conflict.message, {
+      statusCode: 409,
+      code: conflict.code,
+      details: schedulerRows.rows[0].value_json,
+    });
+  }
+
+  const candidates = await client.query(
+    `SELECT candidate_id,dispatch_batch_id,pipeline_cycle_id,channel_id,channel_url,
+            priority,status,snapshot_attempts,source_json
+     FROM crawler.channel_candidates
+     WHERE source_json->>'source'='legacy_results_db'
+       AND status IN ('discovered','failed')
+     ORDER BY priority DESC,candidate_id
+     LIMIT $1::int
+     FOR UPDATE`,
+    [normalizedSelection.limit],
+  );
+  if (candidates.rows.length === 0) {
+    return {
+      batchId: null,
+      selection: normalizedSelection.selection,
+      targetCount: 0,
+      firstCandidateId: null,
+      lastCandidateId: null,
+    };
+  }
+
+  const candidateIds = candidates.rows.map((candidate) => candidate.candidate_id);
+  const sourceBatchIds = [...new Set(
+    candidates.rows.map((candidate) => String(candidate.dispatch_batch_id || "").trim()).filter(Boolean),
+  )];
+  const pageId = manualPageId(normalizedBatchId);
+  const metadata = {
+    source: "results.db",
+    purpose: "manual_migration_batch",
+    migration_dispatcher: {
+      mode: "dashboard_batch",
+      selection: normalizedSelection.selection,
+      target_count: candidateIds.length,
+      source_batch_ids: sourceBatchIds,
+      min_subscriber_count: Number(minSubscriberCount),
+      first_candidate_id: candidateIds[0],
+      last_candidate_id: candidateIds.at(-1),
+    },
+  };
+
+  await client.query(
+    `INSERT INTO crawler.query_dispatch_batches (
+       dispatch_batch_id,pipeline_cycle_id,status,discovered_candidate_count,
+       discovery_closed_at,result_json,updated_at
+     ) VALUES ($1,$1,'discovery_closed',$2,now(),$3::jsonb,now())`,
+    [normalizedBatchId, candidateIds.length, JSON.stringify(metadata)],
+  );
+  await client.query(
+    `INSERT INTO crawler.query_pages (
+       page_id,query_text,page_no,status,candidate_count,should_continue,
+       stop_reason,result_json,dispatch_batch_id,finished_at,updated_at
+     ) VALUES ($1,'results.db batch migration',1,'done',$2,false,
+               'manual_migration_batch',$3::jsonb,$4,now(),now())`,
+    [pageId, candidateIds.length, JSON.stringify(metadata), normalizedBatchId],
+  );
+  const updatedCandidates = await client.query(
+    `UPDATE crawler.channel_candidates
+     SET dispatch_batch_id=$2,pipeline_cycle_id=$2,status='discovered',
+         snapshot_attempts=CASE WHEN status='failed' THEN 0 ELSE snapshot_attempts END,
+         reject_reason=NULL,error_message=NULL,next_retry_at=NULL,
+         validation_started_at=NULL,validation_finished_at=NULL,accepted_at=NULL,
+         source_json=source_json || jsonb_build_object(
+           'manual_migration',jsonb_build_object(
+             'requested_at',now(),
+             'source_batch_id',dispatch_batch_id,
+             'batch_id',$2::text,
+             'mode','dashboard_batch'
+           )
+         ),
+         updated_at=now()
+     WHERE candidate_id=ANY($1::bigint[])
+       AND status IN ('discovered','failed')
+     RETURNING candidate_id`,
+    [candidateIds, normalizedBatchId],
+  );
+  if (updatedCandidates.rowCount !== candidateIds.length) {
+    throw new ManualMigrationDispatchError("migration candidate selection changed while preparing the batch", {
+      statusCode: 409,
+      code: "batch_selection_changed",
+      details: { expected: candidateIds.length, updated: updatedCandidates.rowCount },
+    });
+  }
+
+  await client.query(
+    `UPDATE crawler.channel_candidate_sources
+     SET page_id=$2,query_text='results.db batch migration',
+         source_json=source_json || jsonb_build_object(
+           'manual_migration_batch_id',$3::text,
+           'manual_migration_requested_at',now()
+         )
+     WHERE candidate_id=ANY($1::bigint[])`,
+    [candidateIds, pageId, normalizedBatchId],
+  );
+  await client.query(
+    `INSERT INTO crawler.channel_candidate_sources (
+       candidate_id,page_id,query_text,discovery_strategy,source_json
+     )
+     SELECT selected.candidate_id,$2,'results.db batch migration','manual_migration',
+            jsonb_build_object('manual_migration_batch_id',$3::text)
+     FROM unnest($1::bigint[]) AS selected(candidate_id)
+     WHERE NOT EXISTS (
+       SELECT 1
+       FROM crawler.channel_candidate_sources source
+       WHERE source.candidate_id=selected.candidate_id
+     )`,
+    [candidateIds, pageId, normalizedBatchId],
+  );
+  await refreshBatchCounts(client, normalizedBatchId);
+  for (const sourceBatchId of sourceBatchIds) {
+    if (sourceBatchId === normalizedBatchId) continue;
+    await refreshBatchCounts(client, sourceBatchId);
+    await refreshSourcePageCounts(client, sourceBatchId);
+  }
+
+  const now = new Date().toISOString();
+  await client.query(
+    `UPDATE crawler.settings
+     SET value_json=value_json || jsonb_build_object(
+           'status','finishing',
+           'pipeline_cycle_id',$2::text,
+           'started_at',$3::text,
+           'paused_at',NULL,
+           'stopped_at',NULL,
+           'completed_at',NULL,
+           'stop_reason','manual_migration_batch_dispatch',
+           'updated_at',$3::text,
+           'updated_by','manualMigrationDispatch'
+         ),updated_at=now()
+     WHERE setting_key=$1`,
+    ["query_scheduler", normalizedBatchId, now],
+  );
+
+  return {
+    batchId: normalizedBatchId,
+    selection: normalizedSelection.selection,
+    targetCount: candidateIds.length,
+    firstCandidateId: candidateIds[0],
+    lastCandidateId: candidateIds.at(-1),
+  };
+}
+
+export async function dispatchManualMigrationBatch({
+  selection,
+  batchId = generatedManualBatchId(),
+  minSubscriberCount = Number(process.env.MIN_SUBSCRIBER_COUNT || 1000),
+  transaction = withTransaction,
+} = {}) {
+  const prepared = await transaction((client) => prepareManualMigrationBatch(client, {
+    selection,
+    batchId,
+    minSubscriberCount,
+  }));
+  return {
+    ok: true,
+    created: prepared.targetCount > 0,
+    selection: prepared.selection,
+    target_count: prepared.targetCount,
+    batch_id: prepared.batchId,
+    first_candidate_id: prepared.firstCandidateId,
+    last_candidate_id: prepared.lastCandidateId,
+  };
 }
 
 export async function prepareManualMigration(client, {
