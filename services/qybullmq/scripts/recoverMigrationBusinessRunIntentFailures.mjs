@@ -1,10 +1,12 @@
 #!/usr/bin/env node
 
 import process from "node:process";
+import { fileURLToPath } from "node:url";
 import { Queue } from "bullmq";
 import pg from "pg";
 
 import { recoverMigrationBusinessRunIntentFailures } from "../src/migrationBusinessRunIntentRecovery.js";
+import { databaseUrl } from "../src/databaseConnection.js";
 import {
   MIGRATION_PROXY_CONTROL_PRESSURE_STATES,
   migrationProxyControlDispatchCapacity,
@@ -58,13 +60,9 @@ function parseArgs(argv) {
   return options;
 }
 
-function databaseConfig(environment = process.env) {
+export function migrationBusinessRunIntentDatabaseConfig(environment = process.env) {
   return {
-    host: environment.POSTGRES_HOST || "127.0.0.1",
-    port: Number(environment.POSTGRES_PORT || 5432),
-    user: environment.POSTGRES_USER || "bullmq",
-    password: environment.POSTGRES_PASSWORD || "bullmq",
-    database: environment.POSTGRES_DB || "bullmq_crawler",
+    connectionString: databaseUrl(environment),
     application_name: "bug-048-migration-business-run-intent-compat-recovery-v1",
     max: 2,
   };
@@ -85,7 +83,7 @@ function sleep(ms) {
 
 async function main() {
   const options = parseArgs(process.argv.slice(2));
-  const pool = new Pool(databaseConfig());
+  const pool = new Pool(migrationBusinessRunIntentDatabaseConfig());
   const queue = new Queue("youtube-channel-crawl", { connection: redisConfig() });
   const query = (sql, params) => pool.query(sql, params);
   const withTransaction = async (action) => {
@@ -138,10 +136,12 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  console.error(JSON.stringify({
-    event: "migration_business_run_intent_recovery_failed",
-    error: error?.stack || String(error),
-  }));
-  process.exitCode = 1;
-});
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  main().catch((error) => {
+    console.error(JSON.stringify({
+      event: "migration_business_run_intent_recovery_failed",
+      error: error?.stack || String(error),
+    }));
+    process.exitCode = 1;
+  });
+}

@@ -3,28 +3,15 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import pg from "pg";
 import { assertChannelExecutionIdentity } from "./channelExecutionContext.js";
+import { databaseUrl } from "./databaseConnection.js";
 import { crawlerRuntimeSchema } from "./publicationCurrentSchema.js";
 import { PUBLICATION_WRITER_VERSION } from "./publicationWriterVersion.js";
-import { environmentValue } from "./runtimeEnvironment.js";
+
+export { databaseUrl } from "./databaseConnection.js";
 
 const { Pool } = pg;
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-
-export function databaseUrl(environment = process.env) {
-  return environmentValue("DATABASE_URL", { environment, required: false }) || [
-    "postgres://",
-    encodeURIComponent(environment.POSTGRES_USER || "bullmq"),
-    ":",
-    encodeURIComponent(environment.POSTGRES_PASSWORD || "bullmq"),
-    "@",
-    environment.POSTGRES_HOST || "127.0.0.1",
-    ":",
-    environment.POSTGRES_PORT || "5432",
-    "/",
-    environment.POSTGRES_DB || "bullmq_crawler",
-  ].join("");
-}
 
 export const pool = new Pool({
   connectionString: databaseUrl(),

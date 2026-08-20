@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
 import {
@@ -10,6 +13,9 @@ import {
   recoverMigrationBusinessRunIntentFailures,
 } from "../src/migrationBusinessRunIntentRecovery.js";
 import { MIGRATION_PROXY_CONTROL_RECOVERY_OPERATION_ID } from "../src/migrationProxyControlRecovery.js";
+import {
+  migrationBusinessRunIntentDatabaseConfig,
+} from "../scripts/recoverMigrationBusinessRunIntentFailures.mjs";
 
 const batchId = "ytdlp-comments-migration-1000-20260818-v1";
 const candidateId = 30999;
@@ -98,6 +104,21 @@ function jobFixture(source = target(), overrides = {}) {
   };
   return { job, retried, source };
 }
+
+test("the recovery CLI uses the same file-backed crawler database URL as Workers", () => {
+  const directory = mkdtempSync(join(tmpdir(), "qy-migration-intent-recovery-"));
+  const file = join(directory, "database-url");
+  writeFileSync(file, "postgres://crawler-runtime\n");
+
+  const config = migrationBusinessRunIntentDatabaseConfig({
+    DATABASE_URL_FILE: file,
+    POSTGRES_HOST: "wrong-fallback-host",
+    POSTGRES_DB: "wrong-fallback-db",
+  });
+
+  assert.equal(config.connectionString, "postgres://crawler-runtime");
+  assert.equal(Object.prototype.hasOwnProperty.call(config, "host"), false);
+});
 
 test("the compatibility selector accepts pre-bind failures but still requires no Run", () => {
   assert.match(MIGRATION_BUSINESS_RUN_INTENT_TARGET_SQL, /dispatch_batch_id=\$1/);
