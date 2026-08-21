@@ -406,6 +406,8 @@ test("Projector treats an already absent retracted Channel as covered", async ()
         return result([{ channel_id: channelId, version_vector: null }]);
       }
       if (text.includes("business-publication-projector:covered-retractions")) {
+        assert.match(text, /ON search\.channel_id=target\.channel_id/);
+        assert.doesNotMatch(text, /creator_search_live search USING\(channel_id\)/);
         assert.equal(JSON.parse(params[0])[0].channel_id, channelId);
         return result([{ channel_id: channelId }]);
       }

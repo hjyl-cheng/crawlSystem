@@ -167,7 +167,8 @@ async function findAlreadyAbsentRetractions(client, versionVectors) {
       AND revision.result_hash=target.version_vector #>> '{channel,result_hash}'
       AND revision.revision_type='retraction'
       AND revision.operation='retract_channel'
-     LEFT JOIN public.creator_search_live search USING(channel_id)
+     LEFT JOIN public.creator_search_live search
+       ON search.channel_id=target.channel_id
      WHERE search.channel_id IS NULL
      ORDER BY target.channel_id`,
     [JSON.stringify(targets)],
