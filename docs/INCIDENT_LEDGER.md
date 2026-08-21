@@ -26,6 +26,10 @@
   `backfillVideoPublicationItemHashes.mjs` command, followed by normal
   Publication reconciliation. Historical Revisions and Business tables must
   not be edited directly.
+- Repair tooling: a Video-only reconciliation must validate the Business
+  database identity, Channel count, and active watermark, but it must not load
+  or compare a Channel preservation baseline. Preservation is required only
+  when the requested Domains include `channel`.
 
 ## INC-20260821-003: Shared Feature Services Used a Bundled Database Alias
 

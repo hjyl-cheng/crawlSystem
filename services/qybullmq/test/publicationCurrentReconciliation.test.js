@@ -54,6 +54,7 @@ function result(channelId, {
   resultHash = RESULT_HASH,
   dataSequence = 2,
   carriedForwardFields = ["links"],
+  domain = "channel",
 } = {}) {
   return {
     status: status === "revision_created" ? "revised" : status,
@@ -61,7 +62,7 @@ function result(channelId, {
     channel_id: channelId,
     seed_status: "complete",
     domains: [{
-      domain: "channel",
+      domain,
       status,
       result_hash: resultHash,
       data_sequence: dataSequence,
@@ -70,7 +71,7 @@ function result(channelId, {
         : "11111111-1111-4111-8111-111111111112",
       carried_forward_fields: carriedForwardFields,
     }],
-    revisions: status === "revision_created" ? [{ domain: "channel" }] : [],
+    revisions: status === "revision_created" ? [{ domain }] : [],
   };
 }
 
@@ -130,6 +131,7 @@ function fakePool(config, target, { unexpectedOpenDeliveryCount = 0 } = {}) {
 function fakeBusinessPool(config, target, {
   activeWatermark = "business-release-20260725",
   title = "Trusted Business title",
+  preservationRows = null,
 } = {}) {
   const calls = [];
   return {
@@ -148,7 +150,7 @@ function fakeBusinessPool(config, target, {
             }] };
           }
           if (statement.includes("publication-current-reconciliation:business-preservation")) {
-            return { rows: target.channel_ids.map((channelId, index) => ({
+            return { rows: preservationRows ?? target.channel_ids.map((channelId, index) => ({
               target_channel_id: channelId,
               active_watermark: activeWatermark,
               snapshot_id: `business-snapshot-${index}`,
@@ -362,6 +364,79 @@ test("rollback preview executes the real Reconciler but commits no writes", asyn
   assert.match(
     publicationCurrentReconciliationConfirmation(config, target, evidence),
     /^RECONCILE_PUBLICATION_CURRENT:/,
+  );
+});
+
+test("video-only reconciliation does not require a Business Channel preservation baseline", async () => {
+  const config = publicationCurrentReconciliationConfig(environment({
+    PUBLICATION_RECONCILE_DOMAINS: "video",
+  }));
+  const target = buildPublicationCurrentReconciliationTarget(config, CHANNEL_IDS);
+  const businessPool = fakeBusinessPool(config, target, {
+    preservationRows: target.channel_ids.map((channelId) => ({
+      target_channel_id: channelId,
+      active_watermark: "business-release-20260725",
+      snapshot_id: null,
+      registry_exists: true,
+      historical_snapshot_exists: true,
+    })),
+  });
+  const reconciled = [];
+  const administrator = new PublicationCurrentReconciliationAdministrator({
+    crawlerPool: fakePool(config, target),
+    businessPool,
+    config,
+    target,
+    reconcile: async (_client, input) => {
+      reconciled.push(input);
+      return result(input.channelId, { domain: "video", carriedForwardFields: [] });
+    },
+    lock: async () => {},
+  });
+
+  const evidence = await administrator.inspectRollbackPreview({
+    generatedAt: "2026-07-29T02:01:00.000Z",
+  });
+
+  assert.equal(
+    businessPool.calls.some((call) => (
+      call.sql.includes("publication-current-reconciliation:business-preservation")
+    )),
+    false,
+  );
+  assert.equal(evidence.business_state.target_active_snapshot_count, 0);
+  assert.equal(evidence.channels.every((channel) => channel.preservation_baseline === null), true);
+  assert.equal(reconciled.every((input) => input.preservationBaselines === undefined), true);
+  assert.deepEqual(publicationCurrentReconciliationSummary(evidence).business_preservation_baselines, {});
+
+  const applyBusinessPool = fakeBusinessPool(config, target, {
+    preservationRows: target.channel_ids.map((channelId) => ({
+      target_channel_id: channelId,
+      active_watermark: "business-release-20260725",
+      snapshot_id: null,
+      registry_exists: true,
+      historical_snapshot_exists: true,
+    })),
+  });
+  const apply = new PublicationCurrentReconciliationAdministrator({
+    crawlerPool: fakePool(config, target),
+    businessPool: applyBusinessPool,
+    config,
+    target,
+    evidence,
+    reconcile: async (_client, input) => (
+      result(input.channelId, { domain: "video", carriedForwardFields: [] })
+    ),
+    lock: async () => {},
+  });
+
+  const applied = await apply.apply();
+  assert.equal(applied.succeeded, CHANNEL_IDS.length);
+  assert.equal(
+    applyBusinessPool.calls.some((call) => (
+      call.sql.includes("publication-current-reconciliation:business-preservation")
+    )),
+    false,
   );
 });
 

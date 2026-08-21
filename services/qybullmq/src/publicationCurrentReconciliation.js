@@ -337,6 +337,9 @@ function countBy(values, select) {
 
 export function publicationCurrentReconciliationSummary(evidence) {
   const channels = evidence.channels ?? [];
+  const preservationBaselines = channels
+    .map((channel) => channel.preservation_baseline)
+    .filter((baseline) => baseline && typeof baseline === "object");
   const domains = {};
   for (const domain of evidence.target.domains) {
     const results = channels.map((channel) => (
@@ -354,8 +357,8 @@ export function publicationCurrentReconciliationSummary(evidence) {
     channel_count: evidence.target.channel_count,
     channel_outcomes: countBy(channels, (channel) => channel.result.status),
     business_preservation_baselines: countBy(
-      channels,
-      (channel) => channel.preservation_baseline.status,
+      preservationBaselines,
+      (baseline) => baseline.status,
     ),
     domains,
     crawler_refetch_performed: false,
@@ -494,10 +497,10 @@ async function inspectBusinessState(pool, config, target) {
               (SELECT watermark FROM public.creator_search_active WHERE singleton=true)
                 AS active_watermark`,
     )).rows[0];
-    const baselineResult = await client.query(
-      BUSINESS_CHANNEL_PRESERVATION_SQL,
-      [target.channel_ids],
-    );
+    const requiresChannelPreservation = target.domains.includes("channel");
+    const baselineResult = requiresChannelPreservation
+      ? await client.query(BUSINESS_CHANNEL_PRESERVATION_SQL, [target.channel_ids])
+      : { rows: [] };
     await client.query("COMMIT");
     const state = {
       database_name: identity?.database_name ?? null,
@@ -517,11 +520,13 @@ async function inspectBusinessState(pool, config, target) {
       });
     }
     if (!state.active_watermark) fail("Business Active Watermark is missing");
-    const baselines = buildBusinessChannelPreservationBaselines(
-      baselineResult.rows,
-      target.channel_ids,
-      { databaseName: state.database_name },
-    );
+    const baselines = requiresChannelPreservation
+      ? buildBusinessChannelPreservationBaselines(
+        baselineResult.rows,
+        target.channel_ids,
+        { databaseName: state.database_name },
+      )
+      : new Map();
     return {
       state: {
         ...state,
@@ -658,7 +663,7 @@ export class PublicationCurrentReconciliationAdministrator {
     if (failure) throw failure.error;
     const channels = previews.map((item) => ({
       channel_id: item.value.channel_id,
-      preservation_baseline: business.baselines.get(item.value.channel_id),
+      preservation_baseline: business.baselines.get(item.value.channel_id) ?? null,
       result: item.value.result,
     }));
     return buildPublicationCurrentReconciliationEvidence({
@@ -692,15 +697,17 @@ export class PublicationCurrentReconciliationAdministrator {
     const expectedByChannel = new Map(
       approved.channels.map((channel) => [channel.channel_id, channel]),
     );
-    for (const channelId of this.target.channel_ids) {
-      const expected = expectedByChannel.get(channelId).preservation_baseline;
-      const actual = business.baselines.get(channelId);
-      if (!isDeepStrictEqual(actual, expected)) {
-        fail("Business preservation baseline changed after the approved reconciliation plan", {
-          channel_id: channelId,
-          approved: expected,
-          actual,
-        });
+    if (this.target.domains.includes("channel")) {
+      for (const channelId of this.target.channel_ids) {
+        const expected = expectedByChannel.get(channelId).preservation_baseline;
+        const actual = business.baselines.get(channelId);
+        if (!isDeepStrictEqual(actual, expected)) {
+          fail("Business preservation baseline changed after the approved reconciliation plan", {
+            channel_id: channelId,
+            approved: expected,
+            actual,
+          });
+        }
       }
     }
     const applied = await mapConcurrent(
