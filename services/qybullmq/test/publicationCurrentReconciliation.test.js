@@ -4,7 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { publicationCurrentReconciliationCommand } from "../scripts/reconcilePublicationCurrent.mjs";
-import { buildBusinessChannelPreservationBaselines } from "../src/publicationBusinessPreservation.js";
+import {
+  BUSINESS_CHANNEL_PRESERVATION_SQL,
+  buildBusinessChannelPreservationBaselines,
+} from "../src/publicationBusinessPreservation.js";
 import {
   PublicationCurrentReconciliationAdministrator,
   PublicationCurrentReconciliationPartialFailure,
@@ -242,6 +245,32 @@ test("Business Active Snapshots become bounded Channel preservation baselines", 
         historical_snapshot: false,
       },
     },
+  });
+});
+
+test("Business preservation follows the active Creator Search storage mode", () => {
+  assert.match(BUSINESS_CHANNEL_PRESERVATION_SQL, /creator_search_storage_state/);
+  assert.match(BUSINESS_CHANNEL_PRESERVATION_SQL, /public\.creator_search_live/);
+  assert.match(BUSINESS_CHANNEL_PRESERVATION_SQL, /public\.creator_search_current/);
+
+  const baselines = buildBusinessChannelPreservationBaselines([{
+    target_channel_id: CHANNEL_IDS[0],
+    storage_read_mode: "live",
+    active_watermark: "publication-projection-live",
+    snapshot_id: "snapshot-live",
+    snapshot_channel_id: CHANNEL_IDS[0],
+    snapshot_captured_at: "2026-08-21T01:00:00.000Z",
+    title: "Live Channel",
+    channel_url: `https://www.youtube.com/channel/${CHANNEL_IDS[0]}`,
+    link_id: null,
+  }], [CHANNEL_IDS[0]], { databaseName: "yewu_business" });
+
+  assert.deepEqual(baselines.get(CHANNEL_IDS[0]).source, {
+    type: "business_live_snapshot",
+    database_name: "yewu_business",
+    active_watermark: "publication-projection-live",
+    snapshot_id: "snapshot-live",
+    captured_at: "2026-08-21T01:00:00.000Z",
   });
 });
 

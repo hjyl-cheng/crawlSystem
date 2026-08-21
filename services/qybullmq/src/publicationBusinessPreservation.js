@@ -9,13 +9,37 @@ export const BUSINESS_CHANNEL_PRESERVATION_SQL = `/* publication-current-reconci
 WITH target AS (
   SELECT channel_id,ordinality::int AS target_position
   FROM unnest($1::text[]) WITH ORDINALITY AS requested(channel_id,ordinality)
+), storage_state AS (
+  SELECT COALESCE((
+    SELECT read_mode
+    FROM publication.creator_search_storage_state
+    WHERE singleton=true
+  ),'legacy') AS read_mode
 ), active_release AS (
   SELECT watermark
   FROM public.creator_search_active
   WHERE singleton=true
+), active_search AS (
+  SELECT target.channel_id AS target_channel_id,state.read_mode AS storage_read_mode,
+         search.watermark,search.snapshot_id,search.channel_id AS snapshot_channel_id
+  FROM target
+  CROSS JOIN storage_state state
+  LEFT JOIN public.creator_search_live search
+    ON search.channel_id=target.channel_id
+  WHERE state.read_mode='live'
+  UNION ALL
+  SELECT target.channel_id AS target_channel_id,state.read_mode AS storage_read_mode,
+         release.watermark,search.snapshot_id,search.channel_id AS snapshot_channel_id
+  FROM target
+  CROSS JOIN storage_state state
+  CROSS JOIN active_release release
+  LEFT JOIN public.creator_search_current search
+    ON search.watermark=release.watermark AND search.channel_id=target.channel_id
+  WHERE state.read_mode='legacy'
 ), active_snapshot AS (
   SELECT target.channel_id AS target_channel_id,target.target_position,
-         release.watermark AS active_watermark,
+         search.storage_read_mode,
+         COALESCE(search.watermark,release.watermark) AS active_watermark,
          snapshot.id AS snapshot_id,snapshot.channel_id AS snapshot_channel_id,
          snapshot.captured_at AS snapshot_captured_at,
          snapshot.title,snapshot.handle,snapshot.avatar_url,snapshot.description,
@@ -36,10 +60,9 @@ WITH target AS (
          snapshot.raw_channel->>'country_canonical_name' AS raw_country_canonical_name
   FROM target
   CROSS JOIN active_release release
-  LEFT JOIN public.creator_search_current search
-    ON search.watermark=release.watermark AND search.channel_id=target.channel_id
+  LEFT JOIN active_search search ON search.target_channel_id=target.channel_id
   LEFT JOIN public.channel_snapshots snapshot
-    ON snapshot.id=search.snapshot_id AND snapshot.channel_id=search.channel_id
+    ON snapshot.id=search.snapshot_id AND snapshot.channel_id=search.snapshot_channel_id
 )
 SELECT active.*,
        link.id AS link_id,link.link_type,link.url AS link_url,link.title AS link_title,
@@ -86,6 +109,14 @@ function joinedStatus(value) {
   return metricStatus(value);
 }
 
+function storageReadMode(value) {
+  const mode = text(value) ?? "legacy";
+  if (mode !== "legacy" && mode !== "live") {
+    throw new TypeError(`Business Creator Search storage mode is unsupported: ${mode}`);
+  }
+  return mode;
+}
+
 function addText(payload, key, value) {
   const output = text(value);
   if (output) payload[key] = output;
@@ -118,9 +149,11 @@ function canonicalLinks(rows, channelId) {
 
 function availableBaseline(rows, databaseName, channelId) {
   const row = rows[0];
+  const readMode = storageReadMode(row.storage_read_mode);
   if (rows.some((value) => (
     text(value.snapshot_id) !== text(row.snapshot_id)
     || text(value.active_watermark) !== text(row.active_watermark)
+    || storageReadMode(value.storage_read_mode) !== readMode
   ))) {
     throw new TypeError(`Business Active Snapshot is inconsistent: ${channelId}`);
   }
@@ -177,7 +210,7 @@ function availableBaseline(rows, databaseName, channelId) {
     payload,
     payload_hash: observationFactsHash(payload),
     source: {
-      type: "legacy_business_active_snapshot",
+      type: readMode === "live" ? "business_live_snapshot" : "legacy_business_active_snapshot",
       database_name: databaseName,
       active_watermark: text(row.active_watermark),
       snapshot_id: text(row.snapshot_id),
@@ -217,6 +250,7 @@ export function buildBusinessChannelPreservationBaselines(
   return new Map(channelIds.map((channelId) => {
     const rows = grouped.get(channelId);
     const row = rows[0];
+    const readMode = storageReadMode(row.storage_read_mode);
     const activeWatermark = text(row.active_watermark);
     if (!activeWatermark) throw new TypeError("Business Active Watermark is missing");
     if (!text(row.snapshot_id)) {
@@ -236,7 +270,9 @@ export function buildBusinessChannelPreservationBaselines(
         payload: null,
         payload_hash: null,
         source: {
-          type: "legacy_business_active_snapshot_lookup",
+          type: readMode === "live"
+            ? "business_live_snapshot_lookup"
+            : "legacy_business_active_snapshot_lookup",
           database_name: expectedDatabase,
           active_watermark: activeWatermark,
           absence_checks: {
