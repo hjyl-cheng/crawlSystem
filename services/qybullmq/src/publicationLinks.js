@@ -151,7 +151,8 @@ export function normalizePublicationLinks(rawLinks, { observed = Array.isArray(r
     seen.add(targetUrl);
     const inferredType = publicationLinkType(targetUrl);
     const declaredType = text(raw.link_type);
-    const type = LINK_TYPES.has(declaredType) ? declaredType : inferredType;
+    const declaredTypeConflicts = LINK_TYPES.has(declaredType) && declaredType !== inferredType;
+    const type = inferredType;
     const title = text(raw.title);
     const displayUrl = text(raw.display_url) ?? text(raw.displayUrl);
     const declaredPurpose = text(raw.purpose);
@@ -162,7 +163,7 @@ export function normalizePublicationLinks(rawLinks, { observed = Array.isArray(r
       favicon_url: normalizePublicationImageUrl(raw.favicon_url ?? raw.faviconUrl),
       position: nonnegativeInteger(raw.position) ?? index,
       link_type: type,
-      purpose: LINK_PURPOSES.has(declaredPurpose)
+      purpose: !declaredTypeConflicts && LINK_PURPOSES.has(declaredPurpose)
         ? declaredPurpose
         : publicationLinkPurpose(type, title, displayUrl),
     });

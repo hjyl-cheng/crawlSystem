@@ -89,6 +89,24 @@ test("historical mailto-wrapped HTTP links recover to their original URL", () =>
   );
 });
 
+test("historical mailto-wrapped URLs cannot retain an email type", () => {
+  const result = normalizePublicationLinks([{
+    target_url: "mailto:https://www.youtube.com/@serragg2.0",
+    link_type: "email",
+    purpose: "contact",
+  }]);
+
+  assert.deepEqual(result.links[0], {
+    title: null,
+    display_url: null,
+    target_url: "https://www.youtube.com/@serragg2.0",
+    favicon_url: null,
+    position: 0,
+    link_type: "youtube",
+    purpose: "public_reference",
+  });
+});
+
 test("Links preserve source order, deduplicate canonical targets, and use Business vocabulary", () => {
   const result = normalizePublicationLinks([
     {

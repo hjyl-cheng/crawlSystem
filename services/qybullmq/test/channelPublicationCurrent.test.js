@@ -152,6 +152,28 @@ test("an unobserved empty Link list is absent without blocking the Channel Domai
   assert.equal(result.warnings.some((item) => item.code === "channel_links_state_unknown"), true);
 });
 
+test("Channel Current repairs a legacy mailto-wrapped URL and its stale email metadata", () => {
+  const result = buildChannelPublicationCurrent(completeRow({
+    external_links: [{
+      target_url: "mailto:https://www.youtube.com/@serragg2.0",
+      link_type: "email",
+      purpose: "contact",
+      position: 0,
+    }],
+  }));
+
+  assert.equal(result.ready, true);
+  assert.deepEqual(result.payload.links, [{
+    title: null,
+    display_url: null,
+    target_url: "https://www.youtube.com/@serragg2.0",
+    favicon_url: null,
+    position: 0,
+    link_type: "youtube",
+    purpose: "public_reference",
+  }]);
+});
+
 test("missing optional Channel fields do not weaken identity and lifecycle gates", () => {
   const optional = buildChannelPublicationCurrent(completeRow({
     avatar_url: null,
