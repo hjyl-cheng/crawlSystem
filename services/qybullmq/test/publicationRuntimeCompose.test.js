@@ -109,6 +109,7 @@ test("shared QY Publication Runtime is deployed only from the pachongsys source 
   assert.match(compose, /publication_transport:\n    internal: true/);
 
   assert.match(launcher, /deploy\/compose\.qy-publication-runtime\.yml/);
+  assert.match(launcher, /--project-name bullmq-publication-runtime/);
   assert.match(launcher, /QYBULLMQ_IMAGE_TAG must pin an immutable pachongsys image/);
   assert.doesNotMatch(launcher, /\/tmp\/|dajian|FeatureEngine/);
 });

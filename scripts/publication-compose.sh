@@ -30,5 +30,6 @@ fi
 
 exec docker compose \
   --env-file "${ENV_FILE}" \
+  --project-name bullmq-publication-runtime \
   -f "${ROOT_DIR}/deploy/compose.qy-publication-runtime.yml" \
   "$@"
