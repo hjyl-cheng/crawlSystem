@@ -145,7 +145,7 @@ const businessAuditPool = businessAuditDatabaseUrl
   ? new Pool({
       connectionString: businessAuditDatabaseUrl,
       max: Number(process.env.BUSINESS_PUBLICATION_AUDIT_POOL_MAX || 3),
-      options: "-c default_transaction_read_only=on -c timezone=UTC",
+      options: "-c timezone=UTC",
     })
   : null;
 const expectedBusinessAuditDatabase = String(

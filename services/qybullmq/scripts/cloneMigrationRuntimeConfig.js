@@ -13,7 +13,7 @@ if (!pipelineCycleId) throw new Error("MIGRATION_PIPELINE_CYCLE_ID is required")
 const source = new Pool({
   connectionString: sourceUrl,
   max: 1,
-  options: "-c default_transaction_read_only=on -c statement_timeout=10000",
+  query_timeout: 10000,
 });
 const target = new Pool({ connectionString: targetUrl, max: 1 });
 

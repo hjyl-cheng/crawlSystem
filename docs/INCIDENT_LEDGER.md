@@ -122,3 +122,26 @@
   empty. The previous `latest_run_id` query still reproduced 15,576 stale
   Channels, proving that this was a population-wide query defect rather than a
   Channel-specific data repair.
+
+## INC-20260821-007: Audit Script Polluted Shared PgBouncer Backends
+
+- Status: fixed in source and fully tested; deployment pending
+- Symptom: Incremental Workers intermittently failed PostgreSQL writes with
+  SQLSTATE `25006` (`cannot execute INSERT/UPDATE in a read-only transaction`).
+  Successful and failed writes were interleaved across multiple Workers.
+- Root cause: an external audit script executed session-level
+  `SET default_transaction_read_only=on` through the transaction-pooled shared
+  PgBouncer. The modified PostgreSQL backend sessions were returned to the
+  shared pool and subsequently reused by write Workers. The first write error
+  followed the audit script timestamp by approximately 0.27 seconds.
+- Prevention: production code relies on the PostgreSQL role's normal default
+  permissions. Read-only audits use a transaction-scoped `BEGIN ... READ ONLY`
+  only when needed. Dashboard and migration tooling no longer request a
+  session-level read-only default, and a repository test rejects equivalent
+  settings in production source and runtime configuration.
+- Rollout requirement: publish immutable Dashboard and QYBullMQ images, drain
+  and recreate every persistent role using either image, including the legacy
+  Feature Relay/Outbox and Publication runtime roles. Reconnect the PgBouncer
+  backend pool once, then verify normal writes and replay the failed Channels.
+  Feature Engine, Feature Dispatch, Auth, Rota, PostgreSQL, PgBouncer, and Nginx
+  images contain no matching setting and do not require a BUG-8 rebuild.
