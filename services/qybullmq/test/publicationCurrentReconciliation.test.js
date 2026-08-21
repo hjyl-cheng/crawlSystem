@@ -410,9 +410,10 @@ test("video-only reconciliation does not require a Business Channel preservation
   assert.deepEqual(publicationCurrentReconciliationSummary(evidence).business_preservation_baselines, {});
 
   const applyBusinessPool = fakeBusinessPool(config, target, {
+    activeWatermark: "business-release-20260726",
     preservationRows: target.channel_ids.map((channelId) => ({
       target_channel_id: channelId,
-      active_watermark: "business-release-20260725",
+      active_watermark: "business-release-20260726",
       snapshot_id: null,
       registry_exists: true,
       historical_snapshot_exists: true,

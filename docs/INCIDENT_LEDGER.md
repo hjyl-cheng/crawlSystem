@@ -29,7 +29,9 @@
 - Repair tooling: a Video-only reconciliation must validate the Business
   database identity, Channel count, and active watermark, but it must not load
   or compare a Channel preservation baseline. Preservation is required only
-  when the requested Domains include `channel`.
+  when the requested Domains include `channel`. A non-empty active watermark is
+  revalidated during Apply, but normal watermark advancement invalidates a plan
+  only when Channel preservation was requested.
 
 ## INC-20260821-003: Shared Feature Services Used a Bundled Database Alias
 

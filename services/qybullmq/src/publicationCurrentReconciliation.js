@@ -562,6 +562,14 @@ function equivalentAppliedResult(expected, actual) {
   });
 }
 
+function equivalentBusinessState(expected, actual, domains) {
+  if (domains.includes("channel")) return isDeepStrictEqual(actual, expected);
+  return actual?.database_name === expected?.database_name
+    && actual?.channel_count === expected?.channel_count
+    && actual?.target_active_snapshot_count === 0
+    && expected?.target_active_snapshot_count === 0;
+}
+
 async function runReconciliationTransaction({
   pool,
   target,
@@ -688,7 +696,11 @@ export class PublicationCurrentReconciliationAdministrator {
         actual: sourceState,
       });
     }
-    if (!isDeepStrictEqual(business.state, approved.business_state)) {
+    if (!equivalentBusinessState(
+      approved.business_state,
+      business.state,
+      this.target.domains,
+    )) {
       fail("Business Active topology changed after the approved reconciliation plan", {
         approved: approved.business_state,
         actual: business.state,
