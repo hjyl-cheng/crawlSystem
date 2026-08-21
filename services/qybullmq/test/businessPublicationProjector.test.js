@@ -362,6 +362,79 @@ test("Projector preserves different Version Vectors from the same Channel", asyn
   assert.deepEqual(pool.projections.map((row) => row.status), ["delivered", "delivered"]);
 });
 
+test("Projector treats an already absent retracted Channel as covered", async () => {
+  const channelId = "channel-already-absent";
+  const versionVector = {
+    channel: {
+      publication_stream_id: STREAM_A,
+      sequence: 2,
+      revision_id: "aaaaaaaa-0000-4000-8000-000000000002",
+      result_hash: `sha256:${"a".repeat(64)}`,
+    },
+    video: null,
+    agent: null,
+  };
+  const projection = {
+    projection_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa2",
+    activation_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaa02",
+    publication_stream_id: STREAM_A,
+    channel_id: channelId,
+    version_vector: versionVector,
+    status: "leased",
+    attempts: 1,
+    created_at: new Date("2026-08-21T00:00:00.000Z"),
+    released_by_cutover_id: null,
+  };
+  const statements = [];
+  const client = {
+    async query(sql, params = []) {
+      const text = String(sql);
+      statements.push(text);
+      if (text.includes("business-publication-projector:ownership")) {
+        return result([{
+          channel_id: channelId,
+          active_publication_stream_id: STREAM_A,
+          status: "active",
+          projection_mode: "online",
+        }]);
+      }
+      if (text.includes("business-publication-projector:open-outbox")) {
+        return result([projection]);
+      }
+      if (text.includes("pg_advisory_xact_lock")) return result();
+      if (text.includes("business-publication-projector:published-version-vectors")) {
+        return result([{ channel_id: channelId, version_vector: null }]);
+      }
+      if (text.includes("business-publication-projector:covered-retractions")) {
+        assert.equal(JSON.parse(params[0])[0].channel_id, channelId);
+        return result([{ channel_id: channelId }]);
+      }
+      if (text.includes("SELECT watermark FROM public.creator_search_active")) {
+        return result([{ watermark: WATERMARK }]);
+      }
+      if (text.includes("business-publication-projector:delivered")) {
+        assert.deepEqual(params[0], [projection.projection_id]);
+        return result([{
+          projection_id: projection.projection_id,
+          released_by_cutover_id: null,
+        }]);
+      }
+      throw new Error(`unexpected SQL for already absent retraction: ${text}`);
+    },
+  };
+
+  const projected = await projectBusinessPublicationChannels(client, [channelId]);
+
+  assert.equal(projected.outcome, "covered_by_current");
+  assert.equal(projected.covered, 1);
+  assert.equal(projected.projected, 0);
+  assert.equal(projected.delivered, 1);
+  assert.equal(
+    statements.some((statement) => statement.includes("business-publication-projector:import-batch")),
+    false,
+  );
+});
+
 test("Projector retry changes only rows from the selected Publication Stream", async () => {
   const pool = mixedStreamPool({ projectionError: new Error("fixture projection failure") });
   const projector = new PostgresBusinessPublicationProjector(pool, {

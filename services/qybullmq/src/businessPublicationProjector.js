@@ -142,6 +142,39 @@ async function loadPublishedVersionVectors(client, channelIds) {
   ]));
 }
 
+async function findAlreadyAbsentRetractions(client, versionVectors) {
+  const targets = Object.entries(versionVectors).map(([channelId, versionVector]) => ({
+    channel_id: channelId,
+    version_vector: versionVector,
+  }));
+  if (targets.length === 0) return new Set();
+  const result = await client.query(
+    `/* business-publication-projector:covered-retractions */
+     WITH target AS (
+       SELECT * FROM jsonb_to_recordset($1::jsonb) AS value(
+         channel_id text,version_vector jsonb
+       )
+     )
+     SELECT target.channel_id
+     FROM target
+     JOIN publication.revision revision
+       ON revision.revision_id=(target.version_vector #>> '{channel,revision_id}')::uuid
+      AND revision.publication_stream_id::text=
+          target.version_vector #>> '{channel,publication_stream_id}'
+      AND revision.channel_id=target.channel_id
+      AND revision.domain='channel'
+      AND revision.data_sequence=(target.version_vector #>> '{channel,sequence}')::bigint
+      AND revision.result_hash=target.version_vector #>> '{channel,result_hash}'
+      AND revision.revision_type='retraction'
+      AND revision.operation='retract_channel'
+     LEFT JOIN public.creator_search_live search USING(channel_id)
+     WHERE search.channel_id IS NULL
+     ORDER BY target.channel_id`,
+    [JSON.stringify(targets)],
+  );
+  return new Set(result.rows.map((row) => row.channel_id));
+}
+
 function sameVersionVector(left, right) {
   return left != null
     && right != null
@@ -736,9 +769,15 @@ export async function projectBusinessPublicationChannels(client, channelIdsValue
       client,
       requestedTargetIds,
     );
-    coveredIds = requestedTargetIds.filter((channelId) => sameVersionVector(
-      requestedVersionVectors[channelId],
-      publishedVersionVectors.get(channelId),
+    const alreadyAbsentRetractions = await findAlreadyAbsentRetractions(
+      client,
+      requestedVersionVectors,
+    );
+    coveredIds = requestedTargetIds.filter((channelId) => (
+      sameVersionVector(
+        requestedVersionVectors[channelId],
+        publishedVersionVectors.get(channelId),
+      ) || alreadyAbsentRetractions.has(channelId)
     ));
   }
   const coveredSet = new Set(coveredIds);

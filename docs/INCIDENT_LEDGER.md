@@ -60,3 +60,19 @@
   batch. The bounded batch was verified through the real Outbox and Ingress
   path before taking over the drain, and a Compose regression test freezes the
   default.
+
+## INC-20260821-005: An Already Absent Retraction Blocked Its Projection Batch
+
+- Status: fixed in source; deployment pending
+- Symptom: a Business Projection batch repeatedly failed the
+  `creator_search_changes_check` constraint. One already removed Channel caused
+  24 unrelated active Channels in the same batch to roll back and retry.
+- Root cause: the target Channel Revision was a valid retraction, while the
+  Channel was already absent from `creator_search_live`. The Projector treated
+  that achieved target state as a new remove operation and attempted to record
+  a change with neither a before nor an after document.
+- Prevention: before creating a Projection batch, the Projector now proves the
+  exact target Channel Revision is a `retract_channel` Revision and the search
+  row is already absent. It then marks that Projection covered by the current
+  state. The database history constraint remains strict, and a regression test
+  prevents no-op removals from creating a batch.
