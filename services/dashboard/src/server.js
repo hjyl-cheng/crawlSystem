@@ -31,6 +31,7 @@ import {
   migrationIncompleteSql,
   migrationWorkSql,
 } from "./migrationCompletion.js";
+import { loadChannelCurrentContent } from "./channelCurrentContent.js";
 
 const { Pool } = pg;
 
@@ -3814,38 +3815,7 @@ async function channelDetailDataFrom(queryDb, channelId) {
     LIMIT 10
   `, [channelId]);
 
-  const contentStats = await queryDb(`
-    SELECT
-      content_type,
-      count(*)::bigint AS total,
-      count(*) FILTER (WHERE published_at_status = 'exact' AND published_at_precision = 'second')::bigint AS exact_second,
-      count(*) FILTER (WHERE length_text IS NOT NULL)::bigint AS has_length,
-      count(*) FILTER (WHERE description_status IN ('exact','empty'))::bigint AS description_resolved,
-      count(*) FILTER (WHERE like_count IS NOT NULL OR comment_count IS NOT NULL OR comments_disabled = true)::bigint AS has_stats,
-      count(*) FILTER (WHERE is_members_only = true)::bigint AS members_only
-    FROM crawler.contents
-    WHERE channel_id = $1
-      AND run_id = $2
-    GROUP BY content_type
-    ORDER BY content_type
-  `, [channelId, channel.rows[0].latest_run_id]);
-
-  const contents = await queryDb(`
-    SELECT content_type, title, source_content_id, url, published_text_raw, published_at_status,
-           description, description_status, description_source, hashtags, keywords,
-           published_at, published_at_precision, published_at_source, position,
-           length_text, duration_seconds, duration_status, duration_source,
-           view_count_text, view_count_status, view_count_source,
-           like_count, like_count_status, like_count_source,
-           comment_count, comment_count_status, comments_disabled, comment_count_source,
-           is_members_only, access_status, access_status_source,
-           live_scheduled_at, live_started_at, live_ended_at, extractor_version
-    FROM crawler.contents
-    WHERE channel_id = $1
-      AND run_id = $2
-    ORDER BY position ASC NULLS LAST
-    LIMIT 100
-  `, [channelId, channel.rows[0].latest_run_id]);
+  const { contentStats, contents } = await loadChannelCurrentContent(queryDb, channelId);
 
   const candidates = await queryDb(`
     SELECT candidate_id,source_content_id,position,title,source_url,content_type,type_status,type_source,
@@ -3876,8 +3846,8 @@ async function channelDetailDataFrom(queryDb, channelId) {
   return {
     channel: channel.rows[0],
     runs: runs.rows,
-    contentStats: contentStats.rows,
-    contents: contents.rows,
+    contentStats,
+    contents,
     candidates: candidates.rows,
     aboutSnapshots: aboutSnapshots.rows,
   };
@@ -4015,7 +3985,7 @@ ${data.error ? `<div class="alert alert-bad">${h(data.error)}</div>` : ""}
 </section>
 
 <section class="table-panel mt">
-    <div class="table-tools"><div class="panel-head"><div><h2>当前内容</h2><div class="note">当前 latest_run_id 已完成类型识别的内容</div></div></div></div>
+    <div class="table-tools"><div class="panel-head"><div><h2>当前内容</h2><div class="note">频道当前唯一内容目录，按发布时间倒序</div></div></div></div>
   <div class="table-scroll">
     <table class="content-table">
       <thead><tr><th>类型</th><th>标题</th><th>描述 / 话题</th><th>发布时间（北京时间）</th><th>访问</th><th>时长</th><th>播放</th><th>Like/Comment</th></tr></thead>

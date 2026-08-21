@@ -63,7 +63,7 @@
 
 ## INC-20260821-005: An Already Absent Retraction Blocked Its Projection Batch
 
-- Status: fixed in source; deployment pending
+- Status: fixed and deployed
 - Symptom: a Business Projection batch repeatedly failed the
   `creator_search_changes_check` constraint. One already removed Channel caused
   24 unrelated active Channels in the same batch to roll back and retry.
@@ -76,3 +76,21 @@
   row is already absent. It then marks that Projection covered by the current
   state. The database history constraint remains strict, and a regression test
   prevents no-op removals from creating a batch.
+
+## INC-20260821-006: Channel Detail Displayed Only One Run's Content
+
+- Status: fixed in source; deployment pending
+- Symptom: Channel detail pages displayed an older latest video even when both
+  Crawler Publication Current and Business Current contained newer videos.
+  Fleet audit found 15,569 active Channels whose displayed latest video lagged
+  the authoritative Crawler Current, plus 4 active Channels with an empty
+  displayed list.
+- Root cause: `crawler.contents` is a Channel-level canonical catalog with one
+  row per source video. Its `run_id` records the last Run that touched each row;
+  it is not a snapshot boundary. The Dashboard filtered the catalog by
+  `channels.latest_run_id`, hiding every current video last touched by another
+  Run, and ordered those remaining rows by a Run-local position.
+- Prevention: Channel content statistics and the current-content table now read
+  the complete Channel catalog and order it by publication time. Run-specific
+  candidate diagnostics remain scoped to `latest_run_id`. A regression test
+  forbids a Run filter in the current-content queries.
