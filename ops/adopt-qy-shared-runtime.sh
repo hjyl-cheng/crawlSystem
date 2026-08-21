@@ -18,6 +18,7 @@ fi
 CRAWLER_CONTAINER="${QY_SOURCE_CRAWLER_CONTAINER:-bullmq-crawler-qy-app}"
 WORKER_CONTAINER="${QY_SOURCE_WORKER_CONTAINER:-bullmq-crawler-migration-worker-channel-1}"
 ROTA_CONTAINER="${QY_SOURCE_ROTA_CONTAINER:-youtube-rota-qy-core}"
+FEATURE_CONTAINER="${QY_SOURCE_FEATURE_CONTAINER:-qy-feature-ingest}"
 BUSINESS_AUDIT_FILE="${QY_SOURCE_BUSINESS_AUDIT_FILE:-/etc/publication/secrets/business-auditor-database-url}"
 
 container_env() {
@@ -108,8 +109,26 @@ for key in "${UPDATE_KEYS[@]}"; do
   fi
 done
 
+FEATURE_DATABASE_URL_PATH="$(container_env "${FEATURE_CONTAINER}" FEATURE_DATABASE_URL_FILE)"
+TARGET_FEATURE_DATABASE_URL="${RUNTIME_ROOT}/secrets/feature_database_url"
+if [[ ! -f "${TARGET_FEATURE_DATABASE_URL}" ]]; then
+  echo "runtime Feature database secret is missing: ${TARGET_FEATURE_DATABASE_URL}" >&2
+  exit 1
+fi
+TEMP_FEATURE_DATABASE_URL="$(mktemp "${TARGET_FEATURE_DATABASE_URL}.tmp.XXXXXX")"
+trap 'rm -f "${TEMP_FEATURE_DATABASE_URL}"' EXIT
+docker cp \
+  "${FEATURE_CONTAINER}:${FEATURE_DATABASE_URL_PATH}" \
+  "${TEMP_FEATURE_DATABASE_URL}"
+node "${ROOT_DIR}/ops/rewrite-runtime-database-url.mjs" \
+  --file "${TEMP_FEATURE_DATABASE_URL}" \
+  --host "${UPDATES[CRAWLER_DB_HOST]}" \
+  --port "${UPDATES[CRAWLER_DB_PORT]}" \
+  --database "${UPDATES[CRAWLER_DB_NAME]}" \
+  --expected-user feature_user
+
 TEMP_ENV="$(mktemp "${RUNTIME_ENV}.tmp.XXXXXX")"
-trap 'rm -f "${TEMP_ENV}"' EXIT
+trap 'rm -f "${TEMP_ENV}" "${TEMP_FEATURE_DATABASE_URL}"' EXIT
 declare -A SEEN=()
 while IFS= read -r line || [[ -n "${line}" ]]; do
   key="${line%%=*}"
@@ -128,7 +147,9 @@ for key in "${UPDATE_KEYS[@]}"; do
 done
 
 chmod --reference="${RUNTIME_ENV}" "${TEMP_ENV}"
+chmod --reference="${TARGET_FEATURE_DATABASE_URL}" "${TEMP_FEATURE_DATABASE_URL}"
 mv "${TEMP_ENV}" "${RUNTIME_ENV}"
+mv "${TEMP_FEATURE_DATABASE_URL}" "${TARGET_FEATURE_DATABASE_URL}"
 trap - EXIT
 
 echo "configured ${ENVIRONMENT} for shared QY state; no credential values were printed"

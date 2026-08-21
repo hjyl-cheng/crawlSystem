@@ -26,3 +26,16 @@
   `backfillVideoPublicationItemHashes.mjs` command, followed by normal
   Publication reconciliation. Historical Revisions and Business tables must
   not be edited directly.
+
+## INC-20260821-003: Shared Feature Services Used a Bundled Database Alias
+
+- Status: fixed in source; deployment validation pending
+- Symptom: the restored Scheduler could not resolve `crawler-pgbouncer`, and
+  Feature Dispatch restarted after the same DNS failure.
+- Root cause: shared-runtime adoption updated `CRAWLER_DB_HOST` but left the
+  file-backed `feature_database_url` using both the disabled bundled service
+  name and the isolated database's different password.
+- Prevention: adoption now copies the complete credential from the working QY
+  Feature service, rewrites its endpoint with a structured URL parser,
+  preserves file mode, and rejects an unexpected database role before
+  replacing the file atomically.
