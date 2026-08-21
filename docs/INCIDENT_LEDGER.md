@@ -12,7 +12,7 @@
 
 ## INC-20260821-002: New Videos Were Crawled But Not Published
 
-- Status: current writer path protected; historical repair pending
+- Status: fixed, deployed, and publishable historical repair completed
 - Example: Lisa Barcelos (`UCElNAGclgkuKa0bKRtUg3Ig`).
 - Symptom: Crawler Current contained the `2026-08-16` videos while Business
   Current remained at `2026-08-05`.
@@ -32,6 +32,17 @@
   when the requested Domains include `channel`. A non-empty active watermark is
   revalidated during Apply, but normal watermark advancement invalidates a plan
   only when Channel preservation was requested.
+- Repair outcome: the guarded reconciliation classified 8,447 successfully
+  evaluated Channels as 7,032 `revised`, 147 `no_change`, and 1,268
+  `not_ready`. All 7,032 exact Video Revisions reached the Crawler Outbox
+  `delivered` state with no error. Business Video Current is at the exact
+  repaired Revision for 6,630 Channels and at a newer Video Revision for 402;
+  none are behind or conflicting. Of the 7,032 repair effects, 7,017 produced
+  an exact delivered Projection Outbox row, while 15 were already superseded
+  before a separate Projection row was required. The 1,268 evidence-incomplete
+  `not_ready` Channels remain isolated for evidence repair and were not
+  force-published. Historical Revisions and Business result tables were not
+  edited directly.
 
 ## INC-20260821-003: Shared Feature Services Used a Bundled Database Alias
 
@@ -76,10 +87,14 @@
   row is already absent. It then marks that Projection covered by the current
   state. The database history constraint remains strict, and a regression test
   prevents no-op removals from creating a batch.
+- Production verification: the original retraction Channel
+  `UCCQPs-PkhIiWKhSQreD6xmA` and an unrelated upsert Channel from the same
+  failing batch, `UCCBSukVTHzh-eo_vbaX7xZg`, both reached `delivered` with no
+  remaining error after the fixed Projector took over.
 
 ## INC-20260821-006: Channel Detail Displayed Only One Run's Content
 
-- Status: fixed in source; deployment pending
+- Status: fixed, deployed, and fleet-verified
 - Symptom: Channel detail pages displayed an older latest video even when both
   Crawler Publication Current and Business Current contained newer videos.
   Fleet audit found 15,569 active Channels whose displayed latest video lagged
@@ -94,3 +109,16 @@
   the complete Channel catalog and order it by publication time. Run-specific
   candidate diagnostics remain scoped to `latest_run_id`. A regression test
   forbids a Run filter in the current-content queries.
+- Deployment: Dashboard image
+  `qy-allpachong/dashboard:pachongsys-9a4b664-channel-current`, built from full
+  Git revision `9a4b664fa0df14c50c322b7f98c802bc9e2640a6`, replaced only the
+  `qy-newcrawler-dashboard-1` service. It became healthy with zero restarts;
+  Workers, Rota, queues, and databases were not replaced.
+- Production verification: Lisa Barcelos now displays video `hO1VuSXgweM`
+  published on `2026-08-16`. The same online-page assertion passed for 50
+  deterministically sampled formerly stale Channels. A read-only fleet audit
+  over 23,563 active Channels found zero canonical Dashboard catalogs behind
+  Publication Current and zero canonical catalogs incorrectly displayed as
+  empty. The previous `latest_run_id` query still reproduced 15,576 stale
+  Channels, proving that this was a population-wide query defect rather than a
+  Channel-specific data repair.
