@@ -1,0 +1,156 @@
+name: bullmq-publication-runtime
+
+x-publication-runtime: &publication-runtime
+  image: qy-allpachong/qybullmq:${QYBULLMQ_IMAGE_TAG:?QYBULLMQ_IMAGE_TAG must pin an immutable pachongsys image}
+  restart: unless-stopped
+  init: true
+  user: node
+  read_only: true
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,size=16m
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  stop_grace_period: 30s
+  logging: &publication-logging
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+services:
+  business-publication-ingress:
+    <<: *publication-runtime
+    command: ["node", "src/runBusinessPublicationIngress.js"]
+    environment:
+      NODE_ENV: production
+      TZ: UTC
+      EXPECTED_BUSINESS_DATABASE: ${BUSINESS_DB_NAME:-yewu_business}
+      BUSINESS_DATABASE_URL_FILE: /run/secrets/business_ingress_database_url
+      BUSINESS_PUBLICATION_INGRESS_TOKEN_FILE: /run/secrets/publication_ingress_token
+      BUSINESS_PUBLICATION_TLS_CERT_FILE: /run/secrets/publication_ingress_tls_cert
+      BUSINESS_PUBLICATION_TLS_KEY_FILE: /run/secrets/publication_ingress_tls_key
+      BUSINESS_PUBLICATION_INGRESS_HOST: 0.0.0.0
+      BUSINESS_PUBLICATION_INGRESS_PORT: 8081
+      BUSINESS_INGRESS_POSTGRES_POOL_MAX: ${BUSINESS_INGRESS_POSTGRES_POOL_MAX:-10}
+      BUSINESS_PUBLICATION_MAX_BODY_BYTES: ${BUSINESS_PUBLICATION_MAX_BODY_BYTES:-4194304}
+    secrets:
+      - business_ingress_database_url
+      - publication_ingress_token
+      - publication_ingress_tls_cert
+      - publication_ingress_tls_key
+      - publication_ingress_ca
+    networks: [business_database, publication_transport]
+    healthcheck:
+      test:
+        - CMD
+        - curl
+        - --fail
+        - --silent
+        - --show-error
+        - --cacert
+        - /run/secrets/publication_ingress_ca
+        - --resolve
+        - business-publication-ingress:8081:127.0.0.1
+        - https://business-publication-ingress:8081/health
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+
+  publication-publisher:
+    <<: *publication-runtime
+    command: ["node", "src/runPublicationPublisher.js"]
+    depends_on:
+      business-publication-ingress:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      TZ: UTC
+      DATABASE_URL_FILE: /run/secrets/crawler_publisher_database_url
+      EXPECTED_CRAWLER_DATABASE: ${CRAWLER_DB_NAME:-bullmq_crawler_migration}
+      PUBLICATION_DESTINATION: ${PUBLICATION_DESTINATION:-business}
+      BUSINESS_PUBLICATION_INGRESS_URL: https://business-publication-ingress:8081/internal/publications/v1/shards
+      BUSINESS_PUBLICATION_INGRESS_TRUSTED_HTTP_HOSTNAME: business-publication-ingress
+      BUSINESS_PUBLICATION_INGRESS_TOKEN_FILE: /run/secrets/publication_ingress_token
+      NODE_EXTRA_CA_CERTS: /run/secrets/publication_ingress_ca
+      PUBLICATION_PUBLISH_POLL_MS: ${PUBLICATION_PUBLISH_POLL_MS:-1000}
+      PUBLICATION_PUBLISH_BATCH_SIZE: ${PUBLICATION_PUBLISH_BATCH_SIZE:-100}
+      PUBLICATION_PUBLISH_LEASE_SECONDS: ${PUBLICATION_PUBLISH_LEASE_SECONDS:-120}
+      PUBLICATION_PUBLISH_MAX_ATTEMPTS: ${PUBLICATION_PUBLISH_MAX_ATTEMPTS:-20}
+      PUBLICATION_SHARD_MAX_BYTES: ${PUBLICATION_SHARD_MAX_BYTES:-4194304}
+      POSTGRES_POOL_MIN: 0
+      POSTGRES_POOL_MAX: ${PUBLICATION_PUBLISHER_POSTGRES_POOL_MAX:-4}
+      SKIP_SCHEMA_MIGRATION: "true"
+    secrets:
+      - crawler_publisher_database_url
+      - publication_ingress_token
+      - publication_ingress_ca
+    networks: [crawler_database, publication_transport]
+
+  business-publication-reconciler:
+    <<: *publication-runtime
+    command: ["node", "src/runBusinessPublicationReconciler.js"]
+    environment:
+      NODE_ENV: production
+      TZ: UTC
+      EXPECTED_BUSINESS_DATABASE: ${BUSINESS_DB_NAME:-yewu_business}
+      BUSINESS_DATABASE_URL_FILE: /run/secrets/business_reconciler_database_url
+      BUSINESS_PUBLICATION_RECONCILE_POLL_MS: ${BUSINESS_PUBLICATION_RECONCILE_POLL_MS:-1000}
+      BUSINESS_PUBLICATION_RECONCILE_BATCH_SIZE: ${BUSINESS_PUBLICATION_RECONCILE_BATCH_SIZE:-100}
+      BUSINESS_PUBLICATION_RECONCILE_CONCURRENCY: ${BUSINESS_PUBLICATION_RECONCILE_CONCURRENCY:-4}
+      BUSINESS_PUBLICATION_RECONCILE_LEASE_SECONDS: ${BUSINESS_PUBLICATION_RECONCILE_LEASE_SECONDS:-120}
+      BUSINESS_PUBLICATION_RECONCILE_BLOCKED_RETRY_SECONDS: ${BUSINESS_PUBLICATION_RECONCILE_BLOCKED_RETRY_SECONDS:-30}
+      BUSINESS_PUBLICATION_RECONCILE_ERROR_RETRY_SECONDS: ${BUSINESS_PUBLICATION_RECONCILE_ERROR_RETRY_SECONDS:-10}
+      BUSINESS_PUBLICATION_RECONCILE_MAX_ERROR_RETRY_SECONDS: ${BUSINESS_PUBLICATION_RECONCILE_MAX_ERROR_RETRY_SECONDS:-300}
+      BUSINESS_RECONCILER_POSTGRES_POOL_MAX: ${BUSINESS_RECONCILER_POSTGRES_POOL_MAX:-12}
+    secrets: [business_reconciler_database_url]
+    networks: [business_database]
+
+  business-publication-projector:
+    <<: *publication-runtime
+    command: ["node", "src/runBusinessPublicationProjector.js"]
+    environment:
+      NODE_ENV: production
+      TZ: UTC
+      EXPECTED_BUSINESS_DATABASE: ${BUSINESS_DB_NAME:-yewu_business}
+      EXPECTED_BUSINESS_PROJECTOR_ROLE: business_publication_projector
+      BUSINESS_DATABASE_URL_FILE: /run/secrets/business_projector_database_url
+      BUSINESS_PUBLICATION_PROJECT_POLL_MS: ${BUSINESS_PUBLICATION_PROJECT_POLL_MS:-1000}
+      BUSINESS_PUBLICATION_PROJECT_BATCH_SIZE: ${BUSINESS_PUBLICATION_PROJECT_BATCH_SIZE:-25}
+      BUSINESS_PUBLICATION_PROJECT_CLAIM_TIMEOUT_MS: ${BUSINESS_PUBLICATION_PROJECT_CLAIM_TIMEOUT_MS:-15000}
+      BUSINESS_PUBLICATION_PROJECT_LEASE_SECONDS: ${BUSINESS_PUBLICATION_PROJECT_LEASE_SECONDS:-300}
+      BUSINESS_PUBLICATION_PROJECT_MAX_ATTEMPTS: ${BUSINESS_PUBLICATION_PROJECT_MAX_ATTEMPTS:-20}
+      BUSINESS_PUBLICATION_PROJECT_RETRY_SECONDS: ${BUSINESS_PUBLICATION_PROJECT_RETRY_SECONDS:-10}
+      BUSINESS_PUBLICATION_PROJECT_MAX_RETRY_SECONDS: ${BUSINESS_PUBLICATION_PROJECT_MAX_RETRY_SECONDS:-600}
+      BUSINESS_PROJECTOR_POSTGRES_POOL_MAX: ${BUSINESS_PROJECTOR_POSTGRES_POOL_MAX:-4}
+    secrets: [business_projector_database_url]
+    networks: [business_database]
+
+networks:
+  crawler_database:
+    external: true
+    name: ${QY_SHARED_CRAWLER_NETWORK:-bullmq-crawler}
+  business_database:
+    external: true
+    name: ${QY_SHARED_BUSINESS_NETWORK:-yewu_business_network}
+  publication_transport:
+    internal: true
+    name: ${QY_PUBLICATION_TRANSPORT_NETWORK:-bullmq-publication-runtime_publication_transport}
+
+secrets:
+  crawler_publisher_database_url:
+    file: ${PUBLICATION_CRAWLER_PUBLISHER_DATABASE_URL_FILE:-/etc/publication/secrets/crawler-publisher-database-url}
+  business_ingress_database_url:
+    file: ${PUBLICATION_BUSINESS_INGRESS_DATABASE_URL_FILE:-/etc/publication/secrets/business-ingress-database-url}
+  business_reconciler_database_url:
+    file: ${PUBLICATION_BUSINESS_RECONCILER_DATABASE_URL_FILE:-/etc/publication/secrets/business-reconciler-database-url}
+  business_projector_database_url:
+    file: ${PUBLICATION_BUSINESS_PROJECTOR_DATABASE_URL_FILE:-/etc/publication/secrets/business-projector-database-url}
+  publication_ingress_token:
+    file: ${PUBLICATION_INGRESS_TOKEN_FILE:-/etc/publication/secrets/ingress-token}
+  publication_ingress_tls_cert:
+    file: ${PUBLICATION_INGRESS_TLS_CERT_FILE:-/etc/publication/secrets/ingress-tls-cert.pem}
+  publication_ingress_tls_key:
+    file: ${PUBLICATION_INGRESS_TLS_KEY_FILE:-/etc/publication/secrets/ingress-tls-key.pem}
+  publication_ingress_ca:
+    file: ${PUBLICATION_INGRESS_CA_FILE:-/etc/publication/secrets/ingress-ca.pem}

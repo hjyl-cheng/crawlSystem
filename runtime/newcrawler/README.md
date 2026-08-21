@@ -36,3 +36,15 @@ all queue Workers, the daily Scheduler, and Feature Dispatch from the new
 project while continuing to share QY PostgreSQL, Redis, MinIO, and Rota. The
 default scale is 20 Full workers and 20 Incremental workers, matching the last
 stable QY production topology.
+
+The four shared QY Publication roles use their own source-controlled topology
+because they bridge the Crawler and Business database networks. Deploy them
+from this repository with the same immutable QYBullMQ image pin:
+
+```bash
+./scripts/publication-compose.sh newcrawler up -d
+```
+
+Do not use copied Compose files under `/tmp` or a legacy workspace. The
+launcher reads the ignored runtime environment for image pins and mounts
+production credentials only from file-backed secrets.

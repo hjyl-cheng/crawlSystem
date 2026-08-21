@@ -72,6 +72,47 @@ test("Publication Runtime Compose mounts credentials and token only as file-back
   }
 });
 
+test("shared QY Publication Runtime is deployed only from the pachongsys source tree", async () => {
+  const compose = await readFile(
+    new URL("../../../deploy/compose.qy-publication-runtime.yml", import.meta.url),
+    "utf8",
+  );
+  const launcher = await readFile(
+    new URL("../../../scripts/publication-compose.sh", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(compose, /^name: bullmq-publication-runtime$/m);
+  assert.match(
+    compose,
+    /image: qy-allpachong\/qybullmq:\$\{QYBULLMQ_IMAGE_TAG:\?QYBULLMQ_IMAGE_TAG must pin an immutable pachongsys image\}/,
+  );
+
+  const entries = new Map([
+    ["business-publication-ingress", "runBusinessPublicationIngress.js"],
+    ["publication-publisher", "runPublicationPublisher.js"],
+    ["business-publication-reconciler", "runBusinessPublicationReconciler.js"],
+    ["business-publication-projector", "runBusinessPublicationProjector.js"],
+  ]);
+  for (const [service, entrypoint] of entries) {
+    const block = serviceBlock(compose, service);
+    assert.match(block, new RegExp(`command: \\["node", "src/${entrypoint}"\\]`));
+    assert.match(block, /<<: \*publication-runtime/);
+  }
+
+  const ingress = serviceBlock(compose, "business-publication-ingress");
+  const publisher = serviceBlock(compose, "publication-publisher");
+  assert.match(ingress, /BUSINESS_PUBLICATION_TLS_CERT_FILE: \/run\/secrets\/publication_ingress_tls_cert/);
+  assert.match(ingress, /networks: \[business_database, publication_transport\]/);
+  assert.match(publisher, /BUSINESS_PUBLICATION_INGRESS_URL: https:\/\/business-publication-ingress:8081/);
+  assert.match(publisher, /networks: \[crawler_database, publication_transport\]/);
+  assert.match(compose, /publication_transport:\n    internal: true/);
+
+  assert.match(launcher, /deploy\/compose\.qy-publication-runtime\.yml/);
+  assert.match(launcher, /QYBULLMQ_IMAGE_TAG must pin an immutable pachongsys image/);
+  assert.doesNotMatch(launcher, /\/tmp\/|dajian|FeatureEngine/);
+});
+
 test("Crawler PgBouncer authenticates only the operational, Feature, and Publisher roles", async () => {
   const compose = await readFile(
     new URL("../../../deploy/compose.yml", import.meta.url),
