@@ -67,3 +67,15 @@ services:
     environment:
       REDIS_PASSWORD: ""
     networks: !override [internal, qy_crawler]
+
+  feature-scheduler-daily:
+    profiles: !reset []
+    depends_on: !reset {}
+    networks: !override [internal, qy_crawler]
+
+  feature-dispatch:
+    profiles: !reset []
+    depends_on: !reset {}
+    environment:
+      REDIS_PASSWORD: ""
+    networks: !override [internal, qy_crawler, qy_rota]

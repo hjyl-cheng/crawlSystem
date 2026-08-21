@@ -117,21 +117,25 @@ start, stop, or recreate a container and does not modify any database row.
 
 ## 9. Shared QY Worker Takeover
 
-Use `shared-qy-workers` only after the existing QYBullMQ consumers have
-gracefully stopped. PostgreSQL, Redis, MinIO, Business PostgreSQL, and Rota
-remain shared, while the new project starts Controller and every QYBullMQ queue
-Worker from one immutable `pachongsys` image:
+Use `shared-qy-workers` only after the existing QYBullMQ consumers and daily
+Feature Clock processes have gracefully stopped. PostgreSQL, Redis, MinIO,
+Business PostgreSQL, and Rota remain shared, while the new project starts
+Controller, every QYBullMQ queue Worker, the daily Scheduler, and Feature
+Dispatch from immutable `pachongsys` images:
 
 ```bash
 QY_DEPLOYMENT_MODE=shared-qy-workers \
   ./scripts/compose.sh newcrawler up -d --no-build \
     local-agent-config controller \
     worker-channel worker-incremental worker-discover worker-query-quality \
-    worker-data-api worker-agent worker-finalize
+    worker-data-api worker-agent worker-finalize \
+    feature-scheduler-daily feature-dispatch
 ```
 
 The default persistent scale is 20 Full workers and 20 Incremental workers,
 matching the last stable QY production topology.
 Override `QY_CHANNEL_WORKER_REPLICAS` and `QY_INCREMENTAL_WORKER_REPLICAS` in
 the ignored runtime environment when Rota capacity changes. Never run the old
-and new consumers together against the shared Redis queues.
+and new consumers together against the shared Redis queues. Never run old and
+new Scheduler or Dispatch processes together against the same Feature Clock
+tables.

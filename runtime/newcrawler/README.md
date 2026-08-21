@@ -30,8 +30,9 @@ state and writer services are excluded by default. The adoption step also
 aligns the ignored runtime credentials used by the MinIO and Rota consoles with
 the shared QY services.
 
-After the legacy QYBullMQ consumers have gracefully stopped, set
-`QY_DEPLOYMENT_MODE=shared-qy-workers` to run Controller and all queue Workers
-from the new project while continuing to share QY PostgreSQL, Redis, MinIO, and
-Rota. The default scale is 20 Full workers and 20 Incremental workers, matching
-the last stable QY production topology.
+After the legacy QYBullMQ consumers and daily Feature Clock processes have
+gracefully stopped, set `QY_DEPLOYMENT_MODE=shared-qy-workers` to run Controller,
+all queue Workers, the daily Scheduler, and Feature Dispatch from the new
+project while continuing to share QY PostgreSQL, Redis, MinIO, and Rota. The
+default scale is 20 Full workers and 20 Incremental workers, matching the last
+stable QY production topology.
