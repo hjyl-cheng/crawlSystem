@@ -33,6 +33,10 @@ test("Publication Runtime Compose preserves the database and transport network b
     publisher,
     /BUSINESS_PUBLICATION_INGRESS_TRUSTED_HTTP_HOSTNAME: business-publication-ingress/,
   );
+  assert.match(
+    publisher,
+    /PUBLICATION_PUBLISH_BATCH_SIZE: \$\{PUBLICATION_PUBLISH_BATCH_SIZE:-10\}/,
+  );
 
   assert.match(reconciler, /networks: \[business_database\]/);
   assert.doesNotMatch(reconciler, /networks:.*internal|networks:.*publication_transport/);

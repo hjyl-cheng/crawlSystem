@@ -45,3 +45,18 @@
   Feature service, rewrites its endpoint with a structured URL parser,
   preserves file mode, and rejects an unexpected database role before
   replacing the file atomically.
+
+## INC-20260821-004: Large Publication Shards Timed Out During Repair Drain
+
+- Status: mitigated at runtime; fixed in source; permanent deployment pending
+- Symptom: the Video Repair burst produced 70-90 item Shards that repeatedly
+  entered `retry_wait` with `fetch failed`, while smaller retries succeeded.
+- Root cause: the Publisher claimed 100 Revisions per batch and allowed a Shard
+  up to 4 MiB, but its authenticated Ingress request timeout remained 15
+  seconds. Large Business transactions exceeded the client deadline even
+  though Publisher, Ingress, Reconciler, and Projector stayed healthy with zero
+  restarts and no OOM event.
+- Prevention: the Compose default is a configurable 10-Revision Publisher
+  batch. The bounded batch was verified through the real Outbox and Ingress
+  path before taking over the drain, and a Compose regression test freezes the
+  default.
