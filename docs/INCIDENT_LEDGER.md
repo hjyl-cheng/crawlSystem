@@ -125,7 +125,7 @@
 
 ## INC-20260821-007: Audit Script Polluted Shared PgBouncer Backends
 
-- Status: fixed in source and fully tested; deployment pending
+- Status: fixed, fully deployed, and production-verified
 - Symptom: Incremental Workers intermittently failed PostgreSQL writes with
   SQLSTATE `25006` (`cannot execute INSERT/UPDATE in a read-only transaction`).
   Successful and failed writes were interleaved across multiple Workers.
@@ -139,9 +139,78 @@
   only when needed. Dashboard and migration tooling no longer request a
   session-level read-only default, and a repository test rejects equivalent
   settings in production source and runtime configuration.
-- Rollout requirement: publish immutable Dashboard and QYBullMQ images, drain
-  and recreate every persistent role using either image, including the legacy
-  Feature Relay/Outbox and Publication runtime roles. Reconnect the PgBouncer
-  backend pool once, then verify normal writes and replay the failed Channels.
-  Feature Engine, Feature Dispatch, Auth, Rota, PostgreSQL, PgBouncer, and Nginx
-  images contain no matching setting and do not require a BUG-8 rebuild.
+- Deployment: Dashboard and all 53 running QYBullMQ roles use immutable image
+  tag `pachongsys-3e65734-pgbouncer-readonly`, Git revision
+  `3e657340a2df72fcbfe430d7bbf9314e0a13dbe5`. This includes API, Controller,
+  20 Channel Workers, 20 Incremental Workers, five specialist Workers,
+  Feature Relay, Crawler Outbox Publisher, and the four Publication roles.
+  All have zero restarts. Three old QYBullMQ repair containers whose only
+  command was `infinity` were stopped without deletion. Feature Engine,
+  Feature Dispatch, Auth, Rota, PostgreSQL, PgBouncer, and Nginx contained no
+  matching setting and were not rebuilt for this incident.
+- Publication ownership: commits `ab927ec` and `6e65178` moved the four shared
+  Publication roles to a source-controlled Compose topology under this
+  repository. The deployment launcher pins the project name and immutable
+  QYBullMQ tag, so a copied `/tmp` Compose file cannot silently retake them.
+- Pool cleanup: `RECONNECT bullmq_crawler_migration` was issued through the
+  PgBouncer admin console after the application rollout. Sixteen immediate
+  samples reached two new backends and reported both
+  `default_transaction_read_only=off` and `transaction_read_only=off`.
+- Write verification: the initial temporary-table DML probe was rejected as
+  insufficient because PostgreSQL permits temporary-table writes in a
+  read-only transaction. The final probes used each runtime role to execute a
+  zero-row `UPDATE` against a normal table inside a rolled-back transaction.
+  `bullmq`, `publication_publisher`, `business_publication_ingress`,
+  `business_publication_reconciler`, and `business_publication_projector` all
+  passed with `off/off`. A 1,000-transaction, 16-concurrency PgBouncer stress
+  run rotated across 17 PostgreSQL backend PIDs with zero read-only errors and
+  zero persistent row changes.
+- Recovery: the final population was 12 Incremental Runs affected by the
+  polluted pool. Eleven had already completed through bounded BullMQ retries.
+  The remaining Job for `UCLGNJYRIp1fY2l7KQq-uAxA` had exhausted all five
+  attempts; a guarded BullMQ retry resumed the same Plan and Run, completed
+  both About and Video, and moved the Daily Plan to `succeeded`. Three attempt
+  rows whose failure finalization had itself been blocked were closed as
+  `failed` only after a successful replacement attempt was proven. Their
+  `result_json` records controlled recovery operation
+  `inc-20260821-007-attempt-close-v1`. All 12 Runs and Daily Plans are now
+  successful and no affected attempt remains `running`.
+- Post-rollout log verification: all 54 affected running containers were
+  scanned from the rollout boundary; no SQLSTATE `25006` or read-only
+  transaction error was present.
+
+## INC-20260821-008: Runtime Environment Overrode Publication Compose Project
+
+- Status: fixed, deployed, and regression-tested
+- Symptom: the first source-controlled Publication rollout created
+  `qy-newcrawler-business-publication-ingress-1` instead of replacing the
+  existing `bullmq-publication-runtime` Ingress.
+- Root cause: `COMPOSE_PROJECT_NAME=qy-newcrawler` in the ignored runtime
+  environment has higher precedence than the Compose file's top-level `name`.
+  The Publication launcher did not explicitly override it.
+- Containment: the original Publication Ingress remained healthy throughout.
+  The duplicate stateless container was gracefully stopped and removed; no
+  database or volume was removed.
+- Prevention: `scripts/publication-compose.sh` now passes
+  `--project-name bullmq-publication-runtime`. A regression test requires that
+  fixed project name and rejects legacy or `/tmp` deployment paths. All four
+  running Publication roles now report
+  `deploy/compose.qy-publication-runtime.yml` in their Compose labels.
+
+## INC-20260821-009: Business PostgreSQL Dynamic Shared Memory Exhaustion
+
+- Status: open; isolated from INC-20260821-007
+- Symptom: Business Publication Reconciler iterations repeatedly fail with
+  `could not resize shared memory segment ... No space left on device` while
+  Ingress, Publisher, and Projector remain running with zero restarts.
+- Evidence: the Business PostgreSQL container has the Docker default 64 MiB
+  `/dev/shm`, PostgreSQL uses `dynamic_shared_memory_type=posix`, and
+  `max_parallel_workers_per_gather=2`. The failure existed before the BUG-8
+  rollout and continued unchanged after it. From `11:03 UTC` through the audit
+  boundary, the new Reconciler logged 1,367 matching failures. Idle `/dev/shm`
+  usage is low; the error is a concurrent parallel-query burst, not host disk
+  exhaustion.
+- Required follow-up: reproduce the exact Reconciler query plans and measure
+  peak dynamic shared memory before choosing between a role-scoped parallelism
+  limit, lower Reconciler fan-out, or a larger Business PostgreSQL `shm_size`.
+  Do not attribute this incident to PgBouncer or change database permissions.

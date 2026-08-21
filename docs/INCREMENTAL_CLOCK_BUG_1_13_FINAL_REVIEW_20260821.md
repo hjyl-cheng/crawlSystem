@@ -547,7 +547,19 @@ BUG-7 是 BUG-6 积压中的历史数据集合，不应建立第二套恢复系�
 - 已增加生产源码、数据库初始化、部署、运维脚本和运行配置门禁测试；
 - Dashboard 测试通过；
 - QYBullMQ 完整测试共 969 项，911 项通过、58 项按环境条件跳过、0 项失败；
-- 尚未部署，尚未重连生产 PgBouncer 后端池，尚未重放历史失败频道。
+- Dashboard、53 个运行中的 QYBullMQ 角色均已部署固定镜像
+  `pachongsys-3e65734-pgbouncer-readonly`，全部 0 重启；
+- Publication Ingress/Reconciler/Projector/Publisher 已由唯一源码仓库中的
+  `deploy/compose.qy-publication-runtime.yml` 接管；
+- 已执行 PgBouncer `RECONNECT bullmq_crawler_migration`；
+- 五个实际数据库运行角色均通过正式表零行 `UPDATE` + `ROLLBACK` 探针；
+- 1,000 次并发事务覆盖 17 个后端 PID，0 个只读错误、0 行持久变更；
+- 最终确认 12 个受影响 Run，全部 Run=`done`、Plan=`succeeded`，0 条
+  affected attempt 仍为 `running`；
+- `UCLGNJYRIp1fY2l7KQq-uAxA` 使用原 BullMQ Job 和原 Plan/Run 恢复成功，
+  没有创建重复 Run；
+- Reconciler 的 Business PostgreSQL `/dev/shm` 错误是独立存量事故，记录为
+  `INC-20260821-009`，不属于本 BUG 的回归。
 
 ## 12. BUG-9：Publisher/Relay 仍归属旧 Compose
 
