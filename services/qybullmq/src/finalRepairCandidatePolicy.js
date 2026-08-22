@@ -1,3 +1,8 @@
+import {
+  videoDispositionEligibleForImmediateRepair,
+  videoDispositionImmediateRepairSql,
+} from "./videoDisposition.js";
+
 export const FINAL_REPAIR_TERMINAL_ACCESS_STATUSES = Object.freeze([
   "members_only",
   "private",
@@ -21,10 +26,13 @@ function normalizedAccessStatus(candidate = {}) {
   return value || "unknown";
 }
 
-export function finalRepairCandidateDecision(candidate = {}) {
+export function finalRepairCandidateDecision(candidate = {}, options = {}) {
   const accessStatus = normalizedAccessStatus(candidate);
   if (FINAL_REPAIR_TERMINAL_ACCESS_STATUSES.includes(accessStatus)) {
     return { repairable: false, reason: `terminal_access:${accessStatus}` };
+  }
+  if (!videoDispositionEligibleForImmediateRepair(candidate, options)) {
+    return { repairable: false, reason: "scheduled_disposition_not_due" };
   }
 
   const detailStatus = String(candidate?.detail_status ?? "").trim().toLowerCase();
@@ -52,6 +60,7 @@ export function finalRepairCandidateSql(alias = "") {
     .join(",");
   return `(
     ${accessStatus} NOT IN (${terminalStatuses})
+    AND ${videoDispositionImmediateRepairSql(alias)}
     AND (
       ${prefix}detail_status='failed'
       OR (${prefix}detail_status='unavailable' AND ${accessStatus}='unknown')

@@ -1,5 +1,6 @@
 import { queuesByRole, safeJobId } from "./queues.js";
 import { refreshVideoPublicationItemHashes } from "./videoPublicationItemStore.js";
+import { videoDispositionImmediateRepairSql } from "./videoDisposition.js";
 
 export const CONTENT_COMPLETENESS_REPAIR_VERSION = "content-completeness-v6";
 
@@ -95,6 +96,7 @@ const targetSql = `
           )<>'unlisted'
       AND cc.detail_status<>'api_pending'
       AND cc.api_status NOT IN ('pending','queued','running','failed')
+      AND ${videoDispositionImmediateRepairSql("cc")}
       AND NOT EXISTS (
         SELECT 1
         FROM crawler.content_candidates api_candidate
@@ -274,6 +276,7 @@ export async function hasPendingContentRepairs(
               cc.result_json#>>'{access,access_status}',
               'unknown'
             )<>'unlisted'
+        AND ${videoDispositionImmediateRepairSql("cc")}
         AND (cc.detail_status='failed' OR incomplete.content_key IS NOT NULL)
         AND (
           settings.content_max_age_days=0

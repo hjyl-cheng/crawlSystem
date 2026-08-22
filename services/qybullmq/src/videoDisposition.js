@@ -1,9 +1,42 @@
 export const VIDEO_DISPOSITION_VERSION = "video-disposition-v1";
+const SCHEDULED_VIDEO_DISPOSITIONS = Object.freeze(["deferred", "terminal_excluded"]);
 
 function text(value) {
   if (value === null || value === undefined) return null;
   const output = String(value).trim();
   return output || null;
+}
+
+function sqlAlias(value) {
+  const alias = String(value ?? "").trim();
+  if (!alias) return "";
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(alias)) {
+    throw new TypeError("SQL alias must be an identifier");
+  }
+  return `${alias}.`;
+}
+
+export function videoDispositionEligibleForImmediateRepair(candidate = {}, {
+  now = new Date(),
+} = {}) {
+  const disposition = text(candidate.disposition);
+  if (!SCHEDULED_VIDEO_DISPOSITIONS.includes(disposition)) return true;
+  const nextAttemptAt = text(candidate.next_attempt_at);
+  if (!nextAttemptAt) return false;
+  const nowMs = new Date(now).getTime();
+  const nextAttemptMs = new Date(nextAttemptAt).getTime();
+  return Number.isFinite(nowMs)
+    && Number.isFinite(nextAttemptMs)
+    && nextAttemptMs <= nowMs;
+}
+
+export function videoDispositionImmediateRepairSql(alias = "") {
+  const prefix = sqlAlias(alias);
+  return `(
+    ${prefix}disposition IS NULL
+    OR ${prefix}disposition NOT IN ('deferred','terminal_excluded')
+    OR ${prefix}next_attempt_at<=now()
+  )`;
 }
 
 function isoAfter(observedAt, milliseconds) {

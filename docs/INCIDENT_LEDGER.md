@@ -311,3 +311,39 @@
   suite passed: 1,015 QYBullMQ tests, Dashboard, Auth, Feature Dispatch, 312
   Python tests plus subtests, and all Rota Go packages. Source verification
   also passed.
+
+## INC-20260822-011: Deferred Video Repair Was Re-enqueued Before Its Due Time
+
+- Status: fixed and regression-tested; production canary pending
+- Symptom: the final Query canary repeatedly failed the same logical Content
+  Repair Job eight times in about four minutes. Several Video Candidates had
+  already been classified as `deferred` with `next_attempt_at` around
+  2026-08-22 19:45 UTC, but the Controller immediately re-enqueued them around
+  13:45 UTC instead of waiting for their scheduled retry.
+- Root cause: the Content Completeness selector and the independent Final
+  Repair candidate policy checked missing fields and retry state but ignored
+  the persisted Video disposition schedule. Resetting Candidate attempts and
+  replacing a terminal BullMQ Job with the same deterministic ID amplified the
+  loop, but neither behavior was the primary defect: the Candidates should not
+  have been eligible before `next_attempt_at` in the first place.
+- Prevention: one shared disposition policy now serves both repair paths.
+  Normal and stored Candidates remain immediately eligible, while `deferred`
+  and `terminal_excluded` Candidates are eligible only when a valid
+  `next_attempt_at` is due. The JavaScript policy fails closed when that
+  timestamp is missing or invalid; the PostgreSQL predicate has equivalent
+  null-safe behavior.
+- Verification: focused Content Repair, Final Repair, and Video disposition
+  tests cover a future schedule, a due schedule, and missing or malformed
+  timestamps. The complete repository suite passed with 957 QYBullMQ tests,
+  Dashboard, Auth, Feature Dispatch, 312 Python tests plus subtests, and all
+  Rota Go packages. Source verification also passed.
+- Production safety: `youtube-channel-crawl` was paused only after it had no
+  active, waiting, or delayed Jobs. The obsolete Controller and Channel Worker
+  canaries were then stopped gracefully. Queue history, failed Jobs, database
+  state, and all other services were preserved.
+- Rollout: build an immutable QYBullMQ image from the committed source, replace
+  the stopped canaries, resume the preserved Query cycle, and prove that a
+  future-scheduled Candidate is not dispatched before its due time. Promote
+  the image only after Query reaches completion and Crawler Current, local
+  Agent, Finalize, Publication, and Business Current agree for an accepted
+  Channel.

@@ -62,6 +62,25 @@ test("pending repair detection uses the same publication window", async () => {
   assert.doesNotMatch(statement, /c\.is_recent=true/);
 });
 
+test("content repair respects deferred and terminal disposition schedules", async () => {
+  const targetStatements = [];
+  await loadContentRepairTargets(async (sql) => {
+    targetStatements.push(sql);
+    return { rows: [] };
+  }, { pipelineCycleId: "pipeline:test" });
+
+  let pendingStatement = "";
+  await hasPendingContentRepairs(async (sql) => {
+    pendingStatement = sql;
+    return { rows: [{ pending: false }] };
+  }, undefined, "pipeline:test");
+
+  for (const statement of [targetStatements[0], pendingStatement]) {
+    assert.match(statement, /cc\.disposition NOT IN \('deferred','terminal_excluded'\)/);
+    assert.match(statement, /cc\.next_attempt_at<=now\(\)/);
+  }
+});
+
 test("positive comment counts without a first page remain content repair targets", async () => {
   const targetStatements = [];
   await loadContentRepairTargets(async (sql) => {
