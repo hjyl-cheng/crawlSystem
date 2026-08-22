@@ -375,3 +375,49 @@
 - Rollout: promote only after a Controller canary closes the preserved batch,
   emits the remaining local Agent tail, and advances it through Finalize and
   Publication without opening another Discover page.
+
+## INC-20260822-013: Feature Ingest Rejected The Video Disposition Ledger
+
+- Status: fixed and regression-tested in source; production rollout pending
+- Symptom: Crawler Outbox event
+  `136780fa-f93f-4bf5-acd1-d9c5d3712abf` reached the `feature-recalc` queue but
+  Feature Ingest rejected it as a permanent contract error. The Job failed
+  again after the source-controlled Feature bridge took over.
+- Root cause: QYBullMQ now records one structured disposition for every newly
+  discovered or rechecked Video, but both strict Feature Engine layers still
+  implemented the preceding Video Discovery contract. They rejected all
+  disposition ledger fields as unexpected before validating their evidence.
+- Prevention: both the Pydantic transport contract and the internal event
+  parser now declare the complete ledger as one atomic field group. They
+  independently validate unique Video IDs, disposition and retry semantics,
+  per-kind counts, unresolved and pending sets, recheck evidence, blocking
+  coverage, stored `first_seen` facts, and Detail coverage. A Discovery cannot
+  claim `complete` while any blocking deferred Video remains. Legacy events
+  without a ledger remain supported.
+- Verification: 183 Feature Engine tests pass, including stored, deferred
+  without a Detail attempt, deferred recheck, inconsistent count rejection,
+  and persisted-blocker rejection. The complete repository test matrix passes.
+  The exact production payload validates offline as `complete` with 122
+  discovered, 122 stored, zero deferred, zero terminally excluded, and a
+  normalized payload identical to the source payload.
+- Rollout: build an immutable Feature Engine image from the committed source,
+  replace only Feature Ingest through the source-controlled bridge launcher,
+  retry the exact failed BullMQ Job, and require both Job completion and an
+  `applied` Feature Inbox row before closing the incident.
+
+## INC-20260822-014: Python Tests Loaded A Stale Installed Source Copy
+
+- Status: fixed and regression-tested in source
+- Symptom: focused container tests passed, but the repository Feature Engine
+  test command loaded the package copied into `.venv` on 2026-08-20 and
+  reported the new contract fields as absent.
+- Root cause: `setup-dev.sh` installed both Python projects as ordinary wheel
+  copies, while `test.sh` relied on ambient import resolution. Editing the
+  unique source tree did not update those installed copies.
+- Prevention: development setup installs Local Agent and Feature Engine in
+  editable mode. The test runner also pins each project's `src` directory in
+  `PYTHONPATH`, so it always tests the checked-out source even when an older
+  virtual environment already exists.
+- Verification: the corrected Feature Engine command passes all 183 tests,
+  and the complete repository test script passes without reinstalling the
+  virtual environment.

@@ -50,8 +50,8 @@ Clock 仍在执行，因此今日累计数量会继续变化。代码语义、�
 | BUG-6 | **积压成立，“没有消费者”不成立** | 补全吞吐不足 | P0/P1 |
 | BUG-7 | **历史未补全成立，归因 BUG-1 错误** | BUG-6 的存量结果 | 随 BUG-6 处理 |
 | BUG-8 | **成立，根因已确认是外部审计脚本污染共享 PgBouncer 后端** | 数据库连接状态污染 | P0 |
-| BUG-9 | **部署归属问题成立，当前功能故障未出现** | 源码/部署治理 | P2 |
-| BUG-10 | **成立** | Feature Ingest 镜像漂移 | P1 |
+| BUG-9 | **已修复并由唯一源码接管** | 源码/部署治理 | P2 |
+| BUG-10 | **镜像漂移已修复；新契约缺口另记 INC-20260822-013** | Feature Ingest 契约 | P1 |
 | BUG-11 | **容器残留成立，不是业务功能 BUG** | 运行态垃圾 | P2 |
 | BUG-12 | **版本差异成立，48 个角色当前功能落后不成立** | 组件版本治理 | P2 |
 | BUG-13 | **全域漏排不成立，但存在 1 个冷启动恢复缺口** | Agent Clock 边界状态缺陷 | P1（单频道修复 + 不变量） |
@@ -596,6 +596,17 @@ BUG-7 是 BUG-6 积压中的历史数据集合，不应建立第二套恢复系�
 8. 从旧 FeatureEngine Compose 删除这两个角色，防止双启动；
 9. 发布门禁增加“生产容器必须有源码 revision label”。
 
+### 12.3 当前实施状态
+
+- 唯一源码新增 `deploy/compose.qy-feature-bridge-runtime.yml` 和固定项目名的
+  `scripts/feature-bridge-compose.sh`；
+- `qy-crawler-outbox-publisher`、`qy-feature-relay` 已由该 Compose 接管；
+- 两个容器均运行不可变 `pachongsys` QYBullMQ 镜像，Compose labels 指向
+  `/root/workspace/agent/pachongsys`，0 次重启；
+- 旧 `/root/workspace/FeatureEngine` 容器被保留为已停止回滚证据，不再消费
+  生产队列；
+- 编排回归测试和 `docker compose config --quiet` 均通过。
+
 ## 13. BUG-10：Feature Ingest 运行旧镜像
 
 ### 13.1 最终结论
@@ -622,6 +633,16 @@ qy-feature-engine:video-contract-compat-20260815-v2
 6. 核对 crawler outbox published、feature inbox applied、channel feature state 更新；
 7. 观察无 rejected/waiting_gap 增长后完成接管；
 8. Compose 归属统一回 `pachongsys/deploy`。
+
+### 13.3 当前实施状态
+
+- `qy-feature-ingest` 已由唯一源码 Feature Bridge Compose 接管，容器健康且
+  0 次重启；
+- 旧镜像漂移问题已消除，运行镜像来自 `pachongsys` 的不可变构建；
+- 接管后的真实事件复验发现新版 Video disposition ledger 尚未进入 Feature
+  Engine 契约，该独立兼容故障已记录为 `INC-20260822-013`；
+- disposition 契约修复和 183 项 Feature Engine 回归已在源码完成，生产镜像
+  切换与失败事件重放仍是关闭该新事故的最后门禁。
 
 ## 14. BUG-11：`fervent_mccarthy` 游离容器
 

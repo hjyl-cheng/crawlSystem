@@ -216,6 +216,219 @@ class V16DomainEventTests(unittest.TestCase):
         self.assertIsInstance(parsed.payload.recent_sampling, VideoRecentSamplingPayload)
         self.assertEqual(parsed.payload.discovery.first_seen[0].video_id, "new-video")
 
+    def test_accepts_incremental_video_disposition_ledger(self) -> None:
+        discovery = discovery_payload()
+        discovery.update(
+            {
+                "discovered_count": 1,
+                "silent_drop_count": 0,
+                "silent_drop_video_ids": [],
+                "dispositions": [
+                    {
+                        "video_id": "new-video",
+                        "kind": "stored",
+                        "reason_code": "content_stored",
+                        "retry_class": None,
+                    }
+                ],
+                "recheck_dispositions": [],
+                "stored_count": 1,
+                "deferred_count": 0,
+                "terminal_excluded_count": 0,
+                "unresolved_count": 0,
+                "unresolved_video_ids": [],
+                "recheck_deferred_video_ids": [],
+                "recheck_deferred_count": 0,
+                "pending_deferred_video_ids": [],
+                "pending_deferred_count": 0,
+                "blocking_deferred_video_ids": [],
+                "recheck_stored_count": 0,
+                "recheck_terminal_excluded_count": 0,
+            }
+        )
+        source = event("video", video_payload(discovery=discovery))
+
+        parsed = CrawlerObservationRecorded.from_mapping(source)
+
+        self.assertEqual(parsed.payload.discovery.disposition_ledger["stored_count"], 1)
+        self.assertEqual(parsed.as_pending_payload()["payload"], source["payload"])
+
+    def test_rejects_inconsistent_incremental_video_disposition_counts(self) -> None:
+        discovery = discovery_payload()
+        discovery.update(
+            {
+                "discovered_count": 1,
+                "silent_drop_count": 0,
+                "silent_drop_video_ids": [],
+                "dispositions": [
+                    {
+                        "video_id": "new-video",
+                        "kind": "stored",
+                        "reason_code": "content_stored",
+                        "retry_class": None,
+                    }
+                ],
+                "recheck_dispositions": [],
+                "stored_count": 0,
+                "deferred_count": 0,
+                "terminal_excluded_count": 0,
+                "unresolved_count": 0,
+                "unresolved_video_ids": [],
+                "recheck_deferred_video_ids": [],
+                "recheck_deferred_count": 0,
+                "pending_deferred_video_ids": [],
+                "pending_deferred_count": 0,
+                "blocking_deferred_video_ids": [],
+                "recheck_stored_count": 0,
+                "recheck_terminal_excluded_count": 0,
+            }
+        )
+
+        with self.assertRaisesRegex(EventValidationError, "stored_count"):
+            CrawlerObservationRecorded.from_mapping(
+                event("video", video_payload(discovery=discovery))
+            )
+
+    def test_accepts_deferred_disposition_without_attempted_detail(self) -> None:
+        discovery = discovery_payload()
+        discovery.update(
+            {
+                "items": 1,
+                "anchor_matched": False,
+                "stop_reason": "max_items",
+                "first_seen": [],
+                "first_seen_count": 0,
+                "detail_success_count": 0,
+                "detail_failure_count": 0,
+                "discovered_count": 1,
+                "silent_drop_count": 0,
+                "silent_drop_video_ids": [],
+                "dispositions": [
+                    {
+                        "video_id": "deferred-video",
+                        "kind": "deferred",
+                        "reason_code": "discovery_scan_incomplete",
+                        "retry_class": "uploads_scan_retry",
+                    }
+                ],
+                "recheck_dispositions": [],
+                "stored_count": 0,
+                "deferred_count": 1,
+                "terminal_excluded_count": 0,
+                "unresolved_count": 1,
+                "unresolved_video_ids": ["deferred-video"],
+                "recheck_deferred_video_ids": [],
+                "recheck_deferred_count": 0,
+                "pending_deferred_video_ids": [],
+                "pending_deferred_count": 0,
+                "blocking_deferred_video_ids": ["deferred-video"],
+                "recheck_stored_count": 0,
+                "recheck_terminal_excluded_count": 0,
+            }
+        )
+
+        parsed = CrawlerObservationRecorded.from_mapping(
+            event(
+                "video",
+                video_payload(
+                    discovery=discovery,
+                    discovery_outcome="partial",
+                    recent_sampling_outcome="complete",
+                ),
+                outcome="partial",
+            )
+        )
+
+        self.assertEqual(parsed.payload.discovery.disposition_ledger["deferred_count"], 1)
+
+    def test_accepts_deferred_recheck_ledger(self) -> None:
+        discovery = discovery_payload()
+        discovery.update(
+            {
+                "items": 1,
+                "first_seen": [],
+                "first_seen_count": 0,
+                "detail_success_count": 0,
+                "detail_failure_count": 1,
+                "discovered_count": 0,
+                "silent_drop_count": 0,
+                "silent_drop_video_ids": [],
+                "dispositions": [],
+                "recheck_dispositions": [
+                    {
+                        "video_id": "recheck-video",
+                        "kind": "deferred",
+                        "reason_code": "detail_collection_failed",
+                        "retry_class": "player_retry",
+                    }
+                ],
+                "stored_count": 0,
+                "deferred_count": 0,
+                "terminal_excluded_count": 0,
+                "unresolved_count": 0,
+                "unresolved_video_ids": [],
+                "recheck_deferred_video_ids": ["recheck-video"],
+                "recheck_deferred_count": 1,
+                "pending_deferred_video_ids": [],
+                "pending_deferred_count": 0,
+                "blocking_deferred_video_ids": ["recheck-video"],
+                "recheck_stored_count": 0,
+                "recheck_terminal_excluded_count": 0,
+            }
+        )
+
+        parsed = CrawlerObservationRecorded.from_mapping(
+            event(
+                "video",
+                video_payload(discovery=discovery, discovery_outcome="partial"),
+                outcome="partial",
+            )
+        )
+
+        self.assertEqual(
+            parsed.payload.discovery.disposition_ledger["recheck_deferred_count"],
+            1,
+        )
+
+    def test_rejects_complete_discovery_with_persisted_blocking_deferred_video(self) -> None:
+        discovery = discovery_payload()
+        discovery.update(
+            {
+                "discovered_count": 1,
+                "silent_drop_count": 0,
+                "silent_drop_video_ids": [],
+                "dispositions": [
+                    {
+                        "video_id": "new-video",
+                        "kind": "stored",
+                        "reason_code": "content_stored",
+                        "retry_class": None,
+                    }
+                ],
+                "recheck_dispositions": [],
+                "stored_count": 1,
+                "deferred_count": 0,
+                "terminal_excluded_count": 0,
+                "unresolved_count": 0,
+                "unresolved_video_ids": [],
+                "recheck_deferred_video_ids": [],
+                "recheck_deferred_count": 0,
+                "pending_deferred_video_ids": [],
+                "pending_deferred_count": 0,
+                "blocking_deferred_video_ids": ["persisted-deferred-video"],
+                "recheck_stored_count": 0,
+                "recheck_terminal_excluded_count": 0,
+            }
+        )
+
+        with self.assertRaisesRegex(
+            EventValidationError,
+            "Complete Discovery cannot contain blocking deferred Videos",
+        ):
+            CrawlerObservationRecorded.from_mapping(
+                event("video", video_payload(discovery=discovery))
+            )
+
     def test_accepts_catchup_limited_video_with_skipped_sampling(self) -> None:
         source = event("video", catchup_limited_video_payload(), outcome="partial")
 

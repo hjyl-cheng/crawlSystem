@@ -9,7 +9,13 @@ import re
 from typing import Any, Mapping, TypeAlias
 from uuid import UUID
 
-from .contracts import ContractValidationError, validate_crawler_observation_contract
+from .contracts import (
+    ContractValidationError,
+    VIDEO_DISPOSITION_KINDS,
+    VIDEO_DISPOSITION_LEDGER_FIELDS,
+    VIDEO_DISPOSITION_LEDGER_TRIGGER_FIELDS,
+    validate_crawler_observation_contract,
+)
 from .utc import as_utc
 
 
@@ -384,6 +390,187 @@ class FirstSeenVideo:
         }
 
 
+def _video_disposition_entries(value: Any, field: str) -> tuple[dict[str, Any], ...]:
+    if not isinstance(value, list):
+        raise EventValidationError(f"{field} must be an array")
+    output: list[dict[str, Any]] = []
+    for index, raw in enumerate(value):
+        if not isinstance(raw, Mapping):
+            raise EventValidationError(f"{field}[{index}] must be an object")
+        _exact_keys(
+            raw,
+            frozenset({"video_id", "kind", "reason_code", "retry_class"}),
+            f"{field}[{index}]",
+        )
+        kind = _required_text(raw["kind"], f"{field}[{index}].kind")
+        if kind not in VIDEO_DISPOSITION_KINDS:
+            raise EventValidationError(f"invalid {field}[{index}].kind: {kind}")
+        retry_class = _optional_text(raw["retry_class"], f"{field}[{index}].retry_class")
+        if kind == "stored" and retry_class is not None:
+            raise EventValidationError(f"stored {field}[{index}] cannot contain retry_class")
+        if kind != "stored" and retry_class is None:
+            raise EventValidationError(f"{kind} {field}[{index}] requires retry_class")
+        output.append(
+            {
+                "video_id": _required_text(raw["video_id"], f"{field}[{index}].video_id"),
+                "kind": kind,
+                "reason_code": _required_text(
+                    raw["reason_code"], f"{field}[{index}].reason_code"
+                ),
+                "retry_class": retry_class,
+            }
+        )
+    ids = [item["video_id"] for item in output]
+    if len(ids) != len(set(ids)):
+        raise EventValidationError(f"{field} video_id values cannot contain duplicates")
+    return tuple(output)
+
+
+def _video_disposition_ledger(
+    source: Mapping[str, Any],
+    *,
+    first_seen: tuple[FirstSeenVideo, ...],
+    detail_success_count: int,
+    detail_failure_count: int,
+) -> dict[str, Any] | None:
+    supplied_trigger_fields = VIDEO_DISPOSITION_LEDGER_TRIGGER_FIELDS & set(source)
+    if not supplied_trigger_fields:
+        return None
+    supplied_fields = VIDEO_DISPOSITION_LEDGER_FIELDS & set(source)
+    if supplied_fields != VIDEO_DISPOSITION_LEDGER_FIELDS:
+        raise EventValidationError("Video disposition ledger fields must be supplied together")
+
+    dispositions = _video_disposition_entries(source["dispositions"], "dispositions")
+    recheck_dispositions = _video_disposition_entries(
+        source["recheck_dispositions"], "recheck_dispositions"
+    )
+    disposition_ids = [item["video_id"] for item in dispositions]
+    recheck_ids = [item["video_id"] for item in recheck_dispositions]
+    if set(disposition_ids) & set(recheck_ids):
+        raise EventValidationError(
+            "dispositions and recheck_dispositions cannot overlap"
+        )
+
+    list_fields = (
+        "silent_drop_video_ids",
+        "unresolved_video_ids",
+        "recheck_deferred_video_ids",
+        "pending_deferred_video_ids",
+        "blocking_deferred_video_ids",
+    )
+    id_lists = {field: _string_list(source[field], field) for field in list_fields}
+    if set(id_lists["silent_drop_video_ids"]) & set(disposition_ids):
+        raise EventValidationError("silent_drop_video_ids cannot have a disposition")
+
+    counts = {
+        field: _integer(source[field], field, minimum=0)
+        for field in (
+            "discovered_count",
+            "silent_drop_count",
+            "stored_count",
+            "deferred_count",
+            "terminal_excluded_count",
+            "unresolved_count",
+            "recheck_deferred_count",
+            "pending_deferred_count",
+            "recheck_stored_count",
+            "recheck_terminal_excluded_count",
+        )
+    }
+    if counts["silent_drop_count"] != len(id_lists["silent_drop_video_ids"]):
+        raise EventValidationError("silent_drop_count must match silent_drop_video_ids")
+    if counts["discovered_count"] != len(dispositions) + counts["silent_drop_count"]:
+        raise EventValidationError(
+            "discovered_count must match dispositions and silent drops"
+        )
+
+    disposition_kinds = [item["kind"] for item in dispositions]
+    recheck_kinds = [item["kind"] for item in recheck_dispositions]
+    expected_counts = {
+        "stored_count": disposition_kinds.count("stored"),
+        "deferred_count": disposition_kinds.count("deferred"),
+        "terminal_excluded_count": disposition_kinds.count("terminal_excluded"),
+        "recheck_stored_count": recheck_kinds.count("stored"),
+        "recheck_deferred_count": recheck_kinds.count("deferred"),
+        "recheck_terminal_excluded_count": recheck_kinds.count("terminal_excluded"),
+    }
+    for field, expected in expected_counts.items():
+        if counts[field] != expected:
+            raise EventValidationError(f"{field} must match disposition entries")
+
+    recheck_deferred_ids = {
+        item["video_id"] for item in recheck_dispositions if item["kind"] == "deferred"
+    }
+    if set(id_lists["recheck_deferred_video_ids"]) != recheck_deferred_ids:
+        raise EventValidationError(
+            "recheck_deferred_video_ids must match deferred recheck dispositions"
+        )
+    if counts["recheck_deferred_count"] != len(id_lists["recheck_deferred_video_ids"]):
+        raise EventValidationError(
+            "recheck_deferred_count must match recheck_deferred_video_ids"
+        )
+    if counts["pending_deferred_count"] != len(id_lists["pending_deferred_video_ids"]):
+        raise EventValidationError(
+            "pending_deferred_count must match pending_deferred_video_ids"
+        )
+
+    newly_deferred_ids = {
+        item["video_id"] for item in dispositions if item["kind"] == "deferred"
+    }
+    expected_unresolved_ids = newly_deferred_ids | set(
+        id_lists["pending_deferred_video_ids"]
+    )
+    if set(id_lists["unresolved_video_ids"]) != expected_unresolved_ids:
+        raise EventValidationError(
+            "unresolved_video_ids must match new and pending deferred Videos"
+        )
+    if counts["unresolved_count"] != len(id_lists["unresolved_video_ids"]):
+        raise EventValidationError("unresolved_count must match unresolved_video_ids")
+    required_blocking_ids = expected_unresolved_ids | recheck_deferred_ids
+    if not set(id_lists["blocking_deferred_video_ids"]).issuperset(required_blocking_ids):
+        raise EventValidationError(
+            "blocking_deferred_video_ids must include all deferred Videos"
+        )
+
+    stored_ids = {
+        item["video_id"]
+        for item in (*dispositions, *recheck_dispositions)
+        if item["kind"] == "stored"
+    }
+    first_seen_ids = [item.video_id for item in first_seen]
+    if set(first_seen_ids) != stored_ids:
+        raise EventValidationError("first_seen Videos must match stored dispositions")
+    if len(first_seen) != counts["stored_count"] + counts["recheck_stored_count"]:
+        raise EventValidationError(
+            "first_seen_count must match stored disposition counts"
+        )
+    detail_count = detail_success_count + detail_failure_count
+    if len(first_seen) > detail_success_count:
+        raise EventValidationError("stored Videos require successful Detail evidence")
+    if detail_count > len(dispositions) + len(recheck_dispositions):
+        raise EventValidationError("Detail counts cannot exceed disposition entries")
+
+    return {
+        "discovered_count": counts["discovered_count"],
+        "silent_drop_count": counts["silent_drop_count"],
+        "silent_drop_video_ids": list(id_lists["silent_drop_video_ids"]),
+        "dispositions": [dict(item) for item in dispositions],
+        "recheck_dispositions": [dict(item) for item in recheck_dispositions],
+        "stored_count": counts["stored_count"],
+        "deferred_count": counts["deferred_count"],
+        "terminal_excluded_count": counts["terminal_excluded_count"],
+        "unresolved_count": counts["unresolved_count"],
+        "unresolved_video_ids": list(id_lists["unresolved_video_ids"]),
+        "recheck_deferred_video_ids": list(id_lists["recheck_deferred_video_ids"]),
+        "recheck_deferred_count": counts["recheck_deferred_count"],
+        "pending_deferred_video_ids": list(id_lists["pending_deferred_video_ids"]),
+        "pending_deferred_count": counts["pending_deferred_count"],
+        "blocking_deferred_video_ids": list(id_lists["blocking_deferred_video_ids"]),
+        "recheck_stored_count": counts["recheck_stored_count"],
+        "recheck_terminal_excluded_count": counts["recheck_terminal_excluded_count"],
+    }
+
+
 @dataclass(frozen=True, slots=True)
 class VideoDiscoveryPayload:
     pages: int | None
@@ -402,6 +589,7 @@ class VideoDiscoveryPayload:
     catch_up_item_count: int | None = None
     unclosed_video_ids: tuple[str, ...] | None = None
     gap_abandonment: dict[str, Any] | None = None
+    disposition_ledger: dict[str, Any] | None = None
 
     @classmethod
     def from_mapping(cls, source: Mapping[str, Any], *, outcome: str) -> VideoDiscoveryPayload:
@@ -447,6 +635,7 @@ class VideoDiscoveryPayload:
                 | incomplete_scan_keys
                 | unresolved_keys
                 | gap_abandonment_keys
+                | VIDEO_DISPOSITION_LEDGER_TRIGGER_FIELDS
             ),
             label="Video Discovery payload",
         )
@@ -522,6 +711,12 @@ class VideoDiscoveryPayload:
                     "unresolved_count must match unresolved_video_ids"
                 )
         effective_unresolved_count = unresolved_count or 0
+        disposition_ledger = _video_disposition_ledger(
+            source,
+            first_seen=first_seen,
+            detail_success_count=successes,
+            detail_failure_count=failures,
+        )
         if first_seen_count != len(first_seen):
             raise EventValidationError("first_seen_count must match first_seen entries")
         if supplied_proof:
@@ -529,11 +724,17 @@ class VideoDiscoveryPayload:
                 raise EventValidationError(
                     "Publication first_seen sample cannot exceed successful details"
                 )
-        elif successes + failures != first_seen_count + effective_unresolved_count:
+        elif (
+            disposition_ledger is None
+            and successes + failures != first_seen_count + effective_unresolved_count
+        ):
             raise EventValidationError("Discovery first_seen/detail counts disagree")
-        if first_seen_count > items:
+        if disposition_ledger is None and first_seen_count > items:
             raise EventValidationError("first_seen_count cannot exceed items")
-        if first_seen_count + effective_unresolved_count > items:
+        if (
+            disposition_ledger is None
+            and first_seen_count + effective_unresolved_count > items
+        ):
             raise EventValidationError(
                 "resolved and unresolved first-seen counts cannot exceed items"
             )
@@ -709,7 +910,19 @@ class VideoDiscoveryPayload:
                     "gap_abandoned_latest_30 items must match selected_item_count"
                 )
             selected_ids = set(gap_abandonment["selected_video_ids"])
-            if any(item.video_id not in selected_ids for item in first_seen):
+            recheck_stored_ids = {
+                item["video_id"]
+                for item in (
+                    disposition_ledger["recheck_dispositions"]
+                    if disposition_ledger is not None
+                    else []
+                )
+                if item["kind"] == "stored"
+            }
+            if any(
+                item.video_id not in selected_ids | recheck_stored_ids
+                for item in first_seen
+            ):
                 raise EventValidationError(
                     "gap_abandoned_latest_30 first_seen must come from selected Videos"
                 )
@@ -811,6 +1024,11 @@ class VideoDiscoveryPayload:
             "candidate_limit_processed",
         }:
             raise EventValidationError("Publication completion reason requires scan proof")
+        blocking_deferred_video_ids = (
+            disposition_ledger["blocking_deferred_video_ids"]
+            if disposition_ledger is not None
+            else []
+        )
         complete = stop_reason in {
             "anchor_matched",
             "anchor_dates_exhausted",
@@ -819,7 +1037,7 @@ class VideoDiscoveryPayload:
             "qualified_item_limit",
             "age_boundary_crossed",
             "candidate_limit_processed",
-        } and parse_gaps == 0 and effective_unresolved_count == 0
+        } and parse_gaps == 0 and effective_unresolved_count == 0 and not blocking_deferred_video_ids
         if outcome not in {"complete", "partial"} or (outcome == "complete") != complete:
             raise EventValidationError("Discovery outcome disagrees with scan coverage")
         return cls(
@@ -839,6 +1057,7 @@ class VideoDiscoveryPayload:
             catch_up_item_count,
             unclosed_video_ids,
             gap_abandonment,
+            disposition_ledger,
         )
 
     def as_facts(self) -> dict[str, Any]:
@@ -853,7 +1072,7 @@ class VideoDiscoveryPayload:
             "detail_success_count": self.detail_success_count,
             "detail_failure_count": self.detail_failure_count,
         }
-        if self.unresolved_count is not None:
+        if self.unresolved_count is not None and self.disposition_ledger is None:
             facts.update(
                 {
                     "unresolved_count": self.unresolved_count,
@@ -872,6 +1091,8 @@ class VideoDiscoveryPayload:
             )
         if self.gap_abandonment is not None:
             facts["gap_abandonment"] = self.gap_abandonment
+        if self.disposition_ledger is not None:
+            facts.update(self.disposition_ledger)
         return facts
 
 

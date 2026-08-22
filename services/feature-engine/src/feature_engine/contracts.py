@@ -70,6 +70,32 @@ MetricStatus: TypeAlias = Literal["exact", "estimated", "unavailable", "unresolv
 Outcome: TypeAlias = Literal["complete", "partial", "failed"]
 V16_LEGACY_ALLOWED_DAYS = (1, 3, 7, 14, 30, 60, 90, 180, 365)
 V16_ALLOWED_DAYS = (1, 2, 3, 5, 7, 14, 30, 60, 90, 180, 365)
+VIDEO_DISPOSITION_KINDS = frozenset({"stored", "deferred", "terminal_excluded"})
+VIDEO_DISPOSITION_LEDGER_FIELDS = frozenset(
+    {
+        "discovered_count",
+        "silent_drop_count",
+        "silent_drop_video_ids",
+        "dispositions",
+        "recheck_dispositions",
+        "stored_count",
+        "deferred_count",
+        "terminal_excluded_count",
+        "unresolved_count",
+        "unresolved_video_ids",
+        "recheck_deferred_video_ids",
+        "recheck_deferred_count",
+        "pending_deferred_video_ids",
+        "pending_deferred_count",
+        "blocking_deferred_video_ids",
+        "recheck_stored_count",
+        "recheck_terminal_excluded_count",
+    }
+)
+VIDEO_DISPOSITION_LEDGER_TRIGGER_FIELDS = VIDEO_DISPOSITION_LEDGER_FIELDS - {
+    "unresolved_count",
+    "unresolved_video_ids",
+}
 
 
 class _ContractModel(BaseModel):
@@ -110,6 +136,21 @@ class _FirstSeenVideoContract(_ContractModel):
     content_type: Literal["video", "short", "live"]
     published_at: TimestampText | None
     published_at_precision: Literal["second", "date_only", "unknown"]
+
+
+class _VideoDispositionEvidenceContract(_ContractModel):
+    video_id: NonEmptyText
+    kind: Literal["stored", "deferred", "terminal_excluded"]
+    reason_code: NonEmptyText
+    retry_class: NonEmptyText | None
+
+    @model_validator(mode="after")
+    def validate_retry_class(self) -> Self:
+        if self.kind == "stored" and self.retry_class is not None:
+            raise ValueError("stored disposition cannot contain retry_class")
+        if self.kind != "stored" and self.retry_class is None:
+            raise ValueError(f"{self.kind} disposition requires retry_class")
+        return self
 
 
 class _VideoGapAbandonmentContract(_ContractModel):
@@ -170,6 +211,21 @@ class _VideoDiscoveryPayloadContract(_ContractModel):
     detail_failure_count: NonNegativeInt
     unresolved_count: NonNegativeInt | None = None
     unresolved_video_ids: list[NonEmptyText] | None = None
+    discovered_count: NonNegativeInt | None = None
+    silent_drop_count: NonNegativeInt | None = None
+    silent_drop_video_ids: list[NonEmptyText] | None = None
+    dispositions: list[_VideoDispositionEvidenceContract] | None = None
+    recheck_dispositions: list[_VideoDispositionEvidenceContract] | None = None
+    stored_count: NonNegativeInt | None = None
+    deferred_count: NonNegativeInt | None = None
+    terminal_excluded_count: NonNegativeInt | None = None
+    recheck_deferred_video_ids: list[NonEmptyText] | None = None
+    recheck_deferred_count: NonNegativeInt | None = None
+    pending_deferred_video_ids: list[NonEmptyText] | None = None
+    pending_deferred_count: NonNegativeInt | None = None
+    blocking_deferred_video_ids: list[NonEmptyText] | None = None
+    recheck_stored_count: NonNegativeInt | None = None
+    recheck_terminal_excluded_count: NonNegativeInt | None = None
     inspected_count: NonNegativeInt | None = None
     requested_limit: NonNegativeInt | None = None
     content_max_age_days: NonNegativeInt | None = None
@@ -213,6 +269,22 @@ class _VideoDiscoveryPayloadContract(_ContractModel):
             raise ValueError("unresolved_video_ids cannot contain duplicates")
         if unresolved_count != len(unresolved_video_ids):
             raise ValueError("unresolved_count must match unresolved_video_ids")
+        supplied_ledger = VIDEO_DISPOSITION_LEDGER_TRIGGER_FIELDS & self.model_fields_set
+        if supplied_ledger:
+            supplied_ledger_fields = VIDEO_DISPOSITION_LEDGER_FIELDS & self.model_fields_set
+            if supplied_ledger_fields != VIDEO_DISPOSITION_LEDGER_FIELDS:
+                raise ValueError("Video disposition ledger fields must be supplied together")
+            missing_values = [
+                field
+                for field in VIDEO_DISPOSITION_LEDGER_FIELDS
+                if getattr(self, field) is None
+            ]
+            if missing_values:
+                raise ValueError(
+                    "Video disposition ledger fields cannot be null: "
+                    + ", ".join(sorted(missing_values))
+                )
+            self._validate_disposition_ledger()
         incomplete_scan_fields = {
             "first_page_item_count",
             "catch_up_item_count",
@@ -225,12 +297,19 @@ class _VideoDiscoveryPayloadContract(_ContractModel):
             raise ValueError("pages may be null only with Publication scan proof")
         if self.first_seen_count != len(self.first_seen):
             raise ValueError("first_seen_count must match first_seen entries")
-        if self.first_seen_count > self.items:
+        if not supplied_ledger and self.first_seen_count > self.items:
             raise ValueError("first_seen_count cannot exceed items")
-        if self.first_seen_count + unresolved_count > self.items:
+        if (
+            not supplied_ledger
+            and self.first_seen_count + unresolved_count > self.items
+        ):
             raise ValueError("resolved and unresolved first-seen counts cannot exceed items")
         detail_count = self.detail_success_count + self.detail_failure_count
-        if not supplied and detail_count != self.first_seen_count + unresolved_count:
+        if (
+            not supplied
+            and not supplied_ledger
+            and detail_count != self.first_seen_count + unresolved_count
+        ):
             raise ValueError("Discovery first_seen/detail counts disagree")
         if self.stop_reason in {
             "qualified_item_limit",
@@ -262,7 +341,15 @@ class _VideoDiscoveryPayloadContract(_ContractModel):
             if self.items != self.gap_abandonment.selected_item_count:
                 raise ValueError("gap_abandoned_latest_30 items must match selected_item_count")
             selected_ids = set(self.gap_abandonment.selected_video_ids)
-            if any(item.video_id not in selected_ids for item in self.first_seen):
+            recheck_stored_ids = {
+                item.video_id
+                for item in (self.recheck_dispositions or [])
+                if item.kind == "stored"
+            }
+            if any(
+                item.video_id not in selected_ids | recheck_stored_ids
+                for item in self.first_seen
+            ):
                 raise ValueError("gap_abandoned_latest_30 first_seen must come from selected Videos")
         elif self.gap_abandonment is not None:
             raise ValueError("gap_abandonment proof requires gap_abandoned_latest_30")
@@ -313,6 +400,96 @@ class _VideoDiscoveryPayloadContract(_ContractModel):
         if self.stop_reason == "list_end" and self.terminal_condition not in {None, "list_end"}:
             raise ValueError("list_end disagrees with terminal_condition")
         return self
+
+    def _validate_disposition_ledger(self) -> None:
+        dispositions = self.dispositions or []
+        recheck_dispositions = self.recheck_dispositions or []
+        silent_drop_video_ids = self.silent_drop_video_ids or []
+        pending_deferred_video_ids = self.pending_deferred_video_ids or []
+        recheck_deferred_video_ids = self.recheck_deferred_video_ids or []
+        blocking_deferred_video_ids = self.blocking_deferred_video_ids or []
+        disposition_ids = [item.video_id for item in dispositions]
+        recheck_ids = [item.video_id for item in recheck_dispositions]
+        unique_lists = {
+            "dispositions video_id": disposition_ids,
+            "recheck_dispositions video_id": recheck_ids,
+            "silent_drop_video_ids": silent_drop_video_ids,
+            "pending_deferred_video_ids": pending_deferred_video_ids,
+            "recheck_deferred_video_ids": recheck_deferred_video_ids,
+            "blocking_deferred_video_ids": blocking_deferred_video_ids,
+        }
+        for label, values in unique_lists.items():
+            if len(values) != len(set(values)):
+                raise ValueError(f"{label} cannot contain duplicates")
+        if set(disposition_ids) & set(recheck_ids):
+            raise ValueError("dispositions and recheck_dispositions cannot overlap")
+        if set(silent_drop_video_ids) & set(disposition_ids):
+            raise ValueError("silent_drop_video_ids cannot have a disposition")
+        if self.silent_drop_count != len(silent_drop_video_ids):
+            raise ValueError("silent_drop_count must match silent_drop_video_ids")
+        if self.discovered_count != len(dispositions) + len(silent_drop_video_ids):
+            raise ValueError("discovered_count must match dispositions and silent drops")
+
+        disposition_kinds = [item.kind for item in dispositions]
+        recheck_kinds = [item.kind for item in recheck_dispositions]
+        expected_counts = {
+            "stored_count": disposition_kinds.count("stored"),
+            "deferred_count": disposition_kinds.count("deferred"),
+            "terminal_excluded_count": disposition_kinds.count("terminal_excluded"),
+            "recheck_stored_count": recheck_kinds.count("stored"),
+            "recheck_deferred_count": recheck_kinds.count("deferred"),
+            "recheck_terminal_excluded_count": recheck_kinds.count("terminal_excluded"),
+        }
+        for field, expected in expected_counts.items():
+            if getattr(self, field) != expected:
+                raise ValueError(f"{field} must match disposition entries")
+
+        recheck_deferred_ids = {
+            item.video_id for item in recheck_dispositions if item.kind == "deferred"
+        }
+        if set(recheck_deferred_video_ids) != recheck_deferred_ids:
+            raise ValueError(
+                "recheck_deferred_video_ids must match deferred recheck dispositions"
+            )
+        if self.pending_deferred_count != len(pending_deferred_video_ids):
+            raise ValueError(
+                "pending_deferred_count must match pending_deferred_video_ids"
+            )
+        if self.recheck_deferred_count != len(recheck_deferred_video_ids):
+            raise ValueError(
+                "recheck_deferred_count must match recheck_deferred_video_ids"
+            )
+        newly_deferred_ids = {
+            item.video_id for item in dispositions if item.kind == "deferred"
+        }
+        expected_unresolved_ids = newly_deferred_ids | set(pending_deferred_video_ids)
+        if set(self.unresolved_video_ids or []) != expected_unresolved_ids:
+            raise ValueError(
+                "unresolved_video_ids must match new and pending deferred Videos"
+            )
+        required_blocking_ids = expected_unresolved_ids | recheck_deferred_ids
+        if not set(blocking_deferred_video_ids).issuperset(required_blocking_ids):
+            raise ValueError(
+                "blocking_deferred_video_ids must include all deferred Videos"
+            )
+
+        stored_ids = {
+            item.video_id
+            for item in (*dispositions, *recheck_dispositions)
+            if item.kind == "stored"
+        }
+        first_seen_ids = [item.video_id for item in self.first_seen]
+        if len(first_seen_ids) != len(set(first_seen_ids)):
+            raise ValueError("first_seen video_id values must be unique")
+        if set(first_seen_ids) != stored_ids:
+            raise ValueError("first_seen Videos must match stored dispositions")
+        if self.first_seen_count != (self.stored_count or 0) + (self.recheck_stored_count or 0):
+            raise ValueError("first_seen_count must match stored disposition counts")
+        detail_count = self.detail_success_count + self.detail_failure_count
+        if self.first_seen_count > self.detail_success_count:
+            raise ValueError("stored Videos require successful Detail evidence")
+        if detail_count > len(dispositions) + len(recheck_dispositions):
+            raise ValueError("Detail counts cannot exceed disposition entries")
 
 
 class _VideoRecentSamplingPayloadContract(_ContractModel):
@@ -392,6 +569,11 @@ class _VideoPayloadContract(_ContractModel):
             and (self.discovery.payload.unresolved_count or 0) != 0
         ):
             raise ValueError("Complete Discovery cannot contain unresolved Videos")
+        if (
+            self.discovery.outcome == "complete"
+            and self.discovery.payload.blocking_deferred_video_ids
+        ):
+            raise ValueError("Complete Discovery cannot contain blocking deferred Videos")
         if (
             isinstance(self.recent_sampling, _VideoRecentSamplingSkippedPhaseContract)
             and self.discovery.outcome != "partial"

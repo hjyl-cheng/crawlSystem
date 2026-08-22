@@ -139,3 +139,36 @@ the ignored runtime environment when Rota capacity changes. Never run the old
 and new consumers together against the shared Redis queues. Never run old and
 new Scheduler or Dispatch processes together against the same Feature Clock
 tables.
+
+## 10. Shared QY Feature Bridge Takeover
+
+The Crawler Observation bridge has one source-controlled runtime topology:
+
+```text
+Crawler Outbox Publisher -> feature-recalc -> Feature Relay -> Feature Ingest
+```
+
+It reuses the approved Crawler Redis, Crawler PostgreSQL, Feature schema,
+private Feature network, and file-backed Feature credential volume. It does
+not start a Scheduler, Dispatcher, Worker, Rota, database, Redis, or MinIO.
+
+Gracefully stop the previous three bridge processes only after the Crawler
+Outbox and `feature-recalc` queue are idle. Then validate and start the pinned
+runtime from the unique source tree:
+
+```bash
+./scripts/feature-bridge-compose.sh newcrawler config --quiet
+./scripts/feature-bridge-compose.sh newcrawler up -d --no-build \
+  feature-ingest feature-relay crawler-outbox-publisher
+./scripts/feature-bridge-compose.sh newcrawler ps
+```
+
+Both `QYBULLMQ_IMAGE_TAG` and `QY_FEATURE_ENGINE_IMAGE_TAG` must be immutable
+tags in `runtime/newcrawler/env/runtime.env`. Do not run this topology beside
+the legacy `/root/workspace/FeatureEngine` bridge consumers: duplicate Relays
+would compete for one BullMQ queue, and duplicate Publishers would add
+avoidable claim pressure even though their writes are idempotent.
+
+Release verification requires a real Crawler Observation to move through the
+Outbox and queue into `feature_clock.crawler_event_inbox` with status
+`applied`. A container health check alone is not sufficient.

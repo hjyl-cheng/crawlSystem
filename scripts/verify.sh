@@ -8,6 +8,7 @@ bash -n \
   scripts/bootstrap.sh \
   scripts/build-images.sh \
   scripts/compose.sh \
+  scripts/feature-bridge-compose.sh \
   scripts/setup-dev.sh \
   scripts/test.sh \
   ops/adopt-qy-shared-runtime.sh \
@@ -68,6 +69,12 @@ if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; 
       -f deploy/compose.yml \
       -f deploy/compose.shared-qy.yml \
       -f deploy/compose.shared-qy-workers.yml \
+      config --quiet
+  QYBULLMQ_IMAGE_TAG=pachongsys-verify \
+  QY_FEATURE_ENGINE_IMAGE_TAG=pachongsys-verify \
+    docker compose --env-file .env.example \
+      --project-name qy-feature-bridge-runtime \
+      -f deploy/compose.qy-feature-bridge-runtime.yml \
       config --quiet
 else
   echo "docker compose unavailable; skipped Compose validation" >&2

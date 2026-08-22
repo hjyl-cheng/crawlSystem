@@ -20,11 +20,11 @@ npm --prefix "${ROOT_DIR}/services/auth" test
 npm --prefix "${ROOT_DIR}/services/feature-dispatch" test
 (
   cd "${ROOT_DIR}/services/local-agent"
-  "${PYTHON_BIN}" -m pytest -q
+  PYTHONPATH="${ROOT_DIR}/services/local-agent/src" "${PYTHON_BIN}" -m pytest -q
 )
 (
   cd "${ROOT_DIR}/services/feature-engine"
-  "${PYTHON_BIN}" -m pytest -q
+  PYTHONPATH="${ROOT_DIR}/services/feature-engine/src" "${PYTHON_BIN}" -m pytest -q
 )
 
 if command -v go >/dev/null 2>&1; then

@@ -1,0 +1,113 @@
+name: qy-feature-bridge-runtime
+
+x-feature-bridge-runtime: &feature-bridge-runtime
+  image: qy-allpachong/qybullmq:${QYBULLMQ_IMAGE_TAG:?QYBULLMQ_IMAGE_TAG must pin an immutable pachongsys image}
+  restart: unless-stopped
+  init: true
+  user: node
+  read_only: true
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,size=16m
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  stop_grace_period: 30s
+  logging: &feature-bridge-logging
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+services:
+  feature-ingest:
+    image: qy-allpachong/feature-engine:${QY_FEATURE_ENGINE_IMAGE_TAG:?QY_FEATURE_ENGINE_IMAGE_TAG must pin an immutable pachongsys image}
+    container_name: qy-feature-ingest
+    restart: unless-stopped
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    stop_grace_period: 30s
+    command: ["feature-ingest"]
+    environment:
+      FEATURE_DATABASE_URL_FILE: /run/qy-feature-secrets/feature_database_url
+      EXPECTED_FEATURE_DATABASE: ${CRAWLER_DB_NAME:-bullmq_crawler_migration}
+      EXPECTED_FEATURE_DATABASE_USER: feature_user
+      FEATURE_INGEST_HOST: 0.0.0.0
+      FEATURE_INGEST_PORT: 8090
+      FEATURE_INGEST_TOKEN_FILE: /run/qy-feature-secrets/feature_ingest_token
+      TZ: UTC
+    volumes:
+      - feature_runtime_secrets:/run/qy-feature-secrets:ro
+    networks: [feature_private, crawler]
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/readyz', timeout=3).read()"
+      interval: 5s
+      timeout: 4s
+      retries: 20
+      start_period: 5s
+    logging: *feature-bridge-logging
+
+  feature-relay:
+    <<: *feature-bridge-runtime
+    container_name: qy-feature-relay
+    depends_on:
+      feature-ingest:
+        condition: service_healthy
+    command: ["node", "src/runFeatureRecalcRelay.js"]
+    environment:
+      NODE_ENV: production
+      REDIS_HOST: ${CRAWLER_REDIS_HOST:-bullmq-crawler-migration-redis}
+      REDIS_PORT: ${CRAWLER_REDIS_PORT:-6379}
+      FEATURE_RECALC_QUEUE: feature-recalc
+      FEATURE_INGEST_URL: http://feature-ingest:8090/v1/crawler-observations
+      FEATURE_INGEST_TOKEN_FILE: /run/qy-feature-secrets/feature_ingest_token
+      FEATURE_RECALC_CONCURRENCY: 4
+      TZ: UTC
+    volumes:
+      - feature_runtime_secrets:/run/qy-feature-secrets:ro
+    networks: [feature_private, crawler]
+
+  crawler-outbox-publisher:
+    <<: *feature-bridge-runtime
+    container_name: qy-crawler-outbox-publisher
+    depends_on:
+      feature-relay:
+        condition: service_started
+    command: ["node", "src/runCrawlerOutboxPublisher.js"]
+    environment:
+      NODE_ENV: production
+      SKIP_SCHEMA_MIGRATION: "true"
+      EXPECTED_CRAWLER_DATABASE: ${CRAWLER_DB_NAME:-bullmq_crawler_migration}
+      POSTGRES_HOST: ${CRAWLER_DB_HOST:-bullmq-crawler-migration-pgbouncer}
+      POSTGRES_PORT: ${CRAWLER_DB_PORT:-6432}
+      POSTGRES_USER: ${CRAWLER_DB_USER:-bullmq}
+      POSTGRES_PASSWORD: ${CRAWLER_DB_PASSWORD:?CRAWLER_DB_PASSWORD is required}
+      POSTGRES_DB: ${CRAWLER_DB_NAME:-bullmq_crawler_migration}
+      POSTGRES_POOL_MIN: 0
+      POSTGRES_POOL_MAX: 4
+      REDIS_HOST: ${CRAWLER_REDIS_HOST:-bullmq-crawler-migration-redis}
+      REDIS_PORT: ${CRAWLER_REDIS_PORT:-6379}
+      FEATURE_RECALC_QUEUE: feature-recalc
+      OUTBOX_PUBLISH_BATCH_SIZE: 50
+      OUTBOX_PUBLISH_POLL_MS: 1000
+      TZ: UTC
+    networks: [crawler]
+
+networks:
+  crawler:
+    external: true
+    name: ${QY_SHARED_CRAWLER_NETWORK:-bullmq-crawler}
+  feature_private:
+    external: true
+    name: ${QY_SHARED_FEATURE_PRIVATE_NETWORK:-qy-feature-private}
+
+volumes:
+  feature_runtime_secrets:
+    external: true
+    name: ${QY_SHARED_FEATURE_RUNTIME_SECRETS_VOLUME:-qy-feature-runtime-secrets}

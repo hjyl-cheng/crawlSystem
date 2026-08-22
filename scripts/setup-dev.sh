@@ -10,8 +10,8 @@ done
 python3 -m venv "${ROOT_DIR}/.venv"
 "${ROOT_DIR}/.venv/bin/pip" install \
   -r "${ROOT_DIR}/services/qybullmq/requirements.txt" \
-  "${ROOT_DIR}/services/local-agent[dev]" \
-  "${ROOT_DIR}/services/feature-engine[postgres]" \
+  -e "${ROOT_DIR}/services/local-agent[dev]" \
+  -e "${ROOT_DIR}/services/feature-engine[postgres]" \
   pytest
 
 echo "development dependencies are ready"
