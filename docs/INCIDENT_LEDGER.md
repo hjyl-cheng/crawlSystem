@@ -347,3 +347,31 @@
   the image only after Query reaches completion and Crawler Current, local
   Agent, Finalize, Publication, and Business Current agree for an accepted
   Channel.
+
+## INC-20260822-012: Restart Between Scheduler And Batch Closure Stranded Agent Tail
+
+- Status: fixed and regression-tested; production canary pending
+- Symptom: a Query cycle reached automatic finalization with 21 accepted
+  Channels. The first 20 entered the configured Agent batch, but the final
+  Channel remained `waiting_agent` with `agent_status='pending'` and no BullMQ
+  Job. The dispatch batch still had `discovery_closed_at=NULL`, so the Agent
+  batcher correctly refused to flush a partial tail because discovery appeared
+  open.
+- Root cause: finishing discovery used two durable writes: first change the
+  scheduler to `finishing`, then close the dispatch batch. A Controller switch
+  occurred between those writes. On restart, the Controller recognized
+  `finishing` or `repairing` but had no reconciliation for the missing batch
+  closure, leaving the tail admission condition permanently false.
+- Prevention: every Controller tick now reconciles the dispatch batch whenever
+  the scheduler is in `finishing` or `repairing`. The operation is idempotent,
+  updates only a batch whose `discovery_closed_at` is still null, and is also
+  used by the normal discovery shutdown path. A running discovery cycle is
+  never closed by this recovery.
+- Verification: the regression test reproduces a `repairing` scheduler with an
+  unclosed batch and requires the next reconciliation to set the closure. A
+  paired test proves that `running` discovery performs no write. Controller
+  lifecycle, Final Repair, Content Repair, and Query Scheduler focused tests
+  pass.
+- Rollout: promote only after a Controller canary closes the preserved batch,
+  emits the remaining local Agent tail, and advances it through Finalize and
+  Publication without opening another Discover page.

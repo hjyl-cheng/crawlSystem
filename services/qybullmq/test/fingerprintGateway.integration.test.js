@@ -53,11 +53,12 @@ test("real curl_cffi gateway keeps profile cookies while using the configured pr
       headers: { accept: "text/plain" },
       timeoutMs: 5000,
     });
+    const responseText = await response.text();
     const snapshot = await gateway.snapshot(chrome);
 
     assert.equal(response.status, 202);
     assert.equal(response.headers.get("x-local-proxy"), "yes");
-    assert.equal(await response.text(), "proxied-locally");
+    assert.equal(responseText, "proxied-locally");
     assert.equal(requests.length, 1);
     assert.equal(requests[0].url, "http://fingerprint.invalid/channel");
     assert.equal(requests[0].userAgent, "Integration Chrome UA");

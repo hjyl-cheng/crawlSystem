@@ -65,6 +65,7 @@ import {
   normalizeQueryScheduler,
   QUERY_SCHEDULER_KEY,
   querySchedulerAllowsDiscovery,
+  reconcileAutomaticDiscoveryClosure,
 } from "./queryScheduler.js";
 import {
   automaticFinalRepairReference,
@@ -538,14 +539,10 @@ async function addDispatchQuery(dispatchBatchId, queryId) {
 
 async function closeDispatchDiscovery(dispatchBatchId) {
   if (!dispatchBatchId) return;
-  await query(
-    `UPDATE crawler.query_dispatch_batches
-     SET status=CASE WHEN status='running' THEN 'discovery_closed' ELSE status END,
-         discovery_closed_at=COALESCE(discovery_closed_at,now()),
-         updated_at=now()
-     WHERE dispatch_batch_id=$1`,
-    [dispatchBatchId],
-  );
+  await reconcileAutomaticDiscoveryClosure(query, {
+    status: "finishing",
+    pipeline_cycle_id: dispatchBatchId,
+  });
 }
 
 async function resumeLegacyAutomaticFinalization(scheduler, actions) {
@@ -2482,6 +2479,12 @@ async function tick() {
   await reconcileQueryQualityQueue(actions);
   let queryScheduler = await getQueryScheduler();
   queryScheduler = await resumeLegacyAutomaticFinalization(queryScheduler, actions);
+  if (await reconcileAutomaticDiscoveryClosure(query, queryScheduler)) {
+    actions.push({
+      action: "reconcile-query-discovery-closure",
+      pipeline_cycle_id: queryScheduler.pipeline_cycle_id,
+    });
+  }
   const metadataCycle = await maybeStartMetadataDiscoveryCycle(withTransaction);
   if (metadataCycle.scheduler) queryScheduler = metadataCycle.scheduler;
   if (metadataCycle.started) {
