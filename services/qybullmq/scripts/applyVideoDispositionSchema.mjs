@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
-import { environmentValue } from "../src/runtimeEnvironment.js";
+import { databaseUrl } from "../src/databaseConnection.js";
 
 const { Client } = pg;
 
@@ -39,7 +39,7 @@ export function videoDispositionSchemaApplyGuard(
     );
   }
   return {
-    databaseUrl: environmentValue("DATABASE_URL", { environment }),
+    databaseUrl: databaseUrl(environment),
     confirmedDatabase,
     expectedCandidateCount: nonnegativeInteger(
       environment,

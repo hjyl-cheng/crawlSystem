@@ -52,6 +52,30 @@ test("Video disposition schema apply pins database identity and Candidate counts
       expectedUndisposedCandidateCount: 1058693,
     },
   );
+
+  const productionComponents = {
+    POSTGRES_HOST: "crawler-pgbouncer",
+    POSTGRES_PORT: "6432",
+    POSTGRES_USER: "crawler writer",
+    POSTGRES_PASSWORD: "password with symbols:/@",
+    POSTGRES_DB: "crawler_production",
+    CONFIRM_VIDEO_DISPOSITION_SCHEMA_APPLY: "crawler_production",
+    EXPECTED_CRAWLER_CANDIDATE_COUNT: "1058693",
+    EXPECTED_UNDISPOSED_CANDIDATE_COUNT: "1058693",
+  };
+  assert.deepEqual(
+    videoDispositionSchemaApplyGuard(
+      productionComponents,
+      ["node", "script", "--apply"],
+    ),
+    {
+      databaseUrl:
+        "postgres://crawler%20writer:password%20with%20symbols%3A%2F%40@crawler-pgbouncer:6432/crawler_production",
+      confirmedDatabase: "crawler_production",
+      expectedCandidateCount: 1058693,
+      expectedUndisposedCandidateCount: 1058693,
+    },
+  );
 });
 
 test("Video disposition controlled apply verifies transactional postconditions", async () => {
