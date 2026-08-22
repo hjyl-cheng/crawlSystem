@@ -1467,6 +1467,7 @@ CREATE TABLE IF NOT EXISTS crawler.content_candidates (
   UNIQUE (run_id, position)
 );
 
+-- video-disposition-schema:start
 ALTER TABLE crawler.content_candidates
 ADD COLUMN IF NOT EXISTS disposition TEXT;
 
@@ -1600,6 +1601,7 @@ WHERE disposition IN ('deferred', 'terminal_excluded') AND next_attempt_at IS NO
 
 CREATE INDEX IF NOT EXISTS idx_crawler_content_candidates_disposition_history
 ON crawler.content_candidates (channel_id, source_content_id, candidate_id DESC);
+-- video-disposition-schema:end
 
 CREATE INDEX IF NOT EXISTS idx_crawler_content_candidates_repairable_run
 ON crawler.content_candidates (run_id) INCLUDE (content_key)
