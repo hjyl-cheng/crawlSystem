@@ -65,6 +65,7 @@ function detail(videoId, viewCount, { contentType = "video" } = {}) {
 function databaseFixture({ beforeTransaction = null } = {}) {
   const state = {
     candidates: new Set(["candidate-only"]),
+    candidateRows: [],
     contents: [
       {
         content_key: "UCvideo:video:known-anchor",
@@ -182,6 +183,58 @@ function databaseFixture({ beforeTransaction = null } = {}) {
         });
         return { rowCount: 1, rows: [] };
       }
+      if (sql.includes("INSERT INTO crawler.content_candidates")) {
+        const candidate = {
+          run_id: params[0],
+          channel_id: params[1],
+          source_content_id: params[2],
+          position: params[3],
+          content_type: params[7],
+          type_status: params[8],
+          detail_status: params[10],
+          api_status: params[11],
+          missing_fields: params[12],
+          disposition: params[14],
+          next_attempt_at: params[15],
+          result_json: JSON.parse(params[16]),
+          error_message: params[17],
+        };
+        const existing = state.candidateRows.find(
+          (row) => row.run_id === candidate.run_id
+            && row.source_content_id === candidate.source_content_id,
+        );
+        if (existing) {
+          if (existing.disposition === "deferred"
+              && ["stored", "terminal_excluded"].includes(candidate.disposition)) {
+            const { disposition: fromDisposition, ...deferredEvidence } = existing.result_json;
+            candidate.result_json.recovery = {
+              from_disposition: fromDisposition,
+              deferred_evidence: deferredEvidence,
+              deferred_error_message: existing.error_message,
+              resolved_at: candidate.result_json.disposition.observed_at,
+            };
+          }
+          Object.assign(existing, candidate);
+        }
+        else state.candidateRows.push(candidate);
+        return { rowCount: 1, rows: [{ candidate_id: state.candidateRows.length }] };
+      }
+      if (sql.includes("row_number() OVER") && sql.includes("ranked.disposition='deferred'")) {
+        const latest = new Map();
+        state.candidateRows.forEach((row, index) => {
+          if (row.channel_id !== params[0]) return;
+          latest.set(row.source_content_id, { ...row, candidate_id: index + 1 });
+        });
+        const rows = [...latest.values()]
+          .filter((row) => row.disposition === "deferred")
+          .filter((row) => !state.contents.some(
+            (content) => content.channel_id === row.channel_id
+              && content.source_content_id === row.source_content_id,
+          ))
+          .sort((left, right) => left.candidate_id - right.candidate_id)
+          .map((row) => ({ video_id: row.source_content_id }));
+        return { rowCount: rows.length, rows };
+      }
       if (sql.includes("AS enrich_pending") && sql.includes("FROM crawler.contents content")) {
         const cutoff = new Date(`${params[1]}T00:00:00.000Z`);
         cutoff.setUTCDate(cutoff.getUTCDate() - Number(params[2]));
@@ -266,13 +319,878 @@ function databaseFixture({ beforeTransaction = null } = {}) {
         const known = new Set(state.contents.map((row) => row.source_content_id));
         return { rows: params[1].filter((id) => known.has(id)).map((video_id) => ({ video_id })) };
       }
+      if (sql.includes("DISTINCT ON (candidate.source_content_id)")) {
+        const requested = new Set(params[1]);
+        const latest = new Map();
+        state.candidateRows.forEach((row, index) => {
+          if (row.channel_id !== params[0] || !requested.has(row.source_content_id)) return;
+          latest.set(row.source_content_id, { ...row, candidate_id: index + 1 });
+        });
+        return { rows: [...latest.values()] };
+      }
       if (sql.includes("SELECT * FROM crawler.contents")) {
         return { rows: state.contents.map((row) => ({ ...row })) };
+      }
+      if (sql.includes("FROM crawler.content_candidates candidate")
+          && sql.includes("candidate.next_attempt_at<=$2::timestamptz")) {
+        const dueAt = new Date(params[1]).getTime();
+        return {
+          rows: state.candidateRows
+            .filter((row) => row.channel_id === params[0])
+            .filter((row) => ["deferred", "terminal_excluded"].includes(row.disposition))
+            .filter((row) => row.next_attempt_at && new Date(row.next_attempt_at).getTime() <= dueAt)
+            .filter((row) => !state.contents.some(
+              (content) => content.source_content_id === row.source_content_id,
+            ))
+            .map((row) => ({ ...row })),
+        };
       }
       throw new Error(`unexpected query: ${sql}`);
     },
   };
 }
+
+test("Video discovery defers a public detail without authoritative type evidence", async () => {
+  const fixture = databaseFixture();
+  const result = await executeIncrementalVideo({
+    plan: plan(),
+    runId: "incremental:deferred-type",
+    startedAt: "2026-07-20T00:00:00.000Z",
+    query: fixture.query,
+    withTransaction: fixture.withTransaction,
+    getChannelSnapshot: async () => ({
+      async scanUploads() {
+        return {
+          playlist_id: "UUvideo",
+          entries: [{
+            id: "public-without-type",
+            position: 1,
+            title: "Public without type",
+            published_day: "2026-07-19",
+          }],
+          pages: 1,
+          item_count: 1,
+          parse_gap_count: 0,
+          anchor_matched: true,
+          matched_anchor_id: "known-anchor",
+          stop_reason: "anchor_matched",
+          terminal_reason: "anchor_matched",
+          complete: true,
+          raw: { engine: "youtubei.js@test" },
+        };
+      },
+    }),
+    fetchDetail: async (videoId) => ({
+      id: videoId,
+      title: "Player returned a partial detail",
+      access_status: "public",
+      availability: "public",
+      ytdlp_client: "web",
+      extractor_version: "yt-dlp@test",
+      content_type_signals: {
+        source: "yt_dlp_player",
+        canonical_url: null,
+        is_shorts_eligible: null,
+        is_live_content: null,
+      },
+    }),
+  });
+
+  assert.equal(result.outcome, "partial");
+  assert.equal(result.first_seen_count, 0);
+  assert.equal(
+    fixture.state.contents.some((row) => row.source_content_id === "public-without-type"),
+    false,
+  );
+  assert.equal(fixture.state.candidateRows.length, 1);
+  assert.deepEqual(fixture.state.candidateRows[0], {
+    run_id: "incremental:deferred-type",
+    channel_id: "UCvideo",
+    source_content_id: "public-without-type",
+    position: 1,
+    content_type: null,
+    type_status: "unresolved",
+    detail_status: "done",
+    api_status: "not_needed",
+    missing_fields: ["content_type"],
+    disposition: "deferred",
+    next_attempt_at: "2026-07-20T06:00:00.000Z",
+    result_json: {
+      flat: {
+        id: "public-without-type",
+        position: 1,
+        title: "Public without type",
+        published_day: "2026-07-19",
+      },
+      detail: {
+        id: "public-without-type",
+        title: "Player returned a partial detail",
+        access_status: "public",
+        availability: "public",
+        ytdlp_client: "web",
+        extractor_version: "yt-dlp@test",
+        content_type_signals: {
+          source: "yt_dlp_player",
+          canonical_url: null,
+          is_shorts_eligible: null,
+          is_live_content: null,
+        },
+      },
+      classification: null,
+      access: {
+        access_status: "public",
+        access_status_source: "yt_dlp",
+      },
+      disposition: {
+        version: "video-disposition-v1",
+        kind: "deferred",
+        reason_code: "authoritative_type_unresolved",
+        retry_class: "alternate_player",
+        retryable: true,
+        observed_at: "2026-07-20T00:00:00.000Z",
+        next_attempt_at: "2026-07-20T06:00:00.000Z",
+      },
+      extractor: {
+        source: "yt_dlp",
+        client: "web",
+        version: "yt-dlp@test",
+      },
+    },
+    error_message: "authoritative content type evidence is missing",
+  });
+  assert.deepEqual(
+    fixture.state.outbox[0].payload.discovery.payload.dispositions,
+    [{
+      video_id: "public-without-type",
+      kind: "deferred",
+      reason_code: "authoritative_type_unresolved",
+      retry_class: "alternate_player",
+    }],
+  );
+  assert.equal(fixture.state.cursorUpdates[0].anchorVideoIds, null);
+  assert.equal(fixture.state.cursorUpdates[0].sourceCursor, null);
+});
+
+test("Video discovery accounts for every new ID with exactly one disposition", async () => {
+  const fixture = databaseFixture();
+  const result = await executeIncrementalVideo({
+    plan: plan(),
+    runId: "incremental:mixed-disposition-ledger",
+    startedAt: "2026-07-20T00:00:00.000Z",
+    query: fixture.query,
+    withTransaction: fixture.withTransaction,
+    getChannelSnapshot: async () => ({
+      async scanUploads() {
+        return {
+          playlist_id: "UUvideo",
+          entries: [
+            { id: "stored-video", position: 1, title: "Stored" },
+            { id: "deferred-video", position: 2, title: "Deferred" },
+            {
+              id: "scheduled-live",
+              position: 3,
+              title: "Scheduled",
+              content_type: "live",
+              is_upcoming: true,
+            },
+            { id: "known-anchor", position: 4, title: "Known" },
+          ],
+          pages: 1,
+          item_count: 4,
+          parse_gap_count: 0,
+          anchor_matched: true,
+          matched_anchor_id: "known-anchor",
+          stop_reason: "anchor_matched",
+          terminal_reason: "anchor_matched",
+          complete: true,
+          raw: { engine: "youtubei.js@test" },
+        };
+      },
+    }),
+    fetchDetail: async (videoId) => videoId === "deferred-video"
+      ? {
+          id: videoId,
+          access_status: "public",
+          availability: "public",
+          content_type_signals: {
+            source: "yt_dlp_player",
+            canonical_url: null,
+            is_shorts_eligible: null,
+            is_live_content: null,
+          },
+        }
+      : detail(videoId, 10),
+  });
+
+  const discovery = fixture.state.outbox[0].payload.discovery.payload;
+  assert.equal(result.outcome, "partial");
+  assert.equal(discovery.discovered_count, 3);
+  assert.equal(discovery.silent_drop_count, 0);
+  assert.equal(
+    discovery.stored_count + discovery.deferred_count + discovery.terminal_excluded_count,
+    discovery.discovered_count,
+  );
+  assert.deepEqual(
+    [...new Set(discovery.dispositions.map((item) => item.video_id))].sort(),
+    ["deferred-video", "scheduled-live", "stored-video"],
+  );
+  assert.deepEqual(
+    discovery.dispositions.map((item) => item.kind).sort(),
+    ["deferred", "stored", "terminal_excluded"],
+  );
+  assert.equal(fixture.state.candidateRows.length, 3);
+  assert.equal(fixture.state.cursorUpdates[0].anchorVideoIds, null);
+  assert.equal(fixture.state.cursorUpdates[0].sourceCursor, null);
+});
+
+test("Video discovery idempotently resolves a deferred candidate and retains its evidence", async () => {
+  const fixture = databaseFixture();
+  let authoritative = false;
+  const execute = (startedAt) => executeIncrementalVideo({
+    plan: plan(),
+    runId: "incremental:deferred-replay",
+    startedAt,
+    query: fixture.query,
+    withTransaction: fixture.withTransaction,
+    getChannelSnapshot: async () => ({
+      async scanUploads() {
+        return {
+          playlist_id: "UUvideo",
+          entries: [
+            { id: "replayed-video", position: 1, title: "Replay" },
+            { id: "known-anchor", position: 2, title: "Known" },
+          ],
+          pages: 1,
+          item_count: 2,
+          parse_gap_count: 0,
+          anchor_matched: true,
+          matched_anchor_id: "known-anchor",
+          stop_reason: "anchor_matched",
+          terminal_reason: "anchor_matched",
+          complete: true,
+          raw: { engine: "youtubei.js@test" },
+        };
+      },
+    }),
+    fetchDetail: async (videoId) => authoritative
+      ? detail(videoId, 12)
+      : {
+          id: videoId,
+          title: "Incomplete Player detail",
+          access_status: "public",
+          availability: "public",
+          content_type_signals: {
+            source: "yt_dlp_player",
+            canonical_url: null,
+            is_shorts_eligible: null,
+            is_live_content: null,
+          },
+        },
+  });
+
+  const deferred = await execute("2026-07-20T00:00:00.000Z");
+  assert.equal(deferred.outcome, "partial");
+  authoritative = true;
+  const recovered = await execute("2026-07-20T06:00:00.000Z");
+
+  assert.equal(recovered.outcome, "complete");
+  assert.equal(fixture.state.candidateRows.length, 1);
+  assert.equal(
+    fixture.state.contents.filter((row) => row.source_content_id === "replayed-video").length,
+    1,
+  );
+  const candidate = fixture.state.candidateRows[0];
+  assert.equal(candidate.disposition, "stored");
+  assert.equal(candidate.next_attempt_at, null);
+  assert.equal(candidate.result_json.disposition.reason_code, "content_stored");
+  assert.equal(
+    candidate.result_json.recovery.from_disposition.reason_code,
+    "authoritative_type_unresolved",
+  );
+  assert.equal(candidate.result_json.recovery.deferred_error_message,
+    "authoritative content type evidence is missing");
+  assert.equal(
+    candidate.result_json.recovery.deferred_evidence.detail.title,
+    "Incomplete Player detail",
+  );
+  assert.equal(candidate.result_json.recovery.resolved_at, "2026-07-20T06:00:00.000Z");
+});
+
+test("Video discovery throttles a deferred recheck before it is due without advancing the cursor", async () => {
+  const fixture = databaseFixture();
+  const fetched = [];
+  const execute = ({ runId, startedAt, jobId }) => executeIncrementalVideo({
+    plan: { ...plan(), job_id: jobId },
+    runId,
+    startedAt,
+    query: fixture.query,
+    withTransaction: fixture.withTransaction,
+    getChannelSnapshot: async () => ({
+      async scanUploads() {
+        return {
+          playlist_id: "UUvideo",
+          entries: [
+            { id: "throttled-deferred", position: 1, title: "Deferred" },
+            { id: "known-anchor", position: 2, title: "Known" },
+          ],
+          pages: 1,
+          item_count: 2,
+          parse_gap_count: 0,
+          anchor_matched: true,
+          matched_anchor_id: "known-anchor",
+          stop_reason: "anchor_matched",
+          terminal_reason: "anchor_matched",
+          complete: true,
+          raw: { engine: "youtubei.js@test" },
+        };
+      },
+    }),
+    fetchDetail: async (videoId) => {
+      fetched.push(videoId);
+      return videoId === "throttled-deferred"
+        ? {
+            id: videoId,
+            title: "Incomplete Player detail",
+            access_status: "public",
+            availability: "public",
+            content_type_signals: {
+              source: "yt_dlp_player",
+              canonical_url: null,
+              is_shorts_eligible: null,
+              is_live_content: null,
+            },
+          }
+        : detail(videoId, 10);
+    },
+  });
+
+  await execute({
+    runId: "incremental:deferred-throttle:first",
+    startedAt: "2026-07-20T00:00:00.000Z",
+    jobId: "incremental__deferred-throttle__first",
+  });
+  const early = await execute({
+    runId: "incremental:deferred-throttle:early",
+    startedAt: "2026-07-20T01:00:00.000Z",
+    jobId: "incremental__deferred-throttle__early",
+  });
+
+  assert.equal(early.outcome, "partial");
+  assert.equal(fetched.filter((videoId) => videoId === "throttled-deferred").length, 1);
+  assert.equal(
+    fixture.state.candidateRows.filter(
+      (row) => row.source_content_id === "throttled-deferred",
+    ).length,
+    1,
+  );
+  const earlyDiscovery = fixture.state.outbox.at(-1).payload.discovery.payload;
+  assert.equal(earlyDiscovery.discovered_count, 0);
+  assert.deepEqual(earlyDiscovery.pending_deferred_video_ids, ["throttled-deferred"]);
+  assert.equal(fixture.state.cursorUpdates.at(-1).sourceCursor, null);
+  assert.equal(fixture.state.cursorUpdates.at(-1).anchorVideoIds, null);
+
+  const due = await execute({
+    runId: "incremental:deferred-throttle:due",
+    startedAt: "2026-07-20T06:00:00.000Z",
+    jobId: "incremental__deferred-throttle__due",
+  });
+  assert.equal(due.outcome, "partial");
+  assert.equal(fetched.filter((videoId) => videoId === "throttled-deferred").length, 2);
+  assert.equal(
+    fixture.state.candidateRows.filter(
+      (row) => row.source_content_id === "throttled-deferred",
+    ).length,
+    2,
+  );
+  const dueDiscovery = fixture.state.outbox.at(-1).payload.discovery.payload;
+  assert.deepEqual(dueDiscovery.recheck_deferred_video_ids, ["throttled-deferred"]);
+  assert.equal(fixture.state.cursorUpdates.at(-1).sourceCursor, null);
+  assert.equal(fixture.state.cursorUpdates.at(-1).anchorVideoIds, null);
+});
+
+test("an outstanding deferred ID blocks the cursor even when it leaves the Uploads page", async () => {
+  const fixture = databaseFixture();
+  const fetched = [];
+  const execute = ({ runId, startedAt, jobId, scanEntries }) => executeIncrementalVideo({
+    plan: { ...plan(), job_id: jobId },
+    runId,
+    startedAt,
+    query: fixture.query,
+    withTransaction: fixture.withTransaction,
+    getChannelSnapshot: async () => ({
+      async scanUploads() {
+        return {
+          playlist_id: "UUvideo",
+          entries: scanEntries,
+          pages: 1,
+          item_count: scanEntries.length,
+          parse_gap_count: 0,
+          anchor_matched: true,
+          matched_anchor_id: "known-anchor",
+          stop_reason: "anchor_matched",
+          terminal_reason: "anchor_matched",
+          complete: true,
+          raw: { engine: "youtubei.js@test" },
+        };
+      },
+    }),
+    fetchDetail: async (videoId) => {
+      fetched.push(videoId);
+      return videoId === "deferred-off-page"
+        ? {
+            id: videoId,
+            title: "Incomplete Player detail",
+            access_status: "public",
+            availability: "public",
+            content_type_signals: {
+              source: "yt_dlp_player",
+              canonical_url: null,
+              is_shorts_eligible: null,
+              is_live_content: null,
+            },
+          }
+        : detail(videoId, 10);
+    },
+  });
+
+  await execute({
+    runId: "incremental:deferred-off-page:first",
+    startedAt: "2026-07-20T00:00:00.000Z",
+    jobId: "incremental__deferred-off-page__first",
+    scanEntries: [
+      { id: "deferred-off-page", position: 1, title: "Deferred" },
+      { id: "known-anchor", position: 2, title: "Known" },
+    ],
+  });
+  const early = await execute({
+    runId: "incremental:deferred-off-page:early",
+    startedAt: "2026-07-20T01:00:00.000Z",
+    jobId: "incremental__deferred-off-page__early",
+    scanEntries: [{ id: "known-anchor", position: 1, title: "Known" }],
+  });
+
+  assert.equal(early.outcome, "partial");
+  assert.equal(fetched.filter((videoId) => videoId === "deferred-off-page").length, 1);
+  assert.deepEqual(
+    fixture.state.outbox.at(-1).payload.discovery.payload.blocking_deferred_video_ids,
+    ["deferred-off-page"],
+  );
+  assert.equal(fixture.state.cursorUpdates.at(-1).sourceCursor, null);
+  assert.equal(fixture.state.cursorUpdates.at(-1).anchorVideoIds, null);
+});
+
+test("Video discovery closes a private detail and schedules a low-frequency recheck", async () => {
+  const fixture = databaseFixture();
+  const result = await executeIncrementalVideo({
+    plan: plan(),
+    runId: "incremental:private-terminal",
+    startedAt: "2026-07-20T00:00:00.000Z",
+    query: fixture.query,
+    withTransaction: fixture.withTransaction,
+    getChannelSnapshot: async () => ({
+      async scanUploads() {
+        return {
+          playlist_id: "UUvideo",
+          entries: [{ id: "private-video", position: 1, title: "Private" }],
+          pages: 1,
+          item_count: 1,
+          parse_gap_count: 0,
+          anchor_matched: true,
+          matched_anchor_id: "known-anchor",
+          crossed_anchor_ids: ["known-anchor"],
+          stop_reason: "anchor_matched",
+          terminal_reason: "anchor_matched",
+          complete: true,
+          raw: { engine: "youtubei.js@test" },
+        };
+      },
+    }),
+    fetchDetail: async (videoId) => ({
+      id: videoId,
+      title: "Private",
+      access_status: "private",
+      availability: "private",
+      extractor_version: "youtubei.js@test",
+    }),
+  });
+
+  assert.equal(result.outcome, "complete");
+  assert.equal(result.first_seen_count, 0);
+  assert.equal(
+    fixture.state.contents.some((row) => row.source_content_id === "private-video"),
+    false,
+  );
+  assert.deepEqual(
+    (({
+      type_status,
+      detail_status,
+      api_status,
+      missing_fields,
+      disposition,
+      next_attempt_at,
+      result_json,
+      error_message,
+    }) => ({
+      type_status,
+      detail_status,
+      api_status,
+      missing_fields,
+      disposition,
+      next_attempt_at,
+      disposition_evidence: result_json.disposition,
+      access_evidence: result_json.access,
+      error_message,
+    }))(fixture.state.candidateRows[0]),
+    {
+      type_status: "unavailable",
+      detail_status: "unavailable",
+      api_status: "unavailable",
+      missing_fields: [],
+      disposition: "terminal_excluded",
+      next_attempt_at: "2026-07-27T00:00:00.000Z",
+      disposition_evidence: {
+        version: "video-disposition-v1",
+        kind: "terminal_excluded",
+        reason_code: "access_private",
+        retry_class: "low_frequency_access_recheck",
+        retryable: false,
+        observed_at: "2026-07-20T00:00:00.000Z",
+        next_attempt_at: "2026-07-27T00:00:00.000Z",
+      },
+      access_evidence: {
+        access_status: "private",
+        access_status_source: "youtubejs_player",
+      },
+      error_message: null,
+    },
+  );
+  assert.deepEqual(
+    fixture.state.outbox[0].payload.discovery.payload.dispositions,
+    [{
+      video_id: "private-video",
+      kind: "terminal_excluded",
+      reason_code: "access_private",
+      retry_class: "low_frequency_access_recheck",
+    }],
+  );
+  assert.deepEqual(fixture.state.cursorUpdates[0].anchorVideoIds.slice(0, 2), [
+    "private-video",
+    "known-anchor",
+  ]);
+  assert.notEqual(fixture.state.cursorUpdates[0].sourceCursor, null);
+});
+
+test("Video discovery does not recheck a terminal ID from Uploads before it is due", async () => {
+  const fixture = databaseFixture();
+  const fetched = [];
+  const execute = ({ runId, startedAt, jobId }) => executeIncrementalVideo({
+    plan: { ...plan(), job_id: jobId },
+    runId,
+    startedAt,
+    query: fixture.query,
+    withTransaction: fixture.withTransaction,
+    getChannelSnapshot: async () => ({
+      async scanUploads() {
+        return {
+          playlist_id: "UUvideo",
+          entries: [
+            { id: "private-on-uploads", position: 1, title: "Private" },
+            { id: "known-anchor", position: 2, title: "Known" },
+          ],
+          pages: 1,
+          item_count: 2,
+          parse_gap_count: 0,
+          anchor_matched: true,
+          matched_anchor_id: "known-anchor",
+          stop_reason: "anchor_matched",
+          terminal_reason: "anchor_matched",
+          complete: true,
+          raw: { engine: "youtubei.js@test" },
+        };
+      },
+    }),
+    fetchDetail: async (videoId) => {
+      fetched.push({ videoId, startedAt });
+      return videoId === "private-on-uploads"
+        ? {
+            id: videoId,
+            access_status: "private",
+            availability: "private",
+            extractor_version: "youtubei.js@test",
+          }
+        : detail(videoId, 10);
+    },
+  });
+
+  await execute({
+    runId: "incremental:terminal-current-page:first",
+    startedAt: "2026-07-20T00:00:00.000Z",
+    jobId: "incremental__terminal-current-page__first",
+  });
+  await execute({
+    runId: "incremental:terminal-current-page:early",
+    startedAt: "2026-07-21T00:00:00.000Z",
+    jobId: "incremental__terminal-current-page__early",
+  });
+  assert.equal(
+    fetched.filter((item) => item.videoId === "private-on-uploads").length,
+    1,
+  );
+  assert.equal(
+    fixture.state.candidateRows.filter((row) => row.source_content_id === "private-on-uploads").length,
+    1,
+  );
+
+  await execute({
+    runId: "incremental:terminal-current-page:due",
+    startedAt: "2026-07-27T00:00:00.000Z",
+    jobId: "incremental__terminal-current-page__due",
+  });
+  assert.equal(
+    fetched.filter((item) => item.videoId === "private-on-uploads").length,
+    2,
+  );
+  assert.equal(
+    fixture.state.candidateRows.filter((row) => row.source_content_id === "private-on-uploads").length,
+    2,
+  );
+  const dueDiscovery = fixture.state.outbox.at(-1).payload.discovery.payload;
+  assert.equal(dueDiscovery.discovered_count, 0);
+  assert.deepEqual(dueDiscovery.dispositions, []);
+  assert.deepEqual(dueDiscovery.recheck_dispositions, [{
+    video_id: "private-on-uploads",
+    kind: "terminal_excluded",
+    reason_code: "access_private",
+    retry_class: "low_frequency_access_recheck",
+  }]);
+});
+
+test("Video discovery rechecks a due terminal exclusion outside the current Uploads page", async () => {
+  const fixture = databaseFixture();
+  const execute = ({ runId, startedAt, jobId, scanEntries, accessStatus }) => executeIncrementalVideo({
+    plan: { ...plan(), job_id: jobId },
+    runId,
+    startedAt,
+    query: fixture.query,
+    withTransaction: fixture.withTransaction,
+    getChannelSnapshot: async () => ({
+      async scanUploads() {
+        return {
+          playlist_id: "UUvideo",
+          entries: scanEntries,
+          pages: 1,
+          item_count: scanEntries.length,
+          parse_gap_count: 0,
+          anchor_matched: true,
+          matched_anchor_id: "known-anchor",
+          stop_reason: "anchor_matched",
+          terminal_reason: "anchor_matched",
+          complete: true,
+          raw: { engine: "youtubei.js@test" },
+        };
+      },
+    }),
+    fetchDetail: async (videoId) => accessStatus === "private"
+      ? {
+          id: videoId,
+          title: "Private",
+          access_status: "private",
+          availability: "private",
+          extractor_version: "youtubei.js@test",
+        }
+      : detail(videoId, 12),
+  });
+
+  const first = await execute({
+    runId: "incremental:terminal-recheck:first",
+    startedAt: "2026-07-20T00:00:00.000Z",
+    jobId: "incremental__terminal-recheck__first",
+    scanEntries: [
+      { id: "recheck-private", position: 1, title: "Private" },
+      { id: "known-anchor", position: 2, title: "Known" },
+    ],
+    accessStatus: "private",
+  });
+  assert.equal(first.outcome, "complete");
+  assert.equal(
+    fixture.state.contents.some((row) => row.source_content_id === "recheck-private"),
+    false,
+  );
+
+  const second = await execute({
+    runId: "incremental:terminal-recheck:second",
+    startedAt: "2026-07-27T00:00:00.000Z",
+    jobId: "incremental__terminal-recheck__second",
+    scanEntries: [{ id: "known-anchor", position: 1, title: "Known" }],
+    accessStatus: "public",
+  });
+
+  assert.equal(second.outcome, "complete");
+  assert.equal(second.first_seen_count, 1);
+  assert.equal(
+    fixture.state.contents.filter((row) => row.source_content_id === "recheck-private").length,
+    1,
+  );
+  const recoveredCandidate = fixture.state.candidateRows.find(
+    (row) => row.run_id === "incremental:terminal-recheck:second"
+      && row.source_content_id === "recheck-private",
+  );
+  assert.equal(recoveredCandidate.disposition, "stored");
+  assert.equal(recoveredCandidate.result_json.disposition.reason_code, "content_stored");
+  assert.equal(fixture.state.cursorUpdates.at(-1).outcome, "complete");
+});
+
+test("a failed low-frequency terminal recheck preserves the non-blocking conclusion", async () => {
+  const fixture = databaseFixture();
+  const execute = ({ runId, startedAt, jobId, scanEntries, recheckFails = false }) => (
+    executeIncrementalVideo({
+      plan: { ...plan(), job_id: jobId },
+      runId,
+      startedAt,
+      query: fixture.query,
+      withTransaction: fixture.withTransaction,
+      getChannelSnapshot: async () => ({
+        async scanUploads() {
+          return {
+            playlist_id: "UUvideo",
+            entries: scanEntries,
+            pages: 1,
+            item_count: scanEntries.length,
+            parse_gap_count: 0,
+            anchor_matched: true,
+            matched_anchor_id: "known-anchor",
+            stop_reason: "anchor_matched",
+            terminal_reason: "anchor_matched",
+            complete: true,
+            raw: { engine: "youtubei.js@test" },
+          };
+        },
+      }),
+      fetchDetail: async (videoId) => {
+        if (recheckFails && videoId === "private-recheck-failure") {
+          throw new Error("temporary Player timeout");
+        }
+        return videoId === "private-recheck-failure"
+          ? {
+              id: videoId,
+              title: "Private",
+              access_status: "private",
+              availability: "private",
+              extractor_version: "youtubei.js@test",
+            }
+          : detail(videoId, 12);
+      },
+    })
+  );
+
+  await execute({
+    runId: "incremental:terminal-recheck-failure:first",
+    startedAt: "2026-07-20T00:00:00.000Z",
+    jobId: "incremental__terminal-recheck-failure__first",
+    scanEntries: [
+      { id: "private-recheck-failure", position: 1, title: "Private" },
+      { id: "known-anchor", position: 2, title: "Known" },
+    ],
+  });
+  const retried = await execute({
+    runId: "incremental:terminal-recheck-failure:second",
+    startedAt: "2026-07-27T00:00:00.000Z",
+    jobId: "incremental__terminal-recheck-failure__second",
+    scanEntries: [{ id: "known-anchor", position: 1, title: "Known" }],
+    recheckFails: true,
+  });
+
+  assert.equal(retried.outcome, "complete");
+  assert.equal(retried.first_seen_count, 0);
+  const recheckCandidate = fixture.state.candidateRows.find(
+    (row) => row.run_id === "incremental:terminal-recheck-failure:second"
+      && row.source_content_id === "private-recheck-failure",
+  );
+  assert.equal(recheckCandidate.disposition, "terminal_excluded");
+  assert.equal(recheckCandidate.result_json.disposition.reason_code, "access_private");
+  assert.equal(
+    recheckCandidate.result_json.collection_error.message,
+    "temporary Player timeout",
+  );
+  assert.equal(
+    recheckCandidate.result_json.flat.disposition_recheck.prior_reason_code,
+    "access_private",
+  );
+  assert.equal(fixture.state.cursorUpdates.at(-1).sourceCursor != null, true);
+});
+
+test("an incomplete Uploads scan does not consume or downgrade a due terminal recheck", async () => {
+  const fixture = databaseFixture();
+  const fetched = [];
+  const execute = ({ runId, startedAt, jobId, complete }) => executeIncrementalVideo({
+    plan: { ...plan(), job_id: jobId },
+    runId,
+    startedAt,
+    query: fixture.query,
+    withTransaction: fixture.withTransaction,
+    getChannelSnapshot: async () => ({
+      async scanUploads() {
+        return {
+          playlist_id: "UUvideo",
+          entries: [
+            { id: "private-incomplete-recheck", position: 1, title: "Private" },
+            ...(complete
+              ? [{ id: "known-anchor", position: 2, title: "Known" }]
+              : []),
+          ],
+          pages: 1,
+          item_count: complete ? 2 : 1,
+          parse_gap_count: 0,
+          anchor_matched: complete,
+          matched_anchor_id: complete ? "known-anchor" : null,
+          stop_reason: complete ? "anchor_matched" : "max_items",
+          terminal_reason: complete ? "anchor_matched" : "max_items",
+          complete,
+          raw: { engine: "youtubei.js@test" },
+        };
+      },
+    }),
+    fetchDetail: async (videoId) => {
+      fetched.push(videoId);
+      return videoId === "private-incomplete-recheck"
+        ? {
+            id: videoId,
+            access_status: "private",
+            availability: "private",
+            extractor_version: "youtubei.js@test",
+          }
+        : detail(videoId, 10);
+    },
+  });
+
+  await execute({
+    runId: "incremental:terminal-incomplete-recheck:first",
+    startedAt: "2026-07-20T00:00:00.000Z",
+    jobId: "incremental__terminal-incomplete-recheck__first",
+    complete: true,
+  });
+  const retried = await execute({
+    runId: "incremental:terminal-incomplete-recheck:second",
+    startedAt: "2026-07-27T00:00:00.000Z",
+    jobId: "incremental__terminal-incomplete-recheck__second",
+    complete: false,
+  });
+
+  assert.equal(retried.outcome, "partial");
+  assert.equal(
+    fetched.filter((videoId) => videoId === "private-incomplete-recheck").length,
+    1,
+  );
+  assert.equal(
+    fixture.state.candidateRows.filter(
+      (row) => row.source_content_id === "private-incomplete-recheck",
+    ).length,
+    1,
+  );
+  const discovery = fixture.state.outbox.at(-1).payload.discovery.payload;
+  assert.deepEqual(discovery.recheck_dispositions, []);
+  assert.deepEqual(discovery.blocking_deferred_video_ids, []);
+});
 
 test("Video execution deduplicates only against Contents before sampling old Videos", async () => {
   const fixture = databaseFixture();
@@ -770,6 +1688,99 @@ test("Video discovery does not persist an upcoming live before it starts", async
     fixture.state.contents.some((row) => row.source_content_id === "upcoming-live"),
     false,
   );
+  assert.deepEqual(
+    (({ disposition, next_attempt_at, result_json }) => ({
+      disposition,
+      next_attempt_at,
+      disposition_evidence: result_json.disposition,
+      upload_evidence: result_json.flat,
+    }))(fixture.state.candidateRows[0]),
+    {
+      disposition: "terminal_excluded",
+      next_attempt_at: "2026-07-21T00:00:00.000Z",
+      disposition_evidence: {
+        version: "video-disposition-v1",
+        kind: "terminal_excluded",
+        reason_code: "upcoming_live",
+        retry_class: "low_frequency_access_recheck",
+        retryable: false,
+        observed_at: "2026-07-20T00:00:00.000Z",
+        next_attempt_at: "2026-07-21T00:00:00.000Z",
+      },
+      upload_evidence: {
+        id: "upcoming-live",
+        position: 1,
+        content_type: "live",
+        is_upcoming: true,
+        title: "Scheduled",
+        published_day: "2026-07-20",
+      },
+    },
+  );
+  assert.deepEqual(
+    fixture.state.outbox[0].payload.discovery.payload.dispositions,
+    [{
+      video_id: "upcoming-live",
+      kind: "terminal_excluded",
+      reason_code: "upcoming_live",
+      retry_class: "low_frequency_access_recheck",
+    }],
+  );
+});
+
+test("Video discovery honors an upcoming state first revealed by Player detail", async () => {
+  const fixture = databaseFixture();
+  const result = await executeIncrementalVideo({
+    plan: plan(),
+    runId: "incremental:detail-upcoming-live",
+    startedAt: "2026-07-20T00:00:00.000Z",
+    query: fixture.query,
+    withTransaction: fixture.withTransaction,
+    getChannelSnapshot: async () => ({
+      async scanUploads() {
+        return {
+          playlist_id: "UUvideo",
+          entries: [{ id: "detail-upcoming", position: 1, title: "Scheduled" }],
+          pages: 1,
+          item_count: 1,
+          parse_gap_count: 0,
+          anchor_matched: true,
+          matched_anchor_id: "known-anchor",
+          stop_reason: "anchor_matched",
+          terminal_reason: "anchor_matched",
+          complete: true,
+          raw: { engine: "youtubei.js@test" },
+        };
+      },
+    }),
+    fetchDetail: async (videoId) => ({
+      ...detail(videoId, 0, { contentType: "live" }),
+      is_upcoming: true,
+      live_status: "is_upcoming",
+      live_scheduled_at: "2026-07-21T12:00:00.000Z",
+      content_type_signals: {
+        source: "youtubei_player",
+        canonical_url: `https://www.youtube.com/watch?v=${videoId}`,
+        is_shorts_eligible: false,
+        is_live_content: true,
+        is_live: false,
+        is_upcoming: true,
+        is_live_now: false,
+      },
+    }),
+  });
+
+  assert.equal(result.outcome, "complete");
+  assert.equal(result.first_seen_count, 0);
+  assert.equal(
+    fixture.state.contents.some((row) => row.source_content_id === "detail-upcoming"),
+    false,
+  );
+  assert.equal(fixture.state.candidateRows[0].disposition, "terminal_excluded");
+  assert.equal(
+    fixture.state.candidateRows[0].result_json.disposition.reason_code,
+    "upcoming_live",
+  );
 });
 
 test("Video discovery does not persist a live broadcast while it is in progress", async () => {
@@ -875,10 +1886,48 @@ test("Video discovery stores an unlisted detail without treating it as public", 
     fixture.state.contents.find((row) => row.source_content_id === "unlisted-video").access_status,
     "unlisted",
   );
+  assert.deepEqual(
+    (({ content_type, type_status, detail_status, disposition, next_attempt_at, result_json }) => ({
+      content_type,
+      type_status,
+      detail_status,
+      disposition,
+      next_attempt_at,
+      disposition_evidence: result_json.disposition,
+      stored_content_key: result_json.content_key,
+    }))(fixture.state.candidateRows[0]),
+    {
+      content_type: "video",
+      type_status: "resolved",
+      detail_status: "done",
+      disposition: "stored",
+      next_attempt_at: null,
+      disposition_evidence: {
+        version: "video-disposition-v1",
+        kind: "stored",
+        reason_code: "content_stored",
+        retry_class: null,
+        retryable: false,
+        observed_at: "2026-07-20T00:00:00.000Z",
+        next_attempt_at: null,
+      },
+      stored_content_key: "UCvideo:video:unlisted-video",
+    },
+  );
+  assert.deepEqual(
+    fixture.state.outbox[0].payload.discovery.payload.dispositions,
+    [{
+      video_id: "unlisted-video",
+      kind: "stored",
+      reason_code: "content_stored",
+      retry_class: null,
+    }],
+  );
 });
 
 test("an incomplete Uploads scan does not advance the incremental cursor", async () => {
   const fixture = databaseFixture();
+  const fetched = [];
   const result = await executeIncrementalVideo({
     plan: plan(),
     runId: "incremental:incomplete-scan",
@@ -905,15 +1954,47 @@ test("an incomplete Uploads scan does not advance the incremental cursor", async
         };
       },
     }),
-    fetchDetail: async (videoId) => ({
-      ...detail(videoId, 100),
-      published_at: videoId === "old-video"
-        ? "2026-07-09T00:00:00.000Z"
-        : "2026-07-19T00:00:00.000Z",
-    }),
+    fetchDetail: async (videoId) => {
+      fetched.push(videoId);
+      return detail(videoId, 100);
+    },
   });
 
   assert.equal(result.outcome, "partial");
+  assert.equal(result.first_seen_count, 0);
+  assert.deepEqual(fetched, []);
+  assert.deepEqual(
+    fixture.state.candidateRows.map((row) => ({
+      video_id: row.source_content_id,
+      disposition: row.disposition,
+      reason_code: row.result_json.disposition.reason_code,
+    })),
+    [
+      {
+        video_id: "new-1",
+        disposition: "deferred",
+        reason_code: "discovery_scan_incomplete",
+      },
+      {
+        video_id: "new-2",
+        disposition: "deferred",
+        reason_code: "discovery_scan_incomplete",
+      },
+    ],
+  );
+  const incompleteDiscovery = fixture.state.outbox[0].payload.discovery.payload;
+  assert.equal(incompleteDiscovery.discovered_count, 2);
+  assert.equal(incompleteDiscovery.deferred_count, 2);
+  assert.deepEqual(
+    incompleteDiscovery.dispositions.map((item) => item.video_id),
+    ["new-1", "new-2"],
+  );
+  assert.equal(
+    incompleteDiscovery.stored_count
+      + incompleteDiscovery.deferred_count
+      + incompleteDiscovery.terminal_excluded_count,
+    incompleteDiscovery.discovered_count,
+  );
   assert.equal(fixture.state.cursorUpdates.length, 1);
   assert.equal(fixture.state.cursorUpdates[0].anchorVideoIds, null);
   assert.equal(fixture.state.cursorUpdates[0].sourceCursor, null);
@@ -1106,6 +2187,18 @@ test("Catch-up exhaustion with parse gaps remains Partial and has no Content sid
   assert.equal(result.outcome, "partial");
   assert.deepEqual(fetched, []);
   assert.deepEqual(fixture.state.contents, initialContents);
+  assert.equal(fixture.state.candidateRows.length, scannedEntries.length);
+  assert.equal(
+    fixture.state.candidateRows.every((row) => (
+      row.disposition === "deferred"
+      && row.result_json.disposition.reason_code === "discovery_scan_incomplete"
+    )),
+    true,
+  );
+  assert.equal(
+    fixture.state.outbox[0].payload.discovery.payload.deferred_count,
+    scannedEntries.length,
+  );
   assert.equal(fixture.state.cursorUpdates[0].anchorVideoIds, null);
   assert.equal(fixture.state.cursorUpdates[0].sourceCursor, null);
   assert.equal(fixture.state.outbox[0].payload.discovery.payload.stop_reason, "catchup_limit");
@@ -1156,6 +2249,14 @@ test("Catch-up cannot abandon a gap before the configured budget is exhausted", 
   assert.equal(result.outcome, "partial");
   assert.deepEqual(fetched, []);
   assert.deepEqual(fixture.state.contents, initialContents);
+  assert.equal(fixture.state.candidateRows.length, scannedEntries.length);
+  assert.equal(
+    fixture.state.candidateRows.every((row) => (
+      row.disposition === "deferred"
+      && row.result_json.disposition.reason_code === "discovery_scan_incomplete"
+    )),
+    true,
+  );
   assert.equal(fixture.state.enrichPending.size, 0);
   assert.equal(fixture.state.cursorUpdates[0].anchorVideoIds, null);
   assert.equal(fixture.state.cursorUpdates[0].sourceCursor, null);
@@ -1216,6 +2317,55 @@ test("Video discovery does not invent a video type when Watch detail collection 
   assert.deepEqual(
     fixture.state.outbox[0].payload.discovery.payload.unresolved_video_ids,
     ["new-video"],
+  );
+  assert.deepEqual(
+    (({ detail_status, missing_fields, disposition, next_attempt_at, result_json, error_message }) => ({
+      detail_status,
+      missing_fields,
+      disposition,
+      next_attempt_at,
+      disposition_evidence: result_json.disposition,
+      collection_error: result_json.collection_error,
+      upload_evidence: result_json.flat,
+      error_message,
+    }))(fixture.state.candidateRows[0]),
+    {
+      detail_status: "failed",
+      missing_fields: ["detail", "content_type"],
+      disposition: "deferred",
+      next_attempt_at: "2026-07-20T01:00:00.000Z",
+      disposition_evidence: {
+        version: "video-disposition-v1",
+        kind: "deferred",
+        reason_code: "detail_collection_failed",
+        retry_class: "player_retry",
+        retryable: true,
+        observed_at: "2026-07-20T00:00:00.000Z",
+        next_attempt_at: "2026-07-20T01:00:00.000Z",
+      },
+      collection_error: {
+        name: "Error",
+        code: null,
+        message: "detail unavailable",
+      },
+      upload_evidence: {
+        id: "new-video",
+        position: 1,
+        content_type: null,
+        title: "New",
+        published_day: "2026-07-19",
+      },
+      error_message: "detail unavailable",
+    },
+  );
+  assert.deepEqual(
+    fixture.state.outbox[0].payload.discovery.payload.dispositions,
+    [{
+      video_id: "new-video",
+      kind: "deferred",
+      reason_code: "detail_collection_failed",
+      retry_class: "player_retry",
+    }],
   );
   assert.equal(fixture.state.cursorUpdates[0].sourceCursor, null);
 });

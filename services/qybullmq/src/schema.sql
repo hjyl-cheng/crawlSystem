@@ -1447,15 +1447,159 @@ CREATE TABLE IF NOT EXISTS crawler.content_candidates (
   content_key TEXT REFERENCES crawler.contents(content_key) ON DELETE SET NULL,
   result_json JSONB NOT NULL DEFAULT '{}'::jsonb,
   error_message TEXT,
+  disposition TEXT,
+  next_attempt_at TIMESTAMPTZ,
   first_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   finished_at TIMESTAMPTZ,
+  CONSTRAINT content_candidates_disposition_kind_check
+    CHECK (disposition IN ('stored', 'deferred', 'terminal_excluded')),
+  CONSTRAINT content_candidates_disposition_schedule_check
+    CHECK (
+      (disposition IS NULL AND next_attempt_at IS NULL)
+      OR (disposition='stored' AND next_attempt_at IS NULL)
+      OR (
+        disposition IN ('deferred','terminal_excluded')
+        AND next_attempt_at IS NOT NULL
+      )
+    ),
   UNIQUE (run_id, source_content_id),
   UNIQUE (run_id, position)
 );
 
+ALTER TABLE crawler.content_candidates
+ADD COLUMN IF NOT EXISTS disposition TEXT;
+
+ALTER TABLE crawler.content_candidates
+ADD COLUMN IF NOT EXISTS next_attempt_at TIMESTAMPTZ;
+
+WITH legacy_video_disposition_backfill AS (
+  SELECT
+    candidate.candidate_id,
+    COALESCE(candidate.finished_at,candidate.updated_at,candidate.first_seen_at,now()) AS observed_at,
+    CASE
+      WHEN candidate.result_json->'scope'->>'reason'='upcoming_live'
+        THEN 'terminal_excluded'
+      WHEN candidate.result_json->'scope'->>'reason'
+        IN ('older_than_max_age','after_chronological_age_cutoff')
+        THEN 'terminal_excluded'
+      WHEN candidate.content_key IS NOT NULL THEN 'stored'
+      WHEN candidate.result_json#>>'{access,access_status}' IN ('private','unavailable')
+        THEN 'terminal_excluded'
+      ELSE 'deferred'
+    END AS disposition,
+    CASE
+      WHEN candidate.result_json->'scope'->>'reason'='upcoming_live' THEN 'upcoming_live'
+      WHEN candidate.result_json->'scope'->>'reason'
+        IN ('older_than_max_age','after_chronological_age_cutoff')
+        THEN 'outside_content_window'
+      WHEN candidate.content_key IS NOT NULL THEN 'legacy_content_already_stored'
+      WHEN candidate.result_json#>>'{access,access_status}'='private' THEN 'access_private'
+      WHEN candidate.result_json#>>'{access,access_status}'='unavailable' THEN 'access_unavailable'
+      WHEN candidate.detail_status='failed' THEN 'detail_collection_failed'
+      WHEN candidate.api_status IN ('pending','queued','running','failed')
+        THEN 'legacy_api_resolution_pending'
+      ELSE 'legacy_terminal_unresolved'
+    END AS reason_code,
+    CASE
+      WHEN candidate.result_json->'scope'->>'reason'
+        IN ('older_than_max_age','after_chronological_age_cutoff')
+        THEN 'low_frequency_policy_recheck'
+      WHEN candidate.result_json->'scope'->>'reason'='upcoming_live'
+        THEN 'low_frequency_access_recheck'
+      WHEN candidate.content_key IS NOT NULL THEN NULL
+      WHEN candidate.result_json#>>'{access,access_status}' IN ('private','unavailable')
+        THEN 'low_frequency_access_recheck'
+      WHEN candidate.detail_status='failed' THEN 'player_retry'
+      ELSE 'legacy_recovery'
+    END AS retry_class,
+    CASE
+      WHEN candidate.result_json->'scope'->>'reason'
+        IN ('older_than_max_age','after_chronological_age_cutoff')
+        THEN interval '30 days'
+      WHEN candidate.result_json->'scope'->>'reason'='upcoming_live' THEN interval '1 day'
+      WHEN candidate.content_key IS NOT NULL THEN NULL
+      WHEN candidate.result_json#>>'{access,access_status}' IN ('private','unavailable')
+        THEN interval '7 days'
+      WHEN candidate.detail_status='failed' THEN interval '1 hour'
+      ELSE interval '6 hours'
+    END AS retry_after
+  FROM crawler.content_candidates candidate
+  WHERE candidate.disposition IS NULL
+), resolved_video_disposition_backfill AS (
+  SELECT
+    backfill.*,
+    CASE
+      WHEN backfill.disposition='stored' THEN NULL
+      ELSE backfill.observed_at+backfill.retry_after
+    END AS next_attempt_at
+  FROM legacy_video_disposition_backfill backfill
+)
+UPDATE crawler.content_candidates candidate
+SET disposition=backfill.disposition,
+    next_attempt_at=backfill.next_attempt_at,
+    result_json=COALESCE(candidate.result_json,'{}'::jsonb)
+      || jsonb_build_object(
+           'disposition',jsonb_build_object(
+             'version','video-disposition-v1',
+             'kind',backfill.disposition,
+             'reason_code',backfill.reason_code,
+             'retry_class',backfill.retry_class,
+             'retryable',backfill.disposition='deferred',
+             'observed_at',backfill.observed_at,
+             'next_attempt_at',backfill.next_attempt_at
+           ),
+           'legacy_video_disposition_backfill',jsonb_build_object(
+             'applied_at',now(),
+             'prior_detail_status',candidate.detail_status,
+             'prior_api_status',candidate.api_status,
+             'prior_error_message',candidate.error_message
+           )
+         ),
+    error_message=CASE
+      WHEN backfill.disposition='deferred'
+        THEN COALESCE(
+          NULLIF(btrim(candidate.error_message),''),
+          'legacy Candidate lacked an explicit Video disposition and requires recovery'
+        )
+      ELSE candidate.error_message
+    END,
+    updated_at=now()
+FROM resolved_video_disposition_backfill backfill
+WHERE candidate.candidate_id=backfill.candidate_id;
+
+ALTER TABLE crawler.content_candidates
+DROP CONSTRAINT IF EXISTS content_candidates_disposition_kind_check;
+ALTER TABLE crawler.content_candidates
+ADD CONSTRAINT content_candidates_disposition_kind_check
+CHECK (disposition IN ('stored', 'deferred', 'terminal_excluded'));
+
+ALTER TABLE crawler.content_candidates
+DROP CONSTRAINT IF EXISTS content_candidates_disposition_schedule_check;
+ALTER TABLE crawler.content_candidates
+ADD CONSTRAINT content_candidates_disposition_schedule_check
+CHECK (
+  (disposition IS NULL AND next_attempt_at IS NULL)
+  OR (disposition='stored' AND next_attempt_at IS NULL)
+  OR (
+    disposition IN ('deferred','terminal_excluded')
+    AND next_attempt_at IS NOT NULL
+  )
+);
+
 CREATE INDEX IF NOT EXISTS idx_crawler_content_candidates_batch
 ON crawler.content_candidates (run_id, detail_status, position ASC);
+
+CREATE INDEX IF NOT EXISTS idx_crawler_content_candidates_disposition_due
+ON crawler.content_candidates (disposition, next_attempt_at ASC, candidate_id ASC)
+WHERE disposition IN ('deferred', 'terminal_excluded') AND next_attempt_at IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_crawler_content_candidates_channel_disposition_due
+ON crawler.content_candidates (channel_id, disposition, next_attempt_at ASC, candidate_id ASC)
+WHERE disposition IN ('deferred', 'terminal_excluded') AND next_attempt_at IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_crawler_content_candidates_disposition_history
+ON crawler.content_candidates (channel_id, source_content_id, candidate_id DESC);
 
 CREATE INDEX IF NOT EXISTS idx_crawler_content_candidates_repairable_run
 ON crawler.content_candidates (run_id) INCLUDE (content_key)

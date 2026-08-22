@@ -199,6 +199,70 @@ test("incremental Video commits Current and aggregate events atomically", {
     assert.equal(result.first_seen_count, 2);
     assert.deepEqual(fetched, ["new-video", "candidate-only", "pending-detail", "old-video"]);
 
+    const dispositions = await pool.query(
+      `SELECT source_content_id,disposition,next_attempt_at,
+              result_json->'disposition' AS disposition_evidence,content_key
+       FROM crawler.content_candidates
+       WHERE run_id=$1 AND source_content_id=ANY($2::text[])
+       ORDER BY source_content_id`,
+      [runId, ["candidate-only", "new-video"]],
+    );
+    assert.deepEqual(
+      dispositions.rows.map((row) => ({
+        source_content_id: row.source_content_id,
+        disposition: row.disposition,
+        next_attempt_at: row.next_attempt_at,
+        reason_code: row.disposition_evidence.reason_code,
+        content_key: row.content_key,
+      })),
+      [
+        {
+          source_content_id: "candidate-only",
+          disposition: "stored",
+          next_attempt_at: null,
+          reason_code: "content_stored",
+          content_key: `${channelId}:video:candidate-only`,
+        },
+        {
+          source_content_id: "new-video",
+          disposition: "stored",
+          next_attempt_at: null,
+          reason_code: "content_stored",
+          content_key: `${channelId}:video:new-video`,
+        },
+      ],
+    );
+
+    const outbox = await pool.query(
+      `SELECT payload_json
+       FROM crawler.crawler_outbox
+       WHERE aggregate_key=$1 AND payload_json->>'observation_kind'='video'`,
+      [`${channelId}:video`],
+    );
+    const discovery = outbox.rows[0].payload_json.payload.discovery.payload;
+    assert.equal(discovery.discovered_count, 2);
+    assert.equal(discovery.stored_count, 2);
+    assert.equal(discovery.deferred_count, 0);
+    assert.equal(discovery.terminal_excluded_count, 0);
+    assert.deepEqual(
+      discovery.dispositions.map((item) => item.video_id).sort(),
+      ["candidate-only", "new-video"],
+    );
+
+    const cursor = await pool.query(
+      `SELECT latest_sequence,anchor_video_ids,source_cursor
+       FROM crawler.channel_domain_cursors
+       WHERE channel_id=$1 AND observation_kind='video'`,
+      [channelId],
+    );
+    assert.equal(cursor.rows[0].latest_sequence, "1");
+    assert.deepEqual(cursor.rows[0].anchor_video_ids.slice(0, 3), [
+      "new-video",
+      "candidate-only",
+      "known-anchor",
+    ]);
+    assert.equal(cursor.rows[0].source_cursor.matched_anchor_id, "known-anchor");
+
     const contents = await pool.query(
       `SELECT source_content_id,view_count,comments_disabled,comments_first_page,video_change_probability,
               description,description_status,hashtags,keywords,
@@ -281,6 +345,274 @@ test("incremental Video commits Current and aggregate events atomically", {
       [channelId],
     );
     assert.equal(snapshots.rows[0].count, 0);
+  } finally {
+    await pool.query("DELETE FROM crawler.channels WHERE channel_id=$1", [channelId]).catch(() => {});
+    await pool.end();
+  }
+});
+
+test("Video disposition schema rejects invalid kind and retry schedules", {
+  skip: !integrationUrl,
+}, async () => {
+  const pool = new Pool({ connectionString: integrationUrl, max: 2 });
+  const suffix = randomUUID().replaceAll("-", "");
+  const channelId = `UCdispositionconstraint${suffix}`;
+  const runId = `incremental:disposition-constraint:${suffix}`;
+  try {
+    await pool.query(
+      `INSERT INTO crawler.channels (channel_id,channel_url,title,status)
+       VALUES ($1,$2,'Disposition constraint integration','active')`,
+      [channelId, `https://www.youtube.com/channel/${channelId}`],
+    );
+    await pool.query(
+      `INSERT INTO crawler.channel_runs (run_id,channel_id,status,crawl_mode,detail_status)
+       VALUES ($1,$2,'running','incremental','pending')`,
+      [runId, channelId],
+    );
+    const insertCandidate = (disposition, nextAttemptAt) => pool.query(
+      `INSERT INTO crawler.content_candidates (
+         run_id,channel_id,source_content_id,position,detail_status,api_status,
+         disposition,next_attempt_at
+       ) VALUES ($1,$2,'constraint-video',1,'done','not_needed',$3,$4)`,
+      [runId, channelId, disposition, nextAttemptAt],
+    );
+
+    await assert.rejects(
+      insertCandidate("discarded", null),
+      (error) => error?.code === "23514"
+        && error?.constraint === "content_candidates_disposition_kind_check",
+    );
+    await assert.rejects(
+      insertCandidate("stored", "2026-07-21T00:00:00.000Z"),
+      (error) => error?.code === "23514"
+        && error?.constraint === "content_candidates_disposition_schedule_check",
+    );
+    await assert.rejects(
+      insertCandidate("deferred", null),
+      (error) => error?.code === "23514"
+        && error?.constraint === "content_candidates_disposition_schedule_check",
+    );
+  } finally {
+    await pool.query("DELETE FROM crawler.channels WHERE channel_id=$1", [channelId]).catch(() => {});
+    await pool.end();
+  }
+});
+
+test("incremental Video rechecks terminal exclusions only when their schedule is due", {
+  skip: !integrationUrl,
+}, async () => {
+  const pool = new Pool({ connectionString: integrationUrl, max: 4 });
+  const suffix = randomUUID().replaceAll("-", "");
+  const channelId = `UCterminalrecheck${suffix}`;
+  const privateVideoId = `private-${suffix}`;
+  const anchorVideoId = `anchor-${suffix}`;
+  const fetched = [];
+  let privateRecheckFails = false;
+  const withTransaction = async (action) => {
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      const result = await action(client);
+      await client.query("COMMIT");
+      return result;
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+  };
+  const insertRun = async (runId) => {
+    const planId = randomUUID();
+    await pool.query(
+      `INSERT INTO crawler.channel_runs (
+         run_id,channel_id,status,crawl_mode,content_limit,detail_status,
+         plan_id,plan_day,trigger_reason,task_mask,scheduled_at,
+         clock_version,policy_version,planner_config_version,capacity_version,
+         crawler_version,started_at
+       ) VALUES (
+         $1,$2,'running','incremental',0,'pending',$3,'2026-07-20','clock_due',
+         '{"video":true}'::jsonb,
+         '2026-07-20T00:00:00Z',7,'v16-rule-1','video-plan-1','capacity-1','test',now()
+       )`,
+      [runId, channelId, planId],
+    );
+    return planId;
+  };
+  const execute = async ({ runId, jobId, startedAt, planId }) => executeIncrementalVideo({
+    plan: {
+      job_id: jobId,
+      plan_id: planId,
+      plan_day: "2026-07-20",
+      scheduled_at: startedAt,
+      channel_id: channelId,
+      capacity: { factor: 1, player_cap: 20, next_cap: 8, version: "capacity-1" },
+      planner_config_version: "video-plan-1",
+    },
+    runId,
+    startedAt,
+    query: (sql, params) => pool.query(sql, params),
+    withTransaction,
+    getChannelSnapshot: async () => ({
+      async scanUploads() {
+        return {
+          playlist_id: `UU${channelId.slice(2)}`,
+          entries: [
+            { id: privateVideoId, position: 1, title: "Private" },
+            { id: anchorVideoId, position: 2, title: "Anchor" },
+          ],
+          pages: 1,
+          item_count: 2,
+          parse_gap_count: 0,
+          anchor_matched: true,
+          matched_anchor_id: anchorVideoId,
+          stop_reason: "anchor_matched",
+          terminal_reason: "anchor_matched",
+          complete: true,
+          raw: { engine: "youtubei.js@test" },
+        };
+      },
+    }),
+    fetchDetail: async (videoId) => {
+      fetched.push({ videoId, startedAt });
+      if (videoId === privateVideoId) {
+        if (privateRecheckFails) throw new Error("temporary Player timeout");
+        return {
+          id: videoId,
+          title: "Private",
+          access_status: "private",
+          availability: "private",
+          extractor_version: "youtubei.js@test",
+        };
+      }
+      return {
+        id: videoId,
+        title: "Anchor",
+        published_at: "2026-07-19T00:00:00.000Z",
+        published_at_precision: "second",
+        view_count: 10,
+        access_status: "public",
+        availability: "public",
+        content_type_signals: {
+          source: "youtubei_player",
+          canonical_url: `https://www.youtube.com/watch?v=${videoId}`,
+          is_shorts_eligible: false,
+          is_live_content: false,
+          is_live: false,
+          is_upcoming: false,
+          is_live_now: false,
+        },
+        extractor_version: "youtubei.js@test",
+      };
+    },
+    now: () => new Date(startedAt),
+    crawlerVersion: "qy-v16-integration-test",
+  });
+
+  try {
+    await pool.query(
+      `INSERT INTO crawler.channels (channel_id,channel_url,title,status)
+       VALUES ($1,$2,'Terminal recheck integration','active')`,
+      [channelId, `https://www.youtube.com/channel/${channelId}`],
+    );
+    const firstRunId = `incremental:terminal:first:${suffix}`;
+    const firstPlanId = await insertRun(firstRunId);
+    await pool.query(
+      `INSERT INTO crawler.contents (
+         content_key,channel_id,run_id,content_type,content_type_source,
+         source_content_id,position,title,url,published_at,published_at_status,
+         published_at_source,published_at_precision,first_seen_at,last_seen_at
+       ) VALUES ($1,$2,$3,'video','youtube_watch_canonical',$4,2,'Anchor',$5,
+         '2026-07-19T00:00:00Z','exact','youtubejs_player','second',now(),now())`,
+      [
+        `${channelId}:video:${anchorVideoId}`,
+        channelId,
+        firstRunId,
+        anchorVideoId,
+        `https://www.youtube.com/watch?v=${anchorVideoId}`,
+      ],
+    );
+    await pool.query(
+      `INSERT INTO crawler.channel_domain_cursors (channel_id,observation_kind,anchor_video_ids)
+       VALUES ($1,'video',ARRAY[$2]::text[])`,
+      [channelId, anchorVideoId],
+    );
+
+    const first = await execute({
+      runId: firstRunId,
+      jobId: `incremental__terminal__first__${suffix}`,
+      startedAt: "2026-07-20T00:00:00.000Z",
+      planId: firstPlanId,
+    });
+    assert.equal(first.outcome, "complete");
+
+    const earlyRunId = `incremental:terminal:early:${suffix}`;
+    const early = await execute({
+      runId: earlyRunId,
+      jobId: `incremental__terminal__early__${suffix}`,
+      startedAt: "2026-07-21T00:00:00.000Z",
+      planId: await insertRun(earlyRunId),
+    });
+    assert.equal(early.outcome, "complete");
+    assert.equal(fetched.filter((item) => item.videoId === privateVideoId).length, 1);
+
+    const dueRunId = `incremental:terminal:due:${suffix}`;
+    const due = await execute({
+      runId: dueRunId,
+      jobId: `incremental__terminal__due__${suffix}`,
+      startedAt: "2026-07-27T00:00:00.000Z",
+      planId: await insertRun(dueRunId),
+    });
+    assert.equal(due.outcome, "complete");
+    assert.equal(fetched.filter((item) => item.videoId === privateVideoId).length, 2);
+
+    privateRecheckFails = true;
+    const failedRecheckRunId = `incremental:terminal:failed-recheck:${suffix}`;
+    const failedRecheck = await execute({
+      runId: failedRecheckRunId,
+      jobId: `incremental__terminal__failed_recheck__${suffix}`,
+      startedAt: "2026-08-03T00:00:00.000Z",
+      planId: await insertRun(failedRecheckRunId),
+    });
+    assert.equal(failedRecheck.outcome, "complete");
+    assert.equal(fetched.filter((item) => item.videoId === privateVideoId).length, 3);
+
+    const candidates = await pool.query(
+      `SELECT run_id,disposition,result_json#>>'{disposition,reason_code}' AS reason_code,
+              result_json#>>'{collection_error,message}' AS collection_error_message
+       FROM crawler.content_candidates
+       WHERE channel_id=$1 AND source_content_id=$2
+       ORDER BY candidate_id`,
+      [channelId, privateVideoId],
+    );
+    assert.deepEqual(candidates.rows, [
+      {
+        run_id: firstRunId,
+        disposition: "terminal_excluded",
+        reason_code: "access_private",
+        collection_error_message: null,
+      },
+      {
+        run_id: dueRunId,
+        disposition: "terminal_excluded",
+        reason_code: "access_private",
+        collection_error_message: null,
+      },
+      {
+        run_id: failedRecheckRunId,
+        disposition: "terminal_excluded",
+        reason_code: "access_private",
+        collection_error_message: "temporary Player timeout",
+      },
+    ]);
+    const cursor = await pool.query(
+      `SELECT latest_sequence,source_cursor
+       FROM crawler.channel_domain_cursors
+       WHERE channel_id=$1 AND observation_kind='video'`,
+      [channelId],
+    );
+    assert.equal(cursor.rows[0].latest_sequence, "4");
+    assert.notEqual(cursor.rows[0].source_cursor, null);
   } finally {
     await pool.query("DELETE FROM crawler.channels WHERE channel_id=$1", [channelId]).catch(() => {});
     await pool.end();
