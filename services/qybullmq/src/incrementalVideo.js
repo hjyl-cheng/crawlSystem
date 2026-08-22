@@ -16,6 +16,10 @@ import { fetchYoutubeJsVideoDetail } from "./youtubeJs.js";
 import { resolveYoutubeContentType } from "./youtubeContentType.js";
 import { fullVideoStorageAction } from "./fullVideoContentStore.js";
 import {
+  resolveVideoDisposition,
+  videoDispositionSummary,
+} from "./videoDisposition.js";
+import {
   assertYoutubeContentObservation,
   isYoutubeCollectionFailureError,
 } from "./youtubePlayability.js";
@@ -310,6 +314,138 @@ async function knownVideoIds(query, channelId, videoIds) {
   return new Set(known.rows.map((row) => String(row.video_id)));
 }
 
+async function outstandingDeferredVideoIds(query, channelId) {
+  const rows = await query(
+    `WITH ranked AS (
+       SELECT candidate.channel_id,candidate.source_content_id,candidate.candidate_id,
+              candidate.disposition,
+              row_number() OVER (
+                PARTITION BY candidate.source_content_id
+                ORDER BY candidate.candidate_id DESC
+              ) AS disposition_rank
+       FROM crawler.content_candidates candidate
+       WHERE candidate.channel_id=$1
+     )
+     SELECT ranked.source_content_id AS video_id
+     FROM ranked
+     WHERE ranked.disposition_rank=1
+       AND ranked.disposition='deferred'
+       AND NOT EXISTS (
+         SELECT 1
+         FROM crawler.contents content
+         WHERE content.channel_id=ranked.channel_id
+           AND content.source_content_id=ranked.source_content_id
+       )
+     ORDER BY ranked.candidate_id`,
+    [channelId],
+  );
+  return stringList(rows.rows.map((row) => row.video_id));
+}
+
+async function latestVideoDispositionEntries(query, channelId, videoIds) {
+  const ids = [...new Set(videoIds.map((videoId) => text(videoId)).filter(Boolean))];
+  if (ids.length === 0) return new Map();
+  const latest = await query(
+    `SELECT DISTINCT ON (candidate.source_content_id)
+            candidate.source_content_id,candidate.candidate_id,candidate.disposition,
+            candidate.next_attempt_at,candidate.result_json,candidate.error_message
+     FROM crawler.content_candidates candidate
+     WHERE candidate.channel_id=$1
+       AND candidate.source_content_id=ANY($2::text[])
+     ORDER BY candidate.source_content_id,candidate.candidate_id DESC`,
+    [channelId, ids],
+  );
+  return new Map(latest.rows.map((row) => [text(row.source_content_id), row]));
+}
+
+function dispositionRecheckEntry(entry, prior) {
+  return {
+    ...entry,
+    disposition_recheck: {
+      candidate_id: Number(prior.candidate_id),
+      prior_kind: text(prior.disposition),
+      prior_reason_code: text(prior.result_json?.disposition?.reason_code),
+      scheduled_at: prior.next_attempt_at == null
+        ? null
+        : new Date(prior.next_attempt_at).toISOString(),
+    },
+  };
+}
+
+function scannedVideoDispositionWork(entries, priorByVideoId, observedAt, {
+  allowDueRechecks = true,
+} = {}) {
+  const observedAtMs = Date.parse(observedAt);
+  const pendingDeferredVideoIds = [];
+  const workEntries = entries.flatMap((entry) => {
+    const prior = priorByVideoId.get(entry.id);
+    const priorKind = text(prior?.disposition);
+    if (!["deferred", "terminal_excluded"].includes(priorKind)) return [entry];
+    if (!allowDueRechecks) {
+      if (priorKind === "deferred") pendingDeferredVideoIds.push(entry.id);
+      return [];
+    }
+    const nextAttemptAtMs = Date.parse(prior.next_attempt_at);
+    const due = !Number.isFinite(nextAttemptAtMs) || nextAttemptAtMs <= observedAtMs;
+    if (due) return [dispositionRecheckEntry(entry, prior)];
+    if (priorKind === "deferred") pendingDeferredVideoIds.push(entry.id);
+    return [];
+  });
+  return { workEntries, pendingDeferredVideoIds };
+}
+
+async function loadDueVideoDispositionEntries(query, channelId, observedAt, scanEntries, limit = 10) {
+  const due = await query(
+    `SELECT candidate.*
+     FROM crawler.content_candidates candidate
+     WHERE candidate.channel_id=$1
+       AND candidate.disposition IN ('deferred','terminal_excluded')
+       AND candidate.next_attempt_at<=$2::timestamptz
+       AND NOT EXISTS (
+         SELECT 1
+         FROM crawler.content_candidates newer
+         WHERE newer.channel_id=candidate.channel_id
+           AND newer.source_content_id=candidate.source_content_id
+           AND newer.candidate_id>candidate.candidate_id
+       )
+       AND NOT EXISTS (
+         SELECT 1
+         FROM crawler.contents content
+         WHERE content.channel_id=candidate.channel_id
+           AND content.source_content_id=candidate.source_content_id
+       )
+     ORDER BY candidate.next_attempt_at,candidate.candidate_id
+     LIMIT $3`,
+    [channelId, observedAt, Math.max(1, limit)],
+  );
+  const scannedIds = new Set(scanEntries.map((entry) => text(entry?.id)).filter(Boolean));
+  const maxPosition = scanEntries.reduce(
+    (current, entry) => Math.max(current, integer(entry?.position) ?? 0),
+    0,
+  );
+  return due.rows
+    .filter((row) => !scannedIds.has(text(row.source_content_id)))
+    .map((row, index) => {
+      const flat = row.result_json?.flat ?? {};
+      return {
+        id: text(row.source_content_id),
+        position: maxPosition + index + 1,
+        title: text(row.title) ?? text(flat.title),
+        thumbnail_url: text(row.thumbnail_url) ?? text(flat.thumbnail_url),
+        published_day: text(flat.published_day),
+        disposition_recheck: {
+          candidate_id: Number(row.candidate_id),
+          prior_kind: text(row.disposition),
+          prior_reason_code: text(row.result_json?.disposition?.reason_code),
+          scheduled_at: row.next_attempt_at == null
+            ? null
+            : new Date(row.next_attempt_at).toISOString(),
+        },
+      };
+    })
+    .filter((entry) => entry.id);
+}
+
 async function loadDiscoveryAnchors(query, channelId) {
   const cursor = await query(
     `SELECT COALESCE(
@@ -399,6 +535,107 @@ async function queueRefreshTask(client, {
   );
 }
 
+async function persistIncrementalCandidate(client, {
+  runId,
+  channelId,
+  entry,
+  detail,
+  classification,
+  disposition,
+  missingFields,
+  contentKey = null,
+  detailStatus,
+  apiStatus,
+  typeStatus,
+  resultJson,
+  errorMessage = null,
+  observedAt,
+  attempted = false,
+}) {
+  await client.query(
+    `INSERT INTO crawler.content_candidates (
+       run_id,channel_id,source_content_id,position,title,source_url,thumbnail_url,
+       content_type,type_status,type_source,detail_status,api_status,missing_fields,
+       content_key,disposition,next_attempt_at,result_json,error_message,attempts,
+       finished_at,updated_at
+     ) VALUES (
+       $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::text[],$14,$15,$16,$17::jsonb,$18,
+       $19::integer,CASE WHEN $15='deferred' THEN NULL ELSE $20::timestamptz END,now()
+     )
+     ON CONFLICT (run_id,source_content_id) DO UPDATE
+     SET position=EXCLUDED.position,title=COALESCE(EXCLUDED.title,crawler.content_candidates.title),
+         source_url=EXCLUDED.source_url,
+         thumbnail_url=COALESCE(EXCLUDED.thumbnail_url,crawler.content_candidates.thumbnail_url),
+         content_type=EXCLUDED.content_type,type_status=EXCLUDED.type_status,
+         type_source=EXCLUDED.type_source,detail_status=EXCLUDED.detail_status,
+         api_status=EXCLUDED.api_status,missing_fields=EXCLUDED.missing_fields,
+         content_key=EXCLUDED.content_key,disposition=EXCLUDED.disposition,
+         next_attempt_at=EXCLUDED.next_attempt_at,
+         result_json=CASE
+           WHEN crawler.content_candidates.disposition='deferred'
+             AND EXCLUDED.disposition IN ('stored','terminal_excluded')
+           THEN EXCLUDED.result_json || jsonb_build_object(
+             'recovery',jsonb_build_object(
+               'from_disposition',crawler.content_candidates.result_json->'disposition',
+               'deferred_evidence',crawler.content_candidates.result_json - 'disposition',
+               'deferred_error_message',crawler.content_candidates.error_message,
+               'resolved_at',EXCLUDED.result_json#>>'{disposition,observed_at}'
+             )
+           )
+           ELSE EXCLUDED.result_json
+         END,
+         error_message=EXCLUDED.error_message,
+         attempts=crawler.content_candidates.attempts+EXCLUDED.attempts,
+         finished_at=CASE WHEN EXCLUDED.disposition='deferred' THEN NULL ELSE EXCLUDED.finished_at END,
+         updated_at=now()
+     RETURNING candidate_id`,
+    [
+      runId,
+      channelId,
+      entry.id,
+      entry.position,
+      detail?.title ?? entry.title ?? null,
+      classification?.canonical_url
+        ?? `https://www.youtube.com/watch?v=${encodeURIComponent(entry.id)}`,
+      detail?.thumbnail_url ?? entry.thumbnail_url ?? null,
+      classification?.authoritative === true ? classification.content_type : null,
+      typeStatus,
+      classification?.authoritative === true ? classification.source : null,
+      detailStatus,
+      apiStatus,
+      missingFields,
+      contentKey,
+      disposition.kind,
+      disposition.next_attempt_at,
+      JSON.stringify(resultJson),
+      errorMessage,
+      attempted ? 1 : 0,
+      observedAt,
+    ],
+  );
+}
+
+function collectionErrorEvidence(error) {
+  if (!error) return null;
+  return {
+    name: text(error.name) ?? "Error",
+    code: text(error.code),
+    message: text(error.message) ?? String(error),
+    ...(error.youtube_failure_evidence && typeof error.youtube_failure_evidence === "object"
+      ? { youtube_failure_evidence: error.youtube_failure_evidence }
+      : {}),
+    ...(Array.isArray(error.errors)
+      ? {
+          causes: error.errors.map((cause) => ({
+            name: text(cause?.name) ?? "Error",
+            code: text(cause?.code),
+            message: text(cause?.message) ?? String(cause),
+          })),
+        }
+      : {}),
+  };
+}
+
 async function upsertFirstSeenContent(client, {
   channelId,
   runId,
@@ -406,6 +643,7 @@ async function upsertFirstSeenContent(client, {
   observedAt,
   entry,
   capture,
+  discoveryDeferred = null,
 }) {
   const detail = capture?.detail ?? null;
   const facts = detailFacts(detail);
@@ -416,7 +654,93 @@ async function upsertFirstSeenContent(client, {
     classification,
     access: { access_status: facts?.access_status ?? "unknown" },
   });
-  if (storageAction.kind !== "upsert") return null;
+  const terminalReason = entry.is_upcoming === true || isUpcomingLiveDetail(detail)
+    ? "upcoming_live"
+    : entry.is_live === true || isLiveInProgress(detail) ? "live_in_progress" : null;
+  const disposition = resolveVideoDisposition({
+    storageAction,
+    classification,
+    access: {
+      access_status: facts?.access_status ?? "unknown",
+      access_status_source: facts?.access_status_source ?? null,
+    },
+    detail,
+    error: capture?.error ?? null,
+    observedAt,
+    terminalReason,
+    deferredReason: discoveryDeferred?.reason_code ?? null,
+    priorDisposition: entry.disposition_recheck
+      ? {
+          kind: entry.disposition_recheck.prior_kind,
+          reason_code: entry.disposition_recheck.prior_reason_code,
+        }
+      : null,
+  });
+  if (disposition.kind !== "stored") {
+    const terminalExcluded = disposition.kind === "terminal_excluded";
+    const collectionFailed = capture?.error != null;
+    const scanIncomplete = disposition.reason_code === "discovery_scan_incomplete";
+    const missingFields = terminalExcluded
+      ? []
+      : scanIncomplete
+        ? ["discovery_scan", "detail", "content_type"]
+      : collectionFailed
+        ? ["detail", "content_type"]
+        : classification?.authoritative === true ? ["access_status"] : ["content_type"];
+    const errorMessage = terminalExcluded
+      ? null
+      : scanIncomplete
+        ? `Uploads discovery scan incomplete: ${discoveryDeferred.stop_reason ?? "incomplete"}`
+      : collectionFailed
+        ? text(capture.error?.message) ?? String(capture.error)
+        : classification?.authoritative === true
+        ? `content access ${facts?.access_status ?? "unknown"} is not currently storable`
+        : "authoritative content type evidence is missing";
+    const resultJson = {
+      flat: entry,
+      detail,
+      classification,
+      access: {
+        access_status: facts?.access_status ?? "unknown",
+        access_status_source: facts?.access_status_source ?? null,
+      },
+      disposition,
+      ...(scanIncomplete ? { discovery_deferred: discoveryDeferred } : {}),
+      extractor: {
+        source: detail ? detailSource(detail) : null,
+        client: text(detail?.ytdlp_client),
+        version: text(detail?.extractor_version),
+      },
+      ...(collectionFailed ? { collection_error: collectionErrorEvidence(capture.error) } : {}),
+    };
+    await persistIncrementalCandidate(client, {
+      runId,
+      channelId,
+      entry,
+      detail,
+      classification,
+      disposition,
+      missingFields,
+      detailStatus: terminalExcluded ? "unavailable" : detail ? "done" : "failed",
+      apiStatus: terminalExcluded ? "unavailable" : "not_needed",
+      typeStatus: classification?.authoritative === true
+        ? "resolved"
+        : terminalExcluded ? "unavailable" : "unresolved",
+      resultJson,
+      errorMessage,
+      observedAt,
+      attempted: detail != null || capture?.error != null,
+    });
+    return {
+      disposition,
+      classification,
+      facts,
+      publishedAt: facts?.published_at ?? uploadFacts?.published_at ?? null,
+      publishedAtPrecision: facts?.published_at
+        ? facts.published_at_precision
+        : uploadFacts?.published_at_precision ?? "unknown",
+    };
+  }
   const contentType = classification.content_type;
   const contentKey = `${channelId}:${contentType}:${entry.id}`;
   const url = contentType === "short"
@@ -619,6 +943,37 @@ async function upsertFirstSeenContent(client, {
     ],
   );
   const storedContentKey = text(stored.rows?.[0]?.content_key) ?? contentKey;
+  await persistIncrementalCandidate(client, {
+    runId,
+    channelId,
+    entry,
+    detail,
+    classification,
+    disposition,
+    missingFields: [],
+    contentKey: storedContentKey,
+    detailStatus: "done",
+    apiStatus: "not_needed",
+    typeStatus: "resolved",
+    resultJson: {
+      flat: entry,
+      detail,
+      classification,
+      access: {
+        access_status: facts?.access_status ?? "unknown",
+        access_status_source: facts?.access_status_source ?? null,
+      },
+      disposition,
+      extractor: {
+        source: detail ? detailSource(detail) : null,
+        client: text(detail?.ytdlp_client),
+        version: text(detail?.extractor_version),
+      },
+      content_key: storedContentKey,
+    },
+    observedAt,
+    attempted: detail != null || capture?.error != null,
+  });
   if (!facts) {
     await queueRefreshTask(client, {
       contentKey: storedContentKey,
@@ -637,6 +992,7 @@ async function upsertFirstSeenContent(client, {
     );
   }
   return {
+    disposition,
     contentKey: storedContentKey,
     contentType,
     classification,
@@ -655,7 +1011,23 @@ async function applyDiscovery({
   transactionClient,
   observationId,
   observedAt,
+  pendingDeferredVideoIds = [],
 }) {
+  const discoveryDeferred = scan.complete === true
+    ? null
+    : {
+        reason_code: "discovery_scan_incomplete",
+        complete: false,
+        playlist_id: text(scan.playlist_id),
+        pages: Number(scan.pages ?? 0),
+        item_count: Number(scan.item_count ?? scan.entries.length),
+        first_page_item_count: Number(scan.first_page_item_count ?? 0),
+        catch_up_item_count: Number(scan.catch_up_item_count ?? 0),
+        anchor_matched: scan.anchor_matched === true,
+        stop_reason: text(scan.stop_reason) ?? "incomplete",
+        terminal_reason: text(scan.terminal_reason),
+        parse_gap_count: Number(scan.parse_gap_count ?? 0),
+      };
   const scanInput = scan.entries.map((entry) => ({
     video_id: entry.id,
     position: entry.position,
@@ -694,17 +1066,15 @@ async function applyDiscovery({
   );
   const firstSeenEntries = candidateEntries.filter((entry) => !alreadyKnown.has(entry.id));
   const firstSeen = [];
-  const unresolvedVideoIds = [];
+  const dispositions = [];
+  const recheckDispositions = [];
+  const unresolvedVideoIds = [...new Set(pendingDeferredVideoIds)];
+  const recheckDeferredVideoIds = [];
   let detailSuccessCount = 0;
   let detailFailureCount = 0;
   for (const entry of firstSeenEntries) {
     const capture = captures.get(entry.id) ?? { detail: null, error: null };
-    if (
-      entry.is_upcoming === true
-      || entry.is_live === true
-      || isUpcomingLiveDetail(capture.detail)
-      || isLiveInProgress(capture.detail)
-    ) continue;
+    const detailAttempted = captures.has(entry.id);
     const current = await upsertFirstSeenContent(transactionClient, {
       channelId: plan.channel_id,
       runId,
@@ -712,11 +1082,21 @@ async function applyDiscovery({
       observedAt,
       entry,
       capture,
+      discoveryDeferred,
     });
-    if (!current) {
-      unresolvedVideoIds.push(entry.id);
+    const dispositionSummary = videoDispositionSummary(entry.id, current.disposition);
+    if (entry.disposition_recheck) recheckDispositions.push(dispositionSummary);
+    else dispositions.push(dispositionSummary);
+    if (current.disposition.kind === "deferred") {
+      if (entry.disposition_recheck) recheckDeferredVideoIds.push(entry.id);
+      else unresolvedVideoIds.push(entry.id);
       if (capture.detail) detailSuccessCount += 1;
-      else detailFailureCount += 1;
+      else if (detailAttempted) detailFailureCount += 1;
+      continue;
+    }
+    if (current.disposition.kind === "terminal_excluded") {
+      if (capture.detail) detailSuccessCount += 1;
+      else if (detailAttempted) detailFailureCount += 1;
       continue;
     }
     if (current.facts) detailSuccessCount += 1;
@@ -729,6 +1109,35 @@ async function applyDiscovery({
       published_at_precision: current.publishedAtPrecision,
     });
   }
+  const discoveredVideoIds = [...new Set(
+    firstSeenEntries
+      .filter((entry) => !entry.disposition_recheck)
+      .map((entry) => entry.id),
+  )];
+  const dispositionCounts = new Map();
+  for (const item of dispositions) {
+    dispositionCounts.set(item.video_id, (dispositionCounts.get(item.video_id) ?? 0) + 1);
+  }
+  const silentDropVideoIds = discoveredVideoIds.filter(
+    (videoId) => !dispositionCounts.has(videoId),
+  );
+  const duplicateDispositionVideoIds = discoveredVideoIds.filter(
+    (videoId) => (dispositionCounts.get(videoId) ?? 0) > 1,
+  );
+  if (silentDropVideoIds.length > 0 || duplicateDispositionVideoIds.length > 0) {
+    throw new Error(
+      `Video disposition ledger invariant failed: ${silentDropVideoIds.length} missing, ${duplicateDispositionVideoIds.length} duplicated`,
+    );
+  }
+  const persistedBlockingDeferredVideoIds = await outstandingDeferredVideoIds(
+    transactionClient.query.bind(transactionClient),
+    plan.channel_id,
+  );
+  const blockingDeferredVideoIds = [...new Set([
+    ...persistedBlockingDeferredVideoIds,
+    ...unresolvedVideoIds,
+    ...recheckDeferredVideoIds,
+  ])];
   const payload = {
     pages: Number(scan.pages ?? 0),
     items: Number(scan.item_count ?? scan.entries.length),
@@ -737,14 +1146,33 @@ async function applyDiscovery({
     parse_gap_count: Number(scan.parse_gap_count ?? 0),
     first_seen: firstSeen,
     first_seen_count: firstSeen.length,
+    discovered_count: discoveredVideoIds.length,
+    silent_drop_count: silentDropVideoIds.length,
+    silent_drop_video_ids: silentDropVideoIds,
+    dispositions,
+    recheck_dispositions: recheckDispositions,
+    stored_count: dispositions.filter((item) => item.kind === "stored").length,
+    deferred_count: dispositions.filter((item) => item.kind === "deferred").length,
+    terminal_excluded_count: dispositions.filter((item) => item.kind === "terminal_excluded").length,
     unresolved_video_ids: unresolvedVideoIds,
     unresolved_count: unresolvedVideoIds.length,
+    recheck_deferred_video_ids: recheckDeferredVideoIds,
+    recheck_deferred_count: recheckDeferredVideoIds.length,
+    pending_deferred_video_ids: [...new Set(pendingDeferredVideoIds)],
+    pending_deferred_count: new Set(pendingDeferredVideoIds).size,
+    blocking_deferred_video_ids: blockingDeferredVideoIds,
+    recheck_stored_count: recheckDispositions.filter((item) => item.kind === "stored").length,
+    recheck_terminal_excluded_count: recheckDispositions
+      .filter((item) => item.kind === "terminal_excluded").length,
     detail_success_count: detailSuccessCount,
     detail_failure_count: detailFailureCount,
     ...(scan.gap_abandonment ? { gap_abandonment: scan.gap_abandonment } : {}),
   };
   return {
-    outcome: scan.complete && unresolvedVideoIds.length === 0 ? "complete" : "partial",
+    outcome: scan.complete
+      && blockingDeferredVideoIds.length === 0
+      ? "complete"
+      : "partial",
     payload,
     summary: {
       pages: payload.pages,
@@ -753,9 +1181,19 @@ async function applyDiscovery({
       stop_reason: payload.stop_reason,
       parse_gap_count: payload.parse_gap_count,
       first_seen_count: firstSeen.length,
+      discovered_count: payload.discovered_count,
+      silent_drop_count: payload.silent_drop_count,
+      stored_count: payload.stored_count,
+      deferred_count: payload.deferred_count,
+      terminal_excluded_count: payload.terminal_excluded_count,
       detail_success_count: detailSuccessCount,
       detail_failure_count: detailFailureCount,
       unresolved_count: unresolvedVideoIds.length,
+      recheck_deferred_count: recheckDeferredVideoIds.length,
+      pending_deferred_count: payload.pending_deferred_count,
+      blocking_deferred_count: blockingDeferredVideoIds.length,
+      recheck_stored_count: payload.recheck_stored_count,
+      recheck_terminal_excluded_count: payload.recheck_terminal_excluded_count,
       ...(scan.gap_abandonment ? {
         gap_abandonment: {
           policy_version: scan.gap_abandonment.policy_version,
@@ -1039,6 +1477,7 @@ async function recordVideoCycle({
   scan,
   discoveryEntries,
   discoveryCaptures,
+  pendingDeferredVideoIds,
   anchors,
   excludeVideoIds,
   samplingPlanInput,
@@ -1097,19 +1536,22 @@ async function recordVideoCycle({
       },
       prepare: async ({ client: transactionClient, observationId }) => {
         if (scan.complete !== true) {
+          const discovery = await applyDiscovery({
+            plan,
+            runId,
+            scan,
+            candidateEntries: discoveryEntries,
+            captures: discoveryCaptures,
+            transactionClient,
+            observationId,
+            observedAt,
+            pendingDeferredVideoIds,
+          });
           const discoveryPayload = {
-            pages: Number(scan.pages ?? 0),
+            ...discovery.payload,
             first_page_item_count: Number(scan.first_page_item_count ?? 0),
             catch_up_item_count: Number(scan.catch_up_item_count ?? 0),
-            items: Number(scan.item_count ?? scan.entries.length),
-            anchor_matched: scan.anchor_matched === true,
-            stop_reason: scan.stop_reason,
-            parse_gap_count: Number(scan.parse_gap_count ?? 0),
             unclosed_video_ids: scan.entries.map((entry) => entry.id),
-            first_seen: [],
-            first_seen_count: 0,
-            detail_success_count: 0,
-            detail_failure_count: 0,
           };
           return {
             outcome: "partial",
@@ -1121,9 +1563,14 @@ async function recordVideoCycle({
                 anchor_matched: discoveryPayload.anchor_matched,
                 stop_reason: discoveryPayload.stop_reason,
                 parse_gap_count: discoveryPayload.parse_gap_count,
-                first_seen_count: 0,
-                detail_success_count: 0,
-                detail_failure_count: 0,
+                first_seen_count: discoveryPayload.first_seen_count,
+                discovered_count: discoveryPayload.discovered_count,
+                silent_drop_count: discoveryPayload.silent_drop_count,
+                stored_count: discoveryPayload.stored_count,
+                deferred_count: discoveryPayload.deferred_count,
+                terminal_excluded_count: discoveryPayload.terminal_excluded_count,
+                detail_success_count: discoveryPayload.detail_success_count,
+                detail_failure_count: discoveryPayload.detail_failure_count,
               },
               recent_sampling: {
                 selected_count: 0,
@@ -1142,7 +1589,7 @@ async function recordVideoCycle({
             anchorVideoIds: null,
             sourceCursor: null,
             result: {
-              firstSeen: [],
+              firstSeen: discovery.firstSeen,
               selectedCount: 0,
               lifecycleStatus: null,
               lifecycleTransitioned: false,
@@ -1159,6 +1606,7 @@ async function recordVideoCycle({
           transactionClient,
           observationId,
           observedAt,
+          pendingDeferredVideoIds,
         });
         const recentRows = await transactionClient.query(
           `WITH candidate AS (
@@ -1328,14 +1776,28 @@ export async function executeIncrementalVideo({
     catchUpMaxItems: config.discoveryCatchUpMaxItems,
   });
   const storedVideoPlayerBudget = Math.floor(plan.capacity.player_cap * plan.capacity.factor);
+  const ids = scan.entries.map((entry) => entry.id);
+  const known = await knownVideoIds(query, plan.channel_id, ids);
+  const latestDispositions = await latestVideoDispositionEntries(
+    query,
+    plan.channel_id,
+    ids.filter((id) => !known.has(id)),
+  );
+  const scannedWork = scannedVideoDispositionWork(
+    scan.entries.filter((entry) => !known.has(entry.id)),
+    latestDispositions,
+    observedAt,
+    { allowDueRechecks: scan.complete === true },
+  );
   let recorded;
   if (scan.complete !== true) {
     recorded = await recordVideoCycle({
       plan,
       runId,
       scan,
-      discoveryEntries: [],
+      discoveryEntries: scannedWork.workEntries,
       discoveryCaptures: new Map(),
+      pendingDeferredVideoIds: scannedWork.pendingDeferredVideoIds,
       anchors,
       excludeVideoIds: [],
       samplingPlanInput: {
@@ -1351,11 +1813,16 @@ export async function executeIncrementalVideo({
       executionAttemptId,
     });
   } else {
-    const ids = scan.entries.map((entry) => entry.id);
-    const known = await knownVideoIds(query, plan.channel_id, ids);
-    const likelyFirstSeen = scan.entries.filter((entry) => !known.has(entry.id));
-    const detailEligibleFirstSeen = likelyFirstSeen.filter(
-      (entry) => entry.is_upcoming !== true && entry.is_live !== true,
+    const dueDispositionEntries = await loadDueVideoDispositionEntries(
+      query,
+      plan.channel_id,
+      observedAt,
+      scan.entries,
+    );
+    const discoveryEntries = [...scannedWork.workEntries, ...dueDispositionEntries];
+    const detailEligibleFirstSeen = discoveryEntries.filter(
+      (entry) => entry.disposition_recheck
+        || (entry.is_upcoming !== true && entry.is_live !== true),
     );
     const discoveryCaptures = await captureDetails(
       detailEligibleFirstSeen,
@@ -1366,10 +1833,11 @@ export async function executeIncrementalVideo({
       plan,
       runId,
       scan,
-      discoveryEntries: likelyFirstSeen,
+      discoveryEntries,
       discoveryCaptures,
+      pendingDeferredVideoIds: scannedWork.pendingDeferredVideoIds,
       anchors,
-      excludeVideoIds: likelyFirstSeen.map((entry) => entry.id),
+      excludeVideoIds: discoveryEntries.map((entry) => entry.id),
       samplingPlanInput: {
         ...plan,
         capacity: {

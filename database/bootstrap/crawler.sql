@@ -1504,12 +1504,16 @@ CREATE TABLE crawler.content_candidates (
     content_key text,
     result_json jsonb DEFAULT '{}'::jsonb NOT NULL,
     error_message text,
+    disposition text,
+    next_attempt_at timestamp with time zone,
     first_seen_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     finished_at timestamp with time zone,
     CONSTRAINT content_candidates_api_status_check CHECK ((api_status = ANY (ARRAY['not_needed'::text, 'pending'::text, 'queued'::text, 'running'::text, 'done'::text, 'failed'::text, 'unavailable'::text]))),
     CONSTRAINT content_candidates_content_type_check CHECK ((content_type = ANY (ARRAY['video'::text, 'short'::text, 'live'::text]))),
     CONSTRAINT content_candidates_detail_status_check CHECK ((detail_status = ANY (ARRAY['queued'::text, 'running'::text, 'api_pending'::text, 'done'::text, 'unavailable'::text, 'failed'::text]))),
+    CONSTRAINT content_candidates_disposition_kind_check CHECK ((disposition = ANY (ARRAY['stored'::text, 'deferred'::text, 'terminal_excluded'::text]))),
+    CONSTRAINT content_candidates_disposition_schedule_check CHECK ((((disposition IS NULL) AND (next_attempt_at IS NULL)) OR ((disposition = 'stored'::text) AND (next_attempt_at IS NULL)) OR ((disposition = ANY (ARRAY['deferred'::text, 'terminal_excluded'::text])) AND (next_attempt_at IS NOT NULL)))),
     CONSTRAINT content_candidates_type_status_check CHECK ((type_status = ANY (ARRAY['unresolved'::text, 'resolved'::text, 'unavailable'::text])))
 );
 
@@ -4089,10 +4093,31 @@ CREATE INDEX idx_crawler_content_candidates_batch ON crawler.content_candidates 
 
 
 --
+-- Name: idx_crawler_content_candidates_channel_disposition_due; Type: INDEX; Schema: crawler; Owner: -
+--
+
+CREATE INDEX idx_crawler_content_candidates_channel_disposition_due ON crawler.content_candidates USING btree (channel_id, disposition, next_attempt_at, candidate_id) WHERE ((disposition = ANY (ARRAY['deferred'::text, 'terminal_excluded'::text])) AND (next_attempt_at IS NOT NULL));
+
+
+--
 -- Name: idx_crawler_content_candidates_content_key; Type: INDEX; Schema: crawler; Owner: -
 --
 
 CREATE INDEX idx_crawler_content_candidates_content_key ON crawler.content_candidates USING btree (content_key) WHERE (content_key IS NOT NULL);
+
+
+--
+-- Name: idx_crawler_content_candidates_disposition_due; Type: INDEX; Schema: crawler; Owner: -
+--
+
+CREATE INDEX idx_crawler_content_candidates_disposition_due ON crawler.content_candidates USING btree (disposition, next_attempt_at, candidate_id) WHERE ((disposition = ANY (ARRAY['deferred'::text, 'terminal_excluded'::text])) AND (next_attempt_at IS NOT NULL));
+
+
+--
+-- Name: idx_crawler_content_candidates_disposition_history; Type: INDEX; Schema: crawler; Owner: -
+--
+
+CREATE INDEX idx_crawler_content_candidates_disposition_history ON crawler.content_candidates USING btree (channel_id, source_content_id, candidate_id DESC);
 
 
 --
@@ -5296,4 +5321,3 @@ ALTER TABLE ONLY publication.revision
 --
 
 \unrestrict lJLMm7kerNHrnNnKPrSGNhBVfEqa6y3pntHpQL3Og2IziHLUyFiTXlh9XI747T8
-

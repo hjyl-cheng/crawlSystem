@@ -135,6 +135,7 @@ import {
   parseChannelHeader,
 } from "./youtube.js";
 import { resolveYoutubeContentType } from "./youtubeContentType.js";
+import { resolveVideoDisposition } from "./videoDisposition.js";
 import { isYoutubeCollectionFailureError } from "./youtubePlayability.js";
 import {
   fetchYoutubeJsCommentFirstPage,
@@ -645,6 +646,59 @@ async function updateExistingContentAccessFromCandidate(candidate, state) {
   }));
 }
 
+async function persistFullVideoDisposition(row, {
+  storageAction,
+  classification,
+  access,
+  detail,
+  error = null,
+  terminalReason = null,
+} = {}) {
+  const disposition = resolveVideoDisposition({
+    storageAction,
+    classification,
+    access,
+    detail,
+    error,
+    terminalReason,
+    observedAt: new Date().toISOString(),
+  });
+  let recovery = null;
+  if (row.disposition === "deferred" && disposition.kind !== "deferred") {
+    const {
+      disposition: fromDisposition = null,
+      recovery: _previousRecovery,
+      ...deferredEvidence
+    } = row.result_json ?? {};
+    recovery = {
+      from_disposition: fromDisposition,
+      deferred_evidence: deferredEvidence,
+      deferred_error_message: row.error_message ?? null,
+      resolved_at: disposition.observed_at,
+    };
+  }
+  await query(
+    `UPDATE crawler.content_candidates
+     SET disposition=$2,next_attempt_at=$3,
+         result_json=result_json
+           || jsonb_build_object('disposition',$4::jsonb)
+           || CASE
+                WHEN $5::jsonb IS NULL THEN '{}'::jsonb
+                ELSE jsonb_build_object('recovery',$5::jsonb)
+              END,
+         updated_at=now()
+     WHERE candidate_id=$1`,
+    [
+      row.candidate_id,
+      disposition.kind,
+      disposition.next_attempt_at,
+      JSON.stringify(disposition),
+      recovery == null ? null : JSON.stringify(recovery),
+    ],
+  );
+  return disposition;
+}
+
 async function updateRunDetailStatus(runId) {
   const rows = await query(
     `SELECT
@@ -652,6 +706,10 @@ async function updateRunDetailStatus(runId) {
        count(*) FILTER (WHERE detail_status IN ('done','unavailable'))::int AS terminal,
        count(*) FILTER (WHERE api_status IN ('pending','queued','running','failed'))::int AS api_open,
        count(*) FILTER (WHERE detail_status = 'failed')::int AS failed,
+       count(*) FILTER (
+         WHERE detail_status IN ('done','unavailable')
+           AND disposition IS NULL
+       )::int AS undisposed,
        count(*) FILTER (
          WHERE detail_status IN ('done','unavailable')
            AND cardinality(missing_fields)>0
@@ -664,7 +722,13 @@ async function updateRunDetailStatus(runId) {
     [runId],
   );
   const summary = rows.rows[0] ?? {};
-  const status = Number(summary.failed) > 0
+  const undisposed = Number(summary.undisposed ?? 0);
+  const dispositionError = undisposed > 0
+    ? new Error(
+        `${undisposed} terminal content candidate${undisposed === 1 ? "" : "s"} has no disposition`,
+      )
+    : null;
+  const status = Number(summary.failed) > 0 || dispositionError
     ? "failed"
     : Number(summary.api_open) > 0
       ? "api_pending"
@@ -680,9 +744,14 @@ async function updateRunDetailStatus(runId) {
            'excluded_count',$4::int,
            'age_excluded_count',$5::int,
            'upcoming_live_excluded_count',$6::int,
+           'undisposed_content_count',$7::int,
            'retained_content_count',GREATEST($3::int-$4::int,0)
          ),
-         error_message=CASE WHEN $2='failed' THEN error_message ELSE NULL END,
+         error_message=CASE
+           WHEN $7::int>0 THEN $8
+           WHEN $2='failed' THEN error_message
+           ELSE NULL
+         END,
          updated_at=now()
      WHERE run_id=$1`,
     [
@@ -692,6 +761,8 @@ async function updateRunDetailStatus(runId) {
       Number(summary.excluded ?? 0),
       Number(summary.age_excluded ?? 0),
       Number(summary.upcoming_excluded ?? 0),
+      undisposed,
+      dispositionError?.message ?? null,
     ],
   );
   const migrationActivity = await applyMigrationActivityGate(runId, status);
@@ -701,6 +772,7 @@ async function updateRunDetailStatus(runId) {
       candidateId: migrationActivity.candidateId,
     });
   }
+  if (dispositionError) throw dispositionError;
   return {
     ...summary,
     status: migrationActivity.reject ? "skipped" : status,
@@ -1827,6 +1899,13 @@ async function excludeCandidateByAge(row, detail, ageDays, maxAgeDays, source) {
      WHERE candidate_id=$1`,
     [row.candidate_id, JSON.stringify(resultJson)],
   );
+  await persistFullVideoDisposition(row, {
+    storageAction: { kind: "unresolved" },
+    classification: null,
+    access: accessFromDetail(detail),
+    detail,
+    terminalReason: "outside_content_window",
+  });
   if (row.content_key) {
     await query("DELETE FROM crawler.contents WHERE content_key=$1 AND run_id=$2", [row.content_key, row.run_id]);
   }
@@ -1877,6 +1956,13 @@ async function excludeUpcomingLiveCandidate(row, detail, source) {
      WHERE candidate_id=$1`,
     [row.candidate_id, typeSource, JSON.stringify(resultJson)],
   );
+  await persistFullVideoDisposition(row, {
+    storageAction: { kind: "unresolved" },
+    classification,
+    access: accessFromDetail(detail),
+    detail,
+    terminalReason: "upcoming_live",
+  });
   if (row.content_key) {
     await query("DELETE FROM crawler.contents WHERE content_key=$1", [row.content_key]);
   }
@@ -1891,7 +1977,83 @@ async function excludeUpcomingLiveCandidate(row, detail, source) {
   };
 }
 
+function isUndisposedTerminalCandidate(row) {
+  return ["done", "unavailable"].includes(text(row?.detail_status))
+    && row?.disposition == null;
+}
+
+function terminalDispositionReasonFromCandidate(row) {
+  const scopeReason = text(row?.result_json?.scope?.reason);
+  if (["older_than_max_age", "after_chronological_age_cutoff"].includes(scopeReason)) {
+    return "outside_content_window";
+  }
+  if (scopeReason === "upcoming_live") return "upcoming_live";
+  return null;
+}
+
+function terminalDispositionEvidence(row) {
+  const resultJson = row?.result_json ?? {};
+  const terminalReason = terminalDispositionReasonFromCandidate(row);
+  if (terminalReason) {
+    return {
+      classification: resultJson.classification ?? null,
+      access: resultJson.access ?? accessFromDetail(resultJson.detail),
+      detail: resultJson.detail ?? null,
+      error: null,
+      terminalReason,
+    };
+  }
+  const hasClassification = Object.prototype.hasOwnProperty.call(resultJson, "classification");
+  const hasAccess = resultJson.access && typeof resultJson.access === "object";
+  if (!hasClassification || !hasAccess) return null;
+  const persistedErrors = Array.isArray(resultJson.errors) ? resultJson.errors : [];
+  const persistedError = text(row?.error_message);
+  return {
+    classification: resultJson.classification,
+    access: resultJson.access,
+    detail: resultJson.detail ?? null,
+    error: persistedError && persistedErrors.includes(persistedError)
+      ? new Error(persistedError)
+      : null,
+    terminalReason: null,
+  };
+}
+
+async function recoverTerminalCandidateDisposition(row) {
+  const evidence = terminalDispositionEvidence(row);
+  if (!evidence) {
+    throw new Error(
+      `terminal content candidate ${row.candidate_id} has no persisted evidence for disposition recovery`,
+    );
+  }
+  const storageAction = fullVideoStorageAction({
+    candidate: row,
+    classification: evidence.classification,
+    access: evidence.access,
+  });
+  const disposition = await persistFullVideoDisposition(row, {
+    storageAction,
+    classification: evidence.classification,
+    access: evidence.access,
+    detail: evidence.detail,
+    error: evidence.error,
+    terminalReason: evidence.terminalReason,
+  });
+  return {
+    candidate_id: row.candidate_id,
+    video_id: row.source_content_id,
+    content_type: row.content_type ?? null,
+    api_missing: [],
+    missing_fields: row.missing_fields ?? [],
+    error: null,
+    partial: Array.isArray(row.missing_fields) && row.missing_fields.length > 0,
+    excluded: disposition.kind === "terminal_excluded",
+    disposition_recovered: true,
+  };
+}
+
 function shouldPrefetchYoutubeJsDetail(row, settings) {
+  if (isUndisposedTerminalCandidate(row)) return false;
   if (!youtubeJsDetailEnabled()) return false;
   const detail = detailFromCandidate(row);
   if (isUpcomingLiveDetail(detail)) return false;
@@ -1908,6 +2070,9 @@ async function captureYoutubeJsDetail(videoId) {
 }
 
 async function processOneCandidate(row, settings, { youtubeJsDetail = null } = {}) {
+  if (isUndisposedTerminalCandidate(row)) {
+    return recoverTerminalCandidateDisposition(row);
+  }
   const attemptNumber = Number(row.attempts ?? 0) + 1;
   const maxAttempts = settings.detailMaxAttempts;
   await query(
@@ -2053,6 +2218,18 @@ async function processOneCandidate(row, settings, { youtubeJsDetail = null } = {
         String(detailError?.message ?? detailError),
       ],
     );
+    const retryAccess = accessFromDetail(detail);
+    await persistFullVideoDisposition(row, {
+      storageAction: fullVideoStorageAction({
+        candidate: row,
+        classification,
+        access: retryAccess,
+      }),
+      classification,
+      access: retryAccess,
+      detail,
+      error: detailError,
+    });
     return {
       candidate_id: row.candidate_id,
       video_id: row.source_content_id,
@@ -2117,6 +2294,13 @@ async function processOneCandidate(row, settings, { youtubeJsDetail = null } = {
         String(parserError?.message ?? parserError),
       ],
     );
+    await persistFullVideoDisposition(row, {
+      storageAction,
+      classification,
+      access: normalized.access,
+      detail: normalized.detail,
+      error: parserError,
+    });
     throw parserError;
   }
 
@@ -2139,6 +2323,13 @@ async function processOneCandidate(row, settings, { youtubeJsDetail = null } = {
         String(unresolvedError?.message ?? unresolvedError),
       ],
     );
+    await persistFullVideoDisposition(row, {
+      storageAction,
+      classification,
+      access: normalized.access,
+      detail: normalized.detail,
+      error: typeError,
+    });
     return {
       candidate_id: row.candidate_id,
       video_id: row.source_content_id,
@@ -2187,6 +2378,12 @@ async function processOneCandidate(row, settings, { youtubeJsDetail = null } = {
           JSON.stringify(apiResultJson),
         ],
       );
+      await persistFullVideoDisposition(row, {
+        storageAction,
+        classification,
+        access: normalized.access,
+        detail: normalized.detail,
+      });
       await enqueueYoutubeApiFallback(row, classifiedResolution.missingFields);
       return {
         candidate_id: row.candidate_id,
@@ -2220,6 +2417,12 @@ async function processOneCandidate(row, settings, { youtubeJsDetail = null } = {
         accessError.message,
       ],
     );
+    await persistFullVideoDisposition(row, {
+      storageAction,
+      classification,
+      access: normalized.access,
+      detail: normalized.detail,
+    });
     return {
       candidate_id: row.candidate_id,
       video_id: row.source_content_id,
@@ -2248,6 +2451,13 @@ async function processOneCandidate(row, settings, { youtubeJsDetail = null } = {
          WHERE candidate_id=$1`,
         [row.candidate_id, candidateMissing, JSON.stringify(resultJson), missingExisting.message],
       );
+      await persistFullVideoDisposition(row, {
+        storageAction: { kind: "unresolved" },
+        classification,
+        access: normalized.access,
+        detail: normalized.detail,
+        error: missingExisting,
+      });
       return {
         candidate_id: row.candidate_id,
         video_id: row.source_content_id,
@@ -2278,6 +2488,12 @@ async function processOneCandidate(row, settings, { youtubeJsDetail = null } = {
         JSON.stringify(terminalJson),
       ],
     );
+    await persistFullVideoDisposition(row, {
+      storageAction,
+      classification,
+      access: normalized.access,
+      detail: terminal.detail,
+    });
     return {
       candidate_id: row.candidate_id,
       video_id: row.source_content_id,
@@ -2315,6 +2531,12 @@ async function processOneCandidate(row, settings, { youtubeJsDetail = null } = {
        WHERE candidate_id=$1`,
       [row.candidate_id, contentType, typeSource, contentKey, JSON.stringify(resultJson)],
     );
+    await persistFullVideoDisposition(row, {
+      storageAction,
+      classification,
+      access: normalized.access,
+      detail: normalized.detail,
+    });
     return { candidate_id: row.candidate_id, video_id: row.source_content_id, content_type: contentType, api_missing: [], error: null };
   }
 
@@ -2336,6 +2558,12 @@ async function processOneCandidate(row, settings, { youtubeJsDetail = null } = {
        WHERE candidate_id=$1`,
       [row.candidate_id, contentType, typeSource, contentKey, apiMissing, JSON.stringify(apiResultJson)],
     );
+    await persistFullVideoDisposition(row, {
+      storageAction,
+      classification,
+      access: normalized.access,
+      detail: normalized.detail,
+    });
     await enqueueYoutubeApiFallback(row, apiMissing);
     return { candidate_id: row.candidate_id, video_id: row.source_content_id, content_type: contentType, api_missing: apiMissing, error: null };
   }
@@ -2358,6 +2586,12 @@ async function processOneCandidate(row, settings, { youtubeJsDetail = null } = {
      WHERE candidate_id=$1`,
     [row.candidate_id, contentType, typeSource, contentKey, apiMissing, JSON.stringify(terminalJson), partialError],
   );
+  await persistFullVideoDisposition(row, {
+    storageAction,
+    classification,
+    access: normalized.access,
+    detail: terminal.detail,
+  });
   return {
     candidate_id: row.candidate_id,
     video_id: row.source_content_id,
@@ -2396,6 +2630,15 @@ async function excludeRemainingCandidatesByAge(rows, cutoffResult, maxAgeDays) {
      WHERE candidate_id=ANY($1::bigint[])`,
     [candidateIds, JSON.stringify(scope)],
   );
+  for (const row of rows) {
+    await persistFullVideoDisposition(row, {
+      storageAction: { kind: "unresolved" },
+      classification: null,
+      access: { access_status: "unknown", access_status_source: "chronological_cutoff" },
+      detail: row.result_json?.detail ?? null,
+      terminalReason: "outside_content_window",
+    });
+  }
   return updated.rowCount;
 }
 
@@ -2423,7 +2666,13 @@ async function processContentDetailRun({
        ON known.channel_id=candidate.channel_id
       AND known.source_content_id=candidate.source_content_id
      WHERE candidate.run_id=$1
-       AND candidate.detail_status NOT IN ('done','unavailable','api_pending')
+       AND (
+         candidate.detail_status NOT IN ('done','unavailable','api_pending')
+         OR (
+           candidate.detail_status IN ('done','unavailable')
+           AND candidate.disposition IS NULL
+         )
+       )
      ORDER BY candidate.position ASC`,
     [runId],
   );
@@ -2956,6 +3205,12 @@ export async function processDataApiBatchV2(job) {
             JSON.stringify({ ...state, preserved_content_type: true }),
           ],
         );
+        await persistFullVideoDisposition(candidate, {
+          storageAction,
+          classification,
+          access: normalized.access,
+          detail: normalized.detail,
+        });
       } else if (storageAction.kind === "classified_only") {
         const terminalMissing = terminalApiMissingFields(
           missingApiFields(normalized.detail),
@@ -2977,6 +3232,12 @@ export async function processDataApiBatchV2(job) {
             `content access ${normalized.access.access_status || "unknown"} after detail and api`,
           ],
         );
+        await persistFullVideoDisposition(candidate, {
+          storageAction,
+          classification,
+          access: normalized.access,
+          detail: normalized.detail,
+        });
       } else if (!contentType) {
         const terminalMissing = [...new Set([
           "content_type",
@@ -2991,6 +3252,12 @@ export async function processDataApiBatchV2(job) {
            WHERE candidate_id=$1`,
           [candidate.candidate_id, terminalMissing, JSON.stringify(state)],
         );
+        await persistFullVideoDisposition(candidate, {
+          storageAction,
+          classification,
+          access: normalized.access,
+          detail: normalized.detail,
+        });
       } else {
         const terminalMissing = terminalApiMissingFields(
           missingApiFields(normalized.detail),
@@ -3049,6 +3316,12 @@ export async function processDataApiBatchV2(job) {
             JSON.stringify(state),
           ],
         );
+        await persistFullVideoDisposition(candidate, {
+          storageAction,
+          classification,
+          access: normalized.access,
+          detail: normalized.detail,
+        });
       }
       affectedRuns.set(candidate.run_id, candidate.channel_id);
     }
