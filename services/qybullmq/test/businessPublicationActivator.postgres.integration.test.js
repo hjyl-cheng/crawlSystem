@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import pg from "pg";
 import { PostgresBusinessPublicationActivator } from "../src/businessPublicationActivator.js";
+import { PostgresBusinessPublicationAuditor } from "../src/businessPublicationAuditor.js";
 import { PostgresBusinessPublicationStore } from "../src/businessPublicationIngress.js";
 import {
   PostgresBusinessPublicationReconciler,
@@ -1108,6 +1109,48 @@ test("runOnce leases, activates, recovers, and reports durable inconsistencies",
     assert.equal(findings.blocked_activation.count, 1);
     assert.equal(findings.activation_error.count, 0);
     assert.ok(audited.audit.issue_count >= 10);
+
+    const auditSettings = [];
+    const auditPlanNodes = [];
+    const planCheckingPool = {
+      async connect() {
+        const client = await pool.connect();
+        return {
+          async query(sql, params) {
+            const statement = String(sql);
+            if (statement.includes("business-publication-auditor:")) {
+              const setting = await client.query(
+                `SELECT current_setting('max_parallel_workers_per_gather') AS workers,
+                        current_setting('debug_parallel_query') AS debug`,
+              );
+              auditSettings.push(setting.rows[0]);
+              const explained = await client.query(`EXPLAIN (FORMAT JSON) ${statement}`, params);
+              const visit = (node) => {
+                auditPlanNodes.push(node["Node Type"]);
+                for (const child of node.Plans ?? []) visit(child);
+              };
+              visit(explained.rows[0]["QUERY PLAN"][0].Plan);
+            }
+            return client.query(sql, params);
+          },
+          release() { client.release(); },
+        };
+      },
+    };
+    const guardedAudit = await new PostgresBusinessPublicationAuditor(planCheckingPool, {
+      auditIntervalSeconds: 0,
+      gapAlertSeconds: 0,
+      projectionStuckSeconds: 0,
+    }).runIfDue();
+    assert.equal(guardedAudit.status, "succeeded");
+    assert.deepEqual(
+      auditSettings,
+      Array.from({ length: 11 }, () => ({ workers: "0", debug: "off" })),
+    );
+    assert.deepEqual(
+      auditPlanNodes.filter((node) => ["Gather", "Gather Merge", "Parallel Hash"].includes(node)),
+      [],
+    );
   } finally {
     await pool.end();
   }

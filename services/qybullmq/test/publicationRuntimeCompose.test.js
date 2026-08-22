@@ -40,6 +40,10 @@ test("Publication Runtime Compose preserves the database and transport network b
 
   assert.match(reconciler, /networks: \[business_database\]/);
   assert.doesNotMatch(reconciler, /networks:.*internal|networks:.*publication_transport/);
+  assert.match(reconciler, /BUSINESS_PUBLICATION_RECONCILE_CONCURRENCY: 4/);
+  assert.match(reconciler, /BUSINESS_PUBLICATION_AUDIT_ERROR_RETRY_SECONDS: 30/);
+  assert.match(reconciler, /BUSINESS_PUBLICATION_AUDIT_MAX_ERROR_RETRY_SECONDS: 300/);
+  assert.doesNotMatch(reconciler, /shm_size|max_parallel_workers_per_gather/);
   assert.match(compose, /publication_transport:\n    driver: bridge\n    internal: true/);
   for (const block of [ingress, publisher, reconciler]) {
     assert.doesNotMatch(block, /^\s+ports:/m);

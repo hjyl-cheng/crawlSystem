@@ -42,6 +42,8 @@
     "business-publication-ingress": "node src/runBusinessPublicationIngress.js",
     "business-publication-reconciler": "node src/runBusinessPublicationReconciler.js",
     "business-publication-projector": "node src/runBusinessPublicationProjector.js",
+    "diagnose:business-publication-dsm": "node scripts/diagnoseBusinessPublicationDsm.mjs",
+    "soak:business-publication-runtime": "node scripts/soakBusinessPublicationRuntime.mjs",
     "feature-recalc-relay": "node src/runFeatureRecalcRelay.js",
     "test": "node --test test/*.test.js"
   },

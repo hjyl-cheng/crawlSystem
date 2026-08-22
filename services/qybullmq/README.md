@@ -48,3 +48,39 @@ Run the tests with:
 cd services/qybullmq
 npm test
 ```
+
+## Business Publication DSM Diagnostics
+
+Inventory all 11 audit plans without executing them or changing database state:
+
+```bash
+INC009_DSM_MODE=audit-plans \
+INC009_DSM_DATABASE_URL='<database-url>' \
+INC009_DSM_EXPECTED_DATABASE='<database-name>' \
+npm run diagnose:business-publication-dsm
+```
+
+Run the calibrated 64 MiB or 256 MiB Parallel Hash matrix only against an
+isolated database whose name ends in `_test`:
+
+```bash
+INC009_DSM_MODE=reproduce \
+INC009_DSM_DATABASE_URL='<test-database-url>' \
+INC009_DSM_CONTAINER='<postgres-container>' \
+INC009_DSM_EXPECTED_SHM_MIB=64 \
+INC009_DSM_PREPARE=1 \
+npm run diagnose:business-publication-dsm
+```
+
+`INC009_DSM_PREPARE=1` creates the calibrated unlogged probe tables when they
+do not exist. It never truncates or replaces an existing fixture. The joint
+runtime load requires separate Crawler and Business `_test` databases. Use
+`INC009_SOAK_MODE=steady` for the one-hour stability gate or `capacity` for the
+300-Channel saturated throughput gate:
+
+```bash
+INC009_CRAWLER_TEST_DATABASE_URL='<crawler-test-database-url>' \
+INC009_BUSINESS_TEST_DATABASE_URL='<business-test-database-url>' \
+INC009_SOAK_MODE=capacity \
+npm run soak:business-publication-runtime
+```
