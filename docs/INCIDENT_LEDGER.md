@@ -199,7 +199,7 @@
 
 ## INC-20260821-009: Business PostgreSQL Dynamic Shared Memory Exhaustion
 
-- Status: fixed in source, reproducible, and soak-tested; deployment pending
+- Status: fixed, deployed, and production-verified
 - Symptom: Business Publication Reconciler iterations repeatedly fail with
   `could not resize shared memory segment ... No space left on device` while
   Ingress, Publisher, and Projector remain running with zero restarts.
@@ -276,16 +276,17 @@
   exhaust DSM for the whole PostgreSQL cluster.
 - Production safety: diagnosis used read-only transactions only. No production
   configuration, data, container, or deployment was changed or restarted.
-- Rollout: build an immutable image, run the schema-free Reconciler canary,
-  confirm its ready event reports audit pool 1, Gather workers 0, and debug
-  parallel off, then observe audit failure counters and all four throughput
-  rates for 30 minutes before normal release. Roll back only the application
-  image if any gate regresses; this fix has no schema migration, PostgreSQL
-  restart, or `shm_size` change.
+- Deployment: the Business Publication Reconciler now runs immutable QYBullMQ
+  image `pachongsys-2e6fc73-query-closure`, Git revision
+  `2e6fc73a3e417de9343394f666b65b85b26b1b36`, with zero restarts. Production
+  audit telemetry reports a one-connection audit path, Gather workers zero,
+  `debug_parallel_query=off`, zero consecutive failures, and zero cumulative
+  shared-memory failures. Repeated post-rollout audits completed successfully
+  without changing PostgreSQL, `/dev/shm`, or the other role pools.
 
 ## INC-20260822-010: Stale Channel Pressure Permanently Paused Query Discover
 
-- Status: fixed and regression-tested; production rollout in progress
+- Status: fixed, deployed, and production-verified
 - Symptom: the final Query canary completed Query Quality and created its first
   managed Discover Page, but `youtube-discover-page` remained globally paused.
   Controller reported a Channel failure rate of 87% and a proxy cooldown ratio
@@ -311,10 +312,20 @@
   suite passed: 1,015 QYBullMQ tests, Dashboard, Auth, Feature Dispatch, 312
   Python tests plus subtests, and all Rota Go packages. Source verification
   also passed.
+- Deployment: Controller, API, 20 Channel Workers, 20 Incremental Workers,
+  five specialist Workers, the Feature bridge pair, and all four Publication
+  roles now run QYBullMQ revision
+  `2e6fc73a3e417de9343394f666b65b85b26b1b36`. All 53 containers are running
+  with zero restarts. The preserved Query cycle advanced after stale pressure
+  expired instead of being held by the 2026-08-20 failure burst.
+- Production verification: Query candidate `UCIqhABRlNfmCw9XMlan_hAw`
+  (`Monica Toy`) was accepted and completed Full Crawl, local Agent, Finalize,
+  Crawler Publication, Business activation, Projection, and
+  `creator_search_live` delivery on the deployed revision.
 
 ## INC-20260822-011: Deferred Video Repair Was Re-enqueued Before Its Due Time
 
-- Status: fixed and regression-tested; production canary pending
+- Status: fixed, deployed, and production-canary verified
 - Symptom: the final Query canary repeatedly failed the same logical Content
   Repair Job eight times in about four minutes. Several Video Candidates had
   already been classified as `deferred` with `next_attempt_at` around
@@ -341,16 +352,16 @@
   active, waiting, or delayed Jobs. The obsolete Controller and Channel Worker
   canaries were then stopped gracefully. Queue history, failed Jobs, database
   state, and all other services were preserved.
-- Rollout: build an immutable QYBullMQ image from the committed source, replace
-  the stopped canaries, resume the preserved Query cycle, and prove that a
-  future-scheduled Candidate is not dispatched before its due time. Promote
-  the image only after Query reaches completion and Crawler Current, local
-  Agent, Finalize, Publication, and Business Current agree for an accepted
-  Channel.
+- Deployment: the immutable QYBullMQ image at revision
+  `2e6fc73a3e417de9343394f666b65b85b26b1b36` was promoted to the complete
+  fleet. The preserved future-scheduled Candidates remained deferred until
+  their due time; the former immediate Content Repair loop did not recur. The
+  accepted Query canary then completed through Crawler Current, local Agent,
+  Finalize, Publication, Business Current, and search Projection.
 
 ## INC-20260822-012: Restart Between Scheduler And Batch Closure Stranded Agent Tail
 
-- Status: fixed and regression-tested; production canary pending
+- Status: fixed, deployed, and production-canary verified
 - Symptom: a Query cycle reached automatic finalization with 21 accepted
   Channels. The first 20 entered the configured Agent batch, but the final
   Channel remained `waiting_agent` with `agent_status='pending'` and no BullMQ
@@ -372,13 +383,23 @@
   paired test proves that `running` discovery performs no write. Controller
   lifecycle, Final Repair, Content Repair, and Query Scheduler focused tests
   pass.
-- Rollout: promote only after a Controller canary closes the preserved batch,
-  emits the remaining local Agent tail, and advances it through Finalize and
-  Publication without opening another Discover page.
+- Deployment: a Controller canary on revision
+  `2e6fc73a3e417de9343394f666b65b85b26b1b36` reconciled the preserved closing
+  batch, emitted its partial local Agent tail, and advanced it through Finalize
+  and Publication without opening an extra Discover page. The same revision is
+  now on the complete QYBullMQ fleet with zero restarts.
+- End-to-end verification: Query sample `UCIqhABRlNfmCw9XMlan_hAw`, Migration
+  sample `UC6ElOiTjmTemlp98M1WciYQ`, and Incremental sample
+  `UCxm0tptjIc76-i26EKQ9NpA` each reached active Business cursors, delivered
+  Projection state, and `creator_search_live` through their respective paths.
+- Operational boundary: Daily Clock/Scheduler remains intentionally stopped;
+  Discover and Content Detail remain paused. Incremental remains paused with
+  17 preserved Jobs and zero active, waiting, or delayed Jobs. The rollout did
+  not resume any of these queues.
 
 ## INC-20260822-013: Feature Ingest Rejected The Video Disposition Ledger
 
-- Status: fixed and regression-tested in source; production rollout pending
+- Status: fixed, deployed, and production-verified
 - Symptom: Crawler Outbox event
   `136780fa-f93f-4bf5-acd1-d9c5d3712abf` reached the `feature-recalc` queue but
   Feature Ingest rejected it as a permanent contract error. The Job failed
@@ -400,10 +421,31 @@
   The exact production payload validates offline as `complete` with 122
   discovered, 122 stored, zero deferred, zero terminally excluded, and a
   normalized payload identical to the source payload.
-- Rollout: build an immutable Feature Engine image from the committed source,
-  replace only Feature Ingest through the source-controlled bridge launcher,
-  retry the exact failed BullMQ Job, and require both Job completion and an
-  `applied` Feature Inbox row before closing the incident.
+- Deployment: only `qy-feature-ingest` was replaced, using immutable image
+  `qy-allpachong/feature-engine:pachongsys-8b919ed-feature-ledger`, digest
+  `sha256:c451f999f4adf19603a87c9ff9fc42716ff52956a030e7bcffe19cb5281e8abf`,
+  and Git revision `8b919ed41874a77f897c94d7dca75ca3b2ef03b9`. The container is healthy with
+  zero restarts. Relay, Publisher, Workers, Rota, Dashboard, and all databases
+  were not replaced for this incident.
+- Production verification: guarded retry of event
+  `136780fa-f93f-4bf5-acd1-d9c5d3712abf` completed at 2026-08-22 15:26 UTC.
+  Feature Inbox records Channel `UCxm0tptjIc76-i26EKQ9NpA`, Video sequence 12,
+  outcome `complete`, and status `applied`. Crawler Observation Outbox has
+  324,439 published events; Feature Inbox has 324,438 applied events plus one
+  intentionally rejected historical event, so every published event is
+  accounted for.
+- Historical quarantine: the only rejected Feature event is
+  `28e2cee8-27ca-4801-b8c3-5dc84ddd5929`, Video sequence 8 for
+  `UC376n347Ob5Lwzq2WGzF1AA`, recorded on 2026-08-05 under retired fallback
+  contract `QY-BUG-012`. Applied Video sequence 13 supersedes it. It was not
+  retried and the current contract was not broadened to accept retired facts.
+- Publication backlog boundary: no Crawler or Business Publication dead letter
+  was created or updated after this rollout. The 86 Crawler dead letters date
+  from 2026-07-31 through 2026-08-17. Business has six historical dead letters
+  and 22 historical `pending` Projection rows. Those 22 rows belong to three
+  Channels and are deliberately blocked by one earlier dead letter per Channel
+  under ordered Projection semantics; they require separate guarded recovery
+  and are not a regression from this deployment.
 
 ## INC-20260822-014: Python Tests Loaded A Stale Installed Source Copy
 

@@ -51,7 +51,7 @@ Clock 仍在执行，因此今日累计数量会继续变化。代码语义、�
 | BUG-7 | **历史未补全成立，归因 BUG-1 错误** | BUG-6 的存量结果 | 随 BUG-6 处理 |
 | BUG-8 | **成立，根因已确认是外部审计脚本污染共享 PgBouncer 后端** | 数据库连接状态污染 | P0 |
 | BUG-9 | **已修复并由唯一源码接管** | 源码/部署治理 | P2 |
-| BUG-10 | **镜像漂移已修复；新契约缺口另记 INC-20260822-013** | Feature Ingest 契约 | P1 |
+| BUG-10 | **镜像漂移与新契约缺口均已修复、上线并验证** | Feature Ingest 契约 | 已关闭 |
 | BUG-11 | **容器残留成立，不是业务功能 BUG** | 运行态垃圾 | P2 |
 | BUG-12 | **版本差异成立，48 个角色当前功能落后不成立** | 组件版本治理 | P2 |
 | BUG-13 | **全域漏排不成立，但存在 1 个冷启动恢复缺口** | Agent Clock 边界状态缺陷 | P1（单频道修复 + 不变量） |
@@ -567,16 +567,16 @@ BUG-7 是 BUG-6 积压中的历史数据集合，不应建立第二套恢复系�
 
 **部署归属违规成立，当前数据链路故障未出现。**
 
-两个容器仍由 `/root/workspace/FeatureEngine/docker-compose.yml` 管理：
+诊断时，两个容器仍由 `/root/workspace/FeatureEngine/docker-compose.yml` 管理：
 
 - `qy-crawler-outbox-publisher`；
 - `qy-feature-relay`。
 
-镜像为无 revision label 的旧 `bullmq-crawler-qy:latest`。
+诊断时镜像为无 revision label 的旧 `bullmq-crawler-qy:latest`。
 
 进一步哈希核对发现：两个入口文件、Publisher 主实现和 Feature Transport 与唯一源码一致，但旧镜像的 `db.js`、`queues.js` 等依赖并不完全一致，且缺少当前数据库连接模块。因此不能仅凭入口文件一致就宣称整条执行闭包一致。
 
-当前功能证据：
+诊断时的功能证据：
 
 - crawler outbox：313,031 published，仅 1 条刚创建的 pending；
 - feature inbox：313,031 applied；
@@ -603,9 +603,13 @@ BUG-7 是 BUG-6 积压中的历史数据集合，不应建立第二套恢复系�
 - `qy-crawler-outbox-publisher`、`qy-feature-relay` 已由该 Compose 接管；
 - 两个容器均运行不可变 `pachongsys` QYBullMQ 镜像，Compose labels 指向
   `/root/workspace/agent/pachongsys`，0 次重启；
+- 当前镜像为 `pachongsys-2e6fc73-query-closure`，完整 Git revision 为
+  `2e6fc73a3e417de9343394f666b65b85b26b1b36`；全套 53 个 QYBullMQ 运行角色
+  均为该 revision、0 次重启；
 - 旧 `/root/workspace/FeatureEngine` 容器被保留为已停止回滚证据，不再消费
   生产队列；
-- 编排回归测试和 `docker compose config --quiet` 均通过。
+- 编排回归测试和 `docker compose config --quiet` 均通过；真实 Observation
+  已经经 Publisher、Relay 到达 Feature Inbox 并变成 `applied`。
 
 ## 13. BUG-10：Feature Ingest 运行旧镜像
 
@@ -613,7 +617,7 @@ BUG-7 是 BUG-6 积压中的历史数据集合，不应建立第二套恢复系�
 
 **成立。**
 
-运行中的 `qy-feature-ingest` 使用：
+诊断时运行中的 `qy-feature-ingest` 使用：
 
 ```text
 qy-feature-engine:video-contract-compat-20260815-v2
@@ -621,7 +625,7 @@ qy-feature-engine:video-contract-compat-20260815-v2
 
 其 `contracts.py` 和 `events.py` 哈希与唯一源码不同。正在运行的新版 Scheduler 镜像中，同三个关键文件与唯一源码逐字节一致，证明正确构建已经存在。
 
-当前 Inbox 全部正常 applied，说明尚未形成可见积压；但契约和事件解析版本漂移具有真实风险。
+诊断时 Inbox 尚未形成可见积压；但契约和事件解析版本漂移具有真实风险。
 
 ### 13.2 具体解决方案
 
@@ -638,11 +642,16 @@ qy-feature-engine:video-contract-compat-20260815-v2
 
 - `qy-feature-ingest` 已由唯一源码 Feature Bridge Compose 接管，容器健康且
   0 次重启；
-- 旧镜像漂移问题已消除，运行镜像来自 `pachongsys` 的不可变构建；
-- 接管后的真实事件复验发现新版 Video disposition ledger 尚未进入 Feature
-  Engine 契约，该独立兼容故障已记录为 `INC-20260822-013`；
-- disposition 契约修复和 183 项 Feature Engine 回归已在源码完成，生产镜像
-  切换与失败事件重放仍是关闭该新事故的最后门禁。
+- 旧镜像漂移问题已消除；运行镜像为
+  `qy-allpachong/feature-engine:pachongsys-8b919ed-feature-ledger`，完整 Git
+  revision 为 `8b919ed41874a77f897c94d7dca75ca3b2ef03b9`；
+- Video disposition ledger 契约缺口 `INC-20260822-013` 已修复，183 项 Feature
+  Engine 回归和完整仓库测试通过；
+- 原失败事件 `136780fa-f93f-4bf5-acd1-d9c5d3712abf` 已受控重试成功，Feature
+  Inbox 记录 Video sequence 12、`complete/applied`；
+- Crawler Observation Outbox 的 324,439 条 `published` 与 Feature Inbox 的
+  324,438 条 `applied` 加 1 条历史 `rejected` 完全对账；历史拒绝是已被
+  sequence 13 覆盖的 `QY-BUG-012`，不属于当前回归。
 
 ## 14. BUG-11：`fervent_mccarthy` 游离容器
 
