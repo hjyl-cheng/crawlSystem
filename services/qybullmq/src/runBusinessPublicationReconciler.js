@@ -1,6 +1,7 @@
 import { hostname } from "node:os";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
+import { PostgresBusinessPublicationAuditor } from "./businessPublicationAuditor.js";
 import { PostgresBusinessPublicationReconciler } from "./businessPublicationReconciler.js";
 import { environmentValue } from "./runtimeEnvironment.js";
 
@@ -47,6 +48,23 @@ export function businessPublicationReconcilerRuntimeConfig(environment = process
       "BUSINESS_PUBLICATION_RECONCILE_MAX_ERROR_RETRY_SECONDS must not be smaller than the base retry",
     );
   }
+  const auditErrorRetrySeconds = integerSetting(
+    environment,
+    "BUSINESS_PUBLICATION_AUDIT_ERROR_RETRY_SECONDS",
+    30,
+    { minimum: 1, maximum: 3600 },
+  );
+  const auditMaximumErrorRetrySeconds = integerSetting(
+    environment,
+    "BUSINESS_PUBLICATION_AUDIT_MAX_ERROR_RETRY_SECONDS",
+    300,
+    { minimum: 1, maximum: 86400 },
+  );
+  if (auditMaximumErrorRetrySeconds < auditErrorRetrySeconds) {
+    throw new TypeError(
+      "BUSINESS_PUBLICATION_AUDIT_MAX_ERROR_RETRY_SECONDS must not be smaller than the base retry",
+    );
+  }
   return {
     databaseUrl: environmentValue("BUSINESS_DATABASE_URL", { environment }),
     expectedDatabase,
@@ -61,6 +79,7 @@ export function businessPublicationReconcilerRuntimeConfig(environment = process
       Math.max(12, concurrency + 2),
       { minimum: 2, maximum: 100 },
     ),
+    auditPoolMaximum: 1,
     batchSize: integerSetting(
       environment,
       "BUSINESS_PUBLICATION_RECONCILE_BATCH_SIZE",
@@ -106,6 +125,8 @@ export function businessPublicationReconcilerRuntimeConfig(environment = process
       10,
       { minimum: 1, maximum: 100 },
     ),
+    auditErrorRetrySeconds,
+    auditMaximumErrorRetrySeconds,
   };
 }
 
@@ -138,6 +159,13 @@ async function main() {
   const pool = new Pool({
     connectionString: config.databaseUrl,
     max: config.poolMaximum,
+    application_name: "business-publication-reconciler",
+  });
+  const auditPool = new Pool({
+    connectionString: config.databaseUrl,
+    max: config.auditPoolMaximum,
+    application_name: "business-publication-auditor",
+    options: "-c max_parallel_workers_per_gather=0 -c debug_parallel_query=off",
   });
   let stopping = false;
   const stop = () => { stopping = true; };
@@ -145,7 +173,16 @@ async function main() {
   process.once("SIGTERM", stop);
   try {
     await assertBusinessPublicationDatabase(pool, config.expectedDatabase);
+    const auditor = new PostgresBusinessPublicationAuditor(auditPool, {
+      gapAlertSeconds: config.gapAlertSeconds,
+      projectionStuckSeconds: config.projectionStuckSeconds,
+      auditIntervalSeconds: config.auditIntervalSeconds,
+      auditSampleSize: config.auditSampleSize,
+      errorRetrySeconds: config.auditErrorRetrySeconds,
+      maximumErrorRetrySeconds: config.auditMaximumErrorRetrySeconds,
+    });
     const reconciler = new PostgresBusinessPublicationReconciler(pool, {
+      auditor,
       workerId: config.workerId,
       batchSize: config.batchSize,
       concurrency: config.concurrency,
@@ -153,15 +190,14 @@ async function main() {
       blockedRetrySeconds: config.blockedRetrySeconds,
       errorRetrySeconds: config.errorRetrySeconds,
       maximumErrorRetrySeconds: config.maximumErrorRetrySeconds,
-      gapAlertSeconds: config.gapAlertSeconds,
-      projectionStuckSeconds: config.projectionStuckSeconds,
-      auditIntervalSeconds: config.auditIntervalSeconds,
-      auditSampleSize: config.auditSampleSize,
     });
     console.log(JSON.stringify({
       event: "business_publication_reconciler_ready",
       worker_id: config.workerId,
       database: config.expectedDatabase,
+      audit_pool_maximum: config.auditPoolMaximum,
+      audit_parallel_workers_per_gather: 0,
+      audit_debug_parallel_query: "off",
     }));
     while (!stopping) {
       try {
@@ -183,7 +219,10 @@ async function main() {
       if (!stopping) await sleep(config.pollMs);
     }
   } finally {
-    await pool.end().catch(() => {});
+    await Promise.all([
+      pool.end().catch(() => {}),
+      auditPool.end().catch(() => {}),
+    ]);
   }
 }
 

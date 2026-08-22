@@ -199,18 +199,86 @@
 
 ## INC-20260821-009: Business PostgreSQL Dynamic Shared Memory Exhaustion
 
-- Status: open; isolated from INC-20260821-007
+- Status: fixed in source, reproducible, and soak-tested; deployment pending
 - Symptom: Business Publication Reconciler iterations repeatedly fail with
   `could not resize shared memory segment ... No space left on device` while
   Ingress, Publisher, and Projector remain running with zero restarts.
-- Evidence: the Business PostgreSQL container has the Docker default 64 MiB
+- Root cause: one audit iteration launched all 11 inspection queries with
+  `Promise.all`. Queries 0, 1, and 6 selected Parallel Hash plans and query 8
+  selected a Parallel Seq Scan, each with two workers. Their overlapping POSIX
+  dynamic shared-memory growth exceeded the Business PostgreSQL container's
+  64 MiB `/dev/shm`. The Reconciler's four-channel activation concurrency was
+  not the direct cause; it completed before the audit fan-out started.
+- Isolation evidence: the Business PostgreSQL container has the Docker default 64 MiB
   `/dev/shm`, PostgreSQL uses `dynamic_shared_memory_type=posix`, and
   `max_parallel_workers_per_gather=2`. The failure existed before the BUG-8
   rollout and continued unchanged after it. From `11:03 UTC` through the audit
   boundary, the new Reconciler logged 1,367 matching failures. Idle `/dev/shm`
   usage is low; the error is a concurrent parallel-query burst, not host disk
   exhaustion.
-- Required follow-up: reproduce the exact Reconciler query plans and measure
-  peak dynamic shared memory before choosing between a role-scoped parallelism
-  limit, lower Reconciler fan-out, or a larger Business PostgreSQL `shm_size`.
-  Do not attribute this incident to PgBouncer or change database permissions.
+- Controlled reproduction: `npm run diagnose:business-publication-dsm` now
+  preserves the exact one-million-row, 128-byte Parallel Hash fixture, starts
+  concurrent queries behind a PostgreSQL advisory-lock barrier, reads the
+  target container's configured `shm_bytes`, and refuses non-`_test`
+  databases. On PostgreSQL 18.4 with POSIX DSM, `work_mem=4MB`, two workers per
+  Gather, and 64 MiB `/dev/shm`, concurrency 1 succeeded 1/1, concurrency 2
+  failed 1/2 with SQLSTATE 53100, and concurrency 4 failed 3/4. Four concurrent
+  transaction-local serial plans succeeded 4/4. The identical fixture at 256
+  MiB succeeded 1/1, 2/2, and 4/4, proving that capacity only moves the failure
+  threshold. Parallel and serial-plan p50 were about 958 ms and 1,883 ms on the
+  original production-shaped query before SQL optimization.
+- Prevention: audits now use a dedicated one-connection Pool whose startup
+  options set both `max_parallel_workers_per_gather=0` and
+  `debug_parallel_query=off`. Every audit also opens one `REPEATABLE READ READ
+  ONLY` transaction, applies both settings again with `SET LOCAL`, and runs all
+  11 unnamed, tagged queries serially from one snapshot. Single-flight
+  admission blocks overlapping audits. A failed audit is contained and retried
+  on a bounded 30/60/120/300 second schedule without failing core
+  reconciliation. Channel activation concurrency remains four; PostgreSQL
+  parallelism for every other role remains enabled; neither Compose file
+  increases `shm_size`.
+- Query performance: all inspections compute exact counts from narrow rows and
+  construct JSON only for top-N samples; the former full-result `row_number()`
+  sorts are gone. On a 100,000-row synthetic Projection dead-letter set, query
+  8 improved from 704 ms and 4,932 temporary write blocks to 141 ms and zero
+  temporary writes. The complete small integration audit improved from 37/45
+  ms p50/p95 to 36/39 ms.
+- Verification: the final query set completed 156 consecutive real audits in
+  25.234 seconds with p50/p95 51/67 ms, zero failures, zero DSM errors, and zero
+  final issues. An earlier 211-audit gate on the same isolation design also had
+  zero failures. A separate 3,600.177-second joint Publisher, Ingress,
+  Reconciler, Auditor, and Projector load on PostgreSQL 18.4 with 64 MiB
+  `/dev/shm` processed 720 Channels and 2,160 Revisions. All 120 audits
+  succeeded, all queues drained, no dead letter was created, every final row
+  count matched exactly, and the final audit reported zero issues. Publisher,
+  Reconciler, and Projector p50/p95 loop latency was 7/13 ms, 6/11 ms, and
+  10/16 ms; audit p50/p95 was 135/184 ms as the dataset grew.
+- Throughput non-regression: a saturated 300-Channel run against equal-size
+  test databases measured `origin/main` versus the candidate at 47.608/48.042
+  Publisher Revisions/s, 90.459/90.461 Ingress Revisions/s, 29.557/31.713
+  Reconciler Channels/s, and 4.423/4.409 Projector Channels/s. Both runs
+  delivered all 900 Revisions, matched every cursor and final search row, and
+  created one delivered Projection per Activation with no dead letters. The
+  committed capacity mode enforces a non-flaky 90% floor of the baseline for
+  each role (42.8, 81.4, 26.6, and 3.98/s); a separate final run measured
+  47.073, 88.896, 29.302, and 4.792/s and passed all four gates.
+- Runtime evidence: every audit reports query labels and durations, failed
+  query, failure kind, last attempt/success, next attempt, consecutive
+  failures, and cumulative attempts, successes, failures, and DSM failures.
+  The load gate independently reports Publisher, Ingress, Reconciler, and
+  Projector productive capacity and p50/p95 latency, rather than treating the
+  configured arrival rate as throughput.
+- Guarantee boundary: core PostgreSQL SELECT plans cannot enter Parallel Query
+  DSM after both audit-local settings are applied, and the Auditor uses no
+  named prepared statements that could retain an earlier generic plan. This
+  guarantees that this Auditor does not create Parallel Query DSM. It does not
+  claim that unrelated sessions, extensions, or parallel maintenance can never
+  exhaust DSM for the whole PostgreSQL cluster.
+- Production safety: diagnosis used read-only transactions only. No production
+  configuration, data, container, or deployment was changed or restarted.
+- Rollout: build an immutable image, run the schema-free Reconciler canary,
+  confirm its ready event reports audit pool 1, Gather workers 0, and debug
+  parallel off, then observe audit failure counters and all four throughput
+  rates for 30 minutes before normal release. Roll back only the application
+  image if any gate regresses; this fix has no schema migration, PostgreSQL
+  restart, or `shm_size` change.
