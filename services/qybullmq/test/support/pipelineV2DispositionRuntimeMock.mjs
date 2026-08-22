@@ -40,8 +40,11 @@ export async function query(sqlValue, params = []) {
     return result(state().tasks.map((task) => ({ ...task })));
   }
   if (sql.includes("FROM crawler.content_candidates candidate") && sql.includes("crawl_started_at")) {
+    const terminal = ["done", "unavailable"].includes(state().candidate.detail_status);
+    const selectsUndisposedTerminal = sql.includes("candidate.disposition IS NULL");
     return sql.includes("candidate.detail_status NOT IN")
       && ["done", "unavailable", "api_pending"].includes(state().candidate.detail_status)
+      && !(terminal && state().candidate.disposition == null && selectsUndisposedTerminal)
       ? result([])
       : result([{ ...state().candidate }]);
   }
@@ -154,6 +157,11 @@ export async function query(sqlValue, params = []) {
     return result([], 1);
   }
   if (sql.includes("jsonb_build_object('disposition'")) {
+    state().dispositionWriteAttempts += 1;
+    if (state().scenario === "disposition_write_retry"
+        && state().dispositionWriteAttempts === 1) {
+      throw new Error("injected disposition persistence failure");
+    }
     state().candidate.disposition = params[1];
     state().candidate.next_attempt_at = params[2];
     state().candidate.result_json.disposition = JSON.parse(params[3]);
@@ -214,13 +222,15 @@ export async function putRawObject(input) {
 }
 
 export async function fetchVideoYtDlpDetail(videoId) {
+  state().youtubeRequestAttempts += 1;
   if (state().scenario === "detail_failure") {
     const error = new Error(`Player timeout for ${videoId}`);
     error.code = "ETIMEDOUT";
     throw error;
   }
   const privateAccess = ["terminal_private", "existing_private"].includes(state().scenario);
-  const authoritativeType = privateAccess || state().scenario === "stored_public";
+  const authoritativeType = privateAccess
+    || ["stored_public", "disposition_write_retry"].includes(state().scenario);
   return {
     id: videoId,
     title: "Public detail without authoritative type",

@@ -160,9 +160,25 @@ test("the shared Full Crawl detail path persists a deferred disposition before r
 
 test("the shared detail path rejects a terminal candidate without a disposition", () => {
   const observed = runScenario("undisposed_terminal", { expectedStatus: 1 });
-  assert.match(observed.error.message, /1 terminal content candidate has no disposition/);
+  assert.match(observed.error.message, /has no persisted evidence for disposition recovery/);
   assert.equal(observed.candidate.detail_status, "done");
   assert.equal(observed.candidate.disposition, null);
+  assert.equal(observed.requests_after_retry, 0);
+});
+
+test("retry repairs a terminal candidate disposition without another YouTube request", () => {
+  const observed = runScenario("disposition_write_retry");
+  assert.match(observed.first_error.message, /injected disposition persistence failure/);
+  assert.equal(observed.retry_error, null);
+  assert.equal(observed.value.status, "done");
+  assert.equal(observed.value.processed, 1);
+  assert.equal(observed.candidate.detail_status, "done");
+  assert.equal(observed.candidate.disposition, "stored");
+  assert.equal(observed.candidate.result_json.disposition.reason_code, "content_stored");
+  assert.equal(observed.requests_after_first, 1);
+  assert.equal(observed.requests_after_retry, 1);
+  assert.equal(observed.candidate.attempts, 1);
+  assert.equal(observed.disposition_write_attempts, 2);
 });
 
 test("Data API replay resolves a deferred candidate without losing its prior evidence", () => {

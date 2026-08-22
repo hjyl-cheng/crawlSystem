@@ -1977,7 +1977,83 @@ async function excludeUpcomingLiveCandidate(row, detail, source) {
   };
 }
 
+function isUndisposedTerminalCandidate(row) {
+  return ["done", "unavailable"].includes(text(row?.detail_status))
+    && row?.disposition == null;
+}
+
+function terminalDispositionReasonFromCandidate(row) {
+  const scopeReason = text(row?.result_json?.scope?.reason);
+  if (["older_than_max_age", "after_chronological_age_cutoff"].includes(scopeReason)) {
+    return "outside_content_window";
+  }
+  if (scopeReason === "upcoming_live") return "upcoming_live";
+  return null;
+}
+
+function terminalDispositionEvidence(row) {
+  const resultJson = row?.result_json ?? {};
+  const terminalReason = terminalDispositionReasonFromCandidate(row);
+  if (terminalReason) {
+    return {
+      classification: resultJson.classification ?? null,
+      access: resultJson.access ?? accessFromDetail(resultJson.detail),
+      detail: resultJson.detail ?? null,
+      error: null,
+      terminalReason,
+    };
+  }
+  const hasClassification = Object.prototype.hasOwnProperty.call(resultJson, "classification");
+  const hasAccess = resultJson.access && typeof resultJson.access === "object";
+  if (!hasClassification || !hasAccess) return null;
+  const persistedErrors = Array.isArray(resultJson.errors) ? resultJson.errors : [];
+  const persistedError = text(row?.error_message);
+  return {
+    classification: resultJson.classification,
+    access: resultJson.access,
+    detail: resultJson.detail ?? null,
+    error: persistedError && persistedErrors.includes(persistedError)
+      ? new Error(persistedError)
+      : null,
+    terminalReason: null,
+  };
+}
+
+async function recoverTerminalCandidateDisposition(row) {
+  const evidence = terminalDispositionEvidence(row);
+  if (!evidence) {
+    throw new Error(
+      `terminal content candidate ${row.candidate_id} has no persisted evidence for disposition recovery`,
+    );
+  }
+  const storageAction = fullVideoStorageAction({
+    candidate: row,
+    classification: evidence.classification,
+    access: evidence.access,
+  });
+  const disposition = await persistFullVideoDisposition(row, {
+    storageAction,
+    classification: evidence.classification,
+    access: evidence.access,
+    detail: evidence.detail,
+    error: evidence.error,
+    terminalReason: evidence.terminalReason,
+  });
+  return {
+    candidate_id: row.candidate_id,
+    video_id: row.source_content_id,
+    content_type: row.content_type ?? null,
+    api_missing: [],
+    missing_fields: row.missing_fields ?? [],
+    error: null,
+    partial: Array.isArray(row.missing_fields) && row.missing_fields.length > 0,
+    excluded: disposition.kind === "terminal_excluded",
+    disposition_recovered: true,
+  };
+}
+
 function shouldPrefetchYoutubeJsDetail(row, settings) {
+  if (isUndisposedTerminalCandidate(row)) return false;
   if (!youtubeJsDetailEnabled()) return false;
   const detail = detailFromCandidate(row);
   if (isUpcomingLiveDetail(detail)) return false;
@@ -1994,6 +2070,9 @@ async function captureYoutubeJsDetail(videoId) {
 }
 
 async function processOneCandidate(row, settings, { youtubeJsDetail = null } = {}) {
+  if (isUndisposedTerminalCandidate(row)) {
+    return recoverTerminalCandidateDisposition(row);
+  }
   const attemptNumber = Number(row.attempts ?? 0) + 1;
   const maxAttempts = settings.detailMaxAttempts;
   await query(
@@ -2587,7 +2666,13 @@ async function processContentDetailRun({
        ON known.channel_id=candidate.channel_id
       AND known.source_content_id=candidate.source_content_id
      WHERE candidate.run_id=$1
-       AND candidate.detail_status NOT IN ('done','unavailable','api_pending')
+       AND (
+         candidate.detail_status NOT IN ('done','unavailable','api_pending')
+         OR (
+           candidate.detail_status IN ('done','unavailable')
+           AND candidate.disposition IS NULL
+         )
+       )
      ORDER BY candidate.position ASC`,
     [runId],
   );

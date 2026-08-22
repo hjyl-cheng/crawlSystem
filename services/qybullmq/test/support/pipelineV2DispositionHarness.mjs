@@ -4,6 +4,7 @@ const outputPath = process.argv[2];
 const scenario = process.argv[3] ?? "deferred_type";
 const existingContent = scenario === "existing_private";
 const dataApiReplay = scenario === "data_api_replay";
+const dispositionWriteRetry = scenario === "disposition_write_retry";
 const deferredDisposition = {
   version: "video-disposition-v1",
   kind: "deferred",
@@ -120,14 +121,40 @@ globalThis.__pipelineV2DispositionState = {
     : [],
   queries: [],
   rawObjects: [],
+  youtubeRequestAttempts: 0,
+  dispositionWriteAttempts: 0,
 };
 
 const { processContentDetailBatchV2, processDataApiBatchV2 } = await import("../../src/pipelineV2.js");
 let value = null;
 let error = null;
-try {
-  value = dataApiReplay
-    ? await processDataApiBatchV2({
+let firstError = null;
+let retryError = null;
+let requestsAfterFirst = null;
+if (dispositionWriteRetry) {
+  const job = {
+    data: {
+      run_id: "run:shared-video-disposition",
+      channel_id: "UCsharedDisposition",
+      api_fallback_mode: "disabled",
+      content_max_age_days: 0,
+    },
+  };
+  try {
+    await processContentDetailBatchV2(job);
+  } catch (caught) {
+    firstError = { message: caught?.message ?? String(caught), stack: caught?.stack ?? null };
+  }
+  requestsAfterFirst = globalThis.__pipelineV2DispositionState.youtubeRequestAttempts;
+  try {
+    value = await processContentDetailBatchV2(job);
+  } catch (caught) {
+    retryError = { message: caught?.message ?? String(caught), stack: caught?.stack ?? null };
+  }
+} else {
+  try {
+    value = dataApiReplay
+      ? await processDataApiBatchV2({
         id: "batch:stored-evidence",
         data: {
           batch_id: "batch:stored-evidence",
@@ -139,23 +166,29 @@ try {
             task_ids: [91],
           },
         },
-      })
-    : await processContentDetailBatchV2({
+        })
+      : await processContentDetailBatchV2({
         data: {
           run_id: "run:shared-video-disposition",
           channel_id: "UCsharedDisposition",
           api_fallback_mode: "disabled",
           content_max_age_days: scenario === "age_excluded" ? 90 : 0,
         },
-      });
-} catch (caught) {
-  error = { message: caught?.message ?? String(caught), stack: caught?.stack ?? null };
+        });
+  } catch (caught) {
+    error = { message: caught?.message ?? String(caught), stack: caught?.stack ?? null };
+  }
 }
 
 await writeFile(outputPath, JSON.stringify({
   value,
   error,
+  first_error: firstError,
+  retry_error: retryError,
+  requests_after_first: requestsAfterFirst,
+  requests_after_retry: globalThis.__pipelineV2DispositionState.youtubeRequestAttempts,
+  disposition_write_attempts: globalThis.__pipelineV2DispositionState.dispositionWriteAttempts,
   candidate: globalThis.__pipelineV2DispositionState.candidate,
   queries: globalThis.__pipelineV2DispositionState.queries.map(({ sql }) => sql),
 }), "utf8");
-if (error) process.exitCode = 1;
+if (error || retryError) process.exitCode = 1;
