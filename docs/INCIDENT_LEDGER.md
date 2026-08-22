@@ -282,3 +282,32 @@
   rates for 30 minutes before normal release. Roll back only the application
   image if any gate regresses; this fix has no schema migration, PostgreSQL
   restart, or `shm_size` change.
+
+## INC-20260822-010: Stale Channel Pressure Permanently Paused Query Discover
+
+- Status: fixed and regression-tested; production rollout in progress
+- Symptom: the final Query canary completed Query Quality and created its first
+  managed Discover Page, but `youtube-discover-page` remained globally paused.
+  Controller reported a Channel failure rate of 87% and a proxy cooldown ratio
+  of 41.8% despite zero current Channel failures and Rota reporting 833 active
+  exits with zero exits in cooldown.
+- Root cause: Channel pressure selected the last 200 terminal task events with
+  no time boundary. The sample therefore retained 174
+  `BUSINESS_RUN_KEY_CONFLICT` failures emitted during one migration burst on
+  2026-08-20, plus only 26 later completions. Independently,
+  `proxyUnavailableRatio` preferred `(total-active)/total` even when Rota
+  supplied an explicit cooldown count, so archived and other non-running
+  inventory was incorrectly classified as cooling.
+- Prevention: Channel pressure now uses at most 200 terminal samples from the
+  last 900 seconds, backed by the existing `(queue_name, created_at DESC)`
+  index. Rota pressure now computes `cooldown/(active+cooldown)` whenever both
+  lifecycle counts are present and retains the total-based calculation only
+  for legacy payloads that omit cooldown. Controller telemetry reports the
+  active sample window.
+- Verification: the original production data returns zero terminal failures
+  inside the corrected 15-minute window, and the live Rota payload computes a
+  cooldown ratio of zero. Dedicated regression tests cover stale-event expiry,
+  explicit lifecycle counts, and the legacy fallback. The complete repository
+  suite passed: 1,015 QYBullMQ tests, Dashboard, Auth, Feature Dispatch, 312
+  Python tests plus subtests, and all Rota Go packages. Source verification
+  also passed.

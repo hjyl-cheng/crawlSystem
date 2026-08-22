@@ -145,6 +145,7 @@ const discoverResumeProxyCooldownRatio = numberEnv("DISCOVER_RESUME_PROXY_COOLDO
 const discoverFailedRetrySeconds = intEnv("DISCOVER_FAILED_RETRY_SECONDS", 600, 30, 86400);
 const channelPressureMinimumSamples = intEnv("CHANNEL_PRESSURE_MINIMUM_SAMPLES", 10, 1, 1000);
 const channelPressureSampleSize = intEnv("CHANNEL_PRESSURE_SAMPLE_SIZE", 200, 10, 5000);
+const channelPressureWindowSeconds = intEnv("CHANNEL_PRESSURE_WINDOW_SECONDS", 900, 60, 86400);
 const agentBatchSize = intEnv("AGENT_BATCH_SIZE", 30, 1, 50);
 const incrementalAgentBatchSize = intEnv("INCREMENTAL_AGENT_BATCH_SIZE", 30, 1, 50);
 const incrementalAgentConfigId = intEnv("INCREMENTAL_AGENT_CONFIG_ID", 0, 0);
@@ -1225,7 +1226,9 @@ async function getChannelPressure(channelBacklog, proxyCapacity) {
     `WITH recent AS (
        SELECT status,payload_json
        FROM crawler.task_events
-       WHERE queue_name=$1 AND status IN ('completed','failed')
+       WHERE queue_name=$1
+         AND status IN ('completed','failed')
+         AND created_at >= now() - ($3::int * interval '1 second')
        ORDER BY created_at DESC
        LIMIT $2
      )
@@ -1238,7 +1241,7 @@ async function getChannelPressure(channelBacklog, proxyCapacity) {
        percentile_cont(0.95) WITHIN GROUP (ORDER BY (payload_json->>'duration_ms')::numeric)
          FILTER (WHERE status='completed' AND payload_json ? 'duration_ms') AS p95_duration_ms
      FROM recent`,
-    [queuesByRole.channelCrawl, channelPressureSampleSize],
+    [queuesByRole.channelCrawl, channelPressureSampleSize, channelPressureWindowSeconds],
   );
   const sample = rows.rows[0] ?? {};
   const terminalSamples = Number(sample.terminal_samples ?? 0);
@@ -1257,6 +1260,7 @@ async function getChannelPressure(channelBacklog, proxyCapacity) {
     p95_duration_ms: Number.isFinite(Number(sample.p95_duration_ms)) ? Math.round(Number(sample.p95_duration_ms)) : null,
     eta_seconds: channelEtaSeconds,
     proxy_cooldown_ratio: proxyUnavailableRatio(proxyCapacity),
+    sample_window_seconds: channelPressureWindowSeconds,
   };
 }
 

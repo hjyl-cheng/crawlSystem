@@ -51,13 +51,13 @@ export function discoveryPressureRecoveredForReason(reason, metrics, limits) {
 
 export function proxyUnavailableRatio(capacity = {}) {
   const active = Number(capacity.active);
-  const total = Number(capacity.total);
-  if (Number.isFinite(active) && Number.isFinite(total) && total > 0) {
-    return Math.max(0, Math.min(1, (total - active) / total));
-  }
   const cooldown = Number(capacity.cooldown);
   if (Number.isFinite(active) && Number.isFinite(cooldown) && active + cooldown > 0) {
     return Math.max(0, Math.min(1, cooldown / (active + cooldown)));
+  }
+  const total = Number(capacity.total);
+  if (Number.isFinite(active) && Number.isFinite(total) && total > 0) {
+    return Math.max(0, Math.min(1, (total - active) / total));
   }
   return 0;
 }

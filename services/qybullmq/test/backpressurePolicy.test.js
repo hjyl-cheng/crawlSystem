@@ -95,8 +95,12 @@ test("reason-specific recovery keeps each pressure on its own resume threshold",
   );
 });
 
-test("proxy pressure includes failed exits awaiting a cooldown retest", () => {
-  assert.equal(proxyUnavailableRatio({ active: 13, cooldown: 6, total: 24 }), 11 / 24);
-  assert.equal(proxyUnavailableRatio({ active: 21, cooldown: 0, total: 24 }), 3 / 24);
+test("proxy pressure uses the explicit active and cooldown lifecycle pools", () => {
+  assert.equal(proxyUnavailableRatio({ active: 13, cooldown: 6, total: 24 }), 6 / 19);
+  assert.equal(proxyUnavailableRatio({ active: 21, cooldown: 0, total: 24 }), 0);
   assert.equal(proxyUnavailableRatio({ active: 8, cooldown: 2 }), 0.2);
+});
+
+test("proxy pressure falls back to total only for legacy capacity payloads", () => {
+  assert.equal(proxyUnavailableRatio({ active: 21, total: 24 }), 3 / 24);
 });
