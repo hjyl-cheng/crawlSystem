@@ -208,6 +208,26 @@ export class ProxyBusinessRunPreparer {
 
   async prepareChannel(job) {
     const fields = policyFields(this.resolvedPolicy);
+    if (job.queueName === queuesByRole.contentEnrich) {
+      const jobId = required(job.id, "job.id");
+      const channelId = required(job.data?.channel_id, "job.data.channel_id");
+      const tasks = Array.isArray(job.data?.tasks) ? job.data.tasks : [];
+      if (tasks.length === 0) throw new TypeError("Content Enrich tasks are required");
+      for (const task of tasks) {
+        required(task?.task_id, "job.data.tasks[].task_id");
+        positiveInteger(task?.dispatch_generation, "job.data.tasks[].dispatch_generation");
+      }
+      const businessRunId = `content-enrich:${jobId}`;
+      if (businessRunId.length > 255) throw new TypeError("Content Enrich Business Run ID is too long");
+      return ready({
+        businessRunId,
+        workloadKind: "content_enrich",
+        fields,
+        resumed: Number(job.attemptsMade ?? 0) > 0,
+        job,
+        extra: { channelId },
+      });
+    }
     if (job.queueName === queuesByRole.channelIncremental) {
       if (!this.incrementalRunStore) throw new TypeError("incrementalRunStore is required");
       const planPayload = await restoreFrozenIncrementalPlan(job, fields);

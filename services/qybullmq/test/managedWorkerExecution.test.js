@@ -10,9 +10,9 @@ test("managed Worker queue configuration is Role-exclusive", () => {
   assert.deepEqual(
     validateWorkerQueueConfiguration({
       role: "channel",
-      enabledQueues: ["youtube-channel-crawl", "youtube-channel-incremental"],
+      enabledQueues: ["youtube-channel-crawl", "youtube-channel-incremental", "youtube-content-enrich"],
     }).queues,
-    ["youtube-channel-crawl", "youtube-channel-incremental"],
+    ["youtube-channel-crawl", "youtube-channel-incremental", "youtube-content-enrich"],
   );
   assert.throws(
     () => validateWorkerQueueConfiguration({
@@ -33,6 +33,28 @@ test("managed Worker queue configuration is Role-exclusive", () => {
     }),
     /standalone youtube-content-detail/,
   );
+  assert.throws(
+    () => validateWorkerQueueConfiguration({
+      enabledQueues: ["youtube-content-enrich"],
+    }),
+    /require PROXY_SLOT_ROLE/,
+  );
+});
+
+test("Content Enrich reports its real managed task stage", async () => {
+  const result = await executeManagedWorkerAttempt({
+    job: { queueName: "youtube-content-enrich" },
+    prepared: {},
+    attempt: { resumeMode: "initial" },
+    execute: async () => {
+      const error = Object.assign(new Error("HTTP 429"), {
+        youtube_failure_decision: { kind: "youtube_rate_limited" },
+      });
+      throw error;
+    },
+    persistRetryableCheckpoint: async () => true,
+  });
+  assert.equal(result.failedStage, "content_enrich");
 });
 
 test("only structured proxy transport, rate-limit, and challenge failures switch Route", () => {

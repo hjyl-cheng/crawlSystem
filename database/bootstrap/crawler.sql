@@ -1560,8 +1560,10 @@ CREATE TABLE crawler.content_enrich_tasks (
     last_success_at timestamp with time zone,
     lease_owner text,
     lease_expires_at timestamp with time zone,
+    dispatch_generation bigint DEFAULT 0 NOT NULL,
+    CONSTRAINT content_enrich_tasks_dispatch_generation_check CHECK ((dispatch_generation >= 0)),
     CONSTRAINT content_enrich_tasks_job_type_check CHECK ((job_type = ANY (ARRAY['date-resolve'::text, 'duration-resolve'::text, 'view-resolve'::text, 'stats-resolve'::text, 'player-refresh'::text, 'next-refresh'::text]))),
-    CONSTRAINT content_enrich_tasks_status_check CHECK ((status = ANY (ARRAY['queued'::text, 'running'::text, 'done'::text, 'failed'::text, 'skipped'::text])))
+    CONSTRAINT content_enrich_tasks_status_check CHECK ((status = ANY (ARRAY['queued'::text, 'leased'::text, 'running'::text, 'done'::text, 'failed'::text, 'terminal'::text, 'skipped'::text])))
 );
 
 
@@ -2126,6 +2128,11 @@ CREATE TABLE crawler.settings (
     value_json jsonb DEFAULT '{}'::jsonb NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL
 );
+
+INSERT INTO crawler.settings (setting_key,value_json) VALUES
+    ('content_enrich_dispatch', '{"mode":"clock"}'::jsonb),
+    ('content_enrich_dispatch_cursor', '{"channel_id":""}'::jsonb),
+    ('content_enrich_dispatch_mutex', '{"owner":null,"expires_at":null}'::jsonb);
 
 
 --
@@ -4146,6 +4153,20 @@ CREATE INDEX idx_crawler_content_enrich_tasks_claim ON crawler.content_enrich_ta
 --
 
 CREATE INDEX idx_crawler_content_enrich_tasks_retry ON crawler.content_enrich_tasks USING btree (status, next_retry_at, priority, created_at);
+
+
+--
+-- Name: idx_crawler_content_enrich_tasks_dispatch; Type: INDEX; Schema: crawler; Owner: -
+--
+
+CREATE INDEX idx_crawler_content_enrich_tasks_dispatch ON crawler.content_enrich_tasks USING btree (job_type, status, next_retry_at, priority, created_at, channel_id);
+
+
+--
+-- Name: idx_crawler_content_enrich_tasks_lease_owner; Type: INDEX; Schema: crawler; Owner: -
+--
+
+CREATE INDEX idx_crawler_content_enrich_tasks_lease_owner ON crawler.content_enrich_tasks USING btree (lease_owner) WHERE (lease_owner IS NOT NULL);
 
 
 --

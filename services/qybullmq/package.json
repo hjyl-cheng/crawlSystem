@@ -35,6 +35,7 @@
     "publication:recover-retraction-projections": "node scripts/recoverBusinessRetractionProjectionDeadLetters.mjs",
     "recover:stored-data-api-evidence": "node scripts/recoverStoredDataApiEvidence.mjs",
     "recover:migration-business-run-intent": "node scripts/recoverMigrationBusinessRunIntentFailures.mjs",
+    "content-enrich:mode": "node scripts/manageContentEnrichMode.mjs",
     "publication:runtime-roles": "node scripts/managePublicationRuntimeRoles.mjs",
     "publication:video-hashes": "node scripts/backfillVideoPublicationItemHashes.mjs --apply",
     "schema:v16:validate": "node scripts/validateV16CrawlerMigration.mjs",

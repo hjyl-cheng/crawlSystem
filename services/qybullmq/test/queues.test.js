@@ -13,6 +13,13 @@ test("incremental Channel Plans have a queue isolated from Full crawling", () =>
   assert.notEqual(queuesByRole.channelIncremental, queuesByRole.channelCrawl);
 });
 
+test("Content Enrich has a dedicated queue outside Full Detail and normal Incremental", () => {
+  assert.equal(queuesByRole.contentEnrich, "youtube-content-enrich");
+  assert.equal(queueNames.includes(queuesByRole.contentEnrich), true);
+  assert.notEqual(queuesByRole.contentEnrich, queuesByRole.contentDetail);
+  assert.notEqual(queuesByRole.contentEnrich, queuesByRole.channelIncremental);
+});
+
 test("terminal failure decisions discard BullMQ retries", () => {
   let discarded = false;
   const result = applyFailureRetryDecision({ discard() { discarded = true; } }, {
@@ -30,6 +37,7 @@ test("terminal failure decisions discard BullMQ retries", () => {
 test("Query pipeline completion ignores independent Incremental queue backlog", () => {
   const stats = {
     [queuesByRole.channelIncremental]: { paused: 30 },
+    [queuesByRole.contentEnrich]: { waiting: 40 },
     [queuesByRole.agentIncremental]: { waiting: 2 },
   };
 

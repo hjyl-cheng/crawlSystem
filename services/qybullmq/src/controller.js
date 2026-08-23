@@ -8,7 +8,12 @@ import {
   discoveryPressureRecoveredForReason,
   proxyUnavailableRatio,
 } from "./backpressurePolicy.js";
-import { closeDb, ensureSchema, query, withTransaction } from "./db.js";
+import {
+  closeDb,
+  ensureSchema,
+  query,
+  withTransaction,
+} from "./db.js";
 import { createControllerLifecycle } from "./controllerLifecycle.js";
 import { resolveDiscoveryPageQualification } from "./discoveryPagePolicy.js";
 import {
@@ -23,6 +28,10 @@ import {
   prepareContentRepairTargets,
   reconcileLiveDurationNotApplicable,
 } from "./contentRepair.js";
+import {
+  ContentEnrichDispatcher,
+  PostgresContentEnrichDispatchRepository,
+} from "./contentEnrichDispatch.js";
 import {
   IncrementalAgentBacklog,
   IncrementalAgentBatcher,
@@ -199,6 +208,16 @@ const publicationOnboardingIntervalMs = intEnv(
   3600000,
 );
 const publicationOnboardingBatchSize = intEnv("PUBLICATION_ONBOARDING_RECONCILE_BATCH_SIZE", 25, 1, 1000);
+const contentEnrichDispatchEnabled = booleanEnv("CONTENT_ENRICH_DISPATCH_ENABLED", false);
+const contentEnrichQueueHighWater = intEnv("CONTENT_ENRICH_QUEUE_HIGH_WATER", 50, 1, 10_000);
+const contentEnrichQueueRefill = intEnv("CONTENT_ENRICH_QUEUE_REFILL", 20, 1, 10_000);
+const contentEnrichBatchSize = intEnv("CONTENT_ENRICH_BATCH_SIZE", 5, 1, 100);
+const contentEnrichLeaseMs = intEnv(
+  "CONTENT_ENRICH_DISPATCH_LEASE_MS",
+  15 * 60_000,
+  30_000,
+  24 * 60 * 60_000,
+);
 const channelInlineDetails = String(process.env.YOUTUBE_CHANNEL_INLINE_DETAILS || "true").trim().toLowerCase() !== "false";
 let crawlSettingsCache = { expiresAt: 0, value: null };
 let lastStoredTickAt = 0;
@@ -216,6 +235,18 @@ const incrementalAgentBatcher = new IncrementalAgentBatcher({
   batchSize: incrementalAgentBatchSize,
   tailQuietMs: incrementalAgentTailQuietMs,
   agentConfigId: incrementalAgentConfigId || null,
+});
+const contentEnrichDispatcher = new ContentEnrichDispatcher({
+  repository: new PostgresContentEnrichDispatchRepository({
+    queryFn: query,
+    withTransaction,
+  }),
+  queue: queues[queuesByRole.contentEnrich],
+  enabled: contentEnrichDispatchEnabled,
+  highWater: contentEnrichQueueHighWater,
+  refill: contentEnrichQueueRefill,
+  batchSize: contentEnrichBatchSize,
+  leaseDurationMs: contentEnrichLeaseMs,
 });
 
 function tickSignature(stats, actions, queryScheduler) {
@@ -2476,6 +2507,16 @@ async function maybeReconcileAutomaticPublicationOnboarding(actions, now = Date.
 async function tick() {
   const stats = await getQueueStats(queues);
   const actions = [];
+  const contentEnrichDispatch = await contentEnrichDispatcher.dispatchAvailable();
+  if (
+    contentEnrichDispatch.enqueued > 0
+    || contentEnrichDispatch.recovered > 0
+    || contentEnrichDispatch.existing > 0
+    || contentEnrichDispatch.released > 0
+    || contentEnrichDispatch.failed > 0
+  ) {
+    actions.push({ action: "dispatch-content-enrich", ...contentEnrichDispatch });
+  }
   await reconcileQueryQualityQueue(actions);
   let queryScheduler = await getQueryScheduler();
   queryScheduler = await resumeLegacyAutomaticFinalization(queryScheduler, actions);

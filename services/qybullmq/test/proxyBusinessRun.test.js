@@ -502,6 +502,34 @@ test("managed Incremental preparation preserves the frozen Plan contract", async
   assert.equal(validateIncrementalJob(job).plan_id, plan.plan_id);
 });
 
+test("managed Content Enrich uses a stable Business Run identity and a real task kind", async () => {
+  const job = {
+    id: "content_enrich__UC1__stable",
+    name: "content-enrich",
+    queueName: queuesByRole.contentEnrich,
+    attemptsMade: 1,
+    data: {
+      channel_id: "UC1",
+      tasks: [{ task_id: "task-1", dispatch_generation: 4 }],
+      task_ids: ["task-1"],
+    },
+  };
+  const preparer = new ProxyBusinessRunPreparer({
+    queryFn: async () => {
+      throw new Error("Content Enrich preparation must not materialize a Full/Incremental Run");
+    },
+    withTransaction: async () => {},
+    resolvedPolicy,
+    bindingStore: bindingStore(),
+  });
+
+  const prepared = await preparer.prepareChannel(job);
+
+  assert.equal(prepared.businessRunId, "content-enrich:content_enrich__UC1__stable");
+  assert.equal(prepared.workloadKind, "content_enrich");
+  assert.equal(prepared.initialResumeMode, "bullmq_redelivery_resume");
+});
+
 test("managed Incremental preparation repairs only matching legacy runtime metadata", async () => {
   const store = bindingStore();
   const plan = {

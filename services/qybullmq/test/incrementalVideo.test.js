@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  applyIncrementalVideoDetail,
   executeIncrementalVideo as executeIncrementalVideoWithSystemClock,
   fetchIncrementalVideoDetail,
 } from "../src/incrementalVideo.js";
@@ -62,7 +63,7 @@ function detail(videoId, viewCount, { contentType = "video" } = {}) {
   };
 }
 
-function databaseFixture({ beforeTransaction = null } = {}) {
+function databaseFixture({ beforeTransaction = null, enrichMode = "clock" } = {}) {
   const state = {
     candidates: new Set(["candidate-only"]),
     candidateRows: [],
@@ -102,12 +103,17 @@ function databaseFixture({ beforeTransaction = null } = {}) {
     cursorUpdates: [],
     cursorAnchors: ["known-anchor", "old-video"],
     enrichPending: new Set(),
+    enrichLeased: new Set(),
+    enrichMode,
     channelStatus: "active",
   };
 
   const client = {
     async query(sql, params = []) {
       state.sql.push(sql);
+      if (sql.includes("setting_key='content_enrich_dispatch'")) {
+        return { rowCount: 1, rows: [{ mode: state.enrichMode }] };
+      }
       if (sql.includes("INSERT INTO crawler.crawl_observation_keys")) {
         return { rowCount: 1, rows: [{ observation_id: params[1] }] };
       }
@@ -238,13 +244,18 @@ function databaseFixture({ beforeTransaction = null } = {}) {
       if (sql.includes("AS enrich_pending") && sql.includes("FROM crawler.contents content")) {
         const cutoff = new Date(`${params[1]}T00:00:00.000Z`);
         cutoff.setUTCDate(cutoff.getUTCDate() - Number(params[2]));
-        const pendingBypassesWindow = sql.includes("WHERE candidate.enrich_pending");
+        const pendingBypassesWindow = sql.includes("candidate.enrich_pending");
+        const clockOwnsEnrich = params[3] !== false;
+        const protectsLiveLease = sql.includes("AS player_enrich_leased");
         const rows = state.contents
           .filter((row) => {
             const isPending = state.enrichPending.has(row.content_key);
+            const isLeased = state.enrichLeased.has(row.content_key);
             const published = row.published_at == null ? null : new Date(row.published_at);
             const isRecent = published != null && published >= cutoff;
-            return isRecent || (pendingBypassesWindow && isPending);
+            if (isLeased && protectsLiveLease) return false;
+            if (isPending) return clockOwnsEnrich && pendingBypassesWindow;
+            return isRecent;
           })
           .map((row) => ({
             ...row,
@@ -272,9 +283,12 @@ function databaseFixture({ beforeTransaction = null } = {}) {
         row.comments_disabled = params[5];
         row.comments_first_page = params[38] == null ? row.comments_first_page : JSON.parse(params[38]);
         row.video_change_probability = params[8];
+        row.access_status = params[27] ?? row.access_status;
+        row.last_enriched_at = params[1];
         return { rowCount: 1, rows: [] };
       }
-      if (sql.includes("UPDATE crawler.content_enrich_tasks") && sql.includes("status='done'")) {
+      if (sql.includes("UPDATE crawler.content_enrich_tasks")
+          && (sql.includes("status='done'") || sql.includes("SET status=$3"))) {
         state.enrichPending.delete(params[0]);
         return { rowCount: 1, rows: [] };
       }
@@ -1601,6 +1615,170 @@ test("Video sampling recovers queued detail when published_at is unresolved", as
   assert.equal(fixture.state.enrichPending.has(contentKey), false);
 });
 
+test("Video Clock does not consume an open Enrich Task after the database owner switches to the queue", async () => {
+  const contentKey = "UCvideo:video:queue-owned";
+  const fixture = databaseFixture({
+    enrichMode: "queue",
+    beforeTransaction(state) {
+      state.contents.push({
+        content_key: contentKey,
+        channel_id: "UCvideo",
+        source_content_id: "queue-owned",
+        content_type: "video",
+        published_at: "2026-07-19T00:00:00.000Z",
+        last_seen_at: "2026-07-20T00:00:00.000Z",
+        view_count: null,
+        player_last_observed_at: null,
+        next_last_observed_at: null,
+        video_change_probability: null,
+        like_count: null,
+        comment_count: null,
+      });
+      state.enrichPending.add(contentKey);
+    },
+  });
+  const fetched = [];
+
+  const result = await executeIncrementalVideo({
+    plan: {
+      ...plan(),
+      capacity: { ...plan().capacity, player_cap: 20, next_cap: 0 },
+    },
+    runId: "incremental:queue-owned-enrich",
+    startedAt: "2026-07-20T00:00:00.000Z",
+    query: fixture.query,
+    withTransaction: fixture.withTransaction,
+    getChannelSnapshot: async () => ({
+      async scanUploads() {
+        return {
+          playlist_id: "UUvideo",
+          entries: [{
+            id: "known-anchor",
+            position: 1,
+            content_type: "video",
+            title: "Known",
+            published_day: "2026-07-10",
+          }],
+          pages: 1,
+          item_count: 1,
+          parse_gap_count: 0,
+          anchor_matched: true,
+          matched_anchor_id: "known-anchor",
+          stop_reason: "anchor_matched",
+          terminal_reason: "anchor_matched",
+          complete: true,
+          raw: { engine: "youtubei.js@test" },
+        };
+      },
+    }),
+    fetchDetail: async (videoId) => {
+      fetched.push(videoId);
+      return detail(videoId, 123);
+    },
+  });
+
+  assert.equal(result.outcome, "complete");
+  assert.equal(fetched.includes("queue-owned"), false);
+  assert.equal(fixture.state.enrichPending.has(contentKey), true);
+});
+
+test("Clock rollback does not sample a recent Video while its Enrich Worker lease is still live", async () => {
+  const contentKey = "UCvideo:video:worker-leased";
+  const fixture = databaseFixture({
+    enrichMode: "clock",
+    beforeTransaction(state) {
+      state.contents.push({
+        content_key: contentKey,
+        channel_id: "UCvideo",
+        source_content_id: "worker-leased",
+        content_type: "video",
+        published_at: "2026-07-19T00:00:00.000Z",
+        last_seen_at: "2026-07-20T00:00:00.000Z",
+        view_count: null,
+        player_last_observed_at: null,
+        next_last_observed_at: null,
+        video_change_probability: null,
+        like_count: null,
+        comment_count: null,
+      });
+      state.enrichPending.add(contentKey);
+      state.enrichLeased.add(contentKey);
+    },
+  });
+  const fetched = [];
+
+  await executeIncrementalVideo({
+    plan: plan(),
+    runId: "incremental:worker-lease-rollback",
+    startedAt: "2026-07-20T00:00:00.000Z",
+    query: fixture.query,
+    withTransaction: fixture.withTransaction,
+    getChannelSnapshot: async () => ({
+      async scanUploads() {
+        return {
+          playlist_id: "UUvideo",
+          entries: [{
+            id: "known-anchor",
+            position: 1,
+            content_type: "video",
+            title: "Known",
+            published_day: "2026-07-10",
+          }],
+          pages: 1,
+          item_count: 1,
+          parse_gap_count: 0,
+          anchor_matched: true,
+          matched_anchor_id: "known-anchor",
+          stop_reason: "anchor_matched",
+          terminal_reason: "anchor_matched",
+          complete: true,
+          raw: { engine: "youtubei.js@test" },
+        };
+      },
+    }),
+    fetchDetail: async (videoId) => {
+      fetched.push(videoId);
+      return detail(videoId, 123);
+    },
+  });
+
+  assert.equal(fetched.includes("worker-leased"), false);
+  assert.equal(fixture.state.enrichPending.has(contentKey), true);
+});
+
+test("shared Video detail storage preserves an explicit terminal access evidence source", async () => {
+  let update = null;
+  const client = {
+    async query(sql, params) {
+      update = { sql, params };
+      return { rowCount: 1, rows: [] };
+    },
+  };
+
+  await applyIncrementalVideoDetail(client, {
+    row: {
+      content_key: "UCvideo:video:private-error",
+      channel_id: "UCvideo",
+      source_content_id: "private-error",
+      content_type: "video",
+      content_type_source: "youtube_uploads",
+      view_count: null,
+      like_count: null,
+      comment_count: null,
+      video_change_probability: null,
+    },
+    detail: {
+      access_status: "private",
+      access_status_source: "yt_dlp_detail",
+    },
+    observedAt: "2026-07-20T00:00:00.000Z",
+    detailMetadataKey: "content_enrich_detail",
+  });
+
+  assert.equal(update.params[27], "private");
+  assert.equal(update.params[28], "yt_dlp_detail");
+});
+
 test("Video detail falls back to yt-dlp when YouTube.js is challenged", async () => {
   const calls = [];
   const result = await fetchIncrementalVideoDetail("new-video", {
@@ -1635,6 +1813,32 @@ test("Video detail falls back to yt-dlp when YouTube.js returns incomplete facts
 
   assert.deepEqual(calls, ["youtubejs", "yt-dlp"]);
   assert.equal(result.view_count, 84);
+});
+
+test("Video detail propagates cancellation and does not start a fallback after abort", async () => {
+  const controller = new AbortController();
+  const leaseLost = new Error("Enrich lease lost");
+  let forwardedSignal = null;
+  let fallbackCalls = 0;
+
+  await assert.rejects(
+    fetchIncrementalVideoDetail("cancelled-video", {
+      signal: controller.signal,
+      fetchYoutubeJs: async (_videoId, { signal } = {}) => {
+        forwardedSignal = signal ?? null;
+        controller.abort(leaseLost);
+        return { id: "cancelled-video", published_at: "2026-07-19T00:00:00.000Z" };
+      },
+      fetchYtDlp: async () => {
+        fallbackCalls += 1;
+        return detail("cancelled-video", 84);
+      },
+    }),
+    (error) => error === leaseLost,
+  );
+
+  assert.equal(forwardedSignal, controller.signal);
+  assert.equal(fallbackCalls, 0);
 });
 
 test("Video discovery does not persist an upcoming live before it starts", async () => {

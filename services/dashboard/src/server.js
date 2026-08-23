@@ -87,6 +87,7 @@ const queueNames = [
   "youtube-query-quality",
   "youtube-discover-page",
   "youtube-channel-crawl",
+  "youtube-content-enrich",
   "youtube-content-detail",
   "youtube-data-api-batch",
   "youtube-agent-batch",

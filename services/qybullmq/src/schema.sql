@@ -2184,15 +2184,41 @@ ALTER TABLE crawler.content_enrich_tasks ADD COLUMN IF NOT EXISTS last_attempt_a
 ALTER TABLE crawler.content_enrich_tasks ADD COLUMN IF NOT EXISTS last_success_at TIMESTAMPTZ;
 ALTER TABLE crawler.content_enrich_tasks ADD COLUMN IF NOT EXISTS lease_owner TEXT;
 ALTER TABLE crawler.content_enrich_tasks ADD COLUMN IF NOT EXISTS lease_expires_at TIMESTAMPTZ;
+ALTER TABLE crawler.content_enrich_tasks ADD COLUMN IF NOT EXISTS dispatch_generation BIGINT NOT NULL DEFAULT 0;
 ALTER TABLE crawler.content_enrich_tasks DROP CONSTRAINT IF EXISTS content_enrich_tasks_job_type_check;
 ALTER TABLE crawler.content_enrich_tasks ADD CONSTRAINT content_enrich_tasks_job_type_check
 CHECK (job_type IN (
   'date-resolve', 'duration-resolve', 'view-resolve', 'stats-resolve',
   'player-refresh', 'next-refresh'
 ));
+ALTER TABLE crawler.content_enrich_tasks DROP CONSTRAINT IF EXISTS content_enrich_tasks_status_check;
+ALTER TABLE crawler.content_enrich_tasks ADD CONSTRAINT content_enrich_tasks_status_check
+CHECK (status IN ('queued', 'leased', 'running', 'done', 'failed', 'terminal', 'skipped'));
+ALTER TABLE crawler.content_enrich_tasks DROP CONSTRAINT IF EXISTS content_enrich_tasks_dispatch_generation_check;
+ALTER TABLE crawler.content_enrich_tasks ADD CONSTRAINT content_enrich_tasks_dispatch_generation_check
+CHECK (dispatch_generation >= 0);
+
+INSERT INTO crawler.settings (setting_key,value_json)
+VALUES ('content_enrich_dispatch','{"mode":"clock"}'::jsonb)
+ON CONFLICT (setting_key) DO NOTHING;
+
+INSERT INTO crawler.settings (setting_key,value_json)
+VALUES ('content_enrich_dispatch_cursor','{"channel_id":""}'::jsonb)
+ON CONFLICT (setting_key) DO NOTHING;
+
+INSERT INTO crawler.settings (setting_key,value_json)
+VALUES ('content_enrich_dispatch_mutex','{"owner":null,"expires_at":null}'::jsonb)
+ON CONFLICT (setting_key) DO NOTHING;
 
 CREATE INDEX IF NOT EXISTS idx_crawler_content_enrich_tasks_retry
 ON crawler.content_enrich_tasks (status, next_retry_at, priority ASC, created_at ASC);
+
+CREATE INDEX IF NOT EXISTS idx_crawler_content_enrich_tasks_dispatch
+ON crawler.content_enrich_tasks (job_type,status,next_retry_at,priority,created_at,channel_id);
+
+CREATE INDEX IF NOT EXISTS idx_crawler_content_enrich_tasks_lease_owner
+ON crawler.content_enrich_tasks (lease_owner)
+WHERE lease_owner IS NOT NULL;
 
 -- video-identity-schema:start
 -- A YouTube video_id identifies one piece of content. Uploads is only a generic
@@ -2437,8 +2463,10 @@ UPDATE crawler.content_enrich_tasks survivor_task
 SET
   status=CASE
     WHEN survivor_task.status='done' OR duplicate_task.status='done' THEN 'done'
-    WHEN survivor_task.status IN ('queued','running') OR duplicate_task.status IN ('queued','running') THEN 'queued'
+    WHEN survivor_task.status IN ('queued','leased','running')
+      OR duplicate_task.status IN ('queued','leased','running') THEN 'queued'
     WHEN survivor_task.status='failed' OR duplicate_task.status='failed' THEN 'failed'
+    WHEN survivor_task.status='terminal' OR duplicate_task.status='terminal' THEN 'terminal'
     ELSE 'skipped'
   END,
   priority=LEAST(survivor_task.priority,duplicate_task.priority),
@@ -2455,6 +2483,12 @@ SET
   next_retry_at=LEAST(survivor_task.next_retry_at,duplicate_task.next_retry_at),
   last_attempt_at=GREATEST(survivor_task.last_attempt_at,duplicate_task.last_attempt_at),
   last_success_at=GREATEST(survivor_task.last_success_at,duplicate_task.last_success_at),
+  dispatch_generation=GREATEST(survivor_task.dispatch_generation,duplicate_task.dispatch_generation)
+    + CASE
+        WHEN survivor_task.status IN ('leased','running')
+          OR duplicate_task.status IN ('leased','running') THEN 1
+        ELSE 0
+      END,
   lease_owner=NULL,
   lease_expires_at=NULL
 FROM crawler.content_enrich_tasks duplicate_task
@@ -2476,7 +2510,9 @@ WHERE duplicate_task.content_key=identity.duplicate_content_key
 UPDATE crawler.content_enrich_tasks task
 SET
   content_key=identity.survivor_content_key,
-  status=CASE WHEN task.status='running' THEN 'queued' ELSE task.status END,
+  status=CASE WHEN task.status IN ('leased','running') THEN 'queued' ELSE task.status END,
+  dispatch_generation=task.dispatch_generation
+    + CASE WHEN task.status IN ('leased','running') THEN 1 ELSE 0 END,
   lease_owner=NULL,
   lease_expires_at=NULL,
   updated_at=now()

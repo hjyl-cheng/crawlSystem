@@ -1,5 +1,9 @@
 import { createHash } from "node:crypto";
 import { currentChannelExecution } from "./channelExecutionContext.js";
+import {
+  CONTENT_ENRICH_CLOCK_MODE,
+  loadContentEnrichMode,
+} from "./contentEnrichMode.js";
 import { recordCrawlerObservation } from "./crawlObservationStore.js";
 import {
   isLiveInProgress,
@@ -33,6 +37,11 @@ const GAP_ABANDONMENT_POLICY_VERSION = "latest-30-on-catchup-limit-v1";
 const GAP_ABANDONMENT_ITEM_LIMIT = 30;
 const EXPLICIT_CONTENT_ACCESS_STATUSES = new Set([
   "unlisted",
+  "members_only",
+  "private",
+  "unavailable",
+]);
+const TERMINAL_ENRICH_ACCESS_STATUSES = new Set([
   "members_only",
   "private",
   "unavailable",
@@ -200,7 +209,7 @@ function detailFacts(detail) {
     keywords: stringList(detail.keywords),
     keywords_observed: detail.keywords_observed === true || Array.isArray(detail.keywords),
     access_status: detailAccess(detail),
-    access_status_source: source,
+    access_status_source: text(detail.access_status_source) ?? source,
     live_scheduled_at: publishedAt({ published_at: detail.live_scheduled_at }),
     live_started_at: publishedAt({ published_at: detail.live_started_at }),
     live_ended_at: publishedAt({ published_at: detail.live_ended_at }),
@@ -211,14 +220,23 @@ function detailFacts(detail) {
 export async function fetchIncrementalVideoDetail(videoId, {
   fetchYoutubeJs = fetchYoutubeJsVideoDetail,
   fetchYtDlp = fetchVideoYtDlpDetail,
+  signal = null,
 } = {}) {
+  const throwIfAborted = () => {
+    if (!signal?.aborted) return;
+    throw signal.reason instanceof Error
+      ? signal.reason
+      : new Error("incremental Video detail fetch was aborted");
+  };
+  throwIfAborted();
   const url = `https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}`;
   let youtubeJsDetail = null;
   try {
-    youtubeJsDetail = assertYoutubeContentObservation(await fetchYoutubeJs(videoId), {
+    youtubeJsDetail = assertYoutubeContentObservation(await fetchYoutubeJs(videoId, { signal }), {
       videoId,
       source: "youtubejs_player",
     });
+    throwIfAborted();
     const classification = resolveYoutubeContentType({ videoId, detail: youtubeJsDetail });
     if (
       EXPLICIT_CONTENT_ACCESS_STATUSES.has(detailAccess(youtubeJsDetail))
@@ -233,12 +251,16 @@ export async function fetchIncrementalVideoDetail(videoId, {
       return youtubeJsDetail;
     }
   } catch (youtubeJsError) {
+    throwIfAborted();
     try {
-      return assertYoutubeContentObservation(await fetchYtDlp(videoId, url), {
+      const detail = assertYoutubeContentObservation(await fetchYtDlp(videoId, url, { signal }), {
         videoId,
         source: "yt_dlp_detail",
       });
+      throwIfAborted();
+      return detail;
     } catch (ytDlpError) {
+      throwIfAborted();
       if (isYoutubeCollectionFailureError(ytDlpError)) throw ytDlpError;
       throw new AggregateError(
         [youtubeJsError, ytDlpError],
@@ -246,12 +268,16 @@ export async function fetchIncrementalVideoDetail(videoId, {
       );
     }
   }
+  throwIfAborted();
   try {
-    return assertYoutubeContentObservation(await fetchYtDlp(videoId, url), {
+    const detail = assertYoutubeContentObservation(await fetchYtDlp(videoId, url, { signal }), {
       videoId,
       source: "yt_dlp_detail",
     });
+    throwIfAborted();
+    return detail;
   } catch (ytDlpError) {
+    throwIfAborted();
     if (isYoutubeCollectionFailureError(ytDlpError)) throw ytDlpError;
     throw new AggregateError(
       [new Error("YouTube.js detail was incomplete"), ytDlpError],
@@ -503,7 +529,7 @@ function refreshTaskId(contentKey, jobType) {
   return `${jobType}:${digest}`;
 }
 
-async function queueRefreshTask(client, {
+export async function queueRefreshTask(client, {
   contentKey,
   channelId,
   runId,
@@ -518,11 +544,33 @@ async function queueRefreshTask(client, {
        next_retry_at,updated_at
      ) VALUES ($1,$2,$3,$4,'queued',10,0,'{}'::jsonb,$7,$5,$6,now(),now())
      ON CONFLICT (content_key,job_type) DO UPDATE
-     SET status='queued',priority=LEAST(crawler.content_enrich_tasks.priority,10),
+     SET status=CASE
+           WHEN crawler.content_enrich_tasks.status IN ('done','terminal','skipped') THEN 'queued'
+           WHEN crawler.content_enrich_tasks.status IN ('leased','running')
+             AND crawler.content_enrich_tasks.lease_expires_at>now()
+           THEN crawler.content_enrich_tasks.status
+           WHEN crawler.content_enrich_tasks.status='failed' THEN 'failed'
+           ELSE 'queued'
+         END,
+         priority=LEAST(crawler.content_enrich_tasks.priority,10),
+         attempts=CASE
+           WHEN crawler.content_enrich_tasks.status IN ('done','terminal','skipped') THEN 0
+           ELSE crawler.content_enrich_tasks.attempts END,
          error_message=EXCLUDED.error_message,
          requested_by_run_id=EXCLUDED.requested_by_run_id,
          requested_observation_id=EXCLUDED.requested_observation_id,
-         next_retry_at=now(),lease_owner=NULL,lease_expires_at=NULL,updated_at=now()`,
+         next_retry_at=CASE
+           WHEN crawler.content_enrich_tasks.status IN ('done','terminal','skipped') THEN now()
+           ELSE crawler.content_enrich_tasks.next_retry_at END,
+         lease_owner=CASE
+           WHEN crawler.content_enrich_tasks.status IN ('leased','running')
+             AND crawler.content_enrich_tasks.lease_expires_at>now()
+           THEN crawler.content_enrich_tasks.lease_owner ELSE NULL END,
+         lease_expires_at=CASE
+           WHEN crawler.content_enrich_tasks.status IN ('leased','running')
+             AND crawler.content_enrich_tasks.lease_expires_at>now()
+           THEN crawler.content_enrich_tasks.lease_expires_at ELSE NULL END,
+         updated_at=now()`,
     [
       refreshTaskId(contentKey, jobType),
       contentKey,
@@ -1210,30 +1258,20 @@ async function applyDiscovery({
   };
 }
 
-async function updateSampledContent(client, {
+export async function applyIncrementalVideoDetail(client, {
   row,
-  capture,
+  detail,
   observedAt,
-  observationId,
-  runId,
-  collectNext,
-  changeAlpha,
+  observationId = null,
+  collectNext = false,
+  changeAlpha = 0.4,
+  detailMetadataKey = "incremental_detail",
 }) {
-  if (!capture?.detail) {
-    await queueRefreshTask(client, {
-      contentKey: row.content_key,
-      channelId: row.channel_id,
-      runId,
-      observationId,
-      jobType: "player-refresh",
-      error: capture?.error,
-    });
-    return { success: false, viewDelta: null, engagementChanged: false };
-  }
-  const facts = detailFacts(capture.detail);
+  if (!detail) throw new TypeError("detail is required");
+  const facts = detailFacts(detail);
   const classification = resolveYoutubeContentType({
     videoId: row.source_content_id,
-    detail: capture.detail,
+    detail,
   });
   const storageAction = fullVideoStorageAction({
     candidate: {
@@ -1330,15 +1368,15 @@ async function updateSampledContent(client, {
          live_ended_at=COALESCE($33::timestamptz,live_ended_at),
          extractor_version=COALESCE($30,extractor_version),
          raw_json=raw_json || jsonb_build_object(
-           'incremental_detail',jsonb_build_object(
+           $40::text,jsonb_strip_nulls(jsonb_build_object(
              'observation_id',$8::uuid::text,
              'detail_collected',true,
              'source',$34::text
-           )
+           ))
          ),
          player_last_observed_at=$2,
          next_last_observed_at=CASE WHEN $7::boolean THEN $2 ELSE next_last_observed_at END,
-         last_observation_id=$8::uuid,last_enriched_at=$2,
+         last_observation_id=COALESCE($8::uuid,last_observation_id),last_enriched_at=$2,
          video_change_probability=COALESCE($9::double precision,video_change_probability)
      WHERE content_key=$1
        AND (player_last_observed_at IS NULL OR player_last_observed_at<=$2::timestamptz)`,
@@ -1376,21 +1414,65 @@ async function updateSampledContent(client, {
       facts.live_scheduled_at,
       facts.live_started_at,
       facts.live_ended_at,
-      detailSource(capture.detail),
+      detailSource(detail),
       commentsObserved,
       storageAction.kind === "upsert" ? storageAction.content_type : null,
       storageAction.kind === "upsert" ? storageAction.type_source : null,
       storageAction.kind === "upsert" ? classification.canonical_url : null,
       facts.comments_first_page == null ? null : JSON.stringify(facts.comments_first_page),
+      detailMetadataKey,
     ],
   );
+  return {
+    success: true,
+    viewDelta,
+    engagementChanged,
+    changeProbability,
+    accessStatus: facts.access_status,
+  };
+}
+
+async function updateSampledContent(client, {
+  row,
+  capture,
+  observedAt,
+  observationId,
+  runId,
+  collectNext,
+  changeAlpha,
+}) {
+  if (!capture?.detail) {
+    await queueRefreshTask(client, {
+      contentKey: row.content_key,
+      channelId: row.channel_id,
+      runId,
+      observationId,
+      jobType: "player-refresh",
+      error: capture?.error,
+    });
+    return { success: false, viewDelta: null, engagementChanged: false };
+  }
+  const applied = await applyIncrementalVideoDetail(client, {
+    row,
+    detail: capture.detail,
+    observedAt,
+    observationId,
+    collectNext,
+    changeAlpha,
+  });
+  const taskStatus = TERMINAL_ENRICH_ACCESS_STATUSES.has(applied.accessStatus) ? "terminal" : "done";
   await client.query(
     `UPDATE crawler.content_enrich_tasks
-     SET status='done',last_success_at=$2,error_message=NULL,updated_at=now()
-     WHERE content_key=$1 AND job_type IN ('player-refresh','next-refresh')`,
-    [row.content_key, observedAt],
+     SET status=$3,last_success_at=$2,next_retry_at=NULL,error_message=NULL,
+         lease_owner=NULL,lease_expires_at=NULL,updated_at=now()
+     WHERE content_key=$1 AND job_type IN ('player-refresh','next-refresh')
+       AND (
+         status IN ('queued','failed')
+         OR (status IN ('leased','running') AND lease_expires_at<=now())
+       )`,
+    [row.content_key, observedAt, taskStatus],
   );
-  return { success: true, viewDelta, engagementChanged, changeProbability };
+  return applied;
 }
 
 async function applyRecentSampling({
@@ -1608,6 +1690,8 @@ async function recordVideoCycle({
           observedAt,
           pendingDeferredVideoIds,
         });
+        const enrichMode = await loadContentEnrichMode(transactionClient, { lock: true });
+        const clockOwnsPlayerRefresh = enrichMode === CONTENT_ENRICH_CLOCK_MODE;
         const recentRows = await transactionClient.query(
           `WITH candidate AS (
              SELECT content.*,
@@ -1615,19 +1699,41 @@ async function recordVideoCycle({
                       SELECT 1 FROM crawler.content_enrich_tasks task
                       WHERE task.content_key=content.content_key
                         AND task.job_type IN ('player-refresh','next-refresh')
-                        AND task.status IN ('queued','failed')
-                        AND COALESCE(task.next_retry_at,now())<=now()
-                    ) AS enrich_pending
+                        AND (task.job_type='next-refresh' OR $4::boolean)
+                        AND (
+                          (task.status IN ('queued','failed')
+                            AND COALESCE(task.next_retry_at,now())<=now())
+                          OR (task.status IN ('leased','running')
+                            AND task.lease_expires_at<=now())
+                        )
+                    ) AS enrich_pending,
+                    EXISTS (
+                      SELECT 1 FROM crawler.content_enrich_tasks task
+                      WHERE task.content_key=content.content_key
+                        AND task.job_type='player-refresh'
+                        AND task.status IN ('queued','failed','leased','running')
+                    ) AS player_enrich_open,
+                    EXISTS (
+                      SELECT 1 FROM crawler.content_enrich_tasks task
+                      WHERE task.content_key=content.content_key
+                        AND task.job_type='player-refresh'
+                        AND task.status IN ('leased','running')
+                        AND task.lease_expires_at>now()
+                    ) AS player_enrich_leased
              FROM crawler.contents content
              WHERE content.channel_id=$1
                AND content.content_type IN ('video','short','live')
            )
            SELECT candidate.*
            FROM candidate
-           WHERE candidate.enrich_pending
-              OR candidate.published_at>=($2::date - ($3::int * interval '1 day'))
+           WHERE NOT candidate.player_enrich_leased
+             AND ($4::boolean OR NOT candidate.player_enrich_open)
+             AND (
+               candidate.enrich_pending
+               OR candidate.published_at>=($2::date - ($3::int * interval '1 day'))
+             )
            ORDER BY candidate.published_at DESC NULLS LAST,candidate.content_key`,
-          [plan.channel_id, plan.plan_day, config.recentWindowDays],
+          [plan.channel_id, plan.plan_day, config.recentWindowDays, clockOwnsPlayerRefresh],
         );
         const samplePlan = planRecentVideoSampling(recentRows.rows, {
           plan: samplingPlanInput,
