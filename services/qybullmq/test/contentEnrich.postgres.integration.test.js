@@ -85,6 +85,7 @@ function publicDetail(videoId) {
     published_at_precision: "second",
     published_at_source: "youtubejs_player",
     view_count: 123,
+    view_count_text: "123",
     view_count_source: "youtubejs_player",
     duration_seconds: 90,
     duration_source: "youtubejs_player",
@@ -369,6 +370,7 @@ test("Content Enrich PostgreSQL lifecycle is fenced, recoverable, and idempotent
       done: 0,
       terminal: 0,
       retryable: 0,
+      dead_letter: 0,
       skipped: 1,
     });
     assert.equal(expiredDetailApplications, 0);
@@ -655,7 +657,8 @@ test("Content Enrich PostgreSQL lifecycle is fenced, recoverable, and idempotent
     const terminalResult = await terminalExecutor.execute(terminalJob);
     assert.equal(terminalResult.terminal, 1);
     const terminal = (await pool.query(
-      `SELECT task.status,content.access_status,content.access_status_source
+      `SELECT task.status,task.next_retry_at,task.dispatch_generation,
+              content.access_status,content.access_status_source
        FROM crawler.content_enrich_tasks task
        JOIN crawler.contents content USING (content_key)
        WHERE task.channel_id=$1`,
@@ -663,12 +666,292 @@ test("Content Enrich PostgreSQL lifecycle is fenced, recoverable, and idempotent
     )).rows[0];
     assert.deepEqual(terminal, {
       status: "terminal",
+      next_retry_at: new Date(now.getTime() + 7 * 24 * 60 * 60_000),
+      dispatch_generation: "2",
       access_status: "private",
       access_status_source: "yt_dlp_detail",
     });
     const duplicate = await terminalExecutor.execute(terminalJob);
     assert.equal(duplicate.claimed, 0);
     assert.equal(duplicate.skipped, 1);
+
+    for (const queuedJob of queue.jobs.values()) queuedJob.state = "completed";
+    await pool.query(
+      `UPDATE crawler.content_enrich_tasks
+       SET status='done',next_retry_at=NULL,lease_owner=NULL,lease_expires_at=NULL
+       WHERE channel_id<>$1`,
+      [channelA],
+    );
+    const earlyAccessRecheck = await dispatcher.dispatchAvailable();
+    assert.equal(earlyAccessRecheck.enqueued, 0);
+    assert.equal(
+      [...queue.jobs.values()].filter((queuedJob) => queuedJob.state === "waiting").length,
+      0,
+    );
+
+    await pool.query(
+      `UPDATE crawler.content_enrich_tasks
+       SET attempts=5,next_retry_at=clock_timestamp()-interval '1 second'
+       WHERE channel_id=$1 AND status='terminal'`,
+      [channelA],
+    );
+    const dueAccessRecheck = await dispatcher.dispatchAvailable();
+    assert.equal(dueAccessRecheck.enqueued, 1);
+    const accessRecheckJob = [...queue.jobs.values()].find(
+      (queuedJob) => queuedJob.state === "waiting",
+    );
+    assert.ok(accessRecheckJob);
+    assert.notEqual(accessRecheckJob.id, terminalJob.id);
+    assert.deepEqual((await pool.query(
+      `SELECT status,attempts,dispatch_generation,lease_owner
+       FROM crawler.content_enrich_tasks WHERE channel_id=$1`,
+      [channelA],
+    )).rows[0], {
+      status: "leased",
+      attempts: 0,
+      dispatch_generation: "3",
+      lease_owner: accessRecheckJob.id,
+    });
+    const duplicateAccessRecheck = await dispatcher.dispatchAvailable();
+    assert.equal(duplicateAccessRecheck.enqueued, 0);
+    assert.equal(duplicateAccessRecheck.existing, 1);
+    assert.equal(
+      [...queue.jobs.values()].filter((queuedJob) => queuedJob.state === "waiting").length,
+      1,
+    );
+
+    const mixedChannel = "UCcontentenrichMixed";
+    const mixedJobId = `content_enrich__${mixedChannel}__mixed`;
+    const mixedTasks = [
+      { taskId: "player-refresh:mixed-retry", videoId: "mixed-retry", attempts: 2 },
+      { taskId: "player-refresh:mixed-success", videoId: "mixed-success", attempts: 0 },
+    ];
+    await pool.query(
+      `INSERT INTO crawler.channels (channel_id,channel_url,title,status)
+       VALUES ($1,'https://www.youtube.com/channel/' || $1,$1,'active')`,
+      [mixedChannel],
+    );
+    for (const mixed of mixedTasks) {
+      const mixedContentKey = `${mixedChannel}:video:${mixed.videoId}`;
+      await pool.query(
+        `INSERT INTO crawler.contents (
+           content_key,channel_id,content_type,content_type_source,source_content_id,
+           title,url,published_at,published_at_status,published_at_precision,
+           access_status,first_seen_at,last_seen_at
+         ) VALUES ($1,$2,'video','youtube_uploads_default:video',$3,$3,
+                   'https://www.youtube.com/watch?v=' || $3,
+                   '2026-08-01T00:00:00Z','exact','second','unknown',now(),now())`,
+        [mixedContentKey, mixedChannel, mixed.videoId],
+      );
+      await pool.query(
+        `INSERT INTO crawler.content_enrich_tasks (
+           task_id,content_key,channel_id,job_type,status,priority,attempts,
+           next_retry_at,lease_owner,lease_expires_at,dispatch_generation
+         ) VALUES ($1,$2,$3,'player-refresh','leased',10,$4,$6,$5,
+                   clock_timestamp()+interval '5 minutes',1)`,
+        [mixed.taskId, mixedContentKey, mixedChannel, mixed.attempts, mixedJobId, now],
+      );
+    }
+    const publicationFailure = new Error("simulated Publication failure");
+    const mixedRepository = new PostgresContentEnrichExecutionRepository({
+      withTransaction,
+      applyDetail: applyIncrementalVideoDetail,
+      refreshHashes: refreshVideoPublicationItemHashes,
+      reconcilePublication: async () => { throw publicationFailure; },
+    });
+    const mixedExecutor = new ContentEnrichExecutor({
+      repository: mixedRepository,
+      fetchDetail: async (videoId) => {
+        if (videoId === "mixed-retry") throw new Error("temporary upstream timeout");
+        return publicDetail(videoId);
+      },
+      now: () => now,
+      leaseDurationMs: 60_000,
+      retryBaseMs: 60_000,
+    });
+    const mixedJob = {
+      id: mixedJobId,
+      queueName: "youtube-content-enrich",
+      data: {
+        channel_id: mixedChannel,
+        tasks: mixedTasks.map((mixed) => ({
+          task_id: mixed.taskId,
+          dispatch_generation: 1,
+        })),
+      },
+    };
+
+    await assert.rejects(mixedExecutor.execute(mixedJob), (error) => error === publicationFailure);
+    assert.deepEqual((await pool.query(
+      `SELECT content.source_content_id,task.status,task.attempts,task.next_retry_at,
+              task.lease_owner,content.last_enriched_at
+       FROM crawler.content_enrich_tasks task
+       JOIN crawler.contents content USING (content_key)
+       WHERE task.channel_id=$1
+       ORDER BY content.source_content_id`,
+      [mixedChannel],
+    )).rows, [
+      {
+        source_content_id: "mixed-retry",
+        status: "failed",
+        attempts: 3,
+        next_retry_at: new Date(now.getTime() + 4 * 60_000),
+        lease_owner: null,
+        last_enriched_at: null,
+      },
+      {
+        source_content_id: "mixed-success",
+        status: "running",
+        attempts: 0,
+        next_retry_at: now,
+        lease_owner: mixedJobId,
+        last_enriched_at: null,
+      },
+    ]);
+
+    const deadChannel = "UCcontentenrichDead";
+    const deadContentKey = `${deadChannel}:video:video-dead`;
+    const deadTaskId = `player-refresh:${deadChannel}`;
+    const deadJobId = `content_enrich__${deadChannel}__dead`;
+    await pool.query(
+      `INSERT INTO crawler.channels (channel_id,channel_url,title,status)
+       VALUES ($1,'https://www.youtube.com/channel/' || $1,$1,'active')`,
+      [deadChannel],
+    );
+    await pool.query(
+      `INSERT INTO crawler.contents (
+         content_key,channel_id,content_type,content_type_source,source_content_id,
+         title,url,published_at,published_at_status,published_at_precision,
+         access_status,first_seen_at,last_seen_at
+       ) VALUES ($1,$2,'video','youtube_uploads_default:video','video-dead',
+                 'video-dead','https://www.youtube.com/watch?v=video-dead',
+                 '2026-08-01T00:00:00Z','exact','second','unknown',now(),now())`,
+      [deadContentKey, deadChannel],
+    );
+    await pool.query(
+      `INSERT INTO crawler.content_enrich_tasks (
+         task_id,content_key,channel_id,job_type,status,priority,attempts,
+         next_retry_at,lease_owner,lease_expires_at,dispatch_generation
+       ) VALUES ($1,$2,$3,'player-refresh','leased',10,3,now(),$4,
+                 clock_timestamp()+interval '5 minutes',1)`,
+      [deadTaskId, deadContentKey, deadChannel, deadJobId],
+    );
+    const deadJob = {
+      id: deadJobId,
+      queueName: "youtube-content-enrich",
+      data: {
+        channel_id: deadChannel,
+        tasks: [{ task_id: deadTaskId, dispatch_generation: 1 }],
+      },
+    };
+    const exhaustedExecutor = new ContentEnrichExecutor({
+      repository: executionRepository,
+      fetchDetail: async () => { throw new Error("temporary upstream timeout"); },
+      now: () => now,
+      leaseDurationMs: 60_000,
+      maxAttempts: 4,
+    });
+
+    const exhausted = await exhaustedExecutor.execute(deadJob);
+    assert.equal(exhausted.dead_letter, 1);
+    assert.deepEqual((await pool.query(
+      `SELECT status,attempts,next_retry_at
+       FROM crawler.content_enrich_tasks WHERE task_id=$1`,
+      [deadTaskId],
+    )).rows[0], {
+      status: "dead_letter",
+      attempts: 4,
+      next_retry_at: null,
+    });
+    await withTransaction((client) => queueRefreshTask(client, {
+      contentKey: deadContentKey,
+      channelId: deadChannel,
+      runId: "incremental:content-enrich:dead-reentry",
+      observationId: randomUUID(),
+      jobType: "player-refresh",
+      error: new Error("same exhausted Task observed again"),
+    }));
+    assert.deepEqual((await pool.query(
+      `SELECT status,attempts
+       FROM crawler.content_enrich_tasks WHERE task_id=$1`,
+      [deadTaskId],
+    )).rows[0], { status: "dead_letter", attempts: 4 });
+    assert.equal((await exhaustedExecutor.execute(deadJob)).skipped, 1);
+
+    await pool.query(
+      `UPDATE crawler.content_enrich_tasks
+       SET status='done',lease_owner=NULL,lease_expires_at=NULL,next_retry_at=NULL`,
+    );
+    await pool.query(
+      `UPDATE crawler.settings SET value_json='{"channel_id":""}'::jsonb
+       WHERE setting_key='content_enrich_dispatch_cursor'`,
+    );
+    const priorityChannels = [
+      {
+        channelId: "UCpriorityADormant",
+        status: "dormant",
+        publishedAt: new Date(now.getTime() - 10 * 24 * 60 * 60_000),
+      },
+      {
+        channelId: "UCpriorityBHistory",
+        status: "active",
+        publishedAt: new Date(now.getTime() - 120 * 24 * 60 * 60_000),
+      },
+      {
+        channelId: "UCpriorityCRecent",
+        status: "active",
+        publishedAt: new Date(now.getTime() - 10 * 24 * 60 * 60_000),
+      },
+    ];
+    for (const priorityChannel of priorityChannels) {
+      const videoId = `video-${priorityChannel.channelId}`;
+      const priorityContentKey = `${priorityChannel.channelId}:video:${videoId}`;
+      await pool.query(
+        `INSERT INTO crawler.channels (
+           channel_id,channel_url,title,status,dormant_reason,dormant_since,
+           dormant_recheck_day,dormant_last_probe_at,dormant_cycle
+         ) VALUES (
+           $1,'https://www.youtube.com/channel/' || $1,$1,$2,
+           CASE WHEN $2='dormant' THEN 'no_published_content_within_90_days' END,
+           CASE WHEN $2='dormant' THEN now() END,
+           CASE WHEN $2='dormant' THEN current_date+30 END,
+           CASE WHEN $2='dormant' THEN now() END,
+           CASE WHEN $2='dormant' THEN 1 ELSE 0 END
+         )`,
+        [priorityChannel.channelId, priorityChannel.status],
+      );
+      await pool.query(
+        `INSERT INTO crawler.contents (
+           content_key,channel_id,content_type,content_type_source,source_content_id,
+           title,url,published_at,published_at_status,published_at_precision,
+           access_status,first_seen_at,last_seen_at
+         ) VALUES ($1,$2,'video','youtube_uploads_default:video',$3,$3,
+                   'https://www.youtube.com/watch?v=' || $3,$4,'exact','second',
+                   'unknown',now(),now())`,
+        [priorityContentKey, priorityChannel.channelId, videoId, priorityChannel.publishedAt],
+      );
+      await pool.query(
+        `INSERT INTO crawler.content_enrich_tasks (
+           task_id,content_key,channel_id,job_type,status,priority,next_retry_at
+         ) VALUES ($1,$2,$3,'player-refresh','queued',10,now())`,
+        [`player-refresh:${priorityChannel.channelId}`, priorityContentKey, priorityChannel.channelId],
+      );
+    }
+    const priorityLease = await dispatchRepository.withDispatchLock((repository, lock) => (
+      repository.leaseFairBatches({
+        maxJobs: 3,
+        batchSize: 1,
+        leaseDurationMs: 60_000,
+        dispatchOwner: lock.owner,
+      })
+    ));
+    assert.equal(priorityLease.acquired, true);
+    assert.deepEqual(priorityLease.result.map((batch) => batch.channel_id), [
+      "UCpriorityCRecent",
+      "UCpriorityBHistory",
+      "UCpriorityADormant",
+    ]);
+    assert.deepEqual(priorityLease.result.map((batch) => batch.tasks.length), [1, 1, 1]);
   } finally {
     await pool.query("DROP SCHEMA IF EXISTS publication CASCADE").catch(() => {});
     await pool.query("DROP SCHEMA IF EXISTS crawler CASCADE").catch(() => {});

@@ -417,25 +417,28 @@ content_enrich_tasks
   -> 复用 fetchIncrementalVideoDetail + applyIncrementalVideoDetail
   -> contents + Video Item Hash
   -> Publication Reconciler
-  -> done / terminal / failed(next_retry_at)
+  -> done / terminal(next_retry_at) / failed(next_retry_at) / dead_letter
 ```
 
 状态机和 fencing：
 
 ```text
-queued / failed
+queued / failed / 到期的 terminal
   -> leased     (lease_owner, lease_expires_at, dispatch_generation + 1)
   -> running    (Worker 再读 DB，并校验 Job、频道、generation 和有效 lease)
   -> done       (详情成功)
-  -> terminal   (private / unavailable / members-only 等权威终态)
+  -> terminal   (private / unavailable 等权威终态；关闭本轮并低频复查)
   -> failed     (attempts + 1, next_retry_at 使用有上限指数退避)
+  -> dead_letter (累计 attempts 达到上限，停止自动重试)
 ```
 
 - BullMQ Job ID 由频道和排序后的 `task_id:dispatch_generation` 哈希确定，Controller 重放不会产生第二个 Job；
 - `dispatch_generation` 是 fencing token。过期 running 任务重新派发时推进 generation，旧 Worker 不能写 Content 或关闭新任务；
 - Worker 对已完成、过期、错误 generation、错误 lease owner 和重复 Job 均幂等跳过；
+- public 详情必须满足共享的完整 Video surface 契约；缺标题、发布时间、播放量或时长等关键事实时进入 retryable，不能写 `last_enriched_at` 或假装 done；
 - Worker 在抓取期间按不超过 lease 一半的间隔续租；任何续租异常或未续满整批都立即触发 `AbortSignal`、停止后续抓取并丢弃未结算结果，不能把失去所有权后的详情写入 Content；
 - lease 的创建、刷新、claim、续租、过期回收和 retry 到期判断都以 PostgreSQL `clock_timestamp()` 为准，不能混用 Controller/Worker 进程时钟；可能等待行锁的 claim/renew/settle 使用“先锁行、后用 DB 当前时间判 lease”的两阶段 fencing，等待前求出的时间戳不能复活已过期 lease；
+- Rota 换身份前的 retry checkpoint 只有在本批 retryable/dead-letter outcome 全部实际结算后才标记为已持久化；lease 过期或 generation fencing 导致任何 outcome 跳过时必须 fail closed，不能虚报 attempts 已记账；
 - 开放任务再次 upsert 时保留 `attempts`、`next_retry_at` 和有效 lease；只有 done/terminal/skipped 的已关闭任务开始新一轮补抓时才把 attempts 重置为 0。
 
 有界、公平和崩溃恢复：
@@ -445,36 +448,38 @@ queued / failed
 - 领取新批次和刷新未投递 lease 都会在各自数据库事务内重新锁定并校验 mutex owner、expiry 和 mode；仅靠进程内 heartbeat 状态不足以阻止 TTL 后的旧 Controller 继续派发；
 - 需要等待 mutex 行锁的 owner 校验和模式切换先取得行锁，再调用 `clock_timestamp()` 判断 expiry，不能在等待前提前求值；Controller 丢失 mutex heartbeat 或数据库 owner fencing 后均 fail closed。进程崩溃后 mutex 自动过期，下一 Controller 可接管；这不依赖 PgBouncer 后端 session 粘性；
 - 每轮按持久化频道游标环形选择，每个频道最多一个可配置小批次，单 Job 只包含同一频道的少量 task ID；
+- 派发优先级为：活跃频道最近 90 天或日期未知的视频、活跃频道历史视频、非活跃/休眠频道；每层仍遵守 task priority 和频道公平游标；
 - 领取使用 `FOR UPDATE SKIP LOCKED`，第一版只选择已有证据确认的 `player-refresh`；
 - DB 已提交 lease、BullMQ 尚未投递时崩溃，下一轮按原 lease owner 和确定性 Job ID 恢复；
 - 恢复投递的频道占用本轮该频道唯一的公平名额，后续新领取 SQL 显式排除这些频道，不能让一个恢复中的大频道在同一轮再次挤掉其他频道；
 - Queue 已有 waiting/active/delayed Job 时，即使达到 High Water 仍维护其 lease；未投递 lease 的恢复失败会消耗本轮容量，不会在 Redis 故障时继续扩大租约集合；
 - BullMQ 已完成或失败但 DB 仍为 leased 时，Controller 释放旧 lease，再以新 generation 派发。
+- Enrich 派发异常写结构化 Controller action 和日志后即隔离返回，不能阻断同一 tick 后续 Query、Full Crawl、Migration 或 Incremental 工作。
 
 抓取、Rota 和发布：
 
 - Worker 复用现有视频详情抓取、类型判断、访问状态和增量落库函数，没有复制第二套视频规则；
-- terminal 证据更新 `contents.access_status/access_status_source` 并关闭当前任务，不对当前任务无限重试；
-- 每批在同一数据库事务内更新 Content、结算 Task、刷新变化视频的 Item Hash，并按频道调用 Publication Reconciler；
-- retryable 结果只结算 attempts 和 next retry，不刷新未变化的 Hash，也不调用 Publication，发布失败不能回滚重试历史；
+- private/unavailable 权威证据更新 `contents.access_status/access_status_source`、关闭当前任务并写 7 天后的 `next_retry_at`；到期后才开启新一轮，复查仍为终态则再次低频排期；
+- retryable/dead-letter checkpoint 和未执行任务释放先在独立短事务提交；成功或 terminal 的 Content、Task、变化视频 Item Hash 与按频道 Publication Reconciler 保持在另一个原子事务；
+- 因而 Publication 失败会回滚对应 Content/Hash/terminal/done 写入，但不能抹掉同批已经记录的 retry attempts；未变化的 retryable/dead-letter 不刷新 Hash 或调用 Publication；
 - Rota 增加真实 `content_enrich` task kind，并限定为 channel role；没有伪装成 Full Crawl 或 Incremental；
 - Enrich 使用独立 Worker 服务、独立 Queue concurrency 和新增的 channel Slot 容量。示例配置为 2 个 Enrich Worker、每实例并发 1、总 channel Slots 从 40 增至 42。
 
 Clock 互斥与安全切换：
 
 - 数据库设置 `content_enrich_dispatch.mode` 默认为 `clock`；只允许 `clock` 或 `queue`；
-- Clock 在自己的写事务内以共享锁读取 mode。`queue` 模式下，它不消费开放的 `player-refresh`；任何模式下都跳过仍有有效 Enrich lease 的视频；
+- Clock 在自己的写事务内以共享锁读取 mode。`queue` 模式下，它不消费开放任务或已到期 terminal；任何模式下都跳过有效 Enrich lease 和尚未到期的 terminal；只有 `clock` 模式可消费已到期 terminal；
 - Controller 只在 gate 已启用且 mode=`queue` 时派发；模式更新在短事务内按统一顺序取得 xact advisory lock、锁定并校验已提交 mutex，再锁 mode 行，因此切换不会落在派发或 Clock 写事务中间，也不会形成反向锁序；
 - 回滚先切回 `clock`。已领取的 Worker Job 可以排空；Clock 会等待有效 lease 完成或过期后再接管，不能同时消费同一任务。
 
-第一版不为其他历史 `job_type` 扩大范围，也不新增 private/unavailable 的低频复查系统。未来若要增加 access recheck，必须有独立证据、预算和状态契约。
+private/unavailable 的低频复查继续使用同一条 `content_enrich_tasks` 事实和同一个 Clock/Controller 所有权开关，不新增表、Worker 轮询器或第二套调度器。第一版不为其他历史 `job_type` 扩大范围。
 
 ### 9.3 本地验证
 
-- qybullmq 全量：1,068 项，1,006 通过、62 项按环境跳过、0 失败；
-- Content Enrich 真实 PostgreSQL 16 生命周期通过，覆盖已提交 mutex 争用和过期接管、`SKIP LOCKED`、Worker 在 `queue.add()` 内即时 claim 的事务可见性、投递崩溃恢复、attempts/退避、generation fencing、heartbeat、行锁等待后 lease 过期、terminal、Content、Item Hash、真实 Publication revision/outbox 和重复 Job；
+- qybullmq 全量：1,074 项，1,011 通过、63 项按环境跳过、0 失败；宿主缺少 Python 运行依赖的 fingerprint gateway 和 persistent yt-dlp 两项已在生产依赖镜像中分别 1/1 通过；
+- Content Enrich 真实 PostgreSQL 16 生命周期通过，覆盖已提交 mutex 争用和过期接管、`SKIP LOCKED`、Worker 在 `queue.add()` 内即时 claim 的事务可见性、投递崩溃恢复、attempts/退避、generation fencing、heartbeat、行锁等待后 lease 过期、Rota checkpoint fencing、terminal、Content、Item Hash、真实 Publication revision/outbox 和重复 Job；
 - runtime schema 和 fresh `database/bootstrap/crawler.sql` 均在空 PostgreSQL 16 测试库完整应用；bootstrap 默认 mode、cursor 和 mutex 已读取验证；
-- 原有 Incremental Video PostgreSQL 回归 3/3 通过；
+- 原有 Incremental Video PostgreSQL 回归及新增 terminal 所有权回归 4/4 通过；
 - Rota `internal/proxycontrol` Go 测试通过；Dashboard 1/1、共享 Compose 拓扑 4/4 通过；
 - Node 语法检查、`git diff --check` 和隔离 PostgreSQL 测试均通过。
 
@@ -493,7 +498,7 @@ Clock 互斥与安全切换：
 7. 先执行 `npm run content-enrich:mode -- queue` dry-run，再提供 operator、reason 和精确确认值执行 `--apply`；
 8. 小流量观察后再调整 High Water、refill 或 Worker 数量，不能一次性放大。
 
-至少监控：Queue 开放 Job 数/High Water、queued/leased/running/failed/terminal/done 数量、最老 queued 年龄、dispatch mutex contention/expiry/heartbeat、Worker lease renewal/loss、恢复投递失败、过期 lease、attempts 与 next retry、terminal access source、`last_enriched_at`、Item Hash、Publication revision/outbox，以及 Rota channel ready/claimed 和 `content_enrich` Task 结果。
+至少监控：Queue 开放 Job 数/High Water、queued/leased/running/failed/terminal/dead_letter/done 数量、最老 queued 年龄、dispatch mutex contention/expiry/heartbeat、Worker lease renewal/loss、恢复投递失败、过期 lease、attempts 与 next retry、terminal access source、`last_enriched_at`、Item Hash、Publication revision/outbox，以及 Rota channel ready/claimed 和 `content_enrich` Task 结果。
 
 回滚时先把 mode 切为 `clock`，再关闭 Controller gate；保留 Worker 让已领取 Job 排空，或接受它们在 lease 到期后由 Clock 接管。不得先强停 Worker 后直接让 Clock 忽略有效 lease，也不得直接批量改 BUG-7 数据。
 
@@ -505,7 +510,7 @@ Clock 互斥与安全切换：
 - 同一任务不会被 Clock 和 Drain 同时执行；
 - queued 总量和最老年龄连续下降；
 - 正常 Incremental Clock 吞吐不下降超过预设阈值；
-- retryable 任务保留真实 attempts 并按退避重试，权威终态进入 terminal，不永久无解释 queued；
+- retryable 任务保留真实 attempts 并按有上限退避重试；预算耗尽进入 dead_letter，权威终态进入 terminal 并按低频计划复查，不永久无解释 queued；
 - Migration、Query、Full Crawl、正常 Incremental 和 Publication 的吞吐及错误率不回归。
 
 ## 10. BUG-7：历史未 enrich 视频
@@ -537,18 +542,21 @@ BUG-7 是 BUG-6 积压中的历史数据集合，不应建立第二套恢复系�
 
 只由 BUG-6 的 Enrich Drain 消化：
 
-1. 复用已有 task priority，不在第一版凭推测重写历史优先级；
-2. 按频道公平批量补抓已有 content ID，不重新跑整个频道；
-3. 通过正常详情抓取和共享 Writer 更新 `contents` 与 `last_enriched_at`；
-4. private/unavailable 等权威证据更新访问状态并关闭当前任务；
-5. 刷新 Item Hash，再经 Publication Reconciler 更新发布链；
-6. 不直接批量 UPDATE 这 45,770 行，也不为它们创建第二张恢复表或第二个调度器。
+1. P0：活跃频道最近 90 天或发布时间未知的视频；
+2. P1：活跃频道的更老历史视频；
+3. P2：非活跃/休眠频道视频；
+4. 各层继续按频道公平批量补抓已有 content ID，不重新跑整个频道；
+5. 通过正常详情抓取和共享 Writer 更新 `contents` 与 `last_enriched_at`；
+6. private/unavailable 权威证据更新访问状态、关闭本轮并进入同一任务的低频复查；
+7. 刷新 Item Hash，再经 Publication Reconciler 更新发布链；
+8. 不直接批量 UPDATE 这 45,770 行，也不为它们创建第二张恢复表或第二个调度器。
 
 ### 10.3 验收
 
-- 当前存量任务最终进入 done/terminal，或保留具有真实 attempts 和 `next_retry_at` 的可解释 retryable 状态；
+- 当前存量任务最终进入 done/terminal/dead_letter 之一；处理中 retryable 必须保留真实 attempts 和 `next_retry_at`，不能无限重试；
 - 不存在无任务的 `last_enriched_at IS NULL` 行；
 - queued 总量和最老年龄持续下降，失败与 terminal 比例可解释；
+- P0 层先于 P1/P2 清空，且单个大频道不能霸占 Worker；
 - 成功任务的 Content、`last_enriched_at`、Item Hash 和 Publication 同步完成；
 - 不增加全频道重复扫描量。
 

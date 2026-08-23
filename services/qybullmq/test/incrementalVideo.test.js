@@ -104,6 +104,7 @@ function databaseFixture({ beforeTransaction = null, enrichMode = "clock" } = {}
     cursorAnchors: ["known-anchor", "old-video"],
     enrichPending: new Set(),
     enrichLeased: new Set(),
+    enrichTerminalSchedule: new Map(),
     enrichMode,
     channelStatus: "active",
   };
@@ -247,13 +248,25 @@ function databaseFixture({ beforeTransaction = null, enrichMode = "clock" } = {}
         const pendingBypassesWindow = sql.includes("candidate.enrich_pending");
         const clockOwnsEnrich = params[3] !== false;
         const protectsLiveLease = sql.includes("AS player_enrich_leased");
+        const protectsTerminalWait = sql.includes("AS player_enrich_terminal_waiting")
+          && sql.includes("NOT candidate.player_enrich_terminal_waiting");
+        const selectsDueTerminal = sql.includes("task.status='terminal'")
+          && sql.includes("task.next_retry_at<=now()");
+        const queueProtectsTerminal = sql.includes("AS player_enrich_open")
+          && sql.includes("task.status='terminal'");
         const rows = state.contents
           .filter((row) => {
             const isPending = state.enrichPending.has(row.content_key);
             const isLeased = state.enrichLeased.has(row.content_key);
+            const terminalSchedule = state.enrichTerminalSchedule.get(row.content_key);
             const published = row.published_at == null ? null : new Date(row.published_at);
             const isRecent = published != null && published >= cutoff;
             if (isLeased && protectsLiveLease) return false;
+            if (terminalSchedule === "future" && protectsTerminalWait) return false;
+            if (terminalSchedule && !clockOwnsEnrich && queueProtectsTerminal) return false;
+            if (terminalSchedule === "due" && selectsDueTerminal) {
+              return clockOwnsEnrich && pendingBypassesWindow;
+            }
             if (isPending) return clockOwnsEnrich && pendingBypassesWindow;
             return isRecent;
           })
@@ -287,9 +300,21 @@ function databaseFixture({ beforeTransaction = null, enrichMode = "clock" } = {}
         row.last_enriched_at = params[1];
         return { rowCount: 1, rows: [] };
       }
+      if (sql.includes("INSERT INTO crawler.content_enrich_tasks")) {
+        const contentKey = params[1];
+        if (state.enrichTerminalSchedule.has(contentKey)) {
+          const retainsTerminal = /status='terminal'\s+AND \$8::timestamptz IS NOT NULL/.test(sql);
+          if (retainsTerminal && params[7]) state.enrichTerminalSchedule.set(contentKey, "future");
+          else state.enrichTerminalSchedule.delete(contentKey);
+        }
+        return { rowCount: 1, rows: [] };
+      }
       if (sql.includes("UPDATE crawler.content_enrich_tasks")
           && (sql.includes("status='done'") || sql.includes("SET status=$3"))) {
         state.enrichPending.delete(params[0]);
+        if (sql.includes("status='terminal'") && sql.includes("next_retry_at<=now()")) {
+          state.enrichTerminalSchedule.delete(params[0]);
+        }
         return { rowCount: 1, rows: [] };
       }
       if (sql.includes("INSERT INTO crawler.crawler_outbox")) {
@@ -1744,6 +1769,119 @@ test("Clock rollback does not sample a recent Video while its Enrich Worker leas
 
   assert.equal(fetched.includes("worker-leased"), false);
   assert.equal(fixture.state.enrichPending.has(contentKey), true);
+});
+
+test("scheduled terminal access rechecks remain exclusive to the active Enrich owner", async () => {
+  async function runScenario({ mode, schedule, videoId, publishedAt, fetchError = null }) {
+    const contentKey = `UCvideo:video:${videoId}`;
+    const fixture = databaseFixture({
+      enrichMode: mode,
+      beforeTransaction(state) {
+        state.contents.push({
+          content_key: contentKey,
+          channel_id: "UCvideo",
+          source_content_id: videoId,
+          content_type: "video",
+          published_at: publishedAt,
+          last_seen_at: "2026-07-20T00:00:00.000Z",
+          view_count: null,
+          player_last_observed_at: null,
+          next_last_observed_at: null,
+          video_change_probability: null,
+          like_count: null,
+          comment_count: null,
+          access_status: "private",
+        });
+        state.enrichTerminalSchedule.set(contentKey, schedule);
+      },
+    });
+    const fetched = [];
+    await executeIncrementalVideo({
+      plan: {
+        ...plan(),
+        capacity: { ...plan().capacity, player_cap: 20, next_cap: 0 },
+      },
+      runId: `incremental:terminal-recheck:${mode}:${schedule}`,
+      startedAt: "2026-07-20T00:00:00.000Z",
+      query: fixture.query,
+      withTransaction: fixture.withTransaction,
+      getChannelSnapshot: async () => ({
+        async scanUploads() {
+          return {
+            playlist_id: "UUvideo",
+            entries: [{
+              id: "known-anchor",
+              position: 1,
+              content_type: "video",
+              title: "Known",
+              published_day: "2026-07-10",
+            }],
+            pages: 1,
+            item_count: 1,
+            parse_gap_count: 0,
+            anchor_matched: true,
+            matched_anchor_id: "known-anchor",
+            stop_reason: "anchor_matched",
+            terminal_reason: "anchor_matched",
+            complete: true,
+            raw: { engine: "youtubei.js@test" },
+          };
+        },
+      }),
+      fetchDetail: async (fetchedVideoId) => {
+        fetched.push(fetchedVideoId);
+        if (fetchError) throw fetchError;
+        return detail(fetchedVideoId, 123);
+      },
+    });
+    return { contentKey, fetched, fixture };
+  }
+
+  const clockFuture = await runScenario({
+    mode: "clock",
+    schedule: "future",
+    videoId: "terminal-clock-future",
+    publishedAt: "2026-07-19T00:00:00.000Z",
+  });
+  const queueFuture = await runScenario({
+    mode: "queue",
+    schedule: "future",
+    videoId: "terminal-queue-future",
+    publishedAt: "2026-07-19T00:00:00.000Z",
+  });
+  const queueDue = await runScenario({
+    mode: "queue",
+    schedule: "due",
+    videoId: "terminal-queue-due",
+    publishedAt: "2026-01-01T00:00:00.000Z",
+  });
+  const clockDue = await runScenario({
+    mode: "clock",
+    schedule: "due",
+    videoId: "terminal-clock-due",
+    publishedAt: "2026-01-01T00:00:00.000Z",
+  });
+  const failedClockDue = await runScenario({
+    mode: "clock",
+    schedule: "due",
+    videoId: "terminal-clock-failed",
+    publishedAt: "2026-01-01T00:00:00.000Z",
+    fetchError: new Error("temporary Player timeout"),
+  });
+
+  assert.equal(clockFuture.fetched.includes("terminal-clock-future"), false);
+  assert.equal(queueFuture.fetched.includes("terminal-queue-future"), false);
+  assert.equal(queueDue.fetched.includes("terminal-queue-due"), false);
+  assert.equal(clockDue.fetched.filter((videoId) => videoId === "terminal-clock-due").length, 1);
+  assert.equal(clockDue.fixture.state.enrichTerminalSchedule.has(clockDue.contentKey), false);
+  assert.equal(
+    failedClockDue.fetched.filter((videoId) => videoId === "terminal-clock-failed").length,
+    1,
+  );
+  assert.equal(
+    failedClockDue.fixture.state.enrichTerminalSchedule.get(failedClockDue.contentKey),
+    "future",
+  );
 });
 
 test("shared Video detail storage preserves an explicit terminal access evidence source", async () => {

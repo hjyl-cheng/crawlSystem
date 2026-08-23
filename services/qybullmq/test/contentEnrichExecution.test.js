@@ -49,6 +49,7 @@ function publicDetail(videoId, overrides = {}) {
     published_at: "2026-08-01T12:00:00.000Z",
     published_at_precision: "second",
     view_count: 123,
+    view_count_text: "123",
     duration_seconds: 90,
     access_status: "public",
     content_type_signals: {
@@ -120,6 +121,7 @@ class InMemoryExecutionRepository {
     let done = 0;
     let terminal = 0;
     let retryable = 0;
+    let deadLetter = 0;
     let skipped = 0;
     for (const outcome of outcomes) {
       const row = this.rows.get(outcome.task_id);
@@ -149,12 +151,18 @@ class InMemoryExecutionRepository {
       } else if (outcome.kind === "terminal") {
         row.status = "terminal";
         row.last_success_at = outcome.detail ? observedAt.toISOString() : row.last_success_at;
+        row.next_retry_at = outcome.next_retry_at ?? null;
         terminal += 1;
-      } else {
+      } else if (outcome.kind === "retryable") {
         row.status = "failed";
         row.attempts += 1;
         row.next_retry_at = outcome.next_retry_at;
         retryable += 1;
+      } else if (outcome.kind === "dead_letter") {
+        row.status = "dead_letter";
+        row.attempts += 1;
+        row.next_retry_at = null;
+        deadLetter += 1;
       }
     }
     for (const ref of unattemptedTasks) {
@@ -167,7 +175,7 @@ class InMemoryExecutionRepository {
       this.hashBatches.push([...new Set(changedKeys)].sort());
       this.publications.push(channelId);
     }
-    return { done, terminal, retryable, skipped };
+    return { done, terminal, retryable, dead_letter: deadLetter, skipped };
   }
 }
 
@@ -218,6 +226,25 @@ test("Enrich Worker writes detail, closes the Task, refreshes Item Hash, and rec
   assert.deepEqual(repository.publications, ["UC-enrich"]);
 });
 
+test("an incomplete public detail stays retryable instead of recording false completion", async () => {
+  const repository = new InMemoryExecutionRepository([task("incomplete-public", 2)]);
+
+  const result = await executor(repository, async (videoId) => publicDetail(videoId, {
+    duration_seconds: null,
+    view_count: null,
+    view_count_text: null,
+  })).execute(job([["incomplete-public", 2]]));
+
+  const row = repository.rows.get("incomplete-public");
+  assert.equal(result.done, 0);
+  assert.equal(result.retryable, 1);
+  assert.equal(row.status, "failed");
+  assert.equal(row.attempts, 1);
+  assert.equal(row.last_enriched_at, null);
+  assert.deepEqual(repository.hashBatches, []);
+  assert.deepEqual(repository.publications, []);
+});
+
 test("authoritative private and unavailable evidence updates access state and closes the Task", async () => {
   const repository = new InMemoryExecutionRepository([
     task("private-video", 2),
@@ -231,8 +258,10 @@ test("authoritative private and unavailable evidence updates access state and cl
   assert.equal(result.terminal, 2);
   assert.equal(repository.rows.get("private-video").status, "terminal");
   assert.equal(repository.rows.get("private-video").access_status, "private");
+  assert.equal(repository.rows.get("private-video").next_retry_at, "2026-08-30T00:00:00.000Z");
   assert.equal(repository.rows.get("gone-video").status, "terminal");
   assert.equal(repository.rows.get("gone-video").access_status, "unavailable");
+  assert.equal(repository.rows.get("gone-video").next_retry_at, "2026-08-30T00:00:00.000Z");
 });
 
 test("an authoritative terminal error preserves its access evidence source", async () => {
@@ -267,6 +296,26 @@ test("retryable failures increment attempts and use bounded exponential backoff"
   assert.equal(contentEnrichRetryDelayMs(20, { baseMs: 1_000, maxMs: 8_000 }), 8_000);
   assert.deepEqual(repository.hashBatches, []);
   assert.deepEqual(repository.publications, []);
+});
+
+test("the cumulative retry budget dead-letters a Task and makes duplicate execution a skip", async () => {
+  const repository = new InMemoryExecutionRepository([
+    task("retry-exhausted", 5, { attempts: 3 }),
+  ]);
+  const worker = executor(repository, async () => {
+    throw new Error("temporary upstream timeout");
+  }, { maxAttempts: 4 });
+
+  const exhausted = await worker.execute(job([["retry-exhausted", 5]]));
+  const duplicate = await worker.execute(job([["retry-exhausted", 5]]));
+
+  const row = repository.rows.get("retry-exhausted");
+  assert.equal(exhausted.retryable, 0);
+  assert.equal(exhausted.dead_letter, 1);
+  assert.equal(row.status, "dead_letter");
+  assert.equal(row.attempts, 4);
+  assert.equal(row.next_retry_at, null);
+  assert.equal(duplicate.skipped, 1);
 });
 
 test("duplicate, completed, and stale-generation Jobs are idempotent skips", async () => {
@@ -419,6 +468,30 @@ test("a Route failure durably retries the attempted Task and releases untouched 
   const resumed = await worker.execute(job([["rate-limited", 9], ["after-rotation", 10]]));
   assert.equal(resumed.done, 1);
   assert.equal(repository.rows.get("after-rotation").status, "done");
+});
+
+test("a Route failure does not claim a durable checkpoint after its lease expires", async () => {
+  const repository = new InMemoryExecutionRepository([
+    task("expired-rate-limit", 11),
+  ]);
+  const routeError = Object.assign(new Error("HTTP 429 after lease expiry"), {
+    youtube_failure_decision: { kind: "youtube_rate_limited", retry_mode: "new_identity" },
+  });
+  let clockReads = 0;
+  const worker = executor(repository, async () => {
+    throw routeError;
+  }, {
+    now: () => new Date(clockReads++ === 0 ? NOW : "2026-08-23T00:02:00.000Z"),
+  });
+
+  await assert.rejects(
+    worker.execute(job([["expired-rate-limit", 11]])),
+    (error) => error === routeError && error.content_enrich_checkpoint_persisted !== true,
+  );
+
+  const row = repository.rows.get("expired-rate-limit");
+  assert.equal(row.status, "running");
+  assert.equal(row.attempts, 0);
 });
 
 test("PostgreSQL settlement fences the Task and runs Content, Hash, and Publication in one transaction", async () => {

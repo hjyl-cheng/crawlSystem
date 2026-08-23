@@ -6,7 +6,10 @@ test("Content Enrich schema persists dispatch fencing and defaults cutover owner
   const schema = await readFile(new URL("../src/schema.sql", import.meta.url), "utf8");
 
   assert.match(schema, /content_enrich_tasks ADD COLUMN IF NOT EXISTS dispatch_generation BIGINT NOT NULL DEFAULT 0/);
-  assert.match(schema, /content_enrich_tasks_status_check[\s\S]*'queued'[\s\S]*'leased'[\s\S]*'running'[\s\S]*'terminal'/);
+  assert.match(
+    schema,
+    /content_enrich_tasks_status_check\s+CHECK \(status IN \([^;]*'dead_letter'[^;]*\)\);/,
+  );
   assert.match(schema, /setting_key,value_json[\s\S]*'content_enrich_dispatch'[\s\S]*'\{"mode":"clock"\}'::jsonb/);
   assert.match(schema, /'content_enrich_dispatch_cursor'[\s\S]*'\{"channel_id":""\}'::jsonb/);
   assert.match(schema, /'content_enrich_dispatch_mutex'[\s\S]*'\{"owner":null,"expires_at":null\}'::jsonb/);
@@ -23,7 +26,7 @@ test("fresh Crawler bootstrap includes the complete Content Enrich dispatch cont
   assert.match(bootstrap, /dispatch_generation bigint DEFAULT 0 NOT NULL/);
   assert.match(
     bootstrap,
-    /content_enrich_tasks_status_check[\s\S]*'queued'[\s\S]*'leased'[\s\S]*'running'[\s\S]*'terminal'/,
+    /content_enrich_tasks_status_check CHECK \(\(status = ANY \(ARRAY\[[^;\n]*'dead_letter'[^;\n]*\]\)\)\)/,
   );
   assert.match(bootstrap, /CREATE INDEX idx_crawler_content_enrich_tasks_dispatch/);
   assert.match(bootstrap, /CREATE INDEX idx_crawler_content_enrich_tasks_lease_owner/);

@@ -32,6 +32,7 @@ import {
   ContentEnrichDispatcher,
   PostgresContentEnrichDispatchRepository,
 } from "./contentEnrichDispatch.js";
+import { dispatchContentEnrichForController } from "./controllerContentEnrichDispatch.js";
 import {
   IncrementalAgentBacklog,
   IncrementalAgentBatcher,
@@ -2507,16 +2508,10 @@ async function maybeReconcileAutomaticPublicationOnboarding(actions, now = Date.
 async function tick() {
   const stats = await getQueueStats(queues);
   const actions = [];
-  const contentEnrichDispatch = await contentEnrichDispatcher.dispatchAvailable();
-  if (
-    contentEnrichDispatch.enqueued > 0
-    || contentEnrichDispatch.recovered > 0
-    || contentEnrichDispatch.existing > 0
-    || contentEnrichDispatch.released > 0
-    || contentEnrichDispatch.failed > 0
-  ) {
-    actions.push({ action: "dispatch-content-enrich", ...contentEnrichDispatch });
-  }
+  await dispatchContentEnrichForController({
+    dispatcher: contentEnrichDispatcher,
+    actions,
+  });
   await reconcileQueryQualityQueue(actions);
   let queryScheduler = await getQueryScheduler();
   queryScheduler = await resumeLegacyAutomaticFinalization(queryScheduler, actions);

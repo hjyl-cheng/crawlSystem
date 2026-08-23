@@ -4,6 +4,7 @@ import {
   CONTENT_ENRICH_DISPATCH_MUTEX_SETTING_KEY,
   loadContentEnrichMode,
 } from "./contentEnrichMode.js";
+import { DORMANT_WINDOW_DAYS } from "./channelDormancy.js";
 import { safeJobId } from "./queues.js";
 
 const OPEN_QUEUE_STATES = Object.freeze([
@@ -504,18 +505,39 @@ export class PostgresContentEnrichDispatchRepository {
       );
       const selected = await client.query(
         `WITH eligible_channels AS (
-           SELECT channel_id,min(priority) AS priority,
-                  CASE WHEN channel_id>$3::text THEN 0 ELSE 1 END AS cursor_partition
-           FROM crawler.content_enrich_tasks
-           WHERE job_type='player-refresh'
-             AND status IN ('queued','failed')
-             AND lease_owner IS NULL
-             AND COALESCE(next_retry_at,clock_timestamp())<=clock_timestamp()
-             AND NOT (channel_id=ANY($4::text[]))
-           GROUP BY channel_id
-           ORDER BY min(priority),
-                    CASE WHEN channel_id>$3::text THEN 0 ELSE 1 END,
-                    channel_id
+           SELECT task.channel_id,min(task.priority) AS priority,
+                  min(CASE
+                    WHEN registry.status='active' AND (
+                      content.published_at IS NULL
+                      OR content.published_at>=clock_timestamp()-($5::int*interval '1 day')
+                    ) THEN 0
+                    WHEN registry.status='active' THEN 1
+                    ELSE 2
+                  END) AS dispatch_tier,
+                  CASE WHEN task.channel_id>$3::text THEN 0 ELSE 1 END AS cursor_partition
+           FROM crawler.content_enrich_tasks task
+           JOIN crawler.contents content ON content.content_key=task.content_key
+           JOIN crawler.channels registry ON registry.channel_id=task.channel_id
+           WHERE task.job_type='player-refresh'
+             AND (
+               task.status IN ('queued','failed')
+               OR (task.status='terminal' AND task.next_retry_at IS NOT NULL)
+             )
+             AND task.lease_owner IS NULL
+             AND COALESCE(task.next_retry_at,clock_timestamp())<=clock_timestamp()
+             AND NOT (task.channel_id=ANY($4::text[]))
+           GROUP BY task.channel_id
+           ORDER BY min(CASE
+                      WHEN registry.status='active' AND (
+                        content.published_at IS NULL
+                        OR content.published_at>=clock_timestamp()-($5::int*interval '1 day')
+                      ) THEN 0
+                      WHEN registry.status='active' THEN 1
+                      ELSE 2
+                    END),
+                    min(task.priority),
+                    CASE WHEN task.channel_id>$3::text THEN 0 ELSE 1 END,
+                    task.channel_id
            LIMIT $1
          )
          SELECT chosen.*
@@ -523,18 +545,32 @@ export class PostgresContentEnrichDispatchRepository {
          JOIN LATERAL (
            SELECT task.*
            FROM crawler.content_enrich_tasks task
+           JOIN crawler.contents content ON content.content_key=task.content_key
+           JOIN crawler.channels registry ON registry.channel_id=task.channel_id
            WHERE task.channel_id=channel.channel_id
              AND task.job_type='player-refresh'
-             AND task.status IN ('queued','failed')
+             AND (
+               task.status IN ('queued','failed')
+               OR (task.status='terminal' AND task.next_retry_at IS NOT NULL)
+             )
              AND task.lease_owner IS NULL
              AND COALESCE(task.next_retry_at,clock_timestamp())<=clock_timestamp()
-           ORDER BY task.priority,task.created_at,task.task_id
+           ORDER BY CASE
+                      WHEN registry.status='active' AND (
+                        content.published_at IS NULL
+                        OR content.published_at>=clock_timestamp()-($5::int*interval '1 day')
+                      ) THEN 0
+                      WHEN registry.status='active' THEN 1
+                      ELSE 2
+                    END,
+                    task.priority,task.created_at,task.task_id
            LIMIT $2
-           FOR UPDATE SKIP LOCKED
+           FOR UPDATE OF task SKIP LOCKED
          ) chosen ON true
-         ORDER BY channel.priority,channel.cursor_partition,channel.channel_id,
+         ORDER BY channel.dispatch_tier,channel.priority,
+                  channel.cursor_partition,channel.channel_id,
                   chosen.priority,chosen.created_at,chosen.task_id`,
-        [jobLimit, taskLimit, channelCursor, excludedChannels],
+        [jobLimit, taskLimit, channelCursor, excludedChannels, DORMANT_WINDOW_DAYS],
       );
       const grouped = new Map();
       for (const row of selected.rows) {
@@ -556,14 +592,20 @@ export class PostgresContentEnrichDispatchRepository {
            )
            UPDATE crawler.content_enrich_tasks task
            SET status='leased',dispatch_generation=input.dispatch_generation,
+               attempts=CASE WHEN task.status='terminal' THEN 0 ELSE task.attempts END,
+               next_retry_at=CASE WHEN task.status='terminal' THEN NULL ELSE task.next_retry_at END,
                lease_owner=$2,
                lease_expires_at=clock_timestamp()+($3::bigint*interval '1 millisecond'),
                updated_at=now()
            FROM input
            WHERE task.task_id=input.task_id
              AND task.job_type='player-refresh'
-             AND task.status IN ('queued','failed')
+             AND (
+               task.status IN ('queued','failed')
+               OR (task.status='terminal' AND task.next_retry_at IS NOT NULL)
+             )
              AND task.lease_owner IS NULL
+             AND COALESCE(task.next_retry_at,clock_timestamp())<=clock_timestamp()
            RETURNING task.*`,
           [JSON.stringify(references), jobId, durationMs],
         );

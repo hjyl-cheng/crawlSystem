@@ -45,6 +45,11 @@ function isoAfter(observedAt, milliseconds) {
   return new Date(timestamp + milliseconds).toISOString();
 }
 
+export function videoAccessRecheckAt(accessStatus, observedAt) {
+  if (!["private", "unavailable"].includes(text(accessStatus))) return null;
+  return isoAfter(observedAt, 7 * 24 * 60 * 60 * 1000);
+}
+
 function retainedTerminalDisposition(priorDisposition, observedAt) {
   if (text(priorDisposition?.kind) !== "terminal_excluded") return null;
   const reasonCode = text(priorDisposition?.reason_code);
@@ -132,7 +137,7 @@ export function resolveVideoDisposition({
   }
 
   if (["private", "unavailable"].includes(accessStatus)) {
-    const nextAttemptAt = isoAfter(observedAt, 7 * 24 * 60 * 60 * 1000);
+    const nextAttemptAt = videoAccessRecheckAt(accessStatus, observedAt);
     return {
       version: VIDEO_DISPOSITION_VERSION,
       kind: "terminal_excluded",

@@ -21,6 +21,7 @@ import { resolveYoutubeContentType } from "./youtubeContentType.js";
 import { fullVideoStorageAction } from "./fullVideoContentStore.js";
 import {
   resolveVideoDisposition,
+  videoAccessRecheckAt,
   videoDispositionSummary,
 } from "./videoDisposition.js";
 import {
@@ -536,6 +537,7 @@ export async function queueRefreshTask(client, {
   observationId,
   jobType,
   error,
+  terminalRecheckAt = null,
 }) {
   await client.query(
     `INSERT INTO crawler.content_enrich_tasks (
@@ -545,7 +547,10 @@ export async function queueRefreshTask(client, {
      ) VALUES ($1,$2,$3,$4,'queued',10,0,'{}'::jsonb,$7,$5,$6,now(),now())
      ON CONFLICT (content_key,job_type) DO UPDATE
      SET status=CASE
+           WHEN crawler.content_enrich_tasks.status='terminal'
+             AND $8::timestamptz IS NOT NULL THEN 'terminal'
            WHEN crawler.content_enrich_tasks.status IN ('done','terminal','skipped') THEN 'queued'
+           WHEN crawler.content_enrich_tasks.status='dead_letter' THEN 'dead_letter'
            WHEN crawler.content_enrich_tasks.status IN ('leased','running')
              AND crawler.content_enrich_tasks.lease_expires_at>now()
            THEN crawler.content_enrich_tasks.status
@@ -554,14 +559,22 @@ export async function queueRefreshTask(client, {
          END,
          priority=LEAST(crawler.content_enrich_tasks.priority,10),
          attempts=CASE
+           WHEN crawler.content_enrich_tasks.status='terminal'
+             AND $8::timestamptz IS NOT NULL THEN 1
            WHEN crawler.content_enrich_tasks.status IN ('done','terminal','skipped') THEN 0
            ELSE crawler.content_enrich_tasks.attempts END,
          error_message=EXCLUDED.error_message,
          requested_by_run_id=EXCLUDED.requested_by_run_id,
          requested_observation_id=EXCLUDED.requested_observation_id,
          next_retry_at=CASE
+           WHEN crawler.content_enrich_tasks.status='terminal'
+             AND $8::timestamptz IS NOT NULL THEN $8::timestamptz
            WHEN crawler.content_enrich_tasks.status IN ('done','terminal','skipped') THEN now()
            ELSE crawler.content_enrich_tasks.next_retry_at END,
+         last_attempt_at=CASE
+           WHEN crawler.content_enrich_tasks.status='terminal'
+             AND $8::timestamptz IS NOT NULL THEN now()
+           ELSE crawler.content_enrich_tasks.last_attempt_at END,
          lease_owner=CASE
            WHEN crawler.content_enrich_tasks.status IN ('leased','running')
              AND crawler.content_enrich_tasks.lease_expires_at>now()
@@ -579,6 +592,7 @@ export async function queueRefreshTask(client, {
       runId,
       observationId,
       String(error?.message || error || "detail collection deferred").slice(0, 2000),
+      terminalRecheckAt,
     ],
   );
 }
@@ -1449,6 +1463,7 @@ async function updateSampledContent(client, {
       observationId,
       jobType: "player-refresh",
       error: capture?.error,
+      terminalRecheckAt: videoAccessRecheckAt(row.access_status, observedAt),
     });
     return { success: false, viewDelta: null, engagementChanged: false };
   }
@@ -1461,16 +1476,20 @@ async function updateSampledContent(client, {
     changeAlpha,
   });
   const taskStatus = TERMINAL_ENRICH_ACCESS_STATUSES.has(applied.accessStatus) ? "terminal" : "done";
+  const nextRetryAt = videoAccessRecheckAt(applied.accessStatus, observedAt);
   await client.query(
     `UPDATE crawler.content_enrich_tasks
-     SET status=$3,last_success_at=$2,next_retry_at=NULL,error_message=NULL,
+     SET status=$3,last_success_at=$2,
+         attempts=CASE WHEN status='terminal' THEN 0 ELSE attempts END,
+         next_retry_at=$4,error_message=NULL,
          lease_owner=NULL,lease_expires_at=NULL,updated_at=now()
      WHERE content_key=$1 AND job_type IN ('player-refresh','next-refresh')
        AND (
          status IN ('queued','failed')
          OR (status IN ('leased','running') AND lease_expires_at<=now())
+         OR (status='terminal' AND next_retry_at IS NOT NULL AND next_retry_at<=now())
        )`,
-    [row.content_key, observedAt, taskStatus],
+    [row.content_key, observedAt, taskStatus, nextRetryAt],
   );
   return applied;
 }
@@ -1705,13 +1724,19 @@ async function recordVideoCycle({
                             AND COALESCE(task.next_retry_at,now())<=now())
                           OR (task.status IN ('leased','running')
                             AND task.lease_expires_at<=now())
+                          OR (task.status='terminal'
+                            AND task.next_retry_at IS NOT NULL
+                            AND task.next_retry_at<=now())
                         )
                     ) AS enrich_pending,
                     EXISTS (
                       SELECT 1 FROM crawler.content_enrich_tasks task
                       WHERE task.content_key=content.content_key
                         AND task.job_type='player-refresh'
-                        AND task.status IN ('queued','failed','leased','running')
+                        AND (
+                          task.status IN ('queued','failed','leased','running')
+                          OR (task.status='terminal' AND task.next_retry_at IS NOT NULL)
+                        )
                     ) AS player_enrich_open,
                     EXISTS (
                       SELECT 1 FROM crawler.content_enrich_tasks task
@@ -1719,7 +1744,14 @@ async function recordVideoCycle({
                         AND task.job_type='player-refresh'
                         AND task.status IN ('leased','running')
                         AND task.lease_expires_at>now()
-                    ) AS player_enrich_leased
+                    ) AS player_enrich_leased,
+                    EXISTS (
+                      SELECT 1 FROM crawler.content_enrich_tasks task
+                      WHERE task.content_key=content.content_key
+                        AND task.job_type='player-refresh'
+                        AND task.status='terminal'
+                        AND task.next_retry_at>now()
+                    ) AS player_enrich_terminal_waiting
              FROM crawler.contents content
              WHERE content.channel_id=$1
                AND content.content_type IN ('video','short','live')
@@ -1727,6 +1759,7 @@ async function recordVideoCycle({
            SELECT candidate.*
            FROM candidate
            WHERE NOT candidate.player_enrich_leased
+             AND NOT candidate.player_enrich_terminal_waiting
              AND ($4::boolean OR NOT candidate.player_enrich_open)
              AND (
                candidate.enrich_pending

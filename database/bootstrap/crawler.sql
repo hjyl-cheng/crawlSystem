@@ -1563,7 +1563,7 @@ CREATE TABLE crawler.content_enrich_tasks (
     dispatch_generation bigint DEFAULT 0 NOT NULL,
     CONSTRAINT content_enrich_tasks_dispatch_generation_check CHECK ((dispatch_generation >= 0)),
     CONSTRAINT content_enrich_tasks_job_type_check CHECK ((job_type = ANY (ARRAY['date-resolve'::text, 'duration-resolve'::text, 'view-resolve'::text, 'stats-resolve'::text, 'player-refresh'::text, 'next-refresh'::text]))),
-    CONSTRAINT content_enrich_tasks_status_check CHECK ((status = ANY (ARRAY['queued'::text, 'leased'::text, 'running'::text, 'done'::text, 'failed'::text, 'terminal'::text, 'skipped'::text])))
+    CONSTRAINT content_enrich_tasks_status_check CHECK ((status = ANY (ARRAY['queued'::text, 'leased'::text, 'running'::text, 'done'::text, 'failed'::text, 'terminal'::text, 'dead_letter'::text, 'skipped'::text])))
 );
 
 

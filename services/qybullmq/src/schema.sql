@@ -2193,7 +2193,9 @@ CHECK (job_type IN (
 ));
 ALTER TABLE crawler.content_enrich_tasks DROP CONSTRAINT IF EXISTS content_enrich_tasks_status_check;
 ALTER TABLE crawler.content_enrich_tasks ADD CONSTRAINT content_enrich_tasks_status_check
-CHECK (status IN ('queued', 'leased', 'running', 'done', 'failed', 'terminal', 'skipped'));
+CHECK (status IN (
+  'queued', 'leased', 'running', 'done', 'failed', 'terminal', 'dead_letter', 'skipped'
+));
 ALTER TABLE crawler.content_enrich_tasks DROP CONSTRAINT IF EXISTS content_enrich_tasks_dispatch_generation_check;
 ALTER TABLE crawler.content_enrich_tasks ADD CONSTRAINT content_enrich_tasks_dispatch_generation_check
 CHECK (dispatch_generation >= 0);
@@ -2467,6 +2469,7 @@ SET
       OR duplicate_task.status IN ('queued','leased','running') THEN 'queued'
     WHEN survivor_task.status='failed' OR duplicate_task.status='failed' THEN 'failed'
     WHEN survivor_task.status='terminal' OR duplicate_task.status='terminal' THEN 'terminal'
+    WHEN survivor_task.status='dead_letter' OR duplicate_task.status='dead_letter' THEN 'dead_letter'
     ELSE 'skipped'
   END,
   priority=LEAST(survivor_task.priority,duplicate_task.priority),

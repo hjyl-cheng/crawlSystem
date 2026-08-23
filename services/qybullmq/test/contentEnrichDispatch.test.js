@@ -79,7 +79,9 @@ class InMemoryDispatchRepository {
     }
     const eligible = [...this.rows.values()]
       .filter((row) => row.job_type === "player-refresh"
-        && ["queued", "failed"].includes(row.status)
+        && (["queued", "failed"].includes(row.status)
+          || (row.status === "terminal" && row.next_retry_at != null))
+        && (row.next_retry_at == null || Date.parse(row.next_retry_at) <= now.getTime())
         && !row.lease_owner
         && !excludedChannels.has(row.channel_id))
       .sort((left, right) => left.priority - right.priority
@@ -93,6 +95,10 @@ class InMemoryDispatchRepository {
       for (const leasedTask of leased) {
         const row = this.rows.get(leasedTask.task_id);
         row.dispatch_generation = leasedTask.dispatch_generation;
+        if (row.status === "terminal") {
+          row.attempts = 0;
+          row.next_retry_at = null;
+        }
         row.status = "leased";
         row.lease_owner = jobId;
         row.lease_expires_at = leaseExpiresAt.toISOString();
@@ -181,6 +187,47 @@ test("Controller does not lease more work at or above the queue High Water", asy
   assert.equal(result.reason, "high_water");
   assert.equal(repository.leaseCalls, 0);
   assert.equal(queue.jobs.size, 4);
+});
+
+test("Controller opens only a due terminal access recheck as one deterministic new generation", async () => {
+  const repository = new InMemoryDispatchRepository([
+    task("terminal-future", "UC-terminal-future", {
+      status: "terminal",
+      attempts: 4,
+      dispatch_generation: 7,
+      next_retry_at: "2026-08-24T00:00:00.000Z",
+    }),
+    task("terminal-due", "UC-terminal-due", {
+      status: "terminal",
+      attempts: 6,
+      dispatch_generation: 11,
+      next_retry_at: "2026-08-22T00:00:00.000Z",
+    }),
+  ]);
+  const queue = queueFixture();
+  const controller = dispatcher(repository, queue, { batchSize: 1 });
+
+  const first = await controller.dispatchAvailable();
+  const due = repository.rows.get("terminal-due");
+  const future = repository.rows.get("terminal-future");
+  const expectedJobId = contentEnrichJobId({
+    channelId: due.channel_id,
+    tasks: [{ task_id: due.task_id, dispatch_generation: 12 }],
+  });
+
+  assert.equal(first.enqueued, 1);
+  assert.equal(due.status, "leased");
+  assert.equal(due.attempts, 0);
+  assert.equal(due.next_retry_at, null);
+  assert.equal(due.dispatch_generation, 12);
+  assert.equal(due.lease_owner, expectedJobId);
+  assert.equal(future.status, "terminal");
+  assert.equal(future.dispatch_generation, 7);
+
+  const duplicate = await controller.dispatchAvailable();
+  assert.equal(duplicate.enqueued, 0);
+  assert.equal(duplicate.existing, 1);
+  assert.equal(queue.jobs.size, 1);
 });
 
 test("Controller refreshes leases for already queued Jobs even at High Water", async () => {
@@ -654,10 +701,13 @@ test("PostgreSQL fair claim uses one locked player-refresh selection with SKIP L
   assert.match(expiredRunning, /SET status='queued',lease_owner=NULL,lease_expires_at=NULL/);
   assert.match(claim, /job_type='player-refresh'/);
   assert.match(claim, /JOIN LATERAL/);
-  assert.match(claim, /LIMIT \$2[\s\S]*FOR UPDATE SKIP LOCKED/);
-  assert.match(claim, /GROUP BY channel_id/);
-  assert.match(claim, /COALESCE\(next_retry_at,clock_timestamp\(\)\)<=clock_timestamp\(\)/);
-  assert.match(claim, /NOT \(channel_id=ANY\(\$4::text\[\]\)\)/);
+  assert.match(claim, /LIMIT \$2[\s\S]*FOR UPDATE OF task SKIP LOCKED/);
+  assert.match(claim, /JOIN crawler\.contents content/);
+  assert.match(claim, /JOIN crawler\.channels registry/);
+  assert.match(claim, /GROUP BY task\.channel_id/);
+  assert.match(claim, /AS dispatch_tier/);
+  assert.match(claim, /COALESCE\(task\.next_retry_at,clock_timestamp\(\)\)<=clock_timestamp\(\)/);
+  assert.match(claim, /NOT \(task\.channel_id=ANY\(\$4::text\[\]\)\)/);
 });
 
 test("PostgreSQL fair claim advances a persistent channel cursor between refills", async () => {
@@ -718,13 +768,10 @@ test("PostgreSQL fair claim advances a persistent channel cursor between refills
 
   const selection = statements.find(({ sql }) => sql.includes("SELECT chosen.*"));
   assert.equal(selection.params[2], "UC-middle");
+  assert.equal(selection.params[4], 90);
   assert.match(
     selection.sql,
-    /ORDER BY min\(priority\),[\s\S]*CASE WHEN channel_id>\$3::text THEN 0 ELSE 1 END,[\s\S]*channel_id/,
-  );
-  assert.match(
-    selection.sql,
-    /ORDER BY channel\.priority,channel\.cursor_partition,channel\.channel_id/,
+    /ORDER BY channel\.dispatch_tier,channel\.priority,[\s\S]*channel\.cursor_partition,channel\.channel_id/,
   );
   const cursorUpdate = statements.find(({ sql }) => (
     sql.includes("UPDATE crawler.settings")

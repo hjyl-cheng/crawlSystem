@@ -1,5 +1,6 @@
-import { videoAccessStatus } from "./detailPolicy.js";
+import { hasCompletePublicVideoSurface, videoAccessStatus } from "./detailPolicy.js";
 import { retryableRotaFailure } from "./managedWorkerExecution.js";
+import { videoAccessRecheckAt } from "./videoDisposition.js";
 import { decideYoutubeFailure, youtubeFailureText } from "./youtubeFailurePolicy.js";
 
 const TERMINAL_ACCESS_STATUSES = new Set(["members_only", "private", "unavailable"]);
@@ -14,6 +15,23 @@ function positiveInteger(value, fallback, maximum = Number.MAX_SAFE_INTEGER) {
   const number = Number(value);
   if (!Number.isSafeInteger(number) || number <= 0) return fallback;
   return Math.min(number, maximum);
+}
+
+function emptySettlementSummary() {
+  return {
+    done: 0,
+    terminal: 0,
+    retryable: 0,
+    dead_letter: 0,
+    skipped: 0,
+  };
+}
+
+function combineSettlementSummaries(...summaries) {
+  return summaries.reduce((combined, summary) => {
+    for (const key of Object.keys(combined)) combined[key] += Number(summary?.[key] ?? 0);
+    return combined;
+  }, emptySettlementSummary());
 }
 
 function taskReferences(job) {
@@ -66,8 +84,21 @@ function terminalAccessSource(error) {
   return "youtube_failure_policy";
 }
 
-function detailOutcome(task, detail, observedAt) {
+function detailOutcome(task, detail, observedAt, retryOptions) {
   const accessStatus = videoAccessStatus(detail);
+  if (!TERMINAL_ACCESS_STATUSES.has(accessStatus) && !hasCompletePublicVideoSurface(detail)) {
+    const error = Object.assign(
+      new Error("Content Enrich detail is missing the required public Video surface"),
+      {
+        youtube_failure_decision: {
+          kind: "incomplete_detail",
+          retry_mode: "same_identity",
+          reason_code: "required_public_surface_missing",
+        },
+      },
+    );
+    return failureOutcome(task, error, observedAt, retryOptions);
+  }
   return {
     task_id: task.task_id,
     dispatch_generation: task.dispatch_generation,
@@ -75,6 +106,7 @@ function detailOutcome(task, detail, observedAt) {
     detail,
     access_status: accessStatus,
     observed_at: observedAt.toISOString(),
+    next_retry_at: videoAccessRecheckAt(accessStatus, observedAt),
     error_message: null,
   };
 }
@@ -94,6 +126,7 @@ function failureOutcome(task, error, observedAt, retryOptions) {
       },
       access_status: accessStatus,
       observed_at: observedAt.toISOString(),
+      next_retry_at: videoAccessRecheckAt(accessStatus, observedAt),
       error_message: youtubeFailureText(error),
       failure_decision: decision,
     };
@@ -111,6 +144,24 @@ function failureOutcome(task, error, observedAt, retryOptions) {
     };
   }
   const nextAttempt = Number(task.attempts ?? 0) + 1;
+  const maxAttempts = positiveInteger(retryOptions?.maxAttempts, 8, 100);
+  if (nextAttempt >= maxAttempts) {
+    return {
+      task_id: task.task_id,
+      dispatch_generation: task.dispatch_generation,
+      kind: "dead_letter",
+      detail: null,
+      access_status: null,
+      observed_at: observedAt.toISOString(),
+      next_retry_at: null,
+      error_message: youtubeFailureText(error),
+      failure_decision: {
+        ...decision,
+        retry_exhausted: true,
+        max_attempts: maxAttempts,
+      },
+    };
+  }
   const delayMs = contentEnrichRetryDelayMs(nextAttempt, retryOptions);
   return {
     task_id: task.task_id,
@@ -136,6 +187,7 @@ export class ContentEnrichExecutor {
     clearHeartbeatTimeout = clearTimeout,
     retryBaseMs = 30_000,
     retryMaxMs = 6 * 60 * 60_000,
+    maxAttempts = 8,
   } = {}) {
     if (!repository
         || typeof repository.claimBatch !== "function"
@@ -163,7 +215,11 @@ export class ContentEnrichExecutor {
     );
     this.setHeartbeatTimeout = setHeartbeatTimeout;
     this.clearHeartbeatTimeout = clearHeartbeatTimeout;
-    this.retryOptions = { baseMs: retryBaseMs, maxMs: retryMaxMs };
+    this.retryOptions = {
+      baseMs: retryBaseMs,
+      maxMs: retryMaxMs,
+      maxAttempts: positiveInteger(maxAttempts, 8, 100),
+    };
   }
 
   #startHeartbeat({ jobId, channelId, tasks }) {
@@ -258,6 +314,7 @@ export class ContentEnrichExecutor {
         done: 0,
         terminal: 0,
         retryable: 0,
+        dead_letter: 0,
         skipped: tasks.length,
       };
     }
@@ -284,7 +341,7 @@ export class ContentEnrichExecutor {
             signal: heartbeatControl.signal,
           });
           if (heartbeatControl.signal.aborted) break;
-          outcomes.push(detailOutcome(task, detail, observedAt));
+          outcomes.push(detailOutcome(task, detail, observedAt, this.retryOptions));
         } catch (error) {
           if (heartbeatControl.signal.aborted) break;
           outcomes.push(failureOutcome(task, error, observedAt, this.retryOptions));
@@ -324,13 +381,19 @@ export class ContentEnrichExecutor {
       done: Number(settled?.done ?? 0),
       terminal: Number(settled?.terminal ?? 0),
       retryable: Number(settled?.retryable ?? 0),
+      dead_letter: Number(settled?.dead_letter ?? 0),
       skipped: (tasks.length - claimed.length) + (
         heartbeat.lease_lost ? claimed.length : Number(settled?.skipped ?? 0)
       ),
       heartbeat,
     };
     if (routeError) {
-      routeError.content_enrich_checkpoint_persisted = true;
+      const expectedCheckpoints = outcomes.filter(
+        (outcome) => ["retryable", "dead_letter"].includes(outcome.kind),
+      ).length;
+      const persistedCheckpoints = result.retryable + result.dead_letter;
+      routeError.content_enrich_checkpoint_persisted = expectedCheckpoints > 0
+        && persistedCheckpoints === expectedCheckpoints;
       routeError.content_enrich_result = result;
       throw routeError;
     }
@@ -455,7 +518,37 @@ export class PostgresContentEnrichExecutionRepository {
     });
   }
 
-  settleBatch({
+  async settleBatch({
+    jobId,
+    channelId,
+    outcomes,
+    unattemptedTasks,
+    observedAt,
+  }) {
+    const checkpointOutcomes = outcomes.filter((outcome) => outcome.detail == null);
+    const publicationOutcomes = outcomes.filter((outcome) => outcome.detail != null);
+    const checkpoint = checkpointOutcomes.length > 0 || unattemptedTasks.length > 0
+      ? await this.#settleBatchTransaction({
+          jobId,
+          channelId,
+          outcomes: checkpointOutcomes,
+          unattemptedTasks,
+          observedAt,
+        })
+      : emptySettlementSummary();
+    const publication = publicationOutcomes.length > 0
+      ? await this.#settleBatchTransaction({
+          jobId,
+          channelId,
+          outcomes: publicationOutcomes,
+          unattemptedTasks: [],
+          observedAt,
+        })
+      : emptySettlementSummary();
+    return combineSettlementSummaries(checkpoint, publication);
+  }
+
+  #settleBatchTransaction({
     jobId,
     channelId,
     outcomes,
@@ -522,7 +615,7 @@ export class PostgresContentEnrichExecutionRepository {
         .filter((row) => row.disposition === "outcome" && liveIds.has(row.task.task_id))
         .map((row) => [row.task.task_id, row]));
       const changedKeys = [];
-      const summary = { done: 0, terminal: 0, retryable: 0, skipped: 0 };
+      const summary = emptySettlementSummary();
       for (const outcome of outcomes) {
         const lockedRow = rowsById.get(outcome.task_id);
         if (!lockedRow) {
@@ -546,11 +639,11 @@ export class PostgresContentEnrichExecutionRepository {
           access_status: outcome.access_status,
           failure_decision: outcome.failure_decision ?? null,
         });
-        const updated = outcome.kind === "retryable"
+        const updated = ["retryable", "dead_letter"].includes(outcome.kind)
           ? await client.query(
               `UPDATE crawler.content_enrich_tasks
-               SET status='failed',attempts=attempts+1,next_retry_at=$5,
-                   error_message=$6,result_json=result_json || jsonb_build_object('last_outcome',$7::jsonb),
+               SET status=$5,attempts=attempts+1,next_retry_at=$6,
+                   error_message=$7,result_json=result_json || jsonb_build_object('last_outcome',$8::jsonb),
                    lease_owner=NULL,lease_expires_at=NULL,updated_at=now()
                WHERE task_id=$1 AND channel_id=$2 AND job_type='player-refresh'
                  AND status='running' AND lease_owner=$3 AND dispatch_generation=$4`,
@@ -559,6 +652,7 @@ export class PostgresContentEnrichExecutionRepository {
                 channelId,
                 jobId,
                 outcome.dispatch_generation,
+                outcome.kind === "dead_letter" ? "dead_letter" : "failed",
                 outcome.next_retry_at,
                 outcome.error_message,
                 resultJson,
@@ -566,9 +660,9 @@ export class PostgresContentEnrichExecutionRepository {
             )
           : await client.query(
               `UPDATE crawler.content_enrich_tasks
-               SET status=$5,next_retry_at=NULL,error_message=$6,
-                   last_success_at=CASE WHEN $7::boolean THEN $8 ELSE last_success_at END,
-                   result_json=result_json || jsonb_build_object('last_outcome',$9::jsonb),
+               SET status=$5,next_retry_at=$6,error_message=$7,
+                   last_success_at=CASE WHEN $8::boolean THEN $9 ELSE last_success_at END,
+                   result_json=result_json || jsonb_build_object('last_outcome',$10::jsonb),
                    lease_owner=NULL,lease_expires_at=NULL,updated_at=now()
                WHERE task_id=$1 AND channel_id=$2 AND job_type='player-refresh'
                  AND status='running' AND lease_owner=$3 AND dispatch_generation=$4`,
@@ -578,6 +672,7 @@ export class PostgresContentEnrichExecutionRepository {
                 jobId,
                 outcome.dispatch_generation,
                 outcome.kind,
+                outcome.next_retry_at ?? null,
                 outcome.error_message,
                 outcome.detail != null,
                 observedAt,

@@ -99,6 +99,7 @@ const contentEnrichExecutor = new ContentEnrichExecutor({
   heartbeatIntervalMs: Number(process.env.CONTENT_ENRICH_HEARTBEAT_MS || 60_000),
   retryBaseMs: Number(process.env.CONTENT_ENRICH_RETRY_BASE_MS || 30_000),
   retryMaxMs: Number(process.env.CONTENT_ENRICH_RETRY_MAX_MS || 6 * 60 * 60_000),
+  maxAttempts: Number(process.env.CONTENT_ENRICH_MAX_ATTEMPTS || 8),
 });
 const defaultMinSubscriberCount = Number(process.env.MIN_SUBSCRIBER_COUNT || 1000);
 const rotaProxyBaseUrl = String(process.env.ROTA_PROXY_BASE_URL || "http://youtube-rota-qy-core:8000");
