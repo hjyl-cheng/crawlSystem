@@ -34,6 +34,8 @@ function detail(videoId, viewCount, { contentType = "video" } = {}) {
     published_at: "2026-07-19T00:00:00.000Z",
     published_at_precision: "second",
     view_count: viewCount,
+    view_count_text: String(viewCount),
+    duration_seconds: 90,
     comment_count: 2,
     comment_count_status: "exact",
     comment_count_source: "youtubejs_comments",
@@ -105,6 +107,7 @@ function databaseFixture({ beforeTransaction = null, enrichMode = "clock" } = {}
     enrichPending: new Set(),
     enrichLeased: new Set(),
     enrichTerminalSchedule: new Map(),
+    enrichTaskStates: new Map(),
     enrichMode,
     channelStatus: "active",
   };
@@ -172,6 +175,51 @@ function databaseFixture({ beforeTransaction = null, enrichMode = "clock" } = {}
         }
         return { rowCount: 1, rows: [] };
       }
+      if (sql.includes("SELECT task.*") && sql.includes("FROM crawler.content_enrich_tasks task")) {
+        const contentKey = params[0];
+        const recorded = state.enrichTaskStates.get(contentKey);
+        if (recorded) return { rowCount: 1, rows: [{ ...recorded }] };
+        if (state.enrichLeased.has(contentKey)) {
+          return {
+            rowCount: 1,
+            rows: [{
+              task_id: `player-refresh:${contentKey}`,
+              status: "leased",
+              attempts: 0,
+              dispatch_generation: 1,
+              lease_live: true,
+              retry_due: true,
+            }],
+          };
+        }
+        if (state.enrichTerminalSchedule.has(contentKey)) {
+          return {
+            rowCount: 1,
+            rows: [{
+              task_id: `player-refresh:${contentKey}`,
+              status: "terminal",
+              attempts: 5,
+              dispatch_generation: 1,
+              lease_live: false,
+              retry_due: state.enrichTerminalSchedule.get(contentKey) === "due",
+            }],
+          };
+        }
+        if (state.enrichPending.has(contentKey)) {
+          return {
+            rowCount: 1,
+            rows: [{
+              task_id: `player-refresh:${contentKey}`,
+              status: "queued",
+              attempts: 0,
+              dispatch_generation: 1,
+              lease_live: false,
+              retry_due: true,
+            }],
+          };
+        }
+        return { rowCount: 0, rows: [] };
+      }
       if (sql.includes("INSERT INTO crawler.contents")) {
         state.contents.push({
           content_key: params[0],
@@ -187,6 +235,7 @@ function databaseFixture({ beforeTransaction = null, enrichMode = "clock" } = {}
           comments_disabled: params[32],
           comments_first_page: params[43] == null ? null : JSON.parse(params[43]),
           access_status: params[35],
+          last_enriched_at: params[40] ? params[39] : null,
         });
         return { rowCount: 1, rows: [] };
       }
@@ -302,6 +351,33 @@ function databaseFixture({ beforeTransaction = null, enrichMode = "clock" } = {}
       }
       if (sql.includes("INSERT INTO crawler.content_enrich_tasks")) {
         const contentKey = params[1];
+        if (sql.includes("jsonb_build_object('last_outcome'")) {
+          const prior = state.enrichTaskStates.get(contentKey);
+          const status = params[4];
+          const incrementsAttempts = params[13] === true;
+          const priorAttempts = Number(
+            prior?.attempts ?? (state.enrichTerminalSchedule.has(contentKey) ? 5 : 0),
+          );
+          const resetsTerminalRound = params[15] === true;
+          const attempts = resetsTerminalRound
+            ? (incrementsAttempts ? 1 : 0)
+            : incrementsAttempts
+              ? (["done", "skipped"].includes(prior?.status) ? 1 : priorAttempts + 1)
+              : priorAttempts;
+          state.enrichTaskStates.set(contentKey, {
+            task_id: prior?.task_id ?? `player-refresh:${contentKey}`,
+            status,
+            attempts,
+            dispatch_generation: prior?.dispatch_generation ?? 1,
+            lease_live: false,
+            retry_due: params[10] != null,
+          });
+          state.enrichPending.delete(contentKey);
+          state.enrichTerminalSchedule.delete(contentKey);
+          if (status === "failed") state.enrichPending.add(contentKey);
+          if (status === "terminal") state.enrichTerminalSchedule.set(contentKey, "future");
+          return { rowCount: 1, rows: [] };
+        }
         if (state.enrichTerminalSchedule.has(contentKey)) {
           const retainsTerminal = /status='terminal'\s+AND \$8::timestamptz IS NOT NULL/.test(sql);
           if (retainsTerminal && params[7]) state.enrichTerminalSchedule.set(contentKey, "future");
@@ -580,6 +656,53 @@ test("Video discovery accounts for every new ID with exactly one disposition", a
   assert.equal(fixture.state.candidateRows.length, 3);
   assert.equal(fixture.state.cursorUpdates[0].anchorVideoIds, null);
   assert.equal(fixture.state.cursorUpdates[0].sourceCursor, null);
+});
+
+test("First-Seen Video keeps an incomplete public detail open for Enrich", async () => {
+  const fixture = databaseFixture();
+  const videoId = "first-seen-incomplete-detail";
+  const contentKey = `UCvideo:video:${videoId}`;
+
+  await executeIncrementalVideo({
+    plan: plan(),
+    runId: "incremental:first-seen-incomplete-detail",
+    startedAt: "2026-07-20T00:00:00.000Z",
+    query: fixture.query,
+    withTransaction: fixture.withTransaction,
+    getChannelSnapshot: async () => ({
+      async scanUploads() {
+        return {
+          playlist_id: "UUvideo",
+          entries: [
+            { id: videoId, position: 1, title: "First-Seen incomplete" },
+            { id: "known-anchor", position: 2, title: "Known" },
+          ],
+          pages: 1,
+          item_count: 2,
+          parse_gap_count: 0,
+          anchor_matched: true,
+          matched_anchor_id: "known-anchor",
+          stop_reason: "anchor_matched",
+          terminal_reason: "anchor_matched",
+          complete: true,
+          raw: { engine: "youtubei.js@test" },
+        };
+      },
+    }),
+    fetchDetail: async (fetchedVideoId) => ({
+      ...detail(fetchedVideoId, 10),
+      duration_seconds: null,
+    }),
+  });
+
+  const content = fixture.state.contents.find((row) => row.content_key === contentKey);
+  assert.equal(content.last_enriched_at, null);
+  assert.deepEqual(
+    (({ status, attempts }) => ({ status, attempts }))(
+      fixture.state.enrichTaskStates.get(contentKey),
+    ),
+    { status: "failed", attempts: 1 },
+  );
 });
 
 test("Video discovery idempotently resolves a deferred candidate and retains its evidence", async () => {
@@ -1874,13 +1997,23 @@ test("scheduled terminal access rechecks remain exclusive to the active Enrich o
   assert.equal(queueDue.fetched.includes("terminal-queue-due"), false);
   assert.equal(clockDue.fetched.filter((videoId) => videoId === "terminal-clock-due").length, 1);
   assert.equal(clockDue.fixture.state.enrichTerminalSchedule.has(clockDue.contentKey), false);
+  assert.deepEqual(
+    (({ status, attempts }) => ({ status, attempts }))(
+      clockDue.fixture.state.enrichTaskStates.get(clockDue.contentKey),
+    ),
+    { status: "done", attempts: 0 },
+  );
   assert.equal(
     failedClockDue.fetched.filter((videoId) => videoId === "terminal-clock-failed").length,
     1,
   );
-  assert.equal(
-    failedClockDue.fixture.state.enrichTerminalSchedule.get(failedClockDue.contentKey),
-    "future",
+  assert.equal(failedClockDue.fixture.state.enrichTerminalSchedule.has(failedClockDue.contentKey), false);
+  assert.equal(failedClockDue.fixture.state.enrichPending.has(failedClockDue.contentKey), true);
+  assert.deepEqual(
+    (({ status, attempts }) => ({ status, attempts }))(
+      failedClockDue.fixture.state.enrichTaskStates.get(failedClockDue.contentKey),
+    ),
+    { status: "failed", attempts: 1 },
   );
 });
 

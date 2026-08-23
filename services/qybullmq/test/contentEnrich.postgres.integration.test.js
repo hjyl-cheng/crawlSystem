@@ -11,6 +11,7 @@ import {
   ContentEnrichExecutor,
   PostgresContentEnrichExecutionRepository,
 } from "../src/contentEnrichExecution.js";
+import { PostgresContentEnrichObservabilityRepository } from "../src/contentEnrichObservability.js";
 import {
   applyIncrementalVideoDetail,
   queueRefreshTask,
@@ -21,6 +22,57 @@ import { refreshVideoPublicationItemHashes } from "../src/videoPublicationItemSt
 
 const { Pool } = pg;
 const integrationUrl = process.env.CONTENT_ENRICH_POSTGRES_TEST_URL;
+
+async function assertPostgresObservability(pool) {
+  const jobId = `content-enrich-observability:${randomUUID()}`;
+  const repository = new PostgresContentEnrichObservabilityRepository({
+    queryFn: (sql, params) => pool.query(sql, params),
+  });
+  try {
+    const before = await repository.loadSnapshot({ windowMs: 60_000 });
+    await pool.query(
+      `INSERT INTO crawler.task_events (
+         queue_name,job_id,job_name,entity_key,status,payload_json
+       ) VALUES
+         ('youtube-content-enrich',$1,'content-enrich','UC-observability','completed',$2::jsonb),
+         ('youtube-content-enrich',$1 || ':failed','content-enrich','UC-observability','failed',$3::jsonb),
+         ('youtube-content-enrich',$1 || ':legacy','content-enrich','UC-observability','failed',$4::jsonb)`,
+      [
+        jobId,
+        JSON.stringify({
+          claimed: 5,
+          done: 2,
+          retryable: 1,
+          terminal: 1,
+          dead_letter: 1,
+        }),
+        JSON.stringify({
+          content_enrich_result: {
+            claimed: 2,
+            done: 0,
+            retryable: 1,
+            terminal: 0,
+            dead_letter: 0,
+          },
+        }),
+        JSON.stringify({ tasks: [{ task_id: "legacy-event-without-result" }] }),
+      ],
+    );
+    const after = await repository.loadSnapshot({ windowMs: 60_000 });
+    assert.deepEqual(
+      Object.fromEntries(Object.keys(after.outcome_counts).map((key) => [
+        key,
+        after.outcome_counts[key] - before.outcome_counts[key],
+      ])),
+      { claimed: 7, success: 2, retry: 2, terminal: 1, dead_letter: 1 },
+    );
+  } finally {
+    await pool.query(
+      "DELETE FROM crawler.task_events WHERE job_id IN ($1,$1 || ':failed',$1 || ':legacy')",
+      [jobId],
+    ).catch(() => {});
+  }
+}
 
 function transactionRunner(pool) {
   return async (action) => {
@@ -106,7 +158,7 @@ function publicDetail(videoId) {
 test("Content Enrich PostgreSQL lifecycle is fenced, recoverable, and idempotent", {
   skip: !integrationUrl,
   timeout: 60_000,
-}, async () => {
+}, async (context) => {
   const pool = new Pool({ connectionString: integrationUrl, max: 6 });
   const withTransaction = transactionRunner(pool);
   const schema = await readFile(new URL("../src/schema.sql", import.meta.url), "utf8");
@@ -781,7 +833,20 @@ test("Content Enrich PostgreSQL lifecycle is fenced, recoverable, and idempotent
       },
     };
 
-    await assert.rejects(mixedExecutor.execute(mixedJob), (error) => error === publicationFailure);
+    await assert.rejects(mixedExecutor.execute(mixedJob), (error) => {
+      assert.equal(error, publicationFailure);
+      assert.deepEqual(error.content_enrich_result, {
+        requested: 2,
+        claimed: 2,
+        attempted: 2,
+        done: 0,
+        terminal: 0,
+        retryable: 1,
+        dead_letter: 0,
+        skipped: 0,
+      });
+      return true;
+    });
     assert.deepEqual((await pool.query(
       `SELECT content.source_content_id,task.status,task.attempts,task.next_retry_at,
               task.lease_owner,content.last_enriched_at
@@ -952,6 +1017,10 @@ test("Content Enrich PostgreSQL lifecycle is fenced, recoverable, and idempotent
       "UCpriorityADormant",
     ]);
     assert.deepEqual(priorityLease.result.map((batch) => batch.tasks.length), [1, 1, 1]);
+    await context.test(
+      "observability aggregates completed, failed, and legacy Worker events",
+      () => assertPostgresObservability(pool),
+    );
   } finally {
     await pool.query("DROP SCHEMA IF EXISTS publication CASCADE").catch(() => {});
     await pool.query("DROP SCHEMA IF EXISTS crawler CASCADE").catch(() => {});

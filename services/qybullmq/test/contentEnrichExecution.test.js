@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   ContentEnrichExecutor,
   PostgresContentEnrichExecutionRepository,
+  contentEnrichResultFromError,
   contentEnrichRetryDelayMs,
 } from "../src/contentEnrichExecution.js";
 
@@ -191,6 +192,20 @@ function executor(repository, fetchDetail, overrides = {}) {
   });
 }
 
+test("Worker telemetry recovers a persisted Enrich result through an error cause chain", () => {
+  const result = { claimed: 2, retryable: 1 };
+  const routeError = Object.assign(new Error("route checkpoint lost its fence"), {
+    content_enrich_result: result,
+  });
+  const managedError = new AggregateError(
+    [new Error("secondary completion error")],
+    "managed retry checkpoint was not durably persisted",
+    { cause: routeError },
+  );
+
+  assert.equal(contentEnrichResultFromError(managedError), result);
+});
+
 function manualHeartbeatTimer() {
   let callback = null;
   return {
@@ -281,6 +296,33 @@ test("an authoritative terminal error preserves its access evidence source", asy
   assert.equal(row.access_status_source, "yt_dlp_detail");
 });
 
+test("parser and database contract failures dead-letter without fabricating terminal Video evidence", async () => {
+  const repository = new InMemoryExecutionRepository([
+    task("parser-contract", 5),
+    task("database-contract", 6),
+  ]);
+  const parserError = Object.assign(new Error("Player parser contract changed"), {
+    name: "ParserContractError",
+  });
+  const databaseError = Object.assign(new Error("invalid Content row"), {
+    code: "23514",
+  });
+
+  const result = await executor(repository, async (videoId) => {
+    throw videoId === "parser-contract" ? parserError : databaseError;
+  }).execute(job([["parser-contract", 5], ["database-contract", 6]]));
+
+  assert.equal(result.terminal, 0);
+  assert.equal(result.dead_letter, 2);
+  for (const taskId of ["parser-contract", "database-contract"]) {
+    const row = repository.rows.get(taskId);
+    assert.equal(row.status, "dead_letter");
+    assert.equal(row.attempts, 1);
+    assert.equal(row.access_status, "unknown");
+    assert.equal(row.last_enriched_at, null);
+  }
+});
+
 test("retryable failures increment attempts and use bounded exponential backoff", async () => {
   const repository = new InMemoryExecutionRepository([task("retry-video", 4, { attempts: 3 })]);
 
@@ -296,6 +338,25 @@ test("retryable failures increment attempts and use bounded exponential backoff"
   assert.equal(contentEnrichRetryDelayMs(20, { baseMs: 1_000, maxMs: 8_000 }), 8_000);
   assert.deepEqual(repository.hashBatches, []);
   assert.deepEqual(repository.publications, []);
+});
+
+test("retry backoff starts when a slow fetch fails rather than when its batch was claimed", async () => {
+  const repository = new InMemoryExecutionRepository([task("slow-retry", 5)]);
+  let currentTime = new Date(NOW);
+  const worker = executor(repository, async () => {
+    currentTime = new Date("2026-08-23T00:00:10.000Z");
+    throw new Error("temporary upstream timeout after a slow request");
+  }, {
+    now: () => new Date(currentTime),
+    retryBaseMs: 1_000,
+  });
+
+  await worker.execute(job([["slow-retry", 5]]));
+
+  assert.equal(
+    repository.rows.get("slow-retry").next_retry_at,
+    "2026-08-23T00:00:11.000Z",
+  );
 });
 
 test("the cumulative retry budget dead-letters a Task and makes duplicate execution a skip", async () => {

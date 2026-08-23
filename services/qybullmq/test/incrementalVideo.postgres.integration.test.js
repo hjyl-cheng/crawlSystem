@@ -158,6 +158,8 @@ test("incremental Video commits Current and aggregate events atomically", {
             : "2026-07-19T00:00:00.000Z",
           published_at_precision: "second",
           view_count: videoId === "old-video" ? 100 : 10,
+          view_count_text: videoId === "old-video" ? "100" : "10",
+          duration_seconds: 90,
           comment_count: 2,
           comment_count_status: "exact",
           comment_count_source: "youtubejs_comments",
@@ -442,12 +444,21 @@ test("Incremental Video consumes scheduled terminal rechecks only in Clock mode 
         `INSERT INTO crawler.content_enrich_tasks (
            task_id,content_key,channel_id,job_type,status,priority,attempts,next_retry_at
          ) VALUES (
-           $1,$2,$3,'player-refresh','terminal',10,5,
-           CASE WHEN $4::boolean
-             THEN clock_timestamp()-interval '1 second'
-             ELSE clock_timestamp()+interval '7 days' END
+           $1,$2,$3,'player-refresh',$4,10,$5,
+           CASE
+             WHEN $4='dead_letter' THEN NULL
+             WHEN $6::boolean THEN clock_timestamp()-interval '1 second'
+             ELSE clock_timestamp()+interval '7 days'
+           END
          )`,
-        [`player-refresh:${channelId}:${video.videoId}`, contentKey, channelId, video.due],
+        [
+          `player-refresh:${channelId}:${video.videoId}`,
+          contentKey,
+          channelId,
+          video.status ?? "terminal",
+          video.attempts ?? 5,
+          video.due,
+        ],
       );
     }
     await pool.query(
@@ -458,7 +469,7 @@ test("Incremental Video consumes scheduled terminal rechecks only in Clock mode 
     return { anchorId, planId, runId };
   }
 
-  async function executeScenario(channelId, prepared, fetched) {
+  async function executeScenario(channelId, prepared, fetched, fetchResult = null) {
     return executeIncrementalVideo({
       plan: {
         job_id: `incremental__enrich_owner__${channelId}`,
@@ -491,6 +502,7 @@ test("Incremental Video consumes scheduled terminal rechecks only in Clock mode 
       }),
       fetchDetail: async (videoId) => {
         fetched.push(videoId);
+        if (fetchResult) return fetchResult(videoId);
         return {
           id: videoId,
           title: `Public ${videoId}`,
@@ -539,6 +551,9 @@ test("Incremental Video consumes scheduled terminal rechecks only in Clock mode 
 
     const futureVideoId = `clock-future-${suffix}`;
     const dueVideoId = `clock-due-${suffix}`;
+    const incompleteVideoId = `clock-incomplete-${suffix}`;
+    const exhaustedVideoId = `clock-exhausted-${suffix}`;
+    const recoveredDeadLetterVideoId = `clock-dead-recovered-${suffix}`;
     const clockPrepared = await prepareChannel(clockChannelId, [
       {
         videoId: futureVideoId,
@@ -550,17 +565,65 @@ test("Incremental Video consumes scheduled terminal rechecks only in Clock mode 
         publishedAt: "2026-01-01T00:00:00.000Z",
         due: true,
       },
+      {
+        videoId: incompleteVideoId,
+        publishedAt: "2026-01-01T00:00:00.000Z",
+        due: true,
+        status: "queued",
+        attempts: 2,
+      },
+      {
+        videoId: exhaustedVideoId,
+        publishedAt: "2026-01-01T00:00:00.000Z",
+        due: true,
+        status: "failed",
+        attempts: 7,
+      },
+      {
+        videoId: recoveredDeadLetterVideoId,
+        publishedAt: "2026-08-22T00:00:00.000Z",
+        due: false,
+        status: "dead_letter",
+        attempts: 8,
+      },
     ]);
     await pool.query(
       `UPDATE crawler.settings SET value_json='{"mode":"clock"}'::jsonb
        WHERE setting_key='content_enrich_dispatch'`,
     );
     const clockFetched = [];
-    await executeScenario(clockChannelId, clockPrepared, clockFetched);
+    await executeScenario(clockChannelId, clockPrepared, clockFetched, async (videoId) => {
+      if (videoId === exhaustedVideoId) throw new Error("temporary Player timeout");
+      const complete = {
+        id: videoId,
+        title: `Public ${videoId}`,
+        published_at: "2026-01-01T00:00:00.000Z",
+        published_at_precision: "second",
+        view_count: 123,
+        view_count_text: "123",
+        duration_seconds: 90,
+        access_status: "public",
+        availability: "public",
+        content_type_signals: {
+          source: "youtubei_player",
+          canonical_url: `https://www.youtube.com/watch?v=${videoId}`,
+          is_shorts_eligible: false,
+          is_live_content: false,
+          is_live: false,
+          is_upcoming: false,
+          is_live_now: false,
+        },
+        extractor_version: "youtubei.js@test",
+      };
+      return videoId === incompleteVideoId
+        ? { ...complete, duration_seconds: null }
+        : complete;
+    });
     assert.equal(clockFetched.includes(futureVideoId), false);
     assert.equal(clockFetched.filter((videoId) => videoId === dueVideoId).length, 1);
     assert.deepEqual((await pool.query(
-      `SELECT content.source_content_id,task.status,task.attempts,task.next_retry_at
+      `SELECT content.source_content_id,content.last_enriched_at,
+              task.status,task.attempts,task.next_retry_at
        FROM crawler.content_enrich_tasks task
        JOIN crawler.contents content USING (content_key)
        WHERE task.channel_id=$1
@@ -571,18 +634,42 @@ test("Incremental Video consumes scheduled terminal rechecks only in Clock mode 
       status: row.status,
       attempts: row.attempts,
       has_next_retry: row.next_retry_at != null,
+      enriched: row.last_enriched_at != null,
     })), [
+      {
+        source_content_id: recoveredDeadLetterVideoId,
+        status: "done",
+        attempts: 8,
+        has_next_retry: false,
+        enriched: true,
+      },
       {
         source_content_id: dueVideoId,
         status: "done",
         attempts: 0,
         has_next_retry: false,
+        enriched: true,
+      },
+      {
+        source_content_id: exhaustedVideoId,
+        status: "dead_letter",
+        attempts: 8,
+        has_next_retry: false,
+        enriched: false,
       },
       {
         source_content_id: futureVideoId,
         status: "terminal",
         attempts: 5,
         has_next_retry: true,
+        enriched: false,
+      },
+      {
+        source_content_id: incompleteVideoId,
+        status: "failed",
+        attempts: 3,
+        has_next_retry: true,
+        enriched: false,
       },
     ]);
   } finally {
@@ -739,6 +826,8 @@ test("incremental Video rechecks terminal exclusions only when their schedule is
         published_at: "2026-07-19T00:00:00.000Z",
         published_at_precision: "second",
         view_count: 10,
+        view_count_text: "10",
+        duration_seconds: 90,
         access_status: "public",
         availability: "public",
         content_type_signals: {

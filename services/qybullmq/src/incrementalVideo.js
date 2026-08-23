@@ -4,6 +4,10 @@ import {
   CONTENT_ENRICH_CLOCK_MODE,
   loadContentEnrichMode,
 } from "./contentEnrichMode.js";
+import {
+  contentEnrichDetailOutcome,
+  contentEnrichFailureOutcome,
+} from "./contentEnrichPolicy.js";
 import { recordCrawlerObservation } from "./crawlObservationStore.js";
 import {
   isLiveInProgress,
@@ -42,12 +46,6 @@ const EXPLICIT_CONTENT_ACCESS_STATUSES = new Set([
   "private",
   "unavailable",
 ]);
-const TERMINAL_ENRICH_ACCESS_STATUSES = new Set([
-  "members_only",
-  "private",
-  "unavailable",
-]);
-
 function integer(value) {
   if (value === null || value === undefined || value === "") return null;
   const number = Number(value);
@@ -530,6 +528,123 @@ function refreshTaskId(contentKey, jobType) {
   return `${jobType}:${digest}`;
 }
 
+function clockContentEnrichRetryOptions() {
+  return {
+    baseMs: Number(process.env.CONTENT_ENRICH_RETRY_BASE_MS || 30_000),
+    maxMs: Number(process.env.CONTENT_ENRICH_RETRY_MAX_MS || 6 * 60 * 60_000),
+    maxAttempts: Number(process.env.CONTENT_ENRICH_MAX_ATTEMPTS || 8),
+  };
+}
+
+async function prepareClockContentEnrichOutcome(client, {
+  contentKey,
+  jobType,
+  detail = null,
+  error = null,
+}) {
+  const locked = await client.query(
+    `SELECT task.*,
+            COALESCE(
+              task.status IN ('leased','running')
+                AND task.lease_expires_at>clock_timestamp(),
+              false
+            ) AS lease_live,
+            COALESCE(task.next_retry_at<=clock_timestamp(),false) AS retry_due
+     FROM crawler.content_enrich_tasks task
+     WHERE task.content_key=$1 AND task.job_type=$2
+     FOR UPDATE`,
+    [contentKey, jobType],
+  );
+  const currentTask = locked.rows[0] ?? null;
+  if (currentTask?.lease_live === true) return { skipped: true, currentTask, outcome: null };
+  if (currentTask?.status === "terminal" && currentTask.retry_due !== true) {
+    return { skipped: true, currentTask, outcome: null };
+  }
+  const completedAt = new Date();
+  const task = {
+    task_id: currentTask?.task_id ?? refreshTaskId(contentKey, jobType),
+    dispatch_generation: currentTask?.dispatch_generation ?? 0,
+    attempts: ["done", "terminal", "skipped"].includes(currentTask?.status)
+      ? 0
+      : Number(currentTask?.attempts ?? 0),
+  };
+  const retryOptions = clockContentEnrichRetryOptions();
+  const outcome = detail == null
+    ? contentEnrichFailureOutcome(task, error, completedAt, retryOptions)
+    : contentEnrichDetailOutcome(task, detail, completedAt, retryOptions);
+  return { skipped: false, currentTask, outcome };
+}
+
+async function persistClockContentEnrichOutcome(client, {
+  currentTask,
+  outcome,
+  contentKey,
+  channelId,
+  runId,
+  observationId,
+  jobType,
+  observedAt,
+}) {
+  if (!currentTask && outcome.kind === "done") return;
+  const status = outcome.kind === "retryable" ? "failed" : outcome.kind;
+  const incrementsAttempts = ["retryable", "dead_letter"].includes(outcome.kind);
+  const resultJson = JSON.stringify({
+    kind: outcome.kind,
+    observed_at: outcome.observed_at,
+    access_status: outcome.access_status,
+    failure_decision: outcome.failure_decision ?? null,
+    consumer: "clock",
+  });
+  await client.query(
+    `INSERT INTO crawler.content_enrich_tasks (
+       task_id,content_key,channel_id,job_type,status,priority,attempts,
+       result_json,error_message,requested_by_run_id,requested_observation_id,
+       next_retry_at,last_attempt_at,last_success_at,updated_at
+     ) VALUES (
+       $1,$2,$3,$4,$5,10,$6,
+       jsonb_build_object('last_outcome',$7::jsonb),$8,$9,$10,$11,$12,$13,now()
+     )
+     ON CONFLICT (content_key,job_type) DO UPDATE
+     SET status=$5,
+         priority=LEAST(crawler.content_enrich_tasks.priority,10),
+         attempts=CASE
+           WHEN $16::boolean THEN CASE WHEN $14::boolean THEN 1 ELSE 0 END
+           WHEN $14::boolean THEN
+             CASE WHEN crawler.content_enrich_tasks.status IN ('done','skipped')
+               THEN 1 ELSE crawler.content_enrich_tasks.attempts+1 END
+           ELSE crawler.content_enrich_tasks.attempts
+         END,
+         result_json=crawler.content_enrich_tasks.result_json
+           || jsonb_build_object('last_outcome',$7::jsonb),
+         error_message=$8,
+         requested_by_run_id=$9,
+         requested_observation_id=$10,
+         next_retry_at=$11,
+         last_attempt_at=$12,
+         last_success_at=CASE WHEN $15::boolean THEN $13
+           ELSE crawler.content_enrich_tasks.last_success_at END,
+         lease_owner=NULL,lease_expires_at=NULL,updated_at=now()`,
+    [
+      refreshTaskId(contentKey, jobType),
+      contentKey,
+      channelId,
+      jobType,
+      status,
+      incrementsAttempts ? 1 : 0,
+      resultJson,
+      outcome.error_message,
+      runId,
+      observationId,
+      outcome.next_retry_at ?? null,
+      outcome.observed_at,
+      observedAt,
+      incrementsAttempts,
+      outcome.detail != null,
+      currentTask?.status === "terminal",
+    ],
+  );
+}
+
 export async function queueRefreshTask(client, {
   contentKey,
   channelId,
@@ -537,7 +652,6 @@ export async function queueRefreshTask(client, {
   observationId,
   jobType,
   error,
-  terminalRecheckAt = null,
 }) {
   await client.query(
     `INSERT INTO crawler.content_enrich_tasks (
@@ -547,8 +661,6 @@ export async function queueRefreshTask(client, {
      ) VALUES ($1,$2,$3,$4,'queued',10,0,'{}'::jsonb,$7,$5,$6,now(),now())
      ON CONFLICT (content_key,job_type) DO UPDATE
      SET status=CASE
-           WHEN crawler.content_enrich_tasks.status='terminal'
-             AND $8::timestamptz IS NOT NULL THEN 'terminal'
            WHEN crawler.content_enrich_tasks.status IN ('done','terminal','skipped') THEN 'queued'
            WHEN crawler.content_enrich_tasks.status='dead_letter' THEN 'dead_letter'
            WHEN crawler.content_enrich_tasks.status IN ('leased','running')
@@ -559,22 +671,14 @@ export async function queueRefreshTask(client, {
          END,
          priority=LEAST(crawler.content_enrich_tasks.priority,10),
          attempts=CASE
-           WHEN crawler.content_enrich_tasks.status='terminal'
-             AND $8::timestamptz IS NOT NULL THEN 1
            WHEN crawler.content_enrich_tasks.status IN ('done','terminal','skipped') THEN 0
            ELSE crawler.content_enrich_tasks.attempts END,
          error_message=EXCLUDED.error_message,
          requested_by_run_id=EXCLUDED.requested_by_run_id,
          requested_observation_id=EXCLUDED.requested_observation_id,
          next_retry_at=CASE
-           WHEN crawler.content_enrich_tasks.status='terminal'
-             AND $8::timestamptz IS NOT NULL THEN $8::timestamptz
            WHEN crawler.content_enrich_tasks.status IN ('done','terminal','skipped') THEN now()
            ELSE crawler.content_enrich_tasks.next_retry_at END,
-         last_attempt_at=CASE
-           WHEN crawler.content_enrich_tasks.status='terminal'
-             AND $8::timestamptz IS NOT NULL THEN now()
-           ELSE crawler.content_enrich_tasks.last_attempt_at END,
          lease_owner=CASE
            WHEN crawler.content_enrich_tasks.status IN ('leased','running')
              AND crawler.content_enrich_tasks.lease_expires_at>now()
@@ -592,7 +696,6 @@ export async function queueRefreshTask(client, {
       runId,
       observationId,
       String(error?.message || error || "detail collection deferred").slice(0, 2000),
-      terminalRecheckAt,
     ],
   );
 }
@@ -805,6 +908,14 @@ async function upsertFirstSeenContent(client, {
   }
   const contentType = classification.content_type;
   const contentKey = `${channelId}:${contentType}:${entry.id}`;
+  const preparedEnrich = await prepareClockContentEnrichOutcome(client, {
+    contentKey,
+    jobType: "player-refresh",
+    detail,
+    error: capture?.error ?? null,
+  });
+  const detailComplete = preparedEnrich.skipped === false
+    && preparedEnrich.outcome?.detail != null;
   const url = contentType === "short"
     ? `https://www.youtube.com/shorts/${encodeURIComponent(entry.id)}`
     : `https://www.youtube.com/watch?v=${encodeURIComponent(entry.id)}`;
@@ -998,7 +1109,7 @@ async function upsertFirstSeenContent(client, {
         },
       }),
       observedAt,
-      facts != null,
+      detailComplete,
       observationId,
       classification.authoritative === true && facts?.access_status === "public",
       facts?.comments_first_page == null ? null : JSON.stringify(facts.comments_first_page),
@@ -1036,22 +1147,16 @@ async function upsertFirstSeenContent(client, {
     observedAt,
     attempted: detail != null || capture?.error != null,
   });
-  if (!facts) {
-    await queueRefreshTask(client, {
+  if (!preparedEnrich.skipped) {
+    await persistClockContentEnrichOutcome(client, {
+      ...preparedEnrich,
       contentKey: storedContentKey,
       channelId,
       runId,
       observationId,
       jobType: "player-refresh",
-      error: capture?.error,
+      observedAt,
     });
-  } else {
-    await client.query(
-      `UPDATE crawler.content_enrich_tasks
-       SET status='done',last_success_at=$2,error_message=NULL,updated_at=now()
-       WHERE content_key=$1 AND job_type='player-refresh'`,
-      [storedContentKey, observedAt],
-    );
   }
   return {
     disposition,
@@ -1455,43 +1560,35 @@ async function updateSampledContent(client, {
   collectNext,
   changeAlpha,
 }) {
-  if (!capture?.detail) {
-    await queueRefreshTask(client, {
-      contentKey: row.content_key,
-      channelId: row.channel_id,
-      runId,
-      observationId,
-      jobType: "player-refresh",
-      error: capture?.error,
-      terminalRecheckAt: videoAccessRecheckAt(row.access_status, observedAt),
-    });
+  const prepared = await prepareClockContentEnrichOutcome(client, {
+    contentKey: row.content_key,
+    jobType: "player-refresh",
+    detail: capture?.detail ?? null,
+    error: capture?.error ?? null,
+  });
+  if (prepared.skipped) {
     return { success: false, viewDelta: null, engagementChanged: false };
   }
-  const applied = await applyIncrementalVideoDetail(client, {
-    row,
-    detail: capture.detail,
-    observedAt,
+  const applied = prepared.outcome.detail == null
+    ? null
+    : await applyIncrementalVideoDetail(client, {
+        row,
+        detail: prepared.outcome.detail,
+        observedAt,
+        observationId,
+        collectNext,
+        changeAlpha,
+      });
+  await persistClockContentEnrichOutcome(client, {
+    ...prepared,
+    contentKey: row.content_key,
+    channelId: row.channel_id,
+    runId,
     observationId,
-    collectNext,
-    changeAlpha,
+    jobType: "player-refresh",
+    observedAt,
   });
-  const taskStatus = TERMINAL_ENRICH_ACCESS_STATUSES.has(applied.accessStatus) ? "terminal" : "done";
-  const nextRetryAt = videoAccessRecheckAt(applied.accessStatus, observedAt);
-  await client.query(
-    `UPDATE crawler.content_enrich_tasks
-     SET status=$3,last_success_at=$2,
-         attempts=CASE WHEN status='terminal' THEN 0 ELSE attempts END,
-         next_retry_at=$4,error_message=NULL,
-         lease_owner=NULL,lease_expires_at=NULL,updated_at=now()
-     WHERE content_key=$1 AND job_type IN ('player-refresh','next-refresh')
-       AND (
-         status IN ('queued','failed')
-         OR (status IN ('leased','running') AND lease_expires_at<=now())
-         OR (status='terminal' AND next_retry_at IS NOT NULL AND next_retry_at<=now())
-       )`,
-    [row.content_key, observedAt, taskStatus, nextRetryAt],
-  );
-  return applied;
+  return applied ?? { success: false, viewDelta: null, engagementChanged: false };
 }
 
 async function applyRecentSampling({

@@ -15,6 +15,7 @@ import { youtubeErrorText } from "./detailPolicy.js";
 import {
   ContentEnrichExecutor,
   PostgresContentEnrichExecutionRepository,
+  contentEnrichResultFromError,
 } from "./contentEnrichExecution.js";
 import {
   applyIncrementalVideoDetail,
@@ -1594,6 +1595,7 @@ async function startWorkerRuntime() {
         retry_mode: failureDecision.retry_mode,
       }));
       try {
+        const contentEnrichResult = contentEnrichResultFromError(error);
         await logTaskEvent({
           queueName,
           jobId: job?.id,
@@ -1603,6 +1605,9 @@ async function startWorkerRuntime() {
           payload: {
             ...(job?.data ?? {}),
             ...(parserDetails ? { parser_contract_error: parserDetails } : {}),
+            ...(contentEnrichResult
+              ? { content_enrich_result: contentEnrichResult }
+              : {}),
             youtube_failure_decision: failureDecision,
           },
           errorMessage: message,

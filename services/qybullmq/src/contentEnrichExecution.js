@@ -1,9 +1,9 @@
-import { hasCompletePublicVideoSurface, videoAccessStatus } from "./detailPolicy.js";
+import {
+  contentEnrichDetailOutcome,
+  contentEnrichFailureOutcome,
+  contentEnrichRetryDelayMs,
+} from "./contentEnrichPolicy.js";
 import { retryableRotaFailure } from "./managedWorkerExecution.js";
-import { videoAccessRecheckAt } from "./videoDisposition.js";
-import { decideYoutubeFailure, youtubeFailureText } from "./youtubeFailurePolicy.js";
-
-const TERMINAL_ACCESS_STATUSES = new Set(["members_only", "private", "unavailable"]);
 
 function requiredText(value, field) {
   const output = String(value ?? "").trim();
@@ -15,6 +15,12 @@ function positiveInteger(value, fallback, maximum = Number.MAX_SAFE_INTEGER) {
   const number = Number(value);
   if (!Number.isSafeInteger(number) || number <= 0) return fallback;
   return Math.min(number, maximum);
+}
+
+function observedDate(value, field = "now") {
+  const observedAt = new Date(value);
+  if (Number.isNaN(observedAt.getTime())) throw new TypeError(`${field} must return a valid date`);
+  return observedAt;
 }
 
 function emptySettlementSummary() {
@@ -51,24 +57,7 @@ function taskReferences(job) {
   return { channelId, tasks };
 }
 
-export function contentEnrichRetryDelayMs(attemptNumber, {
-  baseMs = 30_000,
-  maxMs = 6 * 60 * 60_000,
-} = {}) {
-  const attempt = positiveInteger(attemptNumber, 1, 1_000_000);
-  const base = positiveInteger(baseMs, 30_000, 24 * 60 * 60_000);
-  const maximum = Math.max(base, positiveInteger(maxMs, 6 * 60 * 60_000, 30 * 24 * 60 * 60_000));
-  return Math.min(maximum, base * (2 ** Math.min(30, attempt - 1)));
-}
-
-function terminalAccessFromError(error) {
-  const message = youtubeFailureText(error).toLowerCase();
-  if (/private/.test(message)) return "private";
-  if (/member|subscriber/.test(message)) return "members_only";
-  return "unavailable";
-}
-
-function terminalAccessSource(error) {
+export function contentEnrichResultFromError(error) {
   const pending = [error];
   const seen = new Set();
   while (pending.length > 0 && seen.size < 20) {
@@ -76,105 +65,15 @@ function terminalAccessSource(error) {
     if (!value || (typeof value !== "object" && typeof value !== "function")) continue;
     if (seen.has(value)) continue;
     seen.add(value);
-    const source = String(value.youtube_failure_evidence?.source ?? "").trim();
-    if (source) return source;
+    const result = value.content_enrich_result;
+    if (result && typeof result === "object" && !Array.isArray(result)) return result;
     if (value.cause != null) pending.push(value.cause);
     if (Array.isArray(value.errors)) pending.push(...value.errors);
   }
-  return "youtube_failure_policy";
+  return null;
 }
 
-function detailOutcome(task, detail, observedAt, retryOptions) {
-  const accessStatus = videoAccessStatus(detail);
-  if (!TERMINAL_ACCESS_STATUSES.has(accessStatus) && !hasCompletePublicVideoSurface(detail)) {
-    const error = Object.assign(
-      new Error("Content Enrich detail is missing the required public Video surface"),
-      {
-        youtube_failure_decision: {
-          kind: "incomplete_detail",
-          retry_mode: "same_identity",
-          reason_code: "required_public_surface_missing",
-        },
-      },
-    );
-    return failureOutcome(task, error, observedAt, retryOptions);
-  }
-  return {
-    task_id: task.task_id,
-    dispatch_generation: task.dispatch_generation,
-    kind: TERMINAL_ACCESS_STATUSES.has(accessStatus) ? "terminal" : "done",
-    detail,
-    access_status: accessStatus,
-    observed_at: observedAt.toISOString(),
-    next_retry_at: videoAccessRecheckAt(accessStatus, observedAt),
-    error_message: null,
-  };
-}
-
-function failureOutcome(task, error, observedAt, retryOptions) {
-  const decision = error?.youtube_failure_decision ?? decideYoutubeFailure({ error });
-  if (decision.kind === "content_terminal") {
-    const accessStatus = terminalAccessFromError(error);
-    const accessStatusSource = terminalAccessSource(error);
-    return {
-      task_id: task.task_id,
-      dispatch_generation: task.dispatch_generation,
-      kind: "terminal",
-      detail: {
-        access_status: accessStatus,
-        access_status_source: accessStatusSource,
-      },
-      access_status: accessStatus,
-      observed_at: observedAt.toISOString(),
-      next_retry_at: videoAccessRecheckAt(accessStatus, observedAt),
-      error_message: youtubeFailureText(error),
-      failure_decision: decision,
-    };
-  }
-  if (decision.retry_mode === "none") {
-    return {
-      task_id: task.task_id,
-      dispatch_generation: task.dispatch_generation,
-      kind: "terminal",
-      detail: null,
-      access_status: null,
-      observed_at: observedAt.toISOString(),
-      error_message: youtubeFailureText(error),
-      failure_decision: decision,
-    };
-  }
-  const nextAttempt = Number(task.attempts ?? 0) + 1;
-  const maxAttempts = positiveInteger(retryOptions?.maxAttempts, 8, 100);
-  if (nextAttempt >= maxAttempts) {
-    return {
-      task_id: task.task_id,
-      dispatch_generation: task.dispatch_generation,
-      kind: "dead_letter",
-      detail: null,
-      access_status: null,
-      observed_at: observedAt.toISOString(),
-      next_retry_at: null,
-      error_message: youtubeFailureText(error),
-      failure_decision: {
-        ...decision,
-        retry_exhausted: true,
-        max_attempts: maxAttempts,
-      },
-    };
-  }
-  const delayMs = contentEnrichRetryDelayMs(nextAttempt, retryOptions);
-  return {
-    task_id: task.task_id,
-    dispatch_generation: task.dispatch_generation,
-    kind: "retryable",
-    detail: null,
-    access_status: null,
-    observed_at: observedAt.toISOString(),
-    next_retry_at: new Date(observedAt.getTime() + delayMs).toISOString(),
-    error_message: youtubeFailureText(error),
-    failure_decision: decision,
-  };
-}
+export { contentEnrichRetryDelayMs } from "./contentEnrichPolicy.js";
 
 export class ContentEnrichExecutor {
   constructor({
@@ -295,7 +194,7 @@ export class ContentEnrichExecutor {
   async execute(job) {
     const jobId = requiredText(job?.id, "job.id");
     const { channelId, tasks } = taskReferences(job);
-    const observedAt = new Date(this.now());
+    const observedAt = observedDate(this.now());
     const leaseExpiresAt = new Date(observedAt.getTime() + this.leaseDurationMs);
     const claimed = await this.repository.claimBatch({
       jobId,
@@ -341,10 +240,12 @@ export class ContentEnrichExecutor {
             signal: heartbeatControl.signal,
           });
           if (heartbeatControl.signal.aborted) break;
-          outcomes.push(detailOutcome(task, detail, observedAt, this.retryOptions));
+          const completedAt = observedDate(this.now());
+          outcomes.push(contentEnrichDetailOutcome(task, detail, completedAt, this.retryOptions));
         } catch (error) {
           if (heartbeatControl.signal.aborted) break;
-          outcomes.push(failureOutcome(task, error, observedAt, this.retryOptions));
+          const completedAt = observedDate(this.now());
+          outcomes.push(contentEnrichFailureOutcome(task, error, completedAt, this.retryOptions));
           if (retryableRotaFailure(error)) {
             routeError = error;
             break;
@@ -365,15 +266,33 @@ export class ContentEnrichExecutor {
         task_id: task.task_id,
         dispatch_generation: task.dispatch_generation,
       }));
-    const settledAt = new Date(this.now());
-    const settled = await this.repository.settleBatch({
-      jobId,
-      channelId,
-      outcomes,
-      unattemptedTasks,
-      observedAt,
-      settledAt,
-    });
+    const settledAt = observedDate(this.now());
+    let settled;
+    try {
+      settled = await this.repository.settleBatch({
+        jobId,
+        channelId,
+        outcomes,
+        unattemptedTasks,
+        observedAt,
+        settledAt,
+      });
+    } catch (error) {
+      if (error && (typeof error === "object" || typeof error === "function")) {
+        const persisted = error.content_enrich_persisted_result ?? emptySettlementSummary();
+        error.content_enrich_result = {
+          requested: tasks.length,
+          claimed: claimed.length,
+          attempted: fetchAttempts,
+          done: Number(persisted.done ?? 0),
+          terminal: Number(persisted.terminal ?? 0),
+          retryable: Number(persisted.retryable ?? 0),
+          dead_letter: Number(persisted.dead_letter ?? 0),
+          skipped: (tasks.length - claimed.length) + Number(persisted.skipped ?? 0),
+        };
+      }
+      throw error;
+    }
     const result = {
       requested: tasks.length,
       claimed: claimed.length,
@@ -536,15 +455,23 @@ export class PostgresContentEnrichExecutionRepository {
           observedAt,
         })
       : emptySettlementSummary();
-    const publication = publicationOutcomes.length > 0
-      ? await this.#settleBatchTransaction({
-          jobId,
-          channelId,
-          outcomes: publicationOutcomes,
-          unattemptedTasks: [],
-          observedAt,
-        })
-      : emptySettlementSummary();
+    let publication;
+    try {
+      publication = publicationOutcomes.length > 0
+        ? await this.#settleBatchTransaction({
+            jobId,
+            channelId,
+            outcomes: publicationOutcomes,
+            unattemptedTasks: [],
+            observedAt,
+          })
+        : emptySettlementSummary();
+    } catch (error) {
+      if (error && (typeof error === "object" || typeof error === "function")) {
+        error.content_enrich_persisted_result = checkpoint;
+      }
+      throw error;
+    }
     return combineSettlementSummaries(checkpoint, publication);
   }
 

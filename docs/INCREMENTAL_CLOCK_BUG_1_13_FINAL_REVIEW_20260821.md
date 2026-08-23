@@ -11,7 +11,7 @@
 3. 容量、积压或部署治理问题；
 4. 既定业务契约或保护机制，被误判成 BUG。
 
-本文最初只做评审和方案设计。BUG-8 根因确认后，唯一源码已完成最小修复与上线验证。2026-08-23，BUG-6/BUG-7 的专用 Enrich Drain 已在隔离 Worktree 完成实现和本地回归；该变更尚未部署，未连接或修改生产数据库、生产队列和业务数据。
+本文最初只做评审和方案设计。BUG-8 根因确认后，唯一源码已完成最小修复与上线验证。2026-08-23，BUG-6/BUG-7 的 Enrich Drain 修正候选已在隔离 Worktree 完成实现和隔离验收；该变更尚未部署，未连接或修改生产数据库、生产队列和业务数据。这里的“隔离验收通过”只表示代码候选具备上线条件，不表示生产积压已经下降或 BUG 已在生产关闭。
 
 ## 2. 复核边界与证据
 
@@ -47,7 +47,7 @@ Clock 仍在执行，因此今日累计数量会继续变化。代码语义、�
 | BUG-3 | **305 条异常数据成立，当前代码根因不成立** | 历史数据修复 | P1 |
 | BUG-4 | **不成立** | 既定发布契约 | 不修改，只增强可观测性 |
 | BUG-5 | **5 条当日异常成立，写入端根因尚未证明** | 历史数据/溯源修复 | P1 |
-| BUG-6 | **积压成立；根因是补全任务没有独立、有界且公平的调度通路** | 调度/吞吐缺口；本地修复已完成、待上线 | P0/P1 |
+| BUG-6 | **积压成立；根因是补全任务没有独立、有界且公平的调度通路** | 调度/吞吐缺口；修正候选已通过隔离验收、待生产验收 | P0/P1 |
 | BUG-7 | **历史未补全成立，是 BUG-6 的存量结果，不是第二套恢复问题** | 随 BUG-6 通过正常补全与发布链处理 | 随 BUG-6 处理 |
 | BUG-8 | **成立，根因已确认是外部审计脚本污染共享 PgBouncer 后端** | 数据库连接状态污染 | P0 |
 | BUG-9 | **已修复并由唯一源码接管** | 源码/部署治理 | P2 |
@@ -405,7 +405,7 @@ Incremental Clock 会读取 queued/failed task，把它们放到最近视频采�
 - `youtube-content-detail` 是 Full Crawl 的旧阶段队列，只接受 `run_id + content_candidates`，且内联详情模式会暂停它，不能承载本任务契约；
 - 所以任务持续生成，但处理能力受频道 Clock 频率和正常增量预算约束，低于积压形成速度。
 
-### 9.2 已实现方案：有界 Enrich Drain
+### 9.2 本地修正候选：有界 Enrich Drain
 
 本地实现采用数据库单一事实来源、Controller 派发和专用 Worker，不允许 Worker 无限轮询数据库：
 
@@ -426,16 +426,22 @@ content_enrich_tasks
 queued / failed / 到期的 terminal
   -> leased     (lease_owner, lease_expires_at, dispatch_generation + 1)
   -> running    (Worker 再读 DB，并校验 Job、频道、generation 和有效 lease)
-  -> done       (详情成功)
+  -> done       (完整 public 详情成功)
   -> terminal   (private / unavailable 等权威终态；关闭本轮并低频复查)
   -> failed     (attempts + 1, next_retry_at 使用有上限指数退避)
   -> dead_letter (累计 attempts 达到上限，停止自动重试)
 ```
 
+框架完成后的复核还发现了第二层根因：专用 Enrich Worker 与 Incremental Clock 的 Recent Sampling、First-Seen 路径曾各自维护一套 Task 状态转换。结果是 Queue 有完整性门禁，而 Clock 仍可能把缺标题、播放量或时长的详情写入 `last_enriched_at` 并关闭任务；Clock 失败也不累计 `attempts`。本轮把“详情是否完整、错误是否为权威终态、累计预算是否耗尽、退避到何时”抽成共享策略，两个消费者只负责所有权和持久化，不再各自解释业务终态。
+
 - BullMQ Job ID 由频道和排序后的 `task_id:dispatch_generation` 哈希确定，Controller 重放不会产生第二个 Job；
 - `dispatch_generation` 是 fencing token。过期 running 任务重新派发时推进 generation，旧 Worker 不能写 Content 或关闭新任务；
 - Worker 对已完成、过期、错误 generation、错误 lease owner 和重复 Job 均幂等跳过；
-- public 详情必须满足共享的完整 Video surface 契约；缺标题、发布时间、播放量或时长等关键事实时进入 retryable，不能写 `last_enriched_at` 或假装 done；
+- Queue Worker、Clock Recent Sampling 和 Clock First-Seen 共用完整 Video surface 契约；缺标题、发布时间、播放量或时长等关键事实时进入 retryable，不能写 `last_enriched_at` 或假装 done；
+- Clock 与 Queue 都按同一开放任务的累计 `attempts` 消耗预算；默认第 8 次失败进入 `dead_letter`。只有已关闭任务开始明确的新一轮时才从 0 计数，默认 Clock 模式和回滚模式不能成为无限重试旁路；
+- 只有失败策略给出 `content_terminal` 的权威 private/members-only/unavailable 证据才能写 `terminal` 和访问状态；解析器、数据库契约等 `retry_mode=none` 工程故障进入 `dead_letter`，不得伪造视频终态；
+- retryable 的 `next_retry_at` 从每条详情请求实际结束的时刻计算，并受指数退避上限约束；慢请求不能在刚失败时就因批次开始时间过早而立即重试；
+- 已是 `dead_letter` 的视频若被后续正常 Incremental 取得完整详情，可以按真实成功结果转为 `done`；历史 attempts 保留作审计，避免出现数据已完整但任务仍显示死信的矛盾状态；
 - Worker 在抓取期间按不超过 lease 一半的间隔续租；任何续租异常或未续满整批都立即触发 `AbortSignal`、停止后续抓取并丢弃未结算结果，不能把失去所有权后的详情写入 Content；
 - lease 的创建、刷新、claim、续租、过期回收和 retry 到期判断都以 PostgreSQL `clock_timestamp()` 为准，不能混用 Controller/Worker 进程时钟；可能等待行锁的 claim/renew/settle 使用“先锁行、后用 DB 当前时间判 lease”的两阶段 fencing，等待前求出的时间戳不能复活已过期 lease；
 - Rota 换身份前的 retry checkpoint 只有在本批 retryable/dead-letter outcome 全部实际结算后才标记为已持久化；lease 过期或 generation fencing 导致任何 outcome 跳过时必须 fail closed，不能虚报 attempts 已记账；
@@ -462,6 +468,7 @@ queued / failed / 到期的 terminal
 - private/unavailable 权威证据更新 `contents.access_status/access_status_source`、关闭当前任务并写 7 天后的 `next_retry_at`；到期后才开启新一轮，复查仍为终态则再次低频排期；
 - retryable/dead-letter checkpoint 和未执行任务释放先在独立短事务提交；成功或 terminal 的 Content、Task、变化视频 Item Hash 与按频道 Publication Reconciler 保持在另一个原子事务；
 - 因而 Publication 失败会回滚对应 Content/Hash/terminal/done 写入，但不能抹掉同批已经记录的 retry attempts；未变化的 retryable/dead-letter 不刷新 Hash 或调用 Publication；
+- Publication 部分失败时，异常只携带已确认提交的 Enrich outcome；Worker 可沿 `cause` 和 `AggregateError.errors` 找回该结果写入失败事件，指标不会把已回滚的 done/terminal 误报为成功，也不会漏掉已提交的 retry/dead-letter；
 - Rota 增加真实 `content_enrich` task kind，并限定为 channel role；没有伪装成 Full Crawl 或 Incremental；
 - Enrich 使用独立 Worker 服务、独立 Queue concurrency 和新增的 channel Slot 容量。示例配置为 2 个 Enrich Worker、每实例并发 1、总 channel Slots 从 40 增至 42。
 
@@ -474,13 +481,20 @@ Clock 互斥与安全切换：
 
 private/unavailable 的低频复查继续使用同一条 `content_enrich_tasks` 事实和同一个 Clock/Controller 所有权开关，不新增表、Worker 轮询器或第二套调度器。第一版不为其他历史 `job_type` 扩大范围。
 
+运行可观测性已经接入 Controller 和 Dashboard：
+
+- Controller 每个观察窗口统计 `player-refresh` 的 queued/leased/running/failed/terminal/dead_letter/done、最老 queued 年龄，以及 Worker claim/success/retry/terminal/dead-letter 数量、每分钟速率和比例；
+- 当前派发是否遇到 mutex contention、BullMQ 开放 Job 数和派发是否成功与同一快照一起写入 `crawler.controller_ticks`；
+- backlog 和 queued age 超阈值时产生带 raised/reminder/resolved 状态的结构化告警日志，并隔离指标查询或派发异常，不能阻断 Controller 后续正常工作；
+- Dashboard `/health` 和只读 `/api/content-enrich/operational` 返回最近快照，并区分 ok、alerting、stale 和 unavailable。
+
 ### 9.3 本地验证
 
-- qybullmq 全量：1,074 项，1,011 通过、63 项按环境跳过、0 失败；宿主缺少 Python 运行依赖的 fingerprint gateway 和 persistent yt-dlp 两项已在生产依赖镜像中分别 1/1 通过；
-- Content Enrich 真实 PostgreSQL 16 生命周期通过，覆盖已提交 mutex 争用和过期接管、`SKIP LOCKED`、Worker 在 `queue.add()` 内即时 claim 的事务可见性、投递崩溃恢复、attempts/退避、generation fencing、heartbeat、行锁等待后 lease 过期、Rota checkpoint fencing、terminal、Content、Item Hash、真实 Publication revision/outbox 和重复 Job；
+- qybullmq 全量执行 220 个测试文件：216 个在宿主直接通过；4 个受沙箱或宿主运行依赖限制的文件分别在解除沙箱限制或现有 qybullmq 依赖镜像中重跑，5 项断言全部通过；
+- Content Enrich 真实 PostgreSQL 16 生命周期 2/2 通过、0 skip，覆盖已提交 mutex 争用和过期接管、`SKIP LOCKED`、Worker 在 `queue.add()` 内即时 claim 的事务可见性、投递崩溃恢复、attempts/实际失败时间退避、generation fencing、heartbeat、行锁等待后 lease 过期、Rota checkpoint fencing、terminal、工程 dead-letter、Content、Item Hash、真实 Publication revision/outbox、部分失败指标和重复 Job；
 - runtime schema 和 fresh `database/bootstrap/crawler.sql` 均在空 PostgreSQL 16 测试库完整应用；bootstrap 默认 mode、cursor 和 mutex 已读取验证；
-- 原有 Incremental Video PostgreSQL 回归及新增 terminal 所有权回归 4/4 通过；
-- Rota `internal/proxycontrol` Go 测试通过；Dashboard 1/1、共享 Compose 拓扑 4/4 通过；
+- Incremental Video PostgreSQL 4/4 通过、0 skip，覆盖 Clock/Queue 所有权、完整性门禁、累计 dead-letter、terminal 新轮次和 dead-letter 后真实成功恢复；
+- Enrich 及 Migration、Query、Full Crawl、正常 Incremental 针对性回归 29/29 个测试文件通过、0 skip；Rota `internal/proxycontrol` Go 测试通过；Dashboard 2/2 通过；
 - Node 语法检查、`git diff --check` 和隔离 PostgreSQL 测试均通过。
 
 这些是隔离测试证据，不代表生产积压已经下降。
@@ -498,11 +512,11 @@ private/unavailable 的低频复查继续使用同一条 `content_enrich_tasks` 
 7. 先执行 `npm run content-enrich:mode -- queue` dry-run，再提供 operator、reason 和精确确认值执行 `--apply`；
 8. 小流量观察后再调整 High Water、refill 或 Worker 数量，不能一次性放大。
 
-至少监控：Queue 开放 Job 数/High Water、queued/leased/running/failed/terminal/dead_letter/done 数量、最老 queued 年龄、dispatch mutex contention/expiry/heartbeat、Worker lease renewal/loss、恢复投递失败、过期 lease、attempts 与 next retry、terminal access source、`last_enriched_at`、Item Hash、Publication revision/outbox，以及 Rota channel ready/claimed 和 `content_enrich` Task 结果。
+代码已提供 Queue 开放 Job 数、queued/leased/running/failed/terminal/dead_letter/done、最老 queued 年龄、claim/success/retry/terminal/dead-letter rate、当前 dispatch mutex contention、积压和年龄阈值告警。上线仍需把结构化告警日志接入现有告警平台，并联合监控 High Water、mutex expiry/heartbeat、Worker lease renewal/loss、恢复投递失败、过期 lease、attempts 与 next retry、terminal access source、`last_enriched_at`、Item Hash、Publication revision/outbox，以及 Rota channel ready/claimed 和 `content_enrich` Task 结果。
 
 回滚时先把 mode 切为 `clock`，再关闭 Controller gate；保留 Worker 让已领取 Job 排空，或接受它们在 lease 到期后由 Clock 接管。不得先强停 Worker 后直接让 Clock 忽略有效 lease，也不得直接批量改 BUG-7 数据。
 
-剩余风险是生产代理容量和单条详情延迟尚未用真实积压压测。heartbeat 能覆盖正常长抓取；若数据库不可续租，Worker 会 fail closed，数据不会被旧 Worker 覆盖，但当前底层抓取适配器可能要等正在执行的单次上游调用返回后才能完全退出，仍可能浪费一次请求。上线后必须用 p95/p99 单条和批次时长校准 batch size、lease 与 heartbeat，并观察失租率。
+剩余风险是生产代理容量和单条详情延迟尚未用真实积压压测，结构化告警日志也尚未在生产告警平台验证送达。heartbeat 能覆盖正常长抓取；若数据库不可续租，Worker 会 fail closed，数据不会被旧 Worker 覆盖，但当前底层抓取适配器可能要等正在执行的单次上游调用返回后才能完全退出，仍可能浪费一次请求。上线后必须用 p95/p99 单条和批次时长校准 batch size、lease 与 heartbeat，并观察失租率。
 
 ### 9.5 生产验收
 
@@ -517,7 +531,7 @@ private/unavailable 的低频复查继续使用同一条 `content_enrich_tasks` 
 
 ### 10.1 最终结论
 
-**历史缺口成立；它是 BUG-6 的存量结果，不是 BUG-1 的结果，也不需要第二套恢复系统。**
+**历史缺口成立；它是 BUG-6 的存量结果，不是 BUG-1 的结果，也不需要第二套恢复系统。代码候选已通过隔离验收，但未直接修改这些数据；只有生产 Drain 经正常抓取、写入、Hash 和 Publication 链实际消化后，BUG-7 才能关闭。**
 
 2026-08-21 原始查询结果：
 

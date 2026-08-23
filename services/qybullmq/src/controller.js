@@ -34,6 +34,10 @@ import {
 } from "./contentEnrichDispatch.js";
 import { dispatchContentEnrichForController } from "./controllerContentEnrichDispatch.js";
 import {
+  ContentEnrichMonitor,
+  PostgresContentEnrichObservabilityRepository,
+} from "./contentEnrichObservability.js";
+import {
   IncrementalAgentBacklog,
   IncrementalAgentBatcher,
 } from "./incrementalAgentBacklog.js";
@@ -219,6 +223,30 @@ const contentEnrichLeaseMs = intEnv(
   30_000,
   24 * 60 * 60_000,
 );
+const contentEnrichMetricsWindowMs = intEnv(
+  "CONTENT_ENRICH_METRICS_WINDOW_SECONDS",
+  300,
+  60,
+  86_400,
+) * 1_000;
+const contentEnrichBacklogAlertThreshold = intEnv(
+  "CONTENT_ENRICH_BACKLOG_ALERT_THRESHOLD",
+  10_000,
+  0,
+  10_000_000,
+);
+const contentEnrichQueuedAgeAlertSeconds = intEnv(
+  "CONTENT_ENRICH_QUEUED_AGE_ALERT_SECONDS",
+  86_400,
+  0,
+  365 * 86_400,
+);
+const contentEnrichAlertRepeatMs = intEnv(
+  "CONTENT_ENRICH_ALERT_REPEAT_SECONDS",
+  900,
+  60,
+  86_400,
+) * 1_000;
 const channelInlineDetails = String(process.env.YOUTUBE_CHANNEL_INLINE_DETAILS || "true").trim().toLowerCase() !== "false";
 let crawlSettingsCache = { expiresAt: 0, value: null };
 let lastStoredTickAt = 0;
@@ -248,6 +276,13 @@ const contentEnrichDispatcher = new ContentEnrichDispatcher({
   refill: contentEnrichQueueRefill,
   batchSize: contentEnrichBatchSize,
   leaseDurationMs: contentEnrichLeaseMs,
+});
+const contentEnrichMonitor = new ContentEnrichMonitor({
+  repository: new PostgresContentEnrichObservabilityRepository({ queryFn: query }),
+  windowMs: contentEnrichMetricsWindowMs,
+  backlogAlertThreshold: contentEnrichBacklogAlertThreshold,
+  queuedAgeAlertSeconds: contentEnrichQueuedAgeAlertSeconds,
+  alertRepeatMs: contentEnrichAlertRepeatMs,
 });
 
 function tickSignature(stats, actions, queryScheduler) {
@@ -2508,10 +2543,15 @@ async function maybeReconcileAutomaticPublicationOnboarding(actions, now = Date.
 async function tick() {
   const stats = await getQueueStats(queues);
   const actions = [];
-  await dispatchContentEnrichForController({
+  const contentEnrichController = await dispatchContentEnrichForController({
     dispatcher: contentEnrichDispatcher,
+    monitor: contentEnrichMonitor,
+    queueCounts: stats[queuesByRole.contentEnrich],
     actions,
   });
+  if (contentEnrichController.operational) {
+    stats[queuesByRole.contentEnrich].content_enrich_operational = contentEnrichController.operational;
+  }
   await reconcileQueryQualityQueue(actions);
   let queryScheduler = await getQueryScheduler();
   queryScheduler = await resumeLegacyAutomaticFinalization(queryScheduler, actions);
