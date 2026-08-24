@@ -4,10 +4,13 @@ import test from "node:test";
 import {
   assertCrawlerDashboardIdentity,
   assertMigrationSourceIdentity,
-  filterAndPageMigrationCandidates,
+  loadMigrationSourceCount,
+  loadMigrationSourcePage,
+  migrationFiltersIncludeUnstarted,
   mergeMigrationCandidate,
   mergeMigrationCandidates,
-  migrationReadModelStats,
+  migrationReadModelStatsFromSummary,
+  migrationSourceCandidateFromIntent,
 } from "./migrationTopology.js";
 
 test("Dashboard Crawler connection rejects the legacy Writer database", () => {
@@ -147,40 +150,134 @@ test("Migration Target state falls back from source candidate ID to channel ID",
   assert.equal(merged[1].migration_done, true);
 });
 
-test("Migration stats count source inventory separately from Target results", () => {
-  assert.deepEqual(migrationReadModelStats(3, [
-    { candidate_status: "discovered", migration_started: false },
-    { candidate_status: "failed", migration_started: true },
-    { candidate_status: "accepted", migration_started: true, migration_done: true, final_status: "ready_auto" },
-  ]), {
-    total: 3,
-    discovered: 1,
-    queued: 0,
-    validating: 0,
-    finishing: 0,
-    failed: 1,
-    migration_done: 1,
-    final_done: 1,
+test("Migration Source applies pagination in SQL before loading wide candidate rows", async () => {
+  const calls = [];
+  const expectedRows = [{ candidate_id: "51", channel_id: "UC-page" }];
+  const rows = await loadMigrationSourcePage({
+    read: async (sql, params) => {
+      calls.push({ sql, params });
+      return { rows: expectedRows };
+    },
+    search: "Lisa",
+    limit: 25,
+    offset: 50,
+  });
+
+  assert.equal(calls.length, 1);
+  const normalizedSql = calls[0].sql.replace(/\s+/g, " ");
+  assert.match(normalizedSql, /source_page AS \(/);
+  assert.match(normalizedSql, /LIMIT \$2::int OFFSET \$3::int/);
+  assert.match(
+    normalizedSql,
+    /FROM source_page page JOIN crawler\.channel_candidates candidate/,
+  );
+  assert.doesNotMatch(
+    normalizedSql.slice(0, normalizedSql.indexOf("source_page AS")),
+    /candidate\.\*/,
+  );
+  assert.deepEqual(calls[0].params, ["%Lisa%", 25, 50]);
+  assert.equal(rows, expectedRows);
+});
+
+test("Migration Source total uses a narrow aggregate query", async () => {
+  const calls = [];
+  const total = await loadMigrationSourceCount({
+    read: async (sql, params) => {
+      calls.push({ sql, params });
+      return { rows: [{ total: 410_292 }] };
+    },
+  });
+
+  assert.equal(total, 410_292);
+  assert.equal(calls.length, 1);
+  assert.match(calls[0].sql, /count\(DISTINCT candidate\.channel_id\)/);
+  assert.doesNotMatch(calls[0].sql, /snapshot_json|candidate\.\*/);
+  assert.deepEqual(calls[0].params, []);
+});
+
+test("Migration filter planning includes unstarted rows only when their default state matches", () => {
+  assert.equal(migrationFiltersIncludeUnstarted({
+    channelStatus: "all",
+    agentStatus: "",
+    finalStatus: "",
+  }), true);
+  assert.equal(migrationFiltersIncludeUnstarted({
+    channelStatus: "discovered",
+    agentStatus: "pending",
+    finalStatus: "pending",
+  }), true);
+  assert.equal(migrationFiltersIncludeUnstarted({
+    channelStatus: "failed",
+    agentStatus: "",
+    finalStatus: "",
+  }), false);
+});
+
+test("Migration Target snapshot restores the immutable Source candidate fields", () => {
+  assert.deepEqual(migrationSourceCandidateFromIntent({
+    source_candidate_id: "42",
+    channel_id: "UC42",
+    source_snapshot: {
+      source_dispatch_batch_id: "legacy-batch",
+      channel_url: "https://www.youtube.com/channel/UC42",
+      handle: "@fortytwo",
+      title: "Forty Two",
+      avatar_url: "https://example.test/avatar.jpg",
+      search_subscriber_count: "1200",
+      snapshot_json: { channel_header: { title: "Forty Two" } },
+      source_json: {
+        source: "legacy_results_db",
+        source_rowid: "99",
+        legacy_import: { country: "BR" },
+      },
+      source_created_at: "2026-08-01T00:00:00.000Z",
+      source_updated_at: "2026-08-02T00:00:00.000Z",
+    },
+  }), {
+    candidate_id: "42",
+    dispatch_batch_id: "legacy-batch",
+    channel_id: "UC42",
+    channel_url: "https://www.youtube.com/channel/UC42",
+    handle: "@fortytwo",
+    title: "Forty Two",
+    avatar_url: "https://example.test/avatar.jpg",
+    search_subscriber_count: "1200",
+    snapshot_json: { channel_header: { title: "Forty Two" } },
+    source_json: {
+      source: "legacy_results_db",
+      source_rowid: "99",
+      legacy_import: { country: "BR" },
+    },
+    legacy_country: "BR",
+    legacy_target_reason: null,
+    legacy_evidence_score: null,
+    legacy_evidence_reasons: null,
+    legacy_discovered_at: null,
+    source_rowid: "99",
+    created_at: "2026-08-01T00:00:00.000Z",
+    updated_at: "2026-08-02T00:00:00.000Z",
   });
 });
 
-test("Migration status filters are applied globally before pagination", () => {
-  const candidates = [
-    { channel_id: "UC1", candidate_status: "discovered", agent_status: "pending", final_status: "pending" },
-    { channel_id: "UC2", candidate_status: "queued", agent_status: "pending", final_status: "pending" },
-    { channel_id: "UC3", candidate_status: "failed", agent_status: "failed", final_status: "pending" },
-    { channel_id: "UC4", candidate_status: "failed", agent_status: "failed", final_status: "pending" },
-    { channel_id: "UC5", candidate_status: "failed", agent_status: "done", final_status: "ready_auto" },
-  ];
-  assert.deepEqual(filterAndPageMigrationCandidates(candidates, {
-    channelStatus: "failed",
-    agentStatus: "failed",
-    finalStatus: "pending",
-    offset: 1,
-    limit: 1,
+test("Migration stats combine Source inventory with Target aggregates", () => {
+  assert.deepEqual(migrationReadModelStatsFromSummary(1000, {
+    started: 12,
+    discovered: 1,
+    queued: 3,
+    validating: 2,
+    finishing: 4,
+    failed: 2,
+    migration_done: 5,
+    final_done: 6,
   }), {
-    rows: [candidates[3]],
-    total: 2,
+    total: 1000,
+    discovered: 989,
+    queued: 3,
+    validating: 2,
+    finishing: 4,
+    failed: 2,
+    migration_done: 5,
+    final_done: 6,
   });
 });
 

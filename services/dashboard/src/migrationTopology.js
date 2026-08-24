@@ -56,6 +56,87 @@ export function assertMigrationSourceIdentity(row, {
 
 const FINAL_STATUSES = new Set(["ready_auto", "ready_partial"]);
 
+function boundedInteger(value, name, { min, max }) {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < min || parsed > max) {
+    throw new TypeError(`${name} must be an integer between ${min} and ${max}`);
+  }
+  return parsed;
+}
+
+function migrationSourceWhere(search, args) {
+  const where = ["candidate.source_json->>'source'='legacy_results_db'"];
+  const normalizedSearch = String(search || "").trim();
+  if (normalizedSearch) {
+    args.push(`%${normalizedSearch}%`);
+    where.push(`(
+      candidate.channel_id ILIKE $${args.length}
+      OR candidate.channel_url ILIKE $${args.length}
+      OR candidate.handle ILIKE $${args.length}
+      OR candidate.title ILIKE $${args.length}
+    )`);
+  }
+  return where.join(" AND ");
+}
+
+export async function loadMigrationSourcePage({
+  read,
+  search = "",
+  limit = 500,
+  offset = 0,
+} = {}) {
+  if (typeof read !== "function") throw new TypeError("read is required");
+  const normalizedLimit = boundedInteger(limit, "limit", { min: 1, max: 500 });
+  const normalizedOffset = boundedInteger(offset, "offset", { min: 0, max: 1_000_000 });
+  const args = [];
+  const whereSql = migrationSourceWhere(search, args);
+  args.push(normalizedLimit, normalizedOffset);
+  const limitParameter = args.length - 1;
+  const offsetParameter = args.length;
+  const result = await read(`WITH ranked_source AS (
+      SELECT candidate.candidate_id,candidate.channel_id,candidate.priority,
+             row_number() OVER (
+               PARTITION BY candidate.channel_id
+               ORDER BY candidate.priority DESC,candidate.candidate_id DESC
+             ) AS channel_rank
+      FROM crawler.channel_candidates candidate
+      WHERE ${whereSql}
+    ), source_page AS (
+      SELECT candidate_id,priority
+      FROM ranked_source
+      WHERE channel_rank=1
+      ORDER BY priority DESC,candidate_id
+      LIMIT $${limitParameter}::int OFFSET $${offsetParameter}::int
+    )
+    SELECT
+      candidate.candidate_id,candidate.dispatch_batch_id,candidate.channel_id,
+      candidate.channel_url,candidate.handle,candidate.title,candidate.avatar_url,
+      candidate.search_subscriber_count,candidate.snapshot_json,candidate.source_json,
+      candidate.source_json #>> '{legacy_import,country}' AS legacy_country,
+      candidate.source_json #>> '{legacy_import,target_reason}' AS legacy_target_reason,
+      candidate.source_json #>> '{legacy_import,br_evidence_score}' AS legacy_evidence_score,
+      candidate.source_json #>> '{legacy_import,br_evidence_reasons}' AS legacy_evidence_reasons,
+      candidate.source_json #>> '{legacy_import,discovered_at}' AS legacy_discovered_at,
+      candidate.source_json->>'source_rowid' AS source_rowid,
+      candidate.created_at,candidate.updated_at
+    FROM source_page page
+    JOIN crawler.channel_candidates candidate ON candidate.candidate_id=page.candidate_id
+    ORDER BY page.priority DESC,page.candidate_id`, args);
+  return result.rows;
+}
+
+export async function loadMigrationSourceCount({ read, search = "" } = {}) {
+  if (typeof read !== "function") throw new TypeError("read is required");
+  const args = [];
+  const whereSql = migrationSourceWhere(search, args);
+  const result = await read(`
+    SELECT count(DISTINCT candidate.channel_id)::int AS total
+    FROM crawler.channel_candidates candidate
+    WHERE ${whereSql}
+  `, args);
+  return Number(result.rows[0]?.total || 0);
+}
+
 export function mergeMigrationCandidate(source, target) {
   const targetState = target || {};
   const targetCandidateStatus = String(targetState.target_candidate_status || "").trim();
@@ -123,39 +204,67 @@ export function mergeMigrationCandidates(sourceRows, targetRows) {
   ));
 }
 
-export function filterAndPageMigrationCandidates(rows, {
+export function migrationCandidateMatches(row, {
   channelStatus = "all",
   agentStatus = "",
   finalStatus = "",
-  offset = 0,
-  limit = 500,
 } = {}) {
-  const filtered = rows.filter((row) => (
-    (channelStatus === "all" || row.candidate_status === channelStatus)
+  return (channelStatus === "all" || row.candidate_status === channelStatus)
     && (!agentStatus || row.agent_status === agentStatus)
-    && (!finalStatus || row.final_status === finalStatus)
-  ));
+    && (!finalStatus || row.final_status === finalStatus);
+}
+
+export function migrationFiltersIncludeUnstarted(filters = {}) {
+  return migrationCandidateMatches({
+    candidate_status: "discovered",
+    agent_status: "pending",
+    final_status: "pending",
+  }, filters);
+}
+
+export function migrationSourceCandidateFromIntent(row) {
+  const snapshot = row?.source_snapshot && typeof row.source_snapshot === "object"
+    ? row.source_snapshot
+    : {};
+  const sourceJson = snapshot.source_json && typeof snapshot.source_json === "object"
+    ? snapshot.source_json
+    : {};
+  const legacyImport = sourceJson.legacy_import && typeof sourceJson.legacy_import === "object"
+    ? sourceJson.legacy_import
+    : {};
   return {
-    rows: filtered.slice(offset, offset + limit),
-    total: filtered.length,
+    candidate_id: row.source_candidate_id ?? snapshot.source_candidate_id,
+    dispatch_batch_id: snapshot.source_dispatch_batch_id ?? null,
+    channel_id: row.channel_id ?? snapshot.channel_id,
+    channel_url: snapshot.channel_url,
+    handle: snapshot.handle ?? "",
+    title: snapshot.title ?? "",
+    avatar_url: snapshot.avatar_url ?? null,
+    search_subscriber_count: snapshot.search_subscriber_count ?? null,
+    snapshot_json: snapshot.snapshot_json ?? {},
+    source_json: sourceJson,
+    legacy_country: legacyImport.country ?? null,
+    legacy_target_reason: legacyImport.target_reason ?? null,
+    legacy_evidence_score: legacyImport.br_evidence_score ?? null,
+    legacy_evidence_reasons: legacyImport.br_evidence_reasons ?? null,
+    legacy_discovered_at: legacyImport.discovered_at ?? null,
+    source_rowid: sourceJson.source_rowid ?? null,
+    created_at: snapshot.source_created_at ?? null,
+    updated_at: snapshot.source_updated_at ?? null,
   };
 }
 
-export function migrationReadModelStats(sourceTotal, rows) {
-  const stats = {
-    total: Number(sourceTotal || 0),
-    discovered: 0,
-    queued: 0,
-    validating: 0,
-    finishing: 0,
-    failed: 0,
-    migration_done: 0,
-    final_done: 0,
+export function migrationReadModelStatsFromSummary(sourceTotal, summary = {}) {
+  const total = Number(sourceTotal || 0);
+  const started = Number(summary.started || 0);
+  return {
+    total,
+    discovered: Math.max(0, total - started) + Number(summary.discovered || 0),
+    queued: Number(summary.queued || 0),
+    validating: Number(summary.validating || 0),
+    finishing: Number(summary.finishing || 0),
+    failed: Number(summary.failed || 0),
+    migration_done: Number(summary.migration_done || 0),
+    final_done: Number(summary.final_done || 0),
   };
-  for (const row of rows) {
-    if (Object.hasOwn(stats, row.candidate_status)) stats[row.candidate_status] += 1;
-    if (row.migration_done) stats.migration_done += 1;
-    if (FINAL_STATUSES.has(String(row.final_status || ""))) stats.final_done += 1;
-  }
-  return stats;
 }

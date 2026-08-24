@@ -32,9 +32,13 @@ import {
 import {
   assertCrawlerDashboardIdentity,
   assertMigrationSourceIdentity,
-  filterAndPageMigrationCandidates,
+  loadMigrationSourceCount,
+  loadMigrationSourcePage,
+  migrationCandidateMatches,
+  migrationFiltersIncludeUnstarted,
   mergeMigrationCandidates,
-  migrationReadModelStats,
+  migrationReadModelStatsFromSummary,
+  migrationSourceCandidateFromIntent,
 } from "./migrationTopology.js";
 import { loadChannelCurrentContent } from "./channelCurrentContent.js";
 
@@ -1518,6 +1522,204 @@ async function channelSummaryRows({
   return rows.rows;
 }
 
+const migrationTargetStateCte = `target_state AS (
+  SELECT intent.migration_intent_id,intent.source_candidate_id,
+         intent.source_snapshot,intent.target_candidate_id,intent.channel_id,
+         candidate.status AS target_candidate_status,
+         channel.status AS target_channel_status,
+         channel.registry_promotion_candidate_id,
+         channel.reject_reason AS target_reject_reason,
+         COALESCE(channel.agent_status,'pending') AS agent_status,
+         channel.latest_run_id,
+         COALESCE(finalized.status,'pending') AS final_status,
+         COALESCE(finalized.quality_json,'{}'::jsonb) AS quality_json,
+         run.status AS run_status,run.detail_status AS run_detail_status,
+         CASE
+           WHEN candidate.status='accepted'
+            AND channel.status='active'
+            AND channel.registry_promotion_candidate_id=candidate.candidate_id
+            AND COALESCE(finalized.status,'pending') NOT IN ('ready_auto','ready_partial')
+           THEN 'finishing'
+           ELSE COALESCE(candidate.status,'discovered')
+         END AS candidate_status,
+         (
+           candidate.status='accepted'
+           AND channel.status IN ('active','dormant')
+           AND channel.registry_promotion_candidate_id=candidate.candidate_id
+           AND COALESCE(finalized.status,'pending') IN ('ready_auto','ready_partial')
+         ) AS migration_done,
+         CASE
+           WHEN (intent.source_snapshot->>'priority') ~ '^-?[0-9]+$'
+           THEN (intent.source_snapshot->>'priority')::int
+           ELSE 100
+         END AS source_priority,
+         GREATEST(intent.updated_at,COALESCE(candidate.updated_at,intent.updated_at),
+                  COALESCE(channel.updated_at,intent.updated_at)) AS updated_at
+  FROM crawler.migration_channel_intents intent
+  LEFT JOIN crawler.channel_candidates candidate
+    ON candidate.candidate_id=intent.target_candidate_id
+  LEFT JOIN crawler.channels channel ON channel.channel_id=intent.channel_id
+  LEFT JOIN crawler.channel_runs run ON run.run_id=channel.latest_run_id
+  LEFT JOIN crawler.finalized_profiles finalized ON finalized.channel_id=intent.channel_id
+  WHERE intent.source_id=$1
+)`;
+
+function migrationTargetSearchClause(args, search) {
+  const normalized = String(search || "").trim();
+  if (!normalized) return "TRUE";
+  args.push(`%${normalized}%`);
+  return `(state.channel_id ILIKE $${args.length}
+    OR state.source_snapshot->>'channel_url' ILIKE $${args.length}
+    OR state.source_snapshot->>'handle' ILIKE $${args.length}
+    OR state.source_snapshot->>'title' ILIKE $${args.length})`;
+}
+
+function migrationTargetFilterClause(args, { channelStatus, agentStatus, finalStatus }) {
+  const where = [];
+  if (channelStatus !== "all") {
+    args.push(channelStatus);
+    where.push(`state.candidate_status=$${args.length}`);
+  }
+  if (agentStatus) {
+    args.push(agentStatus);
+    where.push(`state.agent_status=$${args.length}`);
+  }
+  if (finalStatus) {
+    args.push(finalStatus);
+    where.push(`state.final_status=$${args.length}`);
+  }
+  return where.length > 0 ? where.join(" AND ") : "TRUE";
+}
+
+async function migrationTargetSummary(filters) {
+  const args = [migrationSourceId];
+  const searchSql = migrationTargetSearchClause(args, filters.search);
+  const filterSql = migrationTargetFilterClause(args, filters);
+  const result = await db(`WITH ${migrationTargetStateCte}, searched_state AS (
+      SELECT state.* FROM target_state state WHERE ${searchSql}
+    )
+    SELECT
+      count(*)::int AS started,
+      count(*) FILTER (WHERE state.candidate_status='discovered')::int AS discovered,
+      count(*) FILTER (WHERE state.candidate_status='queued')::int AS queued,
+      count(*) FILTER (WHERE state.candidate_status='validating')::int AS validating,
+      count(*) FILTER (WHERE state.candidate_status='finishing')::int AS finishing,
+      count(*) FILTER (WHERE state.candidate_status='failed')::int AS failed,
+      count(*) FILTER (WHERE state.migration_done)::int AS migration_done,
+      count(*) FILTER (
+        WHERE state.final_status IN ('ready_auto','ready_partial')
+      )::int AS final_done,
+      count(*) FILTER (WHERE ${filterSql})::int AS filtered
+    FROM searched_state state`, args);
+  return result.rows[0] || {};
+}
+
+async function migrationTargetRowsForSources(sourceRows) {
+  if (sourceRows.length === 0) return [];
+  const sourceCandidateIds = sourceRows.map((row) => String(row.candidate_id));
+  const channelIds = sourceRows.map((row) => row.channel_id);
+  const result = await db(`
+    SELECT intent.migration_intent_id,intent.source_candidate_id::text,
+           intent.target_candidate_id,intent.channel_id,
+           candidate.status AS target_candidate_status,
+           channel.status AS target_channel_status,
+           channel.registry_promotion_candidate_id,
+           channel.reject_reason AS target_reject_reason,
+           channel.agent_status,channel.latest_run_id,
+           COALESCE(finalized.status,'pending') AS final_status,
+           COALESCE(finalized.quality_json,'{}'::jsonb) AS quality_json,
+           run.status AS run_status,run.detail_status AS run_detail_status,
+           (SELECT count(*) FROM crawler.contents content
+            WHERE content.channel_id=intent.channel_id
+              AND content.run_id=channel.latest_run_id)::bigint AS content_count,
+           (SELECT count(*) FROM crawler.contents content
+            WHERE content.channel_id=intent.channel_id
+              AND content.run_id=channel.latest_run_id
+              AND content.content_type='video')::bigint AS video_count,
+           (SELECT count(*) FROM crawler.contents content
+            WHERE content.channel_id=intent.channel_id
+              AND content.run_id=channel.latest_run_id
+              AND content.content_type='short')::bigint AS short_count,
+           (SELECT count(*) FROM crawler.contents content
+            WHERE content.channel_id=intent.channel_id
+              AND content.run_id=channel.latest_run_id
+              AND content.content_type='live')::bigint AS live_count,
+           GREATEST(intent.updated_at,COALESCE(candidate.updated_at,intent.updated_at),
+                    COALESCE(channel.updated_at,intent.updated_at)) AS updated_at
+    FROM crawler.migration_channel_intents intent
+    LEFT JOIN crawler.channel_candidates candidate
+      ON candidate.candidate_id=intent.target_candidate_id
+    LEFT JOIN crawler.channels channel ON channel.channel_id=intent.channel_id
+    LEFT JOIN crawler.channel_runs run ON run.run_id=channel.latest_run_id
+    LEFT JOIN crawler.finalized_profiles finalized ON finalized.channel_id=intent.channel_id
+    WHERE intent.source_id=$1
+      AND (intent.source_candidate_id=ANY($2::bigint[])
+           OR intent.channel_id=ANY($3::text[]))
+  `, [migrationSourceId, sourceCandidateIds, channelIds]);
+  return result.rows;
+}
+
+async function migrationTargetPage(filters) {
+  const args = [migrationSourceId];
+  const searchSql = migrationTargetSearchClause(args, filters.search);
+  const filterSql = migrationTargetFilterClause(args, filters);
+  args.push(filters.limit, filters.offset);
+  const limitParameter = args.length - 1;
+  const offsetParameter = args.length;
+  const result = await db(`WITH ${migrationTargetStateCte}, target_page AS (
+      SELECT state.*
+      FROM target_state state
+      WHERE ${searchSql} AND ${filterSql}
+      ORDER BY state.source_priority DESC,state.source_candidate_id
+      LIMIT $${limitParameter}::int OFFSET $${offsetParameter}::int
+    )
+    SELECT page.*,
+           (SELECT count(*) FROM crawler.contents content
+            WHERE content.channel_id=page.channel_id
+              AND content.run_id=page.latest_run_id)::bigint AS content_count,
+           (SELECT count(*) FROM crawler.contents content
+            WHERE content.channel_id=page.channel_id
+              AND content.run_id=page.latest_run_id
+              AND content.content_type='video')::bigint AS video_count,
+           (SELECT count(*) FROM crawler.contents content
+            WHERE content.channel_id=page.channel_id
+              AND content.run_id=page.latest_run_id
+              AND content.content_type='short')::bigint AS short_count,
+           (SELECT count(*) FROM crawler.contents content
+            WHERE content.channel_id=page.channel_id
+              AND content.run_id=page.latest_run_id
+              AND content.content_type='live')::bigint AS live_count
+    FROM target_page page
+    ORDER BY page.source_priority DESC,page.source_candidate_id`, args);
+  const targetRows = result.rows;
+  const sourceRows = targetRows.map(migrationSourceCandidateFromIntent);
+  return mergeMigrationCandidates(sourceRows, targetRows);
+}
+
+async function migrationSourceFilteredPage(filters, sourceTotal) {
+  const channels = [];
+  let matched = 0;
+  let sourceOffset = 0;
+  while (sourceOffset < sourceTotal && channels.length < filters.limit) {
+    const sourceRows = await loadMigrationSourcePage({
+      read: migrationRead,
+      search: filters.search,
+      limit: 500,
+      offset: sourceOffset,
+    });
+    if (sourceRows.length === 0) break;
+    const targetRows = await migrationTargetRowsForSources(sourceRows);
+    for (const channel of mergeMigrationCandidates(sourceRows, targetRows)) {
+      if (!migrationCandidateMatches(channel, filters)) continue;
+      if (matched >= filters.offset) channels.push(channel);
+      matched += 1;
+      if (channels.length >= filters.limit) break;
+    }
+    sourceOffset += sourceRows.length;
+  }
+  return channels;
+}
+
 async function migrationChannelListData(req) {
   const limit = intValue(req.query.limit, 500, 1, 500);
   const offset = intValue(req.query.offset, 0, 0, 1_000_000);
@@ -1533,105 +1735,38 @@ async function migrationChannelListData(req) {
   }
 
   try {
-    const args = [];
-    const sourceWhere = ["candidate.source_json->>'source'='legacy_results_db'"];
-    if (search) {
-      args.push(`%${search}%`);
-      sourceWhere.push(`(
-        candidate.channel_id ILIKE $${args.length}
-        OR candidate.channel_url ILIKE $${args.length}
-        OR candidate.handle ILIKE $${args.length}
-        OR candidate.title ILIKE $${args.length}
-      )`);
+    const [sourceTotal, targetSummary] = await Promise.all([
+      loadMigrationSourceCount({ read: migrationRead, search }),
+      migrationTargetSummary(filters),
+    ]);
+    const includesUnstarted = migrationFiltersIncludeUnstarted(filters);
+    const total = (includesUnstarted
+      ? Math.max(0, sourceTotal - Number(targetSummary.started || 0))
+      : 0) + Number(targetSummary.filtered || 0);
+    let channels = [];
+    if (offset < total) {
+      const unfiltered = channelStatus === "all" && !agentStatus && !finalStatus;
+      if (unfiltered) {
+        const sourceRows = await loadMigrationSourcePage({
+          read: migrationRead,
+          search,
+          limit,
+          offset,
+        });
+        const targetRows = await migrationTargetRowsForSources(sourceRows);
+        channels = mergeMigrationCandidates(sourceRows, targetRows);
+      } else if (includesUnstarted) {
+        channels = await migrationSourceFilteredPage(filters, sourceTotal);
+      } else {
+        channels = await migrationTargetPage(filters);
+      }
     }
-    const sourceWhereSql = sourceWhere.join(" AND ");
-    const sourceRows = await migrationRead(`WITH ranked_source AS (
-        SELECT
-          candidate.*,
-          row_number() OVER (
-            PARTITION BY candidate.channel_id
-            ORDER BY candidate.priority DESC,candidate.candidate_id DESC
-          ) AS channel_rank
-        FROM crawler.channel_candidates candidate
-        WHERE ${sourceWhereSql}
-      )
-        SELECT
-          candidate_id,
-          candidate.dispatch_batch_id,
-          candidate.channel_id,
-          candidate.channel_url,candidate.handle,candidate.title,candidate.avatar_url,
-          candidate.search_subscriber_count,candidate.snapshot_json,candidate.source_json,
-          candidate.source_json #>> '{legacy_import,country}' AS legacy_country,
-          candidate.source_json #>> '{legacy_import,target_reason}' AS legacy_target_reason,
-          candidate.source_json #>> '{legacy_import,br_evidence_score}' AS legacy_evidence_score,
-          candidate.source_json #>> '{legacy_import,br_evidence_reasons}' AS legacy_evidence_reasons,
-          candidate.source_json #>> '{legacy_import,discovered_at}' AS legacy_discovered_at,
-          candidate.source_json->>'source_rowid' AS source_rowid,
-          candidate.created_at,
-          candidate.updated_at
-        FROM ranked_source candidate
-        WHERE candidate.channel_rank=1
-        ORDER BY candidate.priority DESC,candidate.candidate_id
-      `, args);
-    const sourceCandidateRows = sourceRows.rows;
-    const targetCandidateRows = [];
-    for (const sourceChunk of chunksOf(sourceCandidateRows, 500)) {
-      const sourceCandidateIds = sourceChunk.map((row) => String(row.candidate_id));
-      const channelIds = sourceChunk.map((row) => row.channel_id);
-      const targetRows = await db(`
-          SELECT intent.migration_intent_id,intent.source_candidate_id::text,
-                 intent.target_candidate_id,intent.channel_id,
-                 candidate.status AS target_candidate_status,
-                 channel.status AS target_channel_status,
-                 channel.registry_promotion_candidate_id,
-                 channel.reject_reason AS target_reject_reason,
-                 channel.agent_status,channel.latest_run_id,
-                 COALESCE(finalized.status,'pending') AS final_status,
-                 COALESCE(finalized.quality_json,'{}'::jsonb) AS quality_json,
-                 run.status AS run_status,run.detail_status AS run_detail_status,
-                 (SELECT count(*) FROM crawler.contents content
-                  WHERE content.channel_id=intent.channel_id
-                    AND content.run_id=channel.latest_run_id)::bigint AS content_count,
-                 (SELECT count(*) FROM crawler.contents content
-                  WHERE content.channel_id=intent.channel_id
-                    AND content.run_id=channel.latest_run_id
-                    AND content.content_type='video')::bigint AS video_count,
-                 (SELECT count(*) FROM crawler.contents content
-                  WHERE content.channel_id=intent.channel_id
-                    AND content.run_id=channel.latest_run_id
-                    AND content.content_type='short')::bigint AS short_count,
-                 (SELECT count(*) FROM crawler.contents content
-                  WHERE content.channel_id=intent.channel_id
-                    AND content.run_id=channel.latest_run_id
-                    AND content.content_type='live')::bigint AS live_count,
-                 GREATEST(intent.updated_at,COALESCE(candidate.updated_at,intent.updated_at),
-                          COALESCE(channel.updated_at,intent.updated_at)) AS updated_at
-          FROM crawler.migration_channel_intents intent
-          LEFT JOIN crawler.channel_candidates candidate
-            ON candidate.candidate_id=intent.target_candidate_id
-          LEFT JOIN crawler.channels channel ON channel.channel_id=intent.channel_id
-          LEFT JOIN crawler.channel_runs run ON run.run_id=channel.latest_run_id
-          LEFT JOIN crawler.finalized_profiles finalized ON finalized.channel_id=intent.channel_id
-          WHERE intent.source_id=$1
-            AND (intent.source_candidate_id=ANY($2::bigint[])
-                 OR intent.channel_id=ANY($3::text[]))
-        `, [migrationSourceId, sourceCandidateIds, channelIds]);
-      targetCandidateRows.push(...targetRows.rows);
-    }
-    const mergedChannels = mergeMigrationCandidates(sourceCandidateRows, targetCandidateRows);
-    const page = filterAndPageMigrationCandidates(mergedChannels, {
-      channelStatus,
-      agentStatus,
-      finalStatus,
-      offset,
-      limit,
-    });
     return {
       configured: true,
       available: true,
-      channels: page.rows,
-      total: page.total,
-      stats: migrationReadModelStats(sourceCandidateRows.length, mergedChannels),
+      channels,
+      total,
+      stats: migrationReadModelStatsFromSummary(sourceTotal, targetSummary),
       filters,
     };
   } catch (error) {
