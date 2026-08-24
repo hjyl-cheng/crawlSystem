@@ -36,8 +36,10 @@ function job(data) {
 
 function storeFixture(data) {
   const calls = [];
+  const domainResults = [];
   return {
     calls,
+    domainResults,
     async claim() {
       return {
         created: true,
@@ -55,7 +57,10 @@ function storeFixture(data) {
         },
       };
     },
-    async markDomain(runId, domain, status) { calls.push(["domain", domain, status]); },
+    async markDomain(runId, domain, status, result) {
+      calls.push(["domain", domain, status]);
+      domainResults.push({ domain, status, result });
+    },
     async finish(runId, options) { calls.push(["finish", options.waitingForAgent]); },
     async fail() { calls.push(["fail"]); },
   };
@@ -157,6 +162,44 @@ test("Video executor receives the Crawler query dependency", async () => {
   assert.deepEqual(channelOptions, { includeAbout: false });
   assert.equal(result.session_opened, true);
   assert.deepEqual(result.executed_domains, ["video"]);
+});
+
+test("a deferred Video reservation cleanup keeps the Run successful and records the warning", async () => {
+  const data = plan({ video: true });
+  const runStore = storeFixture(data);
+  const runner = new IncrementalChannelRunner({
+    runStore,
+    agentBacklog: {},
+    query: async () => ({ rows: [] }),
+    withTransaction: async (action) => action({}),
+    openChannel: async () => ({}),
+    video: async () => ({
+      outcome: "complete",
+      observation_id: "video-observation",
+      reservation_cleanup_deferred: true,
+    }),
+  });
+
+  const result = await runner.execute(job(data));
+
+  assert.equal(result.status, "done");
+  assert.deepEqual(runStore.calls, [
+    ["domain", "video", "running"],
+    ["domain", "video", "complete"],
+    ["finish", false],
+  ]);
+  assert.deepEqual(runStore.domainResults.at(-1), {
+    domain: "video",
+    status: "complete",
+    result: {
+      outcome: "complete",
+      observation_id: "video-observation",
+      event_id: null,
+      kind_sequence: null,
+      duplicate: false,
+      reservation_cleanup_deferred: true,
+    },
+  });
 });
 
 test("a failed domain Observation fails the incremental Run instead of marking it complete", async () => {

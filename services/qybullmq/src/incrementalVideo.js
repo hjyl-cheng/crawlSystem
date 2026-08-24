@@ -932,15 +932,7 @@ function collectionErrorEvidence(error) {
   };
 }
 
-async function upsertFirstSeenContent(client, {
-  channelId,
-  runId,
-  observationId,
-  observedAt,
-  entry,
-  capture,
-  discoveryDeferred = null,
-}) {
+function resolveFirstSeenContent({ entry, capture, observedAt, discoveryDeferred = null }) {
   const detail = capture?.detail ?? null;
   const facts = detailFacts(detail);
   const uploadFacts = uploadsPublishedFacts(entry);
@@ -972,6 +964,37 @@ async function upsertFirstSeenContent(client, {
         }
       : null,
   });
+  return { detail, facts, uploadFacts, classification, disposition };
+}
+
+function firstSeenCheckpointOutcome(resolution, capture, observedAt) {
+  if (resolution.disposition.kind !== "stored") return null;
+  const task = { task_id: "first-seen-checkpoint", attempts: 0, dispatch_generation: 0 };
+  const completedAt = new Date(observedAt);
+  const retryOptions = clockContentEnrichRetryOptions();
+  const outcome = resolution.detail == null
+    ? contentEnrichFailureOutcome(task, capture?.error ?? null, completedAt, retryOptions)
+    : contentEnrichDetailOutcome(task, resolution.detail, completedAt, retryOptions);
+  return ["retryable", "dead_letter"].includes(outcome.kind) ? outcome : null;
+}
+
+async function upsertFirstSeenContent(client, {
+  channelId,
+  runId,
+  observationId,
+  observedAt,
+  entry,
+  capture,
+  discoveryDeferred = null,
+  resolution = null,
+}) {
+  const resolved = resolution ?? resolveFirstSeenContent({
+    entry,
+    capture,
+    observedAt,
+    discoveryDeferred,
+  });
+  const { detail, facts, uploadFacts, classification, disposition } = resolved;
   if (disposition.kind !== "stored") {
     const terminalExcluded = disposition.kind === "terminal_excluded";
     const collectionFailed = capture?.error != null;
@@ -1031,6 +1054,7 @@ async function upsertFirstSeenContent(client, {
       disposition,
       classification,
       facts,
+      enrichOutcomeKind: null,
       publishedAt: facts?.published_at ?? uploadFacts?.published_at ?? null,
       publishedAtPrecision: facts?.published_at
         ? facts.published_at_precision
@@ -1300,9 +1324,55 @@ async function upsertFirstSeenContent(client, {
     contentType,
     classification,
     facts,
+    enrichOutcomeKind: preparedEnrich.skipped ? null : preparedEnrich.outcome?.kind ?? null,
     publishedAt: published,
     publishedAtPrecision: publishedPrecision,
   };
+}
+
+async function checkpointFirstSeenEnrichFailures({
+  plan,
+  runId,
+  candidateEntries,
+  captures,
+  withTransaction,
+  observedAt,
+}) {
+  const checkpoints = [];
+  const seenVideoIds = new Set();
+  for (const entry of candidateEntries) {
+    if (seenVideoIds.has(entry.id)) continue;
+    seenVideoIds.add(entry.id);
+    if (!captures.has(entry.id)) continue;
+    const capture = captures.get(entry.id);
+    const resolution = resolveFirstSeenContent({ entry, capture, observedAt });
+    if (!firstSeenCheckpointOutcome(resolution, capture, observedAt)) continue;
+    checkpoints.push({ entry, capture, resolution });
+  }
+  if (checkpoints.length === 0) return [];
+  return withTransaction(async (client) => {
+    const alreadyKnown = await knownVideoIds(
+      client.query.bind(client),
+      plan.channel_id,
+      checkpoints.map(({ entry }) => entry.id),
+    );
+    const checkpointed = [];
+    for (const checkpoint of checkpoints) {
+      if (alreadyKnown.has(checkpoint.entry.id)) continue;
+      const persisted = await upsertFirstSeenContent(client, {
+        channelId: plan.channel_id,
+        runId,
+        observationId: null,
+        observedAt,
+        ...checkpoint,
+      });
+      if (!["retryable", "dead_letter"].includes(persisted.enrichOutcomeKind)) {
+        throw new Error(`First-Seen failure checkpoint changed outcome: ${checkpoint.entry.id}`);
+      }
+      checkpointed.push({ entry: checkpoint.entry, ...persisted });
+    }
+    return checkpointed;
+  });
 }
 
 async function applyDiscovery({
@@ -1315,6 +1385,7 @@ async function applyDiscovery({
   observationId,
   observedAt,
   pendingDeferredVideoIds = [],
+  checkpointedFirstSeen = [],
 }) {
   const discoveryDeferred = scan.complete === true
     ? null
@@ -1375,6 +1446,21 @@ async function applyDiscovery({
   const recheckDeferredVideoIds = [];
   let detailSuccessCount = 0;
   let detailFailureCount = 0;
+  for (const current of checkpointedFirstSeen) {
+    const entry = current.entry;
+    const dispositionSummary = videoDispositionSummary(entry.id, current.disposition);
+    if (entry.disposition_recheck) recheckDispositions.push(dispositionSummary);
+    else dispositions.push(dispositionSummary);
+    if (current.facts) detailSuccessCount += 1;
+    else detailFailureCount += 1;
+    firstSeen.push({
+      video_id: entry.id,
+      position: entry.position,
+      content_type: current.contentType,
+      published_at: current.publishedAt,
+      published_at_precision: current.publishedAtPrecision,
+    });
+  }
   for (const entry of firstSeenEntries) {
     const capture = captures.get(entry.id) ?? { detail: null, error: null };
     const detailAttempted = captures.has(entry.id);
@@ -1413,7 +1499,7 @@ async function applyDiscovery({
     });
   }
   const discoveredVideoIds = [...new Set(
-    firstSeenEntries
+    [...checkpointedFirstSeen.map((current) => current.entry), ...firstSeenEntries]
       .filter((entry) => !entry.disposition_recheck)
       .map((entry) => entry.id),
   )];
@@ -1971,6 +2057,7 @@ async function recordVideoCycle({
   scan,
   discoveryEntries,
   discoveryCaptures,
+  checkpointedFirstSeen,
   pendingDeferredVideoIds,
   anchors,
   preparedSampling,
@@ -2042,6 +2129,7 @@ async function recordVideoCycle({
               observationId,
               observedAt,
               pendingDeferredVideoIds,
+              checkpointedFirstSeen,
             });
             const discoveryPayload = {
               ...discovery.payload,
@@ -2103,6 +2191,7 @@ async function recordVideoCycle({
             observationId,
             observedAt,
             pendingDeferredVideoIds,
+            checkpointedFirstSeen,
           });
           const { samplePlan } = preparedSampling;
           const recentSampling = await applyRecentSampling({
@@ -2208,19 +2297,22 @@ async function recordVideoCycle({
   } catch (error) {
     transactionError = error;
   }
+  let reservationCleanupDeferred = false;
   try {
     await releaseClockContentEnrichReservations(withTransaction, preparedSampling);
   } catch (releaseError) {
-    if (!transactionError) throw releaseError;
-    if (
-      transactionError
-      && (typeof transactionError === "object" || typeof transactionError === "function")
-    ) {
+    if (transactionError && (
+      typeof transactionError === "object" || typeof transactionError === "function"
+    )) {
       transactionError.clock_content_enrich_release_error = releaseError;
+    } else {
+      reservationCleanupDeferred = true;
     }
   }
   if (transactionError) throw transactionError;
-  return recorded;
+  return reservationCleanupDeferred
+    ? { ...recorded, reservation_cleanup_deferred: true }
+    : recorded;
 }
 
 export async function executeIncrementalVideo({
@@ -2283,6 +2375,7 @@ export async function executeIncrementalVideo({
       scan,
       discoveryEntries: scannedWork.workEntries,
       discoveryCaptures: new Map(),
+      checkpointedFirstSeen: [],
       pendingDeferredVideoIds: scannedWork.pendingDeferredVideoIds,
       anchors,
       preparedSampling: null,
@@ -2311,6 +2404,14 @@ export async function executeIncrementalVideo({
       detailFetcher,
       detailEligibleFirstSeen.length,
     );
+    const checkpointedFirstSeen = await checkpointFirstSeenEnrichFailures({
+      plan,
+      runId,
+      candidateEntries: discoveryEntries,
+      captures: discoveryCaptures,
+      withTransaction,
+      observedAt,
+    });
     const preparedSampling = await prepareClockRecentSampling({
       plan,
       runId,
@@ -2329,6 +2430,7 @@ export async function executeIncrementalVideo({
       scan,
       discoveryEntries,
       discoveryCaptures,
+      checkpointedFirstSeen,
       pendingDeferredVideoIds: scannedWork.pendingDeferredVideoIds,
       anchors,
       preparedSampling,
@@ -2350,5 +2452,8 @@ export async function executeIncrementalVideo({
     selected_count: recorded.result?.selectedCount ?? 0,
     lifecycle_status: recorded.result?.lifecycleStatus ?? null,
     dormant_recheck_day: recorded.result?.dormantRecheckDay ?? null,
+    ...(recorded.reservation_cleanup_deferred === true
+      ? { reservation_cleanup_deferred: true }
+      : {}),
   };
 }

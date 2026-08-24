@@ -699,7 +699,7 @@ test("First-Seen Video keeps an incomplete public detail open for Enrich", async
   const videoId = "first-seen-incomplete-detail";
   const contentKey = `UCvideo:video:${videoId}`;
 
-  await executeIncrementalVideo({
+  const result = await executeIncrementalVideo({
     plan: plan(),
     runId: "incremental:first-seen-incomplete-detail",
     startedAt: "2026-07-20T00:00:00.000Z",
@@ -731,6 +731,7 @@ test("First-Seen Video keeps an incomplete public detail open for Enrich", async
     }),
   });
 
+  assert.equal(result.first_seen_count, 1);
   const content = fixture.state.contents.find((row) => row.content_key === contentKey);
   assert.equal(content.last_enriched_at, null);
   assert.deepEqual(

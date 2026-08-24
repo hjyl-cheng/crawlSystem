@@ -381,6 +381,10 @@ comments_disabled=true
 全表监控聚合；Clock 也不再先提交成功数据和游标、再单独执行 Publication。这里的
 “关闭”只指代码候选和隔离事务验收，生产 BUG 仍必须等金丝雀实际消化积压后才能关闭。
 
+同日后续复审又关闭两个事务边界缺口：First-Seen 不完整详情的失败证据不再被
+Publication 回滚；已提交 Clock 周期也不再因 reservation cleanup 短暂失败而被控制面
+误判为失败。这里仍只代表代码候选通过隔离验收，不代表生产积压已经修复。
+
 2026-08-21 原始核对时：
 
 | 状态 | 任务数 | 频道数 | 说明 |
@@ -475,7 +479,9 @@ queued / failed / 到期的 terminal
 - retryable/dead-letter checkpoint 和未执行任务释放先在独立短事务提交；成功或 terminal 的 Content、Task、变化视频 Item Hash 与按频道 Publication Reconciler 保持在另一个原子事务；
 - 因而 Publication 失败会回滚对应 Content/Hash/terminal/done 写入，但不能抹掉同批已经记录的 retry attempts；未变化的 retryable/dead-letter 不刷新 Hash 或调用 Publication；
 - Clock 第一事务只提交真实 retryable/dead-letter checkpoint；对 success/terminal 则把已有 Task 变为带 `lease_owner`、expiry 和新 `dispatch_generation` 的 `running` reservation，不提前提交 Content、Hash、Observation、游标或 crawler outbox；
-- Clock 第二事务重新锁定并验证 reservation，随后把 success/terminal Task、Content、Video Item Hash、Observation、游标、crawler outbox 和 `channel + video` Publication Reconciler 一起提交。Publication 失败时第二事务全部回滚，第一事务已记录的失败 attempts 保留；正常异常路径按 fence 恢复未消费 reservation，进程在两事务之间崩溃时则由现有 expired-running 回收路径接管；
+- First-Seen 仅在复用现有类型、访问状态与 Enrich outcome 状态机确认结果为 retryable/dead-letter 后，才用独立短事务保存 Candidate、未补全 Content 和累计 attempts；成功或权威 terminal 不提前提交。Publication 失败时这些真实失败证据保留，而 Hash、Observation、游标和 crawler outbox 仍全部回滚；
+- Clock 第二事务重新锁定并验证 reservation，随后把 success/terminal Task、Content、Video Item Hash、Observation、游标、crawler outbox 和 `channel + video` Publication Reconciler 一起提交。Publication 失败时第二事务全部回滚，前置短事务已记录的失败 attempts 保留；失败路径按 fence 尽力恢复未消费 reservation，进程崩溃或 cleanup 故障则由现有 expired-running 回收路径接管；
+- 主事务一旦提交，cleanup 只是缩短未消费 reservation 恢复时间的补偿优化，不能反转 Job、Domain 或 Run 的成功结果。cleanup 故障返回并持久化 `reservation_cleanup_deferred=true`，已消费 Task 保持 done/terminal，未消费 reservation 等待 lease 到期后按新 generation 接管；
 - 拆分事务不能把 Recent Sampling 从 `post_discovery_current` 偷换成旧快照；规划查询用本轮 Uploads 日期证据对既有 Content 做只读 overlay，因此刚补到 `published_at` 的已知视频仍可在同一轮采样，而真正的 Discovery/Content/游标写入继续等第二事务与 Publication 原子提交；
 - Queue Publication 部分失败时，异常只携带已确认提交的 Enrich outcome；`leased -> running` claim 与 `claimed` 事件同事务，fenced Task 状态迁移与 `checkpointed` outcome 事件同事务。监控只统计这两类已提交事件，不再依赖 Rota 最后一条 Job 事件，因此换身份前已落库的 claim/retry/dead-letter 不会在后续换线成功时消失，也不会把已回滚的 done/terminal 误报为成功；
 - Rota 增加真实 `content_enrich` task kind，并限定为 channel role；没有伪装成 Full Crawl 或 Incremental；
@@ -505,8 +511,8 @@ private/unavailable 的低频复查继续使用同一条 `content_enrich_tasks` 
 - qybullmq 全量执行 1,092 个子测试：首轮 1,023 pass、64 条条件跳过、5 条宿主环境失败；解除沙箱后 Build Images 1 条和 Business Publication HTTP 2 条全部通过。剩余 Fingerprint Gateway 与 yt-dlp Session 两条仅因宿主缺少 Python `aiohttp`、`yt_dlp` 无法执行，未把环境缺依赖记为代码通过；
 - Content Enrich 真实 PostgreSQL 16 生命周期 2/2 通过、0 skip，覆盖已提交 mutex 争用和过期接管、`SKIP LOCKED`、Worker 在 `queue.add()` 内即时 claim 的事务可见性、投递崩溃恢复、attempts/实际失败时间退避、generation fencing、heartbeat、行锁等待后 lease 过期、Rota checkpoint fencing、terminal、工程 dead-letter、Content、Item Hash、真实 Publication revision/outbox、部分失败指标和重复 Job；
 - runtime schema 和 fresh `database/bootstrap/crawler.sql` 均在空 PostgreSQL 16 测试库完整应用；bootstrap 默认 mode、cursor 和 mutex 已读取验证；
-- Incremental Video PostgreSQL 5/5 通过、0 skip；新增 Publication 故障注入证明同批 retry attempts 保留，而 public success 和 authoritative terminal 的 Content/access status、Task outcome、Item Hash、Observation、游标与 crawler outbox 全部回滚，reservation 释放后 generation 仍单调递增；
-- Enrich、Clock、Controller 接线的针对性单元回归 103/103 通过；Migration、Query、Full Crawl 和正常 Incremental 聚焦回归 196 pass、10 条环境条件跳过、0 fail；Dashboard 3/3 通过；
+- Incremental Video PostgreSQL 7/7 通过、0 skip；除存量 public success、authoritative terminal 与 retry 混合批次外，还覆盖重复 First-Seen 不完整详情在 Publication 失败后只累计一次 attempts、保留 Candidate/占位 Content 且不提交发布数据，以及主事务成功后 cleanup 事务入口故障仍返回 complete、保留 Task/Content/Hash/游标/outbox；
+- Enrich、Clock、Controller 接线的针对性单元回归 110/110 通过；Migration、Query、Full Crawl 和正常 Incremental 聚焦回归 197 pass、8 条环境条件跳过、0 fail；Dashboard 前序 3/3 通过；
 - 本次最终修正未修改 Rota；前序分支验收已有 `internal/proxycontrol` 通过记录，但当前宿主没有 `go` 可执行文件，因此本次未独立重跑 Go 测试；
 - Node 语法检查、`git diff --check` 和隔离 PostgreSQL 测试均通过。
 
@@ -525,11 +531,11 @@ private/unavailable 的低频复查继续使用同一条 `content_enrich_tasks` 
 7. 先执行 `npm run content-enrich:mode -- queue` dry-run，再提供 operator、reason 和精确确认值执行 `--apply`；
 8. 小流量观察后再调整 High Water、refill 或 Worker 数量，不能一次性放大。
 
-代码已提供 Queue 开放 Job 数、queued/leased/running/failed/terminal/dead_letter/done、最老 queued 年龄、claim/success/retry/terminal/dead-letter rate、当前 dispatch mutex contention、积压和年龄阈值告警。上线仍需把结构化告警日志接入现有告警平台，并联合监控 High Water、mutex expiry/heartbeat、Worker lease renewal/loss、恢复投递失败、过期 lease、attempts 与 next retry、terminal access source、`last_enriched_at`、Item Hash、Publication revision/outbox，以及 Rota channel ready/claimed 和 `content_enrich` Task 结果。
+代码已提供 Queue 开放 Job 数、queued/leased/running/failed/terminal/dead_letter/done、最老 queued 年龄、claim/success/retry/terminal/dead-letter rate、当前 dispatch mutex contention、积压和年龄阈值告警。上线仍需把结构化告警日志接入现有告警平台，并联合监控 High Water、mutex expiry/heartbeat、Worker lease renewal/loss、恢复投递失败、过期 lease、`reservation_cleanup_deferred`、attempts 与 next retry、terminal access source、`last_enriched_at`、Item Hash、Publication revision/outbox，以及 Rota channel ready/claimed 和 `content_enrich` Task 结果。
 
 回滚时先把 mode 切为 `clock`，再关闭 Controller gate；保留 Worker 让已领取 Job 排空，或接受它们在 lease 到期后由 Clock 接管。不得先强停 Worker 后直接让 Clock 忽略有效 lease，也不得直接批量改 BUG-7 数据。
 
-剩余风险是生产代理容量和单条详情延迟尚未用真实积压压测，结构化告警日志也尚未在生产告警平台验证送达。监控全表聚合若持续超过 deadline，Controller 会保持运行但 Dashboard 将显示旧快照；金丝雀必须同时观察 stale 状态和数据库查询耗时，必要时再基于生产 `EXPLAIN` 优化索引或改为增量指标。heartbeat 能覆盖正常长抓取；若数据库不可续租，Worker 会 fail closed，数据不会被旧 Worker 覆盖，但当前底层抓取适配器可能要等正在执行的单次上游调用返回后才能完全退出，仍可能浪费一次请求。上线后必须用 p95/p99 单条和批次时长校准 batch size、lease 与 heartbeat，并观察失租率。
+剩余风险是生产代理容量和单条详情延迟尚未用真实积压压测，结构化告警日志也尚未在生产告警平台验证送达。监控全表聚合若持续超过 deadline，Controller 会保持运行但 Dashboard 将显示旧快照；金丝雀必须同时观察 stale 状态和数据库查询耗时，必要时再基于生产 `EXPLAIN` 优化索引或改为增量指标。heartbeat 能覆盖正常长抓取；若数据库不可续租，Worker 会 fail closed，数据不会被旧 Worker 覆盖，但当前底层抓取适配器可能要等正在执行的单次上游调用返回后才能完全退出，仍可能浪费一次请求。`incrementalVideo.js` 当前已超过 2,400 行，Clock reservation/First-Seen checkpoint 状态机宜在本次行为稳定后拆成独立深模块；为避免在上线热修中同时改变接口和事务行为，本次不做该重构。上线后必须用 p95/p99 单条和批次时长校准 batch size、lease 与 heartbeat，并观察失租率。
 
 ### 9.5 生产验收
 

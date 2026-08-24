@@ -18,6 +18,9 @@ function domainResult(result) {
     event_id: result?.event_id ?? null,
     kind_sequence: result?.kind_sequence ?? null,
     duplicate: result?.duplicate === true,
+    ...(result?.reservation_cleanup_deferred === true
+      ? { reservation_cleanup_deferred: true }
+      : {}),
   };
 }
 
