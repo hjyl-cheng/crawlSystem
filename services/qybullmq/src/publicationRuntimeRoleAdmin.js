@@ -99,6 +99,7 @@ const ROLE_SPECIFICATIONS = Object.freeze({
         "public.channels": Object.freeze(["SELECT", "INSERT", "UPDATE"]),
         "public.content_items": Object.freeze(["SELECT", "INSERT", "UPDATE"]),
         "public.content_snapshots": Object.freeze(["SELECT", "INSERT"]),
+        "public.content_type_taxonomy": Object.freeze(["SELECT"]),
         "public.creator_search_active": Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]),
         "public.creator_search_current": Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]),
         "public.creator_search_live": Object.freeze(["SELECT", "INSERT", "DELETE"]),

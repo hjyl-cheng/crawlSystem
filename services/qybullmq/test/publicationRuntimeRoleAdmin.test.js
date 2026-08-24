@@ -115,6 +115,10 @@ test("Runtime role specifications grant only the SQL surfaces used by each proce
     ["SELECT", "UPDATE"],
   );
   assert.deepEqual(
+    projector.tables["public.content_type_taxonomy"],
+    ["SELECT"],
+  );
+  assert.deepEqual(
     projector.tables["result.entity_current"],
     ["SELECT"],
   );
