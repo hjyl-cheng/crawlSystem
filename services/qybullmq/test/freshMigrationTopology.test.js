@@ -48,6 +48,7 @@ test("fresh Migration overlay gives Source access only to API and Dashboard", as
   for (const service of [
     "controller",
     "worker-channel",
+    "worker-content-enrich",
     "worker-data-api",
     "worker-agent",
     "worker-finalize",
@@ -78,6 +79,11 @@ test("fresh Migration overlay isolates state, reuses only Rota, and disables aut
   for (const service of ["rota-db", "rota-core", "rota-dashboard"]) {
     assert.match(serviceBlock(overlay, service), /profiles: \[bundled-rota-disabled\]/);
   }
+  const contentEnrich = serviceBlock(overlay, "worker-content-enrich");
+  assert.match(contentEnrich, /profiles: \[content-enrich-canary\]/);
+  assert.match(contentEnrich, /depends_on: !override/);
+  assert.doesNotMatch(contentEnrich, /rota-core/);
+  assert.match(contentEnrich, /networks: !override \[internal, qy_rota\]/);
   assert.match(overlay, /qy_rota:\n    external: true/);
   assert.match(compose, /name: \$\{CRAWLER_POSTGRES_VOLUME_NAME:-qy-newcrawler-crawler-postgres-20260824-v1\}/);
   assert.match(compose, /name: \$\{BUSINESS_POSTGRES_VOLUME_NAME:-qy-newcrawler-business-postgres-20260824-v1\}/);

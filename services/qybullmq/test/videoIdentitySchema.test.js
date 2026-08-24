@@ -45,3 +45,26 @@ test("V16 migration merges legacy type duplicates before enforcing Video identit
     "duplicate Contents must be removed before the unique identity index is created",
   );
 });
+
+test("Video identity migration fences active Content Enrich leases before moving Tasks", async () => {
+  const schema = await readFile(new URL("../src/schema.sql", import.meta.url), "utf8");
+  const startMarker = "-- video-identity-schema:start";
+  const endMarker = "-- video-identity-schema:end";
+  const fragment = schema.slice(
+    schema.indexOf(startMarker) + startMarker.length,
+    schema.indexOf(endMarker),
+  );
+
+  assert.match(
+    fragment,
+    /status IN \('queued','leased','running'\)[\s\S]*THEN 'queued'/,
+  );
+  assert.match(
+    fragment,
+    /dispatch_generation=GREATEST\(survivor_task\.dispatch_generation,duplicate_task\.dispatch_generation\)[\s\S]*status IN \('leased','running'\)[\s\S]*THEN 1/,
+  );
+  assert.match(
+    fragment,
+    /status=CASE WHEN task\.status IN \('leased','running'\) THEN 'queued' ELSE task\.status END,[\s\S]*dispatch_generation=task\.dispatch_generation[\s\S]*THEN 1/,
+  );
+});

@@ -33,6 +33,7 @@ const (
 
 	TaskKindChannelFull        = "channel_full"
 	TaskKindChannelIncremental = "channel_incremental"
+	TaskKindContentEnrich      = "content_enrich"
 	TaskKindDiscoverPage       = "discover_page"
 	TaskKindQueryQualityChunk  = "query_quality_chunk"
 

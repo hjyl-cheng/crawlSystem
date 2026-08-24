@@ -33,6 +33,15 @@ services:
     deploy:
       replicas: ${QY_INCREMENTAL_WORKER_REPLICAS:-20}
 
+  worker-content-enrich:
+    profiles: !reset []
+    depends_on: !reset {}
+    environment:
+      REDIS_PASSWORD: ""
+    networks: !override [internal, qy_crawler, qy_rota]
+    deploy:
+      replicas: ${QY_CONTENT_ENRICH_WORKER_REPLICAS:-2}
+
   worker-discover:
     profiles: !reset []
     depends_on: !reset {}

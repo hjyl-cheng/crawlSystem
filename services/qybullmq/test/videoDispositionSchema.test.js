@@ -33,6 +33,16 @@ test("Video disposition schema constrains schedules and indexes due history look
   assert.match(schema, /idx_crawler_content_candidates_channel_disposition_due/);
   assert.match(schema, /idx_crawler_content_candidates_disposition_history/);
   assert.match(schema, /\(channel_id, source_content_id, candidate_id DESC\)/);
+  assert.match(schema, /ADD COLUMN IF NOT EXISTS first_seen_ledger_status TEXT NOT NULL DEFAULT 'not_applicable'/);
+  assert.match(schema, /ADD COLUMN IF NOT EXISTS first_seen_ledger_observation_id UUID/);
+  assert.match(schema, /content_candidates_first_seen_ledger_shape_check/);
+  assert.match(schema, /first_seen_ledger_status='pending' AND first_seen_ledger_observation_id IS NULL/);
+  assert.match(schema, /first_seen_ledger_status='consumed' AND first_seen_ledger_observation_id IS NOT NULL/);
+  assert.match(schema, /content_candidates_first_seen_ledger_observation_id_fkey[\s\S]*DEFERRABLE INITIALLY DEFERRED NOT VALID/);
+  assert.doesNotMatch(
+    schema,
+    /CREATE INDEX IF NOT EXISTS idx_crawler_content_candidates_first_seen_ledger_pending/,
+  );
 });
 
 test("fresh Crawler bootstrap includes the Video disposition contract", async () => {
@@ -48,4 +58,12 @@ test("fresh Crawler bootstrap includes the Video disposition contract", async ()
   assert.match(bootstrap, /CREATE INDEX idx_crawler_content_candidates_disposition_due/);
   assert.match(bootstrap, /CREATE INDEX idx_crawler_content_candidates_channel_disposition_due/);
   assert.match(bootstrap, /CREATE INDEX idx_crawler_content_candidates_disposition_history/);
+  assert.match(bootstrap, /first_seen_ledger_status text DEFAULT 'not_applicable'::text NOT NULL/);
+  assert.match(bootstrap, /first_seen_ledger_observation_id uuid/);
+  assert.match(bootstrap, /CONSTRAINT content_candidates_first_seen_ledger_shape_check/);
+  assert.match(bootstrap, /content_candidates_first_seen_ledger_observation_id_fkey[\s\S]*DEFERRABLE INITIALLY DEFERRED/);
+  assert.match(
+    bootstrap,
+    /CREATE INDEX idx_crawler_content_candidates_first_seen_ledger_pending[\s\S]*\(channel_id, candidate_id\)/,
+  );
 });

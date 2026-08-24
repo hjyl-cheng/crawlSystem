@@ -1508,6 +1508,8 @@ CREATE TABLE crawler.content_candidates (
     error_message text,
     disposition text,
     next_attempt_at timestamp with time zone,
+    first_seen_ledger_status text DEFAULT 'not_applicable'::text NOT NULL,
+    first_seen_ledger_observation_id uuid,
     first_seen_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     finished_at timestamp with time zone,
@@ -1516,6 +1518,7 @@ CREATE TABLE crawler.content_candidates (
     CONSTRAINT content_candidates_detail_status_check CHECK ((detail_status = ANY (ARRAY['queued'::text, 'running'::text, 'api_pending'::text, 'done'::text, 'unavailable'::text, 'failed'::text]))),
     CONSTRAINT content_candidates_disposition_kind_check CHECK ((disposition = ANY (ARRAY['stored'::text, 'deferred'::text, 'terminal_excluded'::text]))),
     CONSTRAINT content_candidates_disposition_schedule_check CHECK ((((disposition IS NULL) AND (next_attempt_at IS NULL)) OR ((disposition = 'stored'::text) AND (next_attempt_at IS NULL)) OR ((disposition = ANY (ARRAY['deferred'::text, 'terminal_excluded'::text])) AND (next_attempt_at IS NOT NULL)))),
+    CONSTRAINT content_candidates_first_seen_ledger_shape_check CHECK ((((first_seen_ledger_status = 'not_applicable'::text) AND (first_seen_ledger_observation_id IS NULL)) OR ((first_seen_ledger_status = 'pending'::text) AND (first_seen_ledger_observation_id IS NULL)) OR ((first_seen_ledger_status = 'consumed'::text) AND (first_seen_ledger_observation_id IS NOT NULL)))),
     CONSTRAINT content_candidates_type_status_check CHECK ((type_status = ANY (ARRAY['unresolved'::text, 'resolved'::text, 'unavailable'::text])))
 );
 
@@ -1562,8 +1565,10 @@ CREATE TABLE crawler.content_enrich_tasks (
     last_success_at timestamp with time zone,
     lease_owner text,
     lease_expires_at timestamp with time zone,
+    dispatch_generation bigint DEFAULT 0 NOT NULL,
+    CONSTRAINT content_enrich_tasks_dispatch_generation_check CHECK ((dispatch_generation >= 0)),
     CONSTRAINT content_enrich_tasks_job_type_check CHECK ((job_type = ANY (ARRAY['date-resolve'::text, 'duration-resolve'::text, 'view-resolve'::text, 'stats-resolve'::text, 'player-refresh'::text, 'next-refresh'::text]))),
-    CONSTRAINT content_enrich_tasks_status_check CHECK ((status = ANY (ARRAY['queued'::text, 'running'::text, 'done'::text, 'failed'::text, 'skipped'::text])))
+    CONSTRAINT content_enrich_tasks_status_check CHECK ((status = ANY (ARRAY['queued'::text, 'leased'::text, 'running'::text, 'done'::text, 'failed'::text, 'terminal'::text, 'dead_letter'::text, 'skipped'::text])))
 );
 
 
@@ -2128,6 +2133,11 @@ CREATE TABLE crawler.settings (
     value_json jsonb DEFAULT '{}'::jsonb NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL
 );
+
+INSERT INTO crawler.settings (setting_key,value_json) VALUES
+    ('content_enrich_dispatch', '{"mode":"clock"}'::jsonb),
+    ('content_enrich_dispatch_cursor', '{"channel_id":""}'::jsonb),
+    ('content_enrich_dispatch_mutex', '{"owner":null,"expires_at":null}'::jsonb);
 
 
 --
@@ -4125,6 +4135,13 @@ CREATE INDEX idx_crawler_content_candidates_disposition_history ON crawler.conte
 
 
 --
+-- Name: idx_crawler_content_candidates_first_seen_ledger_pending; Type: INDEX; Schema: crawler; Owner: -
+--
+
+CREATE INDEX idx_crawler_content_candidates_first_seen_ledger_pending ON crawler.content_candidates USING btree (channel_id, candidate_id) WHERE (first_seen_ledger_status = 'pending'::text);
+
+
+--
 -- Name: idx_crawler_content_candidates_open_api_source; Type: INDEX; Schema: crawler; Owner: -
 --
 
@@ -4150,6 +4167,20 @@ CREATE INDEX idx_crawler_content_enrich_tasks_claim ON crawler.content_enrich_ta
 --
 
 CREATE INDEX idx_crawler_content_enrich_tasks_retry ON crawler.content_enrich_tasks USING btree (status, next_retry_at, priority, created_at);
+
+
+--
+-- Name: idx_crawler_content_enrich_tasks_dispatch; Type: INDEX; Schema: crawler; Owner: -
+--
+
+CREATE INDEX idx_crawler_content_enrich_tasks_dispatch ON crawler.content_enrich_tasks USING btree (job_type, status, next_retry_at, priority, created_at, channel_id);
+
+
+--
+-- Name: idx_crawler_content_enrich_tasks_lease_owner; Type: INDEX; Schema: crawler; Owner: -
+--
+
+CREATE INDEX idx_crawler_content_enrich_tasks_lease_owner ON crawler.content_enrich_tasks USING btree (lease_owner) WHERE (lease_owner IS NOT NULL);
 
 
 --
@@ -5006,6 +5037,14 @@ ALTER TABLE ONLY crawler.content_candidates
 
 ALTER TABLE ONLY crawler.content_candidates
     ADD CONSTRAINT content_candidates_content_key_fkey FOREIGN KEY (content_key) REFERENCES crawler.contents(content_key) ON DELETE SET NULL;
+
+
+--
+-- Name: content_candidates content_candidates_first_seen_ledger_observation_id_fkey; Type: FK CONSTRAINT; Schema: crawler; Owner: -
+--
+
+ALTER TABLE ONLY crawler.content_candidates
+    ADD CONSTRAINT content_candidates_first_seen_ledger_observation_id_fkey FOREIGN KEY (first_seen_ledger_observation_id) REFERENCES crawler.crawl_observations(observation_id) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED;
 
 
 --

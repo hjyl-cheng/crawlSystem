@@ -35,6 +35,66 @@ test("shared QY worker takeover includes the complete daily Clock runtime", asyn
   assert.match(dispatch, /networks:\s*!override\s*\[internal, qy_crawler, qy_rota\]/);
 });
 
+test("Content Enrich runs in a dedicated channel-identity Worker with its own concurrency limit", async () => {
+  const base = await readFile(new URL(
+    "../../../deploy/compose.yml",
+    import.meta.url,
+  ), "utf8");
+  const overlay = await readFile(new URL(
+    "../../../deploy/compose.shared-qy-workers.yml",
+    import.meta.url,
+  ), "utf8");
+  const sharedRuntime = await readFile(new URL(
+    "../../../deploy/compose.shared-qy.yml",
+    import.meta.url,
+  ), "utf8");
+
+  const enrich = serviceBlock(base, "worker-content-enrich");
+  assert.match(enrich, /WORKER_QUEUES:\s*youtube-content-enrich/);
+  assert.match(enrich, /YOUTUBE_CONTENT_ENRICH_CONCURRENCY:/);
+  assert.match(enrich, /CONTENT_ENRICH_HEARTBEAT_MS:/);
+  assert.match(enrich, /PROXY_SLOT_ROLE:\s*channel/);
+  assert.match(enrich, /ROTA_IDENTITY_POLICY_ID:\s*qy-br-channel-anonymous-v1/);
+
+  const incremental = serviceBlock(base, "worker-incremental");
+  assert.doesNotMatch(incremental, /youtube-content-enrich/);
+
+  const sharedEnrich = serviceBlock(overlay, "worker-content-enrich");
+  assert.match(sharedEnrich, /QY_CONTENT_ENRICH_WORKER_REPLICAS/);
+
+  assert.match(
+    sharedRuntime,
+    /^  worker-content-enrich:\s*\*disabled-in-shared-qy$/m,
+  );
+
+  const environment = await readFile(new URL("../../../.env.example", import.meta.url), "utf8");
+  const values = Object.fromEntries(environment
+    .split("\n")
+    .map((line) => line.match(/^([A-Z0-9_]+)=(\d+)$/))
+    .filter(Boolean)
+    .map((match) => [match[1], Number(match[2])]));
+  const managedChannelWorkers = values.QY_CHANNEL_WORKER_REPLICAS
+    + values.QY_INCREMENTAL_WORKER_REPLICAS
+    + values.QY_CONTENT_ENRICH_WORKER_REPLICAS;
+  assert.ok(
+    values.ROTA_CHANNEL_SLOTS >= managedChannelWorkers,
+    "Enrich replicas must add channel Slot capacity instead of competing for existing Slots",
+  );
+  assert.match(base, /ROTA_CHANNEL_SLOTS:\s*\$\{ROTA_CHANNEL_SLOTS:-42\}/);
+  assert.ok(
+    values.CONTENT_ENRICH_HEARTBEAT_MS < values.CONTENT_ENRICH_WORKER_LEASE_MS,
+    "the Enrich heartbeat must renew before the Worker lease expires",
+  );
+
+  const deployment = await readFile(new URL("../../../docs/DEPLOYMENT.md", import.meta.url), "utf8");
+  const sharedTakeover = deployment.slice(
+    deployment.indexOf("## 9. Shared QY Worker Takeover"),
+    deployment.indexOf("## 10. Shared QY Feature Bridge Takeover"),
+  );
+  assert.match(sharedTakeover, /worker-content-enrich/);
+  assert.match(sharedTakeover, /QY_CONTENT_ENRICH_WORKER_REPLICAS/);
+});
+
 test("shared adoption rewrites the file-backed Feature database endpoint", async (t) => {
   const directory = await mkdtemp(path.join(tmpdir(), "qy-shared-feature-url-"));
   const target = path.join(directory, "feature_database_url");

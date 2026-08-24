@@ -12,6 +12,7 @@ services:
   controller: *disabled-in-shared-qy
   worker-channel: *disabled-in-shared-qy
   worker-incremental: *disabled-in-shared-qy
+  worker-content-enrich: *disabled-in-shared-qy
   worker-discover: *disabled-in-shared-qy
   worker-query-quality: *disabled-in-shared-qy
   worker-data-api: *disabled-in-shared-qy

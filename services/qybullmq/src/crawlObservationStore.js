@@ -149,6 +149,16 @@ async function claimKey(client, command, observationId) {
   return duplicateResult(client, row.observation_id, command.idempotencyKey);
 }
 
+async function lockChannel(client, channelId) {
+  await client.query(
+    `SELECT channel_id
+     FROM crawler.channels
+     WHERE channel_id=$1
+     FOR NO KEY UPDATE`,
+    [channelId],
+  );
+}
+
 async function lockCursor(client, command) {
   await client.query(
     `INSERT INTO crawler.channel_domain_cursors (channel_id,observation_kind)
@@ -199,6 +209,7 @@ export async function recordCrawlerObservation(client, input) {
   }
   const command = normalizeCommand(input);
   const observationId = randomUUID();
+  await lockChannel(client, command.channelId);
   const duplicate = await claimKey(client, command, observationId);
   if (duplicate) return duplicate;
   const cursor = await lockCursor(client, command);

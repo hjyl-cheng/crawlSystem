@@ -41,6 +41,7 @@ import {
   migrationSourceCandidateFromIntent,
 } from "./migrationTopology.js";
 import { loadChannelCurrentContent } from "./channelCurrentContent.js";
+import { loadLatestContentEnrichOperational } from "./contentEnrichOperational.js";
 
 const { Pool } = pg;
 
@@ -96,6 +97,7 @@ const queueNames = [
   "youtube-query-quality",
   "youtube-discover-page",
   "youtube-channel-crawl",
+  "youtube-content-enrich",
   "youtube-content-detail",
   "youtube-data-api-batch",
   "youtube-agent-batch",
@@ -604,6 +606,15 @@ function safeJobId(...parts) {
 async function db(sql, params = []) {
   await ensureSchema();
   return pool.query(sql, params);
+}
+
+async function latestContentEnrichOperational() {
+  return loadLatestContentEnrichOperational(
+    (sql, params) => db(sql, params),
+    {
+      staleAfterMs: Number(process.env.CONTENT_ENRICH_DASHBOARD_STALE_MS || 120_000),
+    },
+  );
 }
 
 async function migrationRead(sql, params = []) {
@@ -4918,9 +4929,23 @@ app.get("/", (_req, res) => res.redirect("/queries"));
 app.get("/health", async (_req, res) => {
   try {
     await db("SELECT 1");
-    res.json({ ok: true, db: "ok", storage: await storageHealth(), queues: await queueStats() });
+    res.json({
+      ok: true,
+      db: "ok",
+      storage: await storageHealth(),
+      queues: await queueStats(),
+      content_enrich: await latestContentEnrichOperational(),
+    });
   } catch (error) {
     res.status(500).json({ ok: false, error: error.message });
+  }
+});
+
+app.get("/api/content-enrich/operational", async (_req, res, next) => {
+  try {
+    res.json(await latestContentEnrichOperational());
+  } catch (error) {
+    next(error);
   }
 });
 

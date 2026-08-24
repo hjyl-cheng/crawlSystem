@@ -47,6 +47,7 @@ const stronglyTypedManagedQueues = new Set([
   queuesByRole.discoverPage,
   queuesByRole.channelCrawl,
   queuesByRole.channelIncremental,
+  queuesByRole.contentEnrich,
 ]);
 await ensureSchema();
 await ensureDefaultAgentConfig();

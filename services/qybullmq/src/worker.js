@@ -12,6 +12,15 @@ import {
 import { ensureSchema, closeDb, logTaskEvent, query, warmDb, withTransaction } from "./db.js";
 import { closePersistentHttpClient } from "./httpClient.js";
 import { youtubeErrorText } from "./detailPolicy.js";
+import {
+  ContentEnrichExecutor,
+  PostgresContentEnrichExecutionRepository,
+  contentEnrichResultFromError,
+} from "./contentEnrichExecution.js";
+import {
+  applyIncrementalVideoDetail,
+  fetchIncrementalVideoDetail,
+} from "./incrementalVideo.js";
 import { dynamicRotaProxyConfig, fixedRotaProxyConfig } from "./fixedProxyConfig.js";
 import { resolveWorkerIdentityPolicy } from "./identityPolicyCatalog.js";
 import { IncrementalAgentBacklog } from "./incrementalAgentBacklog.js";
@@ -30,6 +39,7 @@ import {
 } from "./pipelineV2.js";
 import { getQueryScheduler } from "./queryScheduler.js";
 import { scoreQueryBatch } from "./queryQuality.js";
+import { reconcilePublication } from "./publicationReconciler.js";
 import { isParserContractError, parserContractDetails } from "./localizedParsing.js";
 import { runWithProxyIdentity } from "./proxyIdentity.js";
 import { closeProxyControlClient, proxyControlClient } from "./proxyControlClient.js";
@@ -57,6 +67,7 @@ import { RotaSlotAdapter, RotaSlotDeferredError } from "./rotaSlotAdapter.js";
 import { warmPersistentYtDlp } from "./ytdlpSession.js";
 import { closeYoutubeJs, warmYoutubeJs } from "./youtubeJs.js";
 import { annotateYoutubeFailure, decideYoutubeFailure } from "./youtubeFailurePolicy.js";
+import { refreshVideoPublicationItemHashes } from "./videoPublicationItemStore.js";
 import {
   classifyYoutubeError,
   extractVideoOwnerCandidates,
@@ -76,6 +87,20 @@ const incrementalChannelRunner = new IncrementalChannelRunner({
   agentBacklog: incrementalAgentBacklog,
   query,
   withTransaction,
+});
+const contentEnrichExecutor = new ContentEnrichExecutor({
+  repository: new PostgresContentEnrichExecutionRepository({
+    withTransaction,
+    applyDetail: applyIncrementalVideoDetail,
+    refreshHashes: refreshVideoPublicationItemHashes,
+    reconcilePublication,
+  }),
+  fetchDetail: fetchIncrementalVideoDetail,
+  leaseDurationMs: Number(process.env.CONTENT_ENRICH_WORKER_LEASE_MS || 15 * 60_000),
+  heartbeatIntervalMs: Number(process.env.CONTENT_ENRICH_HEARTBEAT_MS || 60_000),
+  retryBaseMs: Number(process.env.CONTENT_ENRICH_RETRY_BASE_MS || 30_000),
+  retryMaxMs: Number(process.env.CONTENT_ENRICH_RETRY_MAX_MS || 6 * 60 * 60_000),
+  maxAttempts: Number(process.env.CONTENT_ENRICH_MAX_ATTEMPTS || 8),
 });
 const defaultMinSubscriberCount = Number(process.env.MIN_SUBSCRIBER_COUNT || 1000);
 const rotaProxyBaseUrl = String(process.env.ROTA_PROXY_BASE_URL || "http://youtube-rota-qy-core:8000");
@@ -183,6 +208,7 @@ function errorMessage(error) {
 
 function usesChannelExecution(job) {
   if (job.queueName === queuesByRole.channelCrawl) return true;
+  if (job.queueName === queuesByRole.contentEnrich) return true;
   if (job.queueName !== queuesByRole.channelIncremental) return false;
   return ["about", "video"]
     .some((domain) => job.data?.task_mask?.[domain] === true);
@@ -190,7 +216,8 @@ function usesChannelExecution(job) {
 
 function channelExecutionEnabled() {
   return enabledQueues.includes(queuesByRole.channelCrawl)
-    || enabledQueues.includes(queuesByRole.channelIncremental);
+    || enabledQueues.includes(queuesByRole.channelIncremental)
+    || enabledQueues.includes(queuesByRole.contentEnrich);
 }
 
 async function saveFetchedRaw({ fetched, objectType, entityType, entityId, source, metadata = {} }) {
@@ -1230,6 +1257,8 @@ async function executeJob(job, { resumeMode = "initial", prepared = null } = {})
       return processChannelCrawlV2(job, { resumeMode });
     case queuesByRole.channelIncremental:
       return incrementalChannelRunner.execute(job);
+    case queuesByRole.contentEnrich:
+      return contentEnrichExecutor.execute(job);
     case queuesByRole.contentDetail:
       return processContentDetailBatchV2(job);
     case queuesByRole.dataApiBatch:
@@ -1384,6 +1413,9 @@ async function persistManagedRetryCheckpoint({ job, prepared, error, failure }) 
   if (job.queueName === queuesByRole.channelIncremental) {
     // IncrementalChannelRunner persists the active domain and Run failure before rethrowing.
     return true;
+  }
+  if (job.queueName === queuesByRole.contentEnrich) {
+    return error?.content_enrich_checkpoint_persisted === true;
   }
   if (job.queueName === queuesByRole.discoverPage) {
     const pageId = String(prepared?.page?.page_id ?? job.data?.page_id ?? "").trim();
@@ -1563,6 +1595,7 @@ async function startWorkerRuntime() {
         retry_mode: failureDecision.retry_mode,
       }));
       try {
+        const contentEnrichResult = contentEnrichResultFromError(error);
         await logTaskEvent({
           queueName,
           jobId: job?.id,
@@ -1572,6 +1605,9 @@ async function startWorkerRuntime() {
           payload: {
             ...(job?.data ?? {}),
             ...(parserDetails ? { parser_contract_error: parserDetails } : {}),
+            ...(contentEnrichResult
+              ? { content_enrich_result: contentEnrichResult }
+              : {}),
             youtube_failure_decision: failureDecision,
           },
           errorMessage: message,

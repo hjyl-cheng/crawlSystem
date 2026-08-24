@@ -11,6 +11,7 @@ const ROLE_QUEUES = Object.freeze({
   channel: Object.freeze(new Set([
     queuesByRole.channelCrawl,
     queuesByRole.channelIncremental,
+    queuesByRole.contentEnrich,
   ])),
   discover: Object.freeze(new Set([queuesByRole.discoverPage])),
   query_quality: Object.freeze(new Set([queuesByRole.queryQuality])),
@@ -96,6 +97,7 @@ export function retryableRotaFailure(error) {
 export function managedFailedStage(job) {
   if (job?.queueName === queuesByRole.channelCrawl) return "channel_full";
   if (job?.queueName === queuesByRole.channelIncremental) return "channel_incremental";
+  if (job?.queueName === queuesByRole.contentEnrich) return "content_enrich";
   if (job?.queueName === queuesByRole.discoverPage) return "discover_page";
   if (job?.queueName === queuesByRole.queryQuality) return "query_quality_chunk";
   return "managed_workload";

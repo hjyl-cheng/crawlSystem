@@ -1522,6 +1522,8 @@ CREATE TABLE IF NOT EXISTS crawler.content_candidates (
   error_message TEXT,
   disposition TEXT,
   next_attempt_at TIMESTAMPTZ,
+  first_seen_ledger_status TEXT NOT NULL DEFAULT 'not_applicable',
+  first_seen_ledger_observation_id UUID,
   first_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   finished_at TIMESTAMPTZ,
@@ -1535,6 +1537,12 @@ CREATE TABLE IF NOT EXISTS crawler.content_candidates (
         disposition IN ('deferred','terminal_excluded')
         AND next_attempt_at IS NOT NULL
       )
+    ),
+  CONSTRAINT content_candidates_first_seen_ledger_shape_check
+    CHECK (
+      (first_seen_ledger_status='not_applicable' AND first_seen_ledger_observation_id IS NULL)
+      OR (first_seen_ledger_status='pending' AND first_seen_ledger_observation_id IS NULL)
+      OR (first_seen_ledger_status='consumed' AND first_seen_ledger_observation_id IS NOT NULL)
     ),
   UNIQUE (run_id, source_content_id),
   UNIQUE (run_id, position)
@@ -2265,15 +2273,43 @@ ALTER TABLE crawler.content_enrich_tasks ADD COLUMN IF NOT EXISTS last_attempt_a
 ALTER TABLE crawler.content_enrich_tasks ADD COLUMN IF NOT EXISTS last_success_at TIMESTAMPTZ;
 ALTER TABLE crawler.content_enrich_tasks ADD COLUMN IF NOT EXISTS lease_owner TEXT;
 ALTER TABLE crawler.content_enrich_tasks ADD COLUMN IF NOT EXISTS lease_expires_at TIMESTAMPTZ;
+ALTER TABLE crawler.content_enrich_tasks ADD COLUMN IF NOT EXISTS dispatch_generation BIGINT NOT NULL DEFAULT 0;
 ALTER TABLE crawler.content_enrich_tasks DROP CONSTRAINT IF EXISTS content_enrich_tasks_job_type_check;
 ALTER TABLE crawler.content_enrich_tasks ADD CONSTRAINT content_enrich_tasks_job_type_check
 CHECK (job_type IN (
   'date-resolve', 'duration-resolve', 'view-resolve', 'stats-resolve',
   'player-refresh', 'next-refresh'
 ));
+ALTER TABLE crawler.content_enrich_tasks DROP CONSTRAINT IF EXISTS content_enrich_tasks_status_check;
+ALTER TABLE crawler.content_enrich_tasks ADD CONSTRAINT content_enrich_tasks_status_check
+CHECK (status IN (
+  'queued', 'leased', 'running', 'done', 'failed', 'terminal', 'dead_letter', 'skipped'
+));
+ALTER TABLE crawler.content_enrich_tasks DROP CONSTRAINT IF EXISTS content_enrich_tasks_dispatch_generation_check;
+ALTER TABLE crawler.content_enrich_tasks ADD CONSTRAINT content_enrich_tasks_dispatch_generation_check
+CHECK (dispatch_generation >= 0);
+
+INSERT INTO crawler.settings (setting_key,value_json)
+VALUES ('content_enrich_dispatch','{"mode":"clock"}'::jsonb)
+ON CONFLICT (setting_key) DO NOTHING;
+
+INSERT INTO crawler.settings (setting_key,value_json)
+VALUES ('content_enrich_dispatch_cursor','{"channel_id":""}'::jsonb)
+ON CONFLICT (setting_key) DO NOTHING;
+
+INSERT INTO crawler.settings (setting_key,value_json)
+VALUES ('content_enrich_dispatch_mutex','{"owner":null,"expires_at":null}'::jsonb)
+ON CONFLICT (setting_key) DO NOTHING;
 
 CREATE INDEX IF NOT EXISTS idx_crawler_content_enrich_tasks_retry
 ON crawler.content_enrich_tasks (status, next_retry_at, priority ASC, created_at ASC);
+
+CREATE INDEX IF NOT EXISTS idx_crawler_content_enrich_tasks_dispatch
+ON crawler.content_enrich_tasks (job_type,status,next_retry_at,priority,created_at,channel_id);
+
+CREATE INDEX IF NOT EXISTS idx_crawler_content_enrich_tasks_lease_owner
+ON crawler.content_enrich_tasks (lease_owner)
+WHERE lease_owner IS NOT NULL;
 
 -- video-identity-schema:start
 -- A YouTube video_id identifies one piece of content. Uploads is only a generic
@@ -2518,8 +2554,11 @@ UPDATE crawler.content_enrich_tasks survivor_task
 SET
   status=CASE
     WHEN survivor_task.status='done' OR duplicate_task.status='done' THEN 'done'
-    WHEN survivor_task.status IN ('queued','running') OR duplicate_task.status IN ('queued','running') THEN 'queued'
+    WHEN survivor_task.status IN ('queued','leased','running')
+      OR duplicate_task.status IN ('queued','leased','running') THEN 'queued'
     WHEN survivor_task.status='failed' OR duplicate_task.status='failed' THEN 'failed'
+    WHEN survivor_task.status='terminal' OR duplicate_task.status='terminal' THEN 'terminal'
+    WHEN survivor_task.status='dead_letter' OR duplicate_task.status='dead_letter' THEN 'dead_letter'
     ELSE 'skipped'
   END,
   priority=LEAST(survivor_task.priority,duplicate_task.priority),
@@ -2536,6 +2575,12 @@ SET
   next_retry_at=LEAST(survivor_task.next_retry_at,duplicate_task.next_retry_at),
   last_attempt_at=GREATEST(survivor_task.last_attempt_at,duplicate_task.last_attempt_at),
   last_success_at=GREATEST(survivor_task.last_success_at,duplicate_task.last_success_at),
+  dispatch_generation=GREATEST(survivor_task.dispatch_generation,duplicate_task.dispatch_generation)
+    + CASE
+        WHEN survivor_task.status IN ('leased','running')
+          OR duplicate_task.status IN ('leased','running') THEN 1
+        ELSE 0
+      END,
   lease_owner=NULL,
   lease_expires_at=NULL
 FROM crawler.content_enrich_tasks duplicate_task
@@ -2557,7 +2602,9 @@ WHERE duplicate_task.content_key=identity.duplicate_content_key
 UPDATE crawler.content_enrich_tasks task
 SET
   content_key=identity.survivor_content_key,
-  status=CASE WHEN task.status='running' THEN 'queued' ELSE task.status END,
+  status=CASE WHEN task.status IN ('leased','running') THEN 'queued' ELSE task.status END,
+  dispatch_generation=task.dispatch_generation
+    + CASE WHEN task.status IN ('leased','running') THEN 1 ELSE 0 END,
   lease_owner=NULL,
   lease_expires_at=NULL,
   updated_at=now()
@@ -2638,6 +2685,47 @@ ON crawler.crawl_observations (channel_id, observation_kind, observed_at DESC);
 
 CREATE INDEX IF NOT EXISTS idx_crawler_crawl_observations_created_at
 ON crawler.crawl_observations (created_at);
+
+ALTER TABLE crawler.content_candidates
+ADD COLUMN IF NOT EXISTS first_seen_ledger_status TEXT NOT NULL DEFAULT 'not_applicable';
+ALTER TABLE crawler.content_candidates
+ADD COLUMN IF NOT EXISTS first_seen_ledger_observation_id UUID;
+
+DO $first_seen_ledger_shape$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_constraint
+    WHERE conrelid='crawler.content_candidates'::regclass
+      AND conname='content_candidates_first_seen_ledger_shape_check'
+  ) THEN
+    ALTER TABLE crawler.content_candidates
+    ADD CONSTRAINT content_candidates_first_seen_ledger_shape_check
+    CHECK (
+      (first_seen_ledger_status='not_applicable' AND first_seen_ledger_observation_id IS NULL)
+      OR (first_seen_ledger_status='pending' AND first_seen_ledger_observation_id IS NULL)
+      OR (first_seen_ledger_status='consumed' AND first_seen_ledger_observation_id IS NOT NULL)
+    ) NOT VALID;
+  END IF;
+END
+$first_seen_ledger_shape$;
+
+DO $first_seen_ledger_observation_fkey$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_constraint
+    WHERE conrelid='crawler.content_candidates'::regclass
+      AND conname='content_candidates_first_seen_ledger_observation_id_fkey'
+  ) THEN
+    ALTER TABLE crawler.content_candidates
+    ADD CONSTRAINT content_candidates_first_seen_ledger_observation_id_fkey
+    FOREIGN KEY (first_seen_ledger_observation_id)
+    REFERENCES crawler.crawl_observations(observation_id)
+    ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED NOT VALID;
+  END IF;
+END
+$first_seen_ledger_observation_fkey$;
 
 CREATE TABLE IF NOT EXISTS crawler.channel_about_metric_snapshots (
   observation_id UUID PRIMARY KEY REFERENCES crawler.crawl_observations(observation_id) ON DELETE CASCADE,

@@ -1,7 +1,16 @@
 import { createHash } from "node:crypto";
 import { currentChannelExecution } from "./channelExecutionContext.js";
+import {
+  CONTENT_ENRICH_CLOCK_MODE,
+  loadContentEnrichMode,
+} from "./contentEnrichMode.js";
+import {
+  contentEnrichDetailOutcome,
+  contentEnrichFailureOutcome,
+} from "./contentEnrichPolicy.js";
 import { recordCrawlerObservation } from "./crawlObservationStore.js";
 import {
+  hasCompletePublicVideoSurface,
   isLiveInProgress,
   isUpcomingLiveDetail,
   videoAccessStatus,
@@ -17,6 +26,7 @@ import { resolveYoutubeContentType } from "./youtubeContentType.js";
 import { fullVideoStorageAction } from "./fullVideoContentStore.js";
 import {
   resolveVideoDisposition,
+  videoAccessRecheckAt,
   videoDispositionSummary,
 } from "./videoDisposition.js";
 import {
@@ -37,11 +47,15 @@ const EXPLICIT_CONTENT_ACCESS_STATUSES = new Set([
   "private",
   "unavailable",
 ]);
-
 function integer(value) {
   if (value === null || value === undefined || value === "") return null;
   const number = Number(value);
   return Number.isSafeInteger(number) && number >= 0 ? number : null;
+}
+
+function resultRowCount(result) {
+  if (Number.isInteger(result?.rowCount)) return result.rowCount;
+  return Array.isArray(result?.rows) ? result.rows.length : 0;
 }
 
 function positiveInteger(value) {
@@ -200,7 +214,7 @@ function detailFacts(detail) {
     keywords: stringList(detail.keywords),
     keywords_observed: detail.keywords_observed === true || Array.isArray(detail.keywords),
     access_status: detailAccess(detail),
-    access_status_source: source,
+    access_status_source: text(detail.access_status_source) ?? source,
     live_scheduled_at: publishedAt({ published_at: detail.live_scheduled_at }),
     live_started_at: publishedAt({ published_at: detail.live_started_at }),
     live_ended_at: publishedAt({ published_at: detail.live_ended_at }),
@@ -211,14 +225,23 @@ function detailFacts(detail) {
 export async function fetchIncrementalVideoDetail(videoId, {
   fetchYoutubeJs = fetchYoutubeJsVideoDetail,
   fetchYtDlp = fetchVideoYtDlpDetail,
+  signal = null,
 } = {}) {
+  const throwIfAborted = () => {
+    if (!signal?.aborted) return;
+    throw signal.reason instanceof Error
+      ? signal.reason
+      : new Error("incremental Video detail fetch was aborted");
+  };
+  throwIfAborted();
   const url = `https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}`;
   let youtubeJsDetail = null;
   try {
-    youtubeJsDetail = assertYoutubeContentObservation(await fetchYoutubeJs(videoId), {
+    youtubeJsDetail = assertYoutubeContentObservation(await fetchYoutubeJs(videoId, { signal }), {
       videoId,
       source: "youtubejs_player",
     });
+    throwIfAborted();
     const classification = resolveYoutubeContentType({ videoId, detail: youtubeJsDetail });
     if (
       EXPLICIT_CONTENT_ACCESS_STATUSES.has(detailAccess(youtubeJsDetail))
@@ -233,12 +256,16 @@ export async function fetchIncrementalVideoDetail(videoId, {
       return youtubeJsDetail;
     }
   } catch (youtubeJsError) {
+    throwIfAborted();
     try {
-      return assertYoutubeContentObservation(await fetchYtDlp(videoId, url), {
+      const detail = assertYoutubeContentObservation(await fetchYtDlp(videoId, url, { signal }), {
         videoId,
         source: "yt_dlp_detail",
       });
+      throwIfAborted();
+      return detail;
     } catch (ytDlpError) {
+      throwIfAborted();
       if (isYoutubeCollectionFailureError(ytDlpError)) throw ytDlpError;
       throw new AggregateError(
         [youtubeJsError, ytDlpError],
@@ -246,12 +273,16 @@ export async function fetchIncrementalVideoDetail(videoId, {
       );
     }
   }
+  throwIfAborted();
   try {
-    return assertYoutubeContentObservation(await fetchYtDlp(videoId, url), {
+    const detail = assertYoutubeContentObservation(await fetchYtDlp(videoId, url, { signal }), {
       videoId,
       source: "yt_dlp_detail",
     });
+    throwIfAborted();
+    return detail;
   } catch (ytDlpError) {
+    throwIfAborted();
     if (isYoutubeCollectionFailureError(ytDlpError)) throw ytDlpError;
     throw new AggregateError(
       [new Error("YouTube.js detail was incomplete"), ytDlpError],
@@ -503,7 +534,249 @@ function refreshTaskId(contentKey, jobType) {
   return `${jobType}:${digest}`;
 }
 
-async function queueRefreshTask(client, {
+function clockContentEnrichRetryOptions() {
+  return {
+    baseMs: Number(process.env.CONTENT_ENRICH_RETRY_BASE_MS || 30_000),
+    maxMs: Number(process.env.CONTENT_ENRICH_RETRY_MAX_MS || 6 * 60 * 60_000),
+    maxAttempts: Number(process.env.CONTENT_ENRICH_MAX_ATTEMPTS || 8),
+  };
+}
+
+function clockContentEnrichReservationMs() {
+  const value = Number(process.env.CONTENT_ENRICH_DISPATCH_LEASE_MS || 15 * 60_000);
+  if (!Number.isSafeInteger(value) || value < 30_000) return 15 * 60_000;
+  return Math.min(value, 24 * 60 * 60_000);
+}
+
+function clockContentEnrichLeaseOwner({ runId, executionAttemptId }) {
+  const digest = createHash("sha256")
+    .update(`${runId}:${executionAttemptId}`)
+    .digest("hex")
+    .slice(0, 32);
+  return `clock-content-enrich:${digest}`;
+}
+
+async function prepareClockContentEnrichOutcome(client, {
+  contentKey,
+  jobType,
+  detail = null,
+  error = null,
+}) {
+  const locked = await client.query(
+    `SELECT task.*,
+            COALESCE(
+              task.status IN ('leased','running')
+                AND task.lease_expires_at>clock_timestamp(),
+              false
+            ) AS lease_live,
+            COALESCE(
+              task.next_retry_at<=clock_timestamp(),
+              task.status IN ('queued','failed')
+            ) AS retry_due
+     FROM crawler.content_enrich_tasks task
+     WHERE task.content_key=$1 AND task.job_type=$2
+     FOR UPDATE`,
+    [contentKey, jobType],
+  );
+  const currentTask = locked.rows[0] ?? null;
+  if (currentTask?.lease_live === true) return { skipped: true, currentTask, outcome: null };
+  if (["queued", "failed"].includes(currentTask?.status) && currentTask.retry_due !== true) {
+    return { skipped: true, currentTask, outcome: null };
+  }
+  if (currentTask?.status === "terminal" && currentTask.retry_due !== true) {
+    return { skipped: true, currentTask, outcome: null };
+  }
+  const completedAt = new Date();
+  const task = {
+    task_id: currentTask?.task_id ?? refreshTaskId(contentKey, jobType),
+    dispatch_generation: currentTask?.dispatch_generation ?? 0,
+    attempts: ["done", "terminal", "skipped"].includes(currentTask?.status)
+      ? 0
+      : Number(currentTask?.attempts ?? 0),
+  };
+  const retryOptions = clockContentEnrichRetryOptions();
+  const outcome = detail == null
+    ? contentEnrichFailureOutcome(task, error, completedAt, retryOptions)
+    : contentEnrichDetailOutcome(task, detail, completedAt, retryOptions);
+  return { skipped: false, currentTask, outcome };
+}
+
+async function persistClockContentEnrichOutcome(client, {
+  currentTask,
+  priorTaskStatus = currentTask?.status ?? null,
+  outcome,
+  contentKey,
+  channelId,
+  runId,
+  observationId,
+  jobType,
+  observedAt,
+}) {
+  if (!currentTask && outcome.kind === "done") return;
+  const status = outcome.kind === "retryable" ? "failed" : outcome.kind;
+  const incrementsAttempts = ["retryable", "dead_letter"].includes(outcome.kind);
+  const resultJson = JSON.stringify({
+    kind: outcome.kind,
+    observed_at: outcome.observed_at,
+    access_status: outcome.access_status,
+    failure_decision: outcome.failure_decision ?? null,
+    consumer: "clock",
+  });
+  await client.query(
+    `INSERT INTO crawler.content_enrich_tasks (
+       task_id,content_key,channel_id,job_type,status,priority,attempts,
+       result_json,error_message,requested_by_run_id,requested_observation_id,
+       next_retry_at,last_attempt_at,last_success_at,updated_at
+     ) VALUES (
+       $1,$2,$3,$4,$5,10,$6,
+       jsonb_build_object('last_outcome',$7::jsonb),$8,$9,$10,$11,$12,
+       CASE WHEN $15::boolean THEN $13::timestamptz ELSE NULL END,now()
+     )
+     ON CONFLICT (content_key,job_type) DO UPDATE
+     SET status=$5,
+         priority=LEAST(crawler.content_enrich_tasks.priority,10),
+         attempts=CASE
+           WHEN $16::boolean THEN CASE WHEN $14::boolean THEN 1 ELSE 0 END
+           WHEN $14::boolean THEN
+             CASE WHEN crawler.content_enrich_tasks.status IN ('done','skipped')
+               THEN 1 ELSE crawler.content_enrich_tasks.attempts+1 END
+           ELSE crawler.content_enrich_tasks.attempts
+         END,
+         result_json=crawler.content_enrich_tasks.result_json
+           || jsonb_build_object('last_outcome',$7::jsonb),
+         error_message=$8,
+         requested_by_run_id=$9,
+         requested_observation_id=COALESCE($10,crawler.content_enrich_tasks.requested_observation_id),
+         next_retry_at=$11,
+         last_attempt_at=$12,
+         last_success_at=CASE WHEN $15::boolean THEN $13
+           ELSE crawler.content_enrich_tasks.last_success_at END,
+         lease_owner=NULL,lease_expires_at=NULL,updated_at=now()`,
+    [
+      refreshTaskId(contentKey, jobType),
+      contentKey,
+      channelId,
+      jobType,
+      status,
+      incrementsAttempts ? 1 : 0,
+      resultJson,
+      outcome.error_message,
+      runId,
+      observationId,
+      outcome.next_retry_at ?? null,
+      outcome.observed_at,
+      observedAt,
+      incrementsAttempts,
+      outcome.detail != null,
+      priorTaskStatus === "terminal",
+    ],
+  );
+}
+
+async function reserveClockContentEnrichPublication(client, {
+  contentKey,
+  currentTask,
+  leaseOwner,
+  outcome,
+}) {
+  if (!currentTask) return null;
+  const dispatchGeneration = Number(currentTask.dispatch_generation ?? 0) + 1;
+  const reserved = await client.query(
+    `UPDATE crawler.content_enrich_tasks
+     SET status='running',dispatch_generation=$3,lease_owner=$4,
+         lease_expires_at=clock_timestamp()+($5::bigint*interval '1 millisecond'),
+         last_attempt_at=$6,updated_at=clock_timestamp()
+     WHERE task_id=$1 AND content_key=$2 AND job_type='player-refresh'
+     RETURNING task_id,dispatch_generation`,
+    [
+      currentTask.task_id,
+      contentKey,
+      dispatchGeneration,
+      leaseOwner,
+      clockContentEnrichReservationMs(),
+      outcome.observed_at,
+    ],
+  );
+  if (resultRowCount(reserved) !== 1) {
+    throw new Error(`failed to reserve Clock Enrich Task: ${currentTask.task_id}`);
+  }
+  return {
+    task_id: currentTask.task_id,
+    content_key: contentKey,
+    dispatch_generation: dispatchGeneration,
+    lease_owner: leaseOwner,
+    prior_status: ["leased", "running"].includes(currentTask.status)
+      ? "queued"
+      : currentTask.status,
+    prior_last_attempt_at: currentTask.last_attempt_at ?? null,
+  };
+}
+
+async function lockClockContentEnrichPublication(client, { contentKey, fence }) {
+  if (!fence) {
+    const unexpected = await client.query(
+      `SELECT task.*
+       FROM crawler.content_enrich_tasks task
+       WHERE task.content_key=$1 AND task.job_type='player-refresh'
+       FOR UPDATE`,
+      [contentKey],
+    );
+    return resultRowCount(unexpected) === 0
+      ? { owned: true, currentTask: null }
+      : { owned: false, currentTask: null };
+  }
+  const locked = await client.query(
+    `SELECT task.*
+     FROM crawler.content_enrich_tasks task
+     WHERE task.content_key=$1 AND task.task_id=$2 AND task.job_type='player-refresh'
+     FOR UPDATE`,
+    [contentKey, fence.task_id],
+  );
+  if (resultRowCount(locked) !== 1) return { owned: false, currentTask: null };
+  const live = await client.query(
+    `SELECT task.*
+     FROM crawler.content_enrich_tasks task
+     WHERE task.content_key=$1 AND task.task_id=$2 AND task.job_type='player-refresh'
+       AND task.status='running' AND task.lease_owner=$3 AND task.dispatch_generation=$4
+       AND task.lease_expires_at>clock_timestamp()`,
+    [contentKey, fence.task_id, fence.lease_owner, fence.dispatch_generation],
+  );
+  return resultRowCount(live) === 1
+    ? { owned: true, currentTask: live.rows[0] }
+    : { owned: false, currentTask: null };
+}
+
+async function releaseClockContentEnrichReservations(withTransaction, preparedSampling) {
+  const fences = [...(preparedSampling?.preparedCaptures?.values?.() ?? [])]
+    .map((prepared) => prepared?.fence)
+    .filter(Boolean);
+  if (fences.length === 0) return 0;
+  return withTransaction(async (client) => {
+    let released = 0;
+    for (const fence of fences) {
+      const result = await client.query(
+        `UPDATE crawler.content_enrich_tasks
+         SET status=$5,lease_owner=NULL,lease_expires_at=NULL,
+             last_attempt_at=$6,updated_at=clock_timestamp()
+         WHERE task_id=$1 AND job_type='player-refresh'
+           AND status='running' AND lease_owner=$2 AND dispatch_generation=$3
+           AND content_key=$4`,
+        [
+          fence.task_id,
+          fence.lease_owner,
+          fence.dispatch_generation,
+          fence.content_key,
+          fence.prior_status,
+          fence.prior_last_attempt_at,
+        ],
+      );
+      released += Number(result.rowCount ?? 0);
+    }
+    return released;
+  });
+}
+
+export async function queueRefreshTask(client, {
   contentKey,
   channelId,
   runId,
@@ -518,11 +791,34 @@ async function queueRefreshTask(client, {
        next_retry_at,updated_at
      ) VALUES ($1,$2,$3,$4,'queued',10,0,'{}'::jsonb,$7,$5,$6,now(),now())
      ON CONFLICT (content_key,job_type) DO UPDATE
-     SET status='queued',priority=LEAST(crawler.content_enrich_tasks.priority,10),
+     SET status=CASE
+           WHEN crawler.content_enrich_tasks.status IN ('done','terminal','skipped') THEN 'queued'
+           WHEN crawler.content_enrich_tasks.status='dead_letter' THEN 'dead_letter'
+           WHEN crawler.content_enrich_tasks.status IN ('leased','running')
+             AND crawler.content_enrich_tasks.lease_expires_at>now()
+           THEN crawler.content_enrich_tasks.status
+           WHEN crawler.content_enrich_tasks.status='failed' THEN 'failed'
+           ELSE 'queued'
+         END,
+         priority=LEAST(crawler.content_enrich_tasks.priority,10),
+         attempts=CASE
+           WHEN crawler.content_enrich_tasks.status IN ('done','terminal','skipped') THEN 0
+           ELSE crawler.content_enrich_tasks.attempts END,
          error_message=EXCLUDED.error_message,
          requested_by_run_id=EXCLUDED.requested_by_run_id,
          requested_observation_id=EXCLUDED.requested_observation_id,
-         next_retry_at=now(),lease_owner=NULL,lease_expires_at=NULL,updated_at=now()`,
+         next_retry_at=CASE
+           WHEN crawler.content_enrich_tasks.status IN ('done','terminal','skipped') THEN now()
+           ELSE crawler.content_enrich_tasks.next_retry_at END,
+         lease_owner=CASE
+           WHEN crawler.content_enrich_tasks.status IN ('leased','running')
+             AND crawler.content_enrich_tasks.lease_expires_at>now()
+           THEN crawler.content_enrich_tasks.lease_owner ELSE NULL END,
+         lease_expires_at=CASE
+           WHEN crawler.content_enrich_tasks.status IN ('leased','running')
+             AND crawler.content_enrich_tasks.lease_expires_at>now()
+           THEN crawler.content_enrich_tasks.lease_expires_at ELSE NULL END,
+         updated_at=now()`,
     [
       refreshTaskId(contentKey, jobType),
       contentKey,
@@ -551,16 +847,19 @@ async function persistIncrementalCandidate(client, {
   errorMessage = null,
   observedAt,
   attempted = false,
+  firstSeenLedgerStatus = "not_applicable",
+  firstSeenLedgerObservationId = null,
 }) {
-  await client.query(
+  const persisted = await client.query(
     `INSERT INTO crawler.content_candidates (
        run_id,channel_id,source_content_id,position,title,source_url,thumbnail_url,
        content_type,type_status,type_source,detail_status,api_status,missing_fields,
        content_key,disposition,next_attempt_at,result_json,error_message,attempts,
-       finished_at,updated_at
+       finished_at,updated_at,first_seen_ledger_status,first_seen_ledger_observation_id
      ) VALUES (
        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::text[],$14,$15,$16,$17::jsonb,$18,
-       $19::integer,CASE WHEN $15='deferred' THEN NULL ELSE $20::timestamptz END,now()
+       $19::integer,CASE WHEN $15='deferred' THEN NULL ELSE $20::timestamptz END,now(),
+       $21,$22::uuid
      )
      ON CONFLICT (run_id,source_content_id) DO UPDATE
      SET position=EXCLUDED.position,title=COALESCE(EXCLUDED.title,crawler.content_candidates.title),
@@ -587,6 +886,14 @@ async function persistIncrementalCandidate(client, {
          error_message=EXCLUDED.error_message,
          attempts=crawler.content_candidates.attempts+EXCLUDED.attempts,
          finished_at=CASE WHEN EXCLUDED.disposition='deferred' THEN NULL ELSE EXCLUDED.finished_at END,
+         first_seen_ledger_status=CASE
+           WHEN crawler.content_candidates.first_seen_ledger_status IN ('pending','consumed')
+             THEN crawler.content_candidates.first_seen_ledger_status
+           ELSE EXCLUDED.first_seen_ledger_status END,
+         first_seen_ledger_observation_id=CASE
+           WHEN crawler.content_candidates.first_seen_ledger_status IN ('pending','consumed')
+             THEN crawler.content_candidates.first_seen_ledger_observation_id
+           ELSE EXCLUDED.first_seen_ledger_observation_id END,
          updated_at=now()
      RETURNING candidate_id`,
     [
@@ -611,8 +918,13 @@ async function persistIncrementalCandidate(client, {
       errorMessage,
       attempted ? 1 : 0,
       observedAt,
+      firstSeenLedgerStatus,
+      firstSeenLedgerObservationId,
     ],
   );
+  const candidateId = text(persisted.rows?.[0]?.candidate_id);
+  if (!candidateId) throw new Error(`Incremental Candidate was not persisted: ${entry.id}`);
+  return candidateId;
 }
 
 function collectionErrorEvidence(error) {
@@ -636,15 +948,7 @@ function collectionErrorEvidence(error) {
   };
 }
 
-async function upsertFirstSeenContent(client, {
-  channelId,
-  runId,
-  observationId,
-  observedAt,
-  entry,
-  capture,
-  discoveryDeferred = null,
-}) {
+function resolveFirstSeenContent({ entry, capture, observedAt, discoveryDeferred = null }) {
   const detail = capture?.detail ?? null;
   const facts = detailFacts(detail);
   const uploadFacts = uploadsPublishedFacts(entry);
@@ -676,6 +980,37 @@ async function upsertFirstSeenContent(client, {
         }
       : null,
   });
+  return { detail, facts, uploadFacts, classification, disposition };
+}
+
+function firstSeenCheckpointOutcome(resolution, capture, observedAt) {
+  if (resolution.disposition.kind !== "stored") return null;
+  const task = { task_id: "first-seen-checkpoint", attempts: 0, dispatch_generation: 0 };
+  const completedAt = new Date(observedAt);
+  const retryOptions = clockContentEnrichRetryOptions();
+  const outcome = resolution.detail == null
+    ? contentEnrichFailureOutcome(task, capture?.error ?? null, completedAt, retryOptions)
+    : contentEnrichDetailOutcome(task, resolution.detail, completedAt, retryOptions);
+  return ["retryable", "dead_letter"].includes(outcome.kind) ? outcome : null;
+}
+
+async function upsertFirstSeenContent(client, {
+  channelId,
+  runId,
+  observationId,
+  observedAt,
+  entry,
+  capture,
+  discoveryDeferred = null,
+  resolution = null,
+}) {
+  const resolved = resolution ?? resolveFirstSeenContent({
+    entry,
+    capture,
+    observedAt,
+    discoveryDeferred,
+  });
+  const { detail, facts, uploadFacts, classification, disposition } = resolved;
   if (disposition.kind !== "stored") {
     const terminalExcluded = disposition.kind === "terminal_excluded";
     const collectionFailed = capture?.error != null;
@@ -735,6 +1070,7 @@ async function upsertFirstSeenContent(client, {
       disposition,
       classification,
       facts,
+      enrichOutcomeKind: null,
       publishedAt: facts?.published_at ?? uploadFacts?.published_at ?? null,
       publishedAtPrecision: facts?.published_at
         ? facts.published_at_precision
@@ -743,6 +1079,15 @@ async function upsertFirstSeenContent(client, {
   }
   const contentType = classification.content_type;
   const contentKey = `${channelId}:${contentType}:${entry.id}`;
+  const preparedEnrich = await prepareClockContentEnrichOutcome(client, {
+    contentKey,
+    jobType: "player-refresh",
+    detail,
+    error: capture?.error ?? null,
+  });
+  const detailComplete = preparedEnrich.skipped === false
+    && preparedEnrich.outcome?.detail != null;
+  const candidateDetailComplete = hasCompletePublicVideoSurface(detail);
   const url = contentType === "short"
     ? `https://www.youtube.com/shorts/${encodeURIComponent(entry.id)}`
     : `https://www.youtube.com/watch?v=${encodeURIComponent(entry.id)}`;
@@ -936,23 +1281,23 @@ async function upsertFirstSeenContent(client, {
         },
       }),
       observedAt,
-      facts != null,
+      detailComplete,
       observationId,
       classification.authoritative === true && facts?.access_status === "public",
       facts?.comments_first_page == null ? null : JSON.stringify(facts.comments_first_page),
     ],
   );
   const storedContentKey = text(stored.rows?.[0]?.content_key) ?? contentKey;
-  await persistIncrementalCandidate(client, {
+  const candidateId = await persistIncrementalCandidate(client, {
     runId,
     channelId,
     entry,
     detail,
     classification,
     disposition,
-    missingFields: [],
+    missingFields: candidateDetailComplete ? [] : ["detail"],
     contentKey: storedContentKey,
-    detailStatus: "done",
+    detailStatus: candidateDetailComplete ? "done" : "failed",
     apiStatus: "not_needed",
     typeStatus: "resolved",
     resultJson: {
@@ -971,35 +1316,163 @@ async function upsertFirstSeenContent(client, {
       },
       content_key: storedContentKey,
     },
+    errorMessage: candidateDetailComplete
+      ? null
+      : preparedEnrich.outcome?.error_message
+        ?? "Content Enrich detail is missing the required public Video surface",
     observedAt,
     attempted: detail != null || capture?.error != null,
+    firstSeenLedgerStatus: observationId == null ? "pending" : "consumed",
+    firstSeenLedgerObservationId: observationId,
   });
-  if (!facts) {
-    await queueRefreshTask(client, {
+  if (!preparedEnrich.skipped) {
+    await persistClockContentEnrichOutcome(client, {
+      ...preparedEnrich,
       contentKey: storedContentKey,
       channelId,
       runId,
       observationId,
       jobType: "player-refresh",
-      error: capture?.error,
+      observedAt,
     });
-  } else {
-    await client.query(
-      `UPDATE crawler.content_enrich_tasks
-       SET status='done',last_success_at=$2,error_message=NULL,updated_at=now()
-       WHERE content_key=$1 AND job_type='player-refresh'`,
-      [storedContentKey, observedAt],
-    );
   }
   return {
     disposition,
+    candidateId,
     contentKey: storedContentKey,
     contentType,
     classification,
     facts,
+    enrichOutcomeKind: preparedEnrich.skipped ? null : preparedEnrich.outcome?.kind ?? null,
     publishedAt: published,
     publishedAtPrecision: publishedPrecision,
   };
+}
+
+async function checkpointFirstSeenEnrichFailures({
+  plan,
+  runId,
+  candidateEntries,
+  captures,
+  withTransaction,
+  observedAt,
+}) {
+  const checkpoints = [];
+  const seenVideoIds = new Set();
+  for (const entry of candidateEntries) {
+    if (seenVideoIds.has(entry.id)) continue;
+    seenVideoIds.add(entry.id);
+    if (!captures.has(entry.id)) continue;
+    const capture = captures.get(entry.id);
+    const resolution = resolveFirstSeenContent({ entry, capture, observedAt });
+    if (!firstSeenCheckpointOutcome(resolution, capture, observedAt)) continue;
+    checkpoints.push({ entry, capture, resolution });
+  }
+  if (checkpoints.length === 0) return [];
+  return withTransaction(async (client) => {
+    const alreadyKnown = await knownVideoIds(
+      client.query.bind(client),
+      plan.channel_id,
+      checkpoints.map(({ entry }) => entry.id),
+    );
+    const checkpointed = [];
+    for (const checkpoint of checkpoints) {
+      if (alreadyKnown.has(checkpoint.entry.id)) continue;
+      const persisted = await upsertFirstSeenContent(client, {
+        channelId: plan.channel_id,
+        runId,
+        observationId: null,
+        observedAt,
+        ...checkpoint,
+      });
+      if (!["retryable", "dead_letter"].includes(persisted.enrichOutcomeKind)) {
+        throw new Error(`First-Seen failure checkpoint changed outcome: ${checkpoint.entry.id}`);
+      }
+      checkpointed.push({ entry: checkpoint.entry, ...persisted });
+    }
+    return checkpointed;
+  });
+}
+
+async function loadPendingFirstSeenCheckpoints(query, { channelId }) {
+  const pending = await query(
+    `SELECT candidate.candidate_id,candidate.source_content_id AS video_id,
+            candidate.position,candidate.title,candidate.thumbnail_url,
+            candidate.result_json,
+            content.content_key,content.content_type,
+            content.published_at,content.published_at_precision
+     FROM crawler.content_candidates candidate
+     JOIN crawler.contents content
+       ON content.content_key=candidate.content_key
+      AND content.channel_id=candidate.channel_id
+     JOIN crawler.channel_runs run
+       ON run.run_id=candidate.run_id
+      AND run.channel_id=candidate.channel_id
+     WHERE candidate.channel_id=$1
+       AND run.crawl_mode='incremental'
+       AND candidate.disposition='stored'
+       AND candidate.detail_status='failed'
+       AND candidate.result_json #>> '{disposition,kind}'='stored'
+       AND candidate.first_seen_ledger_status='pending'
+     ORDER BY candidate.candidate_id`,
+    [channelId],
+  );
+  return pending.rows.map((row) => {
+    const evidence = row.result_json && typeof row.result_json === "object"
+      ? row.result_json
+      : {};
+    const flat = evidence.flat && typeof evidence.flat === "object" ? evidence.flat : {};
+    const detail = evidence.detail && typeof evidence.detail === "object" ? evidence.detail : null;
+    const disposition = evidence.disposition;
+    const candidateId = text(row.candidate_id);
+    const videoId = text(row.video_id);
+    const contentKey = text(row.content_key);
+    const contentType = text(row.content_type);
+    if (!candidateId || !videoId || !contentKey || !contentType || disposition?.kind !== "stored") {
+      throw new Error(`Invalid pending First-Seen checkpoint: ${videoId ?? contentKey ?? "unknown"}`);
+    }
+    return {
+      candidateId,
+      entry: {
+        ...flat,
+        id: videoId,
+        position: Number(row.position),
+        title: text(flat.title) ?? text(row.title),
+        thumbnail_url: text(flat.thumbnail_url) ?? text(row.thumbnail_url),
+      },
+      disposition,
+      classification: evidence.classification ?? null,
+      facts: detailFacts(detail),
+      contentKey,
+      contentType,
+      publishedAt: row.published_at == null
+        ? null
+        : new Date(row.published_at).toISOString(),
+      publishedAtPrecision: text(row.published_at_precision) ?? "unknown",
+    };
+  });
+}
+
+async function claimPendingFirstSeenCheckpoints(transactionClient, {
+  channelId,
+  observationId,
+  checkpoints,
+}) {
+  const candidateIds = stringList(checkpoints.map((checkpoint) => checkpoint.candidateId));
+  if (candidateIds.length === 0) return [];
+  const claimed = await transactionClient.query(
+    `UPDATE crawler.content_candidates candidate
+     SET first_seen_ledger_status='consumed',
+         first_seen_ledger_observation_id=$3::uuid,
+         updated_at=now()
+     WHERE candidate.channel_id=$1
+       AND candidate.candidate_id=ANY($2::bigint[])
+       AND candidate.first_seen_ledger_status='pending'
+     RETURNING candidate.candidate_id::text AS candidate_id`,
+    [channelId, candidateIds, observationId],
+  );
+  const claimedIds = new Set(claimed.rows.map((row) => text(row.candidate_id)).filter(Boolean));
+  return checkpoints.filter((checkpoint) => claimedIds.has(checkpoint.candidateId));
 }
 
 async function applyDiscovery({
@@ -1012,7 +1485,15 @@ async function applyDiscovery({
   observationId,
   observedAt,
   pendingDeferredVideoIds = [],
+  checkpointedFirstSeen = [],
 }) {
+  const claimedFirstSeen = scan.complete === true
+    ? await claimPendingFirstSeenCheckpoints(transactionClient, {
+        channelId: plan.channel_id,
+        observationId,
+        checkpoints: checkpointedFirstSeen,
+      })
+    : [];
   const discoveryDeferred = scan.complete === true
     ? null
     : {
@@ -1058,6 +1539,27 @@ async function applyDiscovery({
           [plan.channel_id, observedAt, JSON.stringify(scanInput), observationId],
     );
   }
+  const checkpointedContentKeys = stringList(
+    claimedFirstSeen.map((current) => current.contentKey),
+  );
+  if (checkpointedContentKeys.length > 0) {
+    const linked = await transactionClient.query(
+      `UPDATE crawler.contents content
+       SET last_observation_id=$3::uuid,
+           raw_json=COALESCE(content.raw_json,'{}'::jsonb)
+             || jsonb_build_object(
+                  'incremental',
+                  COALESCE(content.raw_json->'incremental','{}'::jsonb)
+                    || jsonb_build_object('observation_id',($3::uuid)::text)
+                )
+       WHERE content.channel_id=$1
+         AND content.content_key=ANY($2::text[])`,
+      [plan.channel_id, checkpointedContentKeys, observationId],
+    );
+    if (resultRowCount(linked) !== checkpointedContentKeys.length) {
+      throw new Error("Pending First-Seen checkpoint Content changed before Observation commit");
+    }
+  }
   const candidateIds = candidateEntries.map((entry) => entry.id);
   const alreadyKnown = await knownVideoIds(
     transactionClient.query.bind(transactionClient),
@@ -1072,6 +1574,21 @@ async function applyDiscovery({
   const recheckDeferredVideoIds = [];
   let detailSuccessCount = 0;
   let detailFailureCount = 0;
+  for (const current of claimedFirstSeen) {
+    const entry = current.entry;
+    const dispositionSummary = videoDispositionSummary(entry.id, current.disposition);
+    if (entry.disposition_recheck) recheckDispositions.push(dispositionSummary);
+    else dispositions.push(dispositionSummary);
+    if (current.facts) detailSuccessCount += 1;
+    else detailFailureCount += 1;
+    firstSeen.push({
+      video_id: entry.id,
+      position: entry.position,
+      content_type: current.contentType,
+      published_at: current.publishedAt,
+      published_at_precision: current.publishedAtPrecision,
+    });
+  }
   for (const entry of firstSeenEntries) {
     const capture = captures.get(entry.id) ?? { detail: null, error: null };
     const detailAttempted = captures.has(entry.id);
@@ -1110,7 +1627,7 @@ async function applyDiscovery({
     });
   }
   const discoveredVideoIds = [...new Set(
-    firstSeenEntries
+    [...claimedFirstSeen.map((current) => current.entry), ...firstSeenEntries]
       .filter((entry) => !entry.disposition_recheck)
       .map((entry) => entry.id),
   )];
@@ -1207,33 +1724,24 @@ async function applyDiscovery({
       } : {}),
     },
     firstSeen,
+    claimedFirstSeen,
   };
 }
 
-async function updateSampledContent(client, {
+export async function applyIncrementalVideoDetail(client, {
   row,
-  capture,
+  detail,
   observedAt,
-  observationId,
-  runId,
-  collectNext,
-  changeAlpha,
+  observationId = null,
+  collectNext = false,
+  changeAlpha = 0.4,
+  detailMetadataKey = "incremental_detail",
 }) {
-  if (!capture?.detail) {
-    await queueRefreshTask(client, {
-      contentKey: row.content_key,
-      channelId: row.channel_id,
-      runId,
-      observationId,
-      jobType: "player-refresh",
-      error: capture?.error,
-    });
-    return { success: false, viewDelta: null, engagementChanged: false };
-  }
-  const facts = detailFacts(capture.detail);
+  if (!detail) throw new TypeError("detail is required");
+  const facts = detailFacts(detail);
   const classification = resolveYoutubeContentType({
     videoId: row.source_content_id,
-    detail: capture.detail,
+    detail,
   });
   const storageAction = fullVideoStorageAction({
     candidate: {
@@ -1330,15 +1838,15 @@ async function updateSampledContent(client, {
          live_ended_at=COALESCE($33::timestamptz,live_ended_at),
          extractor_version=COALESCE($30,extractor_version),
          raw_json=raw_json || jsonb_build_object(
-           'incremental_detail',jsonb_build_object(
+           $40::text,jsonb_strip_nulls(jsonb_build_object(
              'observation_id',$8::uuid::text,
              'detail_collected',true,
              'source',$34::text
-           )
+           ))
          ),
          player_last_observed_at=$2,
          next_last_observed_at=CASE WHEN $7::boolean THEN $2 ELSE next_last_observed_at END,
-         last_observation_id=$8::uuid,last_enriched_at=$2,
+         last_observation_id=COALESCE($8::uuid,last_observation_id),last_enriched_at=$2,
          video_change_probability=COALESCE($9::double precision,video_change_probability)
      WHERE content_key=$1
        AND (player_last_observed_at IS NULL OR player_last_observed_at<=$2::timestamptz)`,
@@ -1376,32 +1884,210 @@ async function updateSampledContent(client, {
       facts.live_scheduled_at,
       facts.live_started_at,
       facts.live_ended_at,
-      detailSource(capture.detail),
+      detailSource(detail),
       commentsObserved,
       storageAction.kind === "upsert" ? storageAction.content_type : null,
       storageAction.kind === "upsert" ? storageAction.type_source : null,
       storageAction.kind === "upsert" ? classification.canonical_url : null,
       facts.comments_first_page == null ? null : JSON.stringify(facts.comments_first_page),
+      detailMetadataKey,
     ],
   );
-  await client.query(
-    `UPDATE crawler.content_enrich_tasks
-     SET status='done',last_success_at=$2,error_message=NULL,updated_at=now()
-     WHERE content_key=$1 AND job_type IN ('player-refresh','next-refresh')`,
-    [row.content_key, observedAt],
+  return {
+    success: true,
+    viewDelta,
+    engagementChanged,
+    changeProbability,
+    accessStatus: facts.access_status,
+  };
+}
+
+async function loadClockRecentSamplingRows(client, {
+  channelId,
+  planDay,
+  recentWindowDays,
+  clockOwnsPlayerRefresh,
+  scanEntries,
+}) {
+  const observedUploads = scanEntries
+    .map((entry) => ({
+      video_id: text(entry?.id),
+      published_at: uploadsPublishedFacts(entry)?.published_at ?? null,
+    }))
+    .filter((entry) => entry.video_id && entry.published_at);
+  const recentRows = await client.query(
+    `WITH observed_uploads AS (
+       SELECT item.video_id,max(item.published_at) AS published_at
+       FROM jsonb_to_recordset($5::jsonb)
+         AS item(video_id text,published_at timestamptz)
+       GROUP BY item.video_id
+     ), candidate AS (
+       SELECT content.*,
+              COALESCE(content.published_at,observed.published_at) AS sampling_published_at,
+              EXISTS (
+                SELECT 1 FROM crawler.content_enrich_tasks task
+                WHERE task.content_key=content.content_key
+                  AND task.job_type IN ('player-refresh','next-refresh')
+                  AND (task.job_type='next-refresh' OR $4::boolean)
+                  AND (
+                    (task.status IN ('queued','failed')
+                      AND COALESCE(task.next_retry_at,now())<=now())
+                    OR (task.status IN ('leased','running')
+                      AND task.lease_expires_at<=now())
+                    OR (task.status='terminal'
+                      AND task.next_retry_at IS NOT NULL
+                      AND task.next_retry_at<=now())
+                  )
+              ) AS enrich_pending,
+              EXISTS (
+                SELECT 1 FROM crawler.content_enrich_tasks task
+                WHERE task.content_key=content.content_key
+                  AND task.job_type='player-refresh'
+                  AND (
+                    task.status IN ('queued','failed','leased','running')
+                    OR (task.status='terminal' AND task.next_retry_at IS NOT NULL)
+                  )
+              ) AS player_enrich_open,
+              EXISTS (
+                SELECT 1 FROM crawler.content_enrich_tasks task
+                WHERE task.content_key=content.content_key
+                  AND task.job_type='player-refresh'
+                  AND task.status IN ('leased','running')
+                  AND task.lease_expires_at>now()
+              ) AS player_enrich_leased,
+              EXISTS (
+                SELECT 1 FROM crawler.content_enrich_tasks task
+                WHERE task.content_key=content.content_key
+                  AND task.job_type='player-refresh'
+                  AND task.status='terminal'
+                  AND task.next_retry_at>now()
+              ) AS player_enrich_terminal_waiting,
+              EXISTS (
+                SELECT 1 FROM crawler.content_enrich_tasks task
+                WHERE task.content_key=content.content_key
+                  AND task.job_type='player-refresh'
+                  AND task.status IN ('queued','failed')
+                  AND task.next_retry_at>now()
+              ) AS player_enrich_retry_waiting
+       FROM crawler.contents content
+       LEFT JOIN observed_uploads observed
+         ON observed.video_id=content.source_content_id
+       WHERE content.channel_id=$1
+         AND content.content_type IN ('video','short','live')
+     )
+     SELECT candidate.*
+     FROM candidate
+     WHERE NOT candidate.player_enrich_leased
+       AND NOT candidate.player_enrich_terminal_waiting
+       AND NOT candidate.player_enrich_retry_waiting
+       AND ($4::boolean OR NOT candidate.player_enrich_open)
+       AND (
+         candidate.enrich_pending
+         OR candidate.sampling_published_at>=($2::date - ($3::int * interval '1 day'))
+       )
+     ORDER BY candidate.sampling_published_at DESC NULLS LAST,candidate.content_key`,
+    [
+      channelId,
+      planDay,
+      recentWindowDays,
+      clockOwnsPlayerRefresh,
+      JSON.stringify(observedUploads),
+    ],
   );
-  return { success: true, viewDelta, engagementChanged, changeProbability };
+  return recentRows.rows.map((row) => ({
+    ...row,
+    published_at: row.sampling_published_at ?? row.published_at,
+  }));
+}
+
+async function prepareClockRecentSampling({
+  plan,
+  runId,
+  scanEntries,
+  excludeVideoIds,
+  samplingPlanInput,
+  config,
+  fetchDetail,
+  withTransaction,
+  executionAttemptId,
+  observedAt,
+}) {
+  const leaseOwner = clockContentEnrichLeaseOwner({ runId, executionAttemptId });
+  return withTransaction(async (client) => {
+    const enrichMode = await loadContentEnrichMode(client, { lock: true });
+    const recentRows = await loadClockRecentSamplingRows(client, {
+      channelId: plan.channel_id,
+      planDay: plan.plan_day,
+      recentWindowDays: config.recentWindowDays,
+      clockOwnsPlayerRefresh: enrichMode === CONTENT_ENRICH_CLOCK_MODE,
+      scanEntries,
+    });
+    const samplePlan = planRecentVideoSampling(recentRows, {
+      plan: samplingPlanInput,
+      config,
+      excludeVideoIds,
+      now: new Date(observedAt),
+    });
+    const captures = await captureDetails(
+      samplePlan.rows.map((row) => ({ id: row.source_content_id })),
+      fetchDetail,
+      samplePlan.rows.length,
+    );
+    const preparedCaptures = new Map();
+    for (const row of samplePlan.rows) {
+      const capture = captures.get(row.source_content_id);
+      const prepared = await prepareClockContentEnrichOutcome(client, {
+        contentKey: row.content_key,
+        jobType: "player-refresh",
+        detail: capture?.detail ?? null,
+        error: capture?.error ?? null,
+      });
+      if (prepared.skipped) {
+        preparedCaptures.set(row.content_key, { state: "skipped", fence: null });
+        continue;
+      }
+      if (prepared.outcome.detail == null) {
+        await persistClockContentEnrichOutcome(client, {
+          ...prepared,
+          contentKey: row.content_key,
+          channelId: row.channel_id,
+          runId,
+          observationId: null,
+          jobType: "player-refresh",
+          observedAt,
+        });
+        preparedCaptures.set(row.content_key, {
+          state: "checkpointed",
+          outcome: prepared.outcome,
+          fence: null,
+        });
+        continue;
+      }
+      const fence = await reserveClockContentEnrichPublication(client, {
+        contentKey: row.content_key,
+        currentTask: prepared.currentTask,
+        leaseOwner,
+        outcome: prepared.outcome,
+      });
+      preparedCaptures.set(row.content_key, {
+        state: "publication",
+        outcome: prepared.outcome,
+        fence,
+      });
+    }
+    return { samplePlan, preparedCaptures };
+  });
 }
 
 async function applyRecentSampling({
   runId,
-  samplePlan,
-  captures,
+  preparedSampling,
   transactionClient,
   observationId,
   observedAt,
   changeAlpha,
 }) {
+  const { samplePlan, preparedCaptures } = preparedSampling;
   const keys = samplePlan.rows.map((row) => row.content_key);
   const locked = keys.length === 0
     ? { rows: [] }
@@ -1421,14 +2107,37 @@ async function applyRecentSampling({
   let engagementChangedCount = 0;
   for (const row of locked.rows) {
     const spec = planned.get(row.content_key);
-    const applied = await updateSampledContent(transactionClient, {
+    const prepared = preparedCaptures.get(row.content_key);
+    if (prepared?.state !== "publication") {
+      failureCount += 1;
+      continue;
+    }
+    const ownership = await lockClockContentEnrichPublication(transactionClient, {
+      contentKey: row.content_key,
+      fence: prepared.fence,
+    });
+    if (!ownership.owned) {
+      failureCount += 1;
+      continue;
+    }
+    const applied = await applyIncrementalVideoDetail(transactionClient, {
       row,
-      capture: captures.get(row.source_content_id),
+      detail: prepared.outcome.detail,
       observedAt,
       observationId,
-      runId,
       collectNext: spec?.collect_next === true,
       changeAlpha,
+    });
+    await persistClockContentEnrichOutcome(transactionClient, {
+      currentTask: ownership.currentTask,
+      priorTaskStatus: prepared.fence?.prior_status ?? ownership.currentTask?.status ?? null,
+      outcome: prepared.outcome,
+      contentKey: row.content_key,
+      channelId: row.channel_id,
+      runId,
+      observationId,
+      jobType: "player-refresh",
+      observedAt,
     });
     if (!applied.success) {
       failureCount += 1;
@@ -1477,12 +2186,12 @@ async function recordVideoCycle({
   scan,
   discoveryEntries,
   discoveryCaptures,
+  checkpointedFirstSeen,
   pendingDeferredVideoIds,
   anchors,
-  excludeVideoIds,
+  preparedSampling,
   samplingPlanInput,
   config,
-  fetchDetail,
   withTransaction,
   startedAt,
   observedAt,
@@ -1497,45 +2206,110 @@ async function recordVideoCycle({
       ?? uploadsPublishedFacts(entry)?.published_at
       ?? null,
   }));
-  return withTransaction(async (client) => {
-    const recorded = await recordCrawlerObservation(client, {
-      idempotencyKey: `video:${runId}:${executionAttemptId}`,
-      observationKind: "video",
-      channelId: plan.channel_id,
-      runId,
-      observedAt,
-      planId: plan.plan_id,
-      planDay: plan.plan_day,
-      triggerReason: "clock_due",
-      scheduledAt: plan.scheduled_at,
-      startedAt,
-      finishedAt: observedAt,
-      crawlerVersion,
-      extractorVersions: { youtubejs: scan.raw?.engine ?? "youtubei.js@17.2.0" },
-      command: {
-        planner_config_version: plan.planner_config_version,
-        anchors,
-        scan: {
-          pages: scan.pages,
-          stop_reason: scan.stop_reason,
-          entries: commandEntries,
-          ...(scan.gap_abandonment ? { gap_abandonment: scan.gap_abandonment } : {}),
+  let recorded = null;
+  let transactionError = null;
+  try {
+    recorded = await withTransaction(async (client) => {
+      const observation = await recordCrawlerObservation(client, {
+        idempotencyKey: `video:${runId}:${executionAttemptId}`,
+        observationKind: "video",
+        channelId: plan.channel_id,
+        runId,
+        observedAt,
+        planId: plan.plan_id,
+        planDay: plan.plan_day,
+        triggerReason: "clock_due",
+        scheduledAt: plan.scheduled_at,
+        startedAt,
+        finishedAt: observedAt,
+        crawlerVersion,
+        extractorVersions: { youtubejs: scan.raw?.engine ?? "youtubei.js@17.2.0" },
+        command: {
+          planner_config_version: plan.planner_config_version,
+          anchors,
+          scan: {
+            pages: scan.pages,
+            stop_reason: scan.stop_reason,
+            entries: commandEntries,
+            ...(scan.gap_abandonment ? { gap_abandonment: scan.gap_abandonment } : {}),
+          },
+          sampling: {
+            basis: "post_discovery_current",
+            recent_window_days: config.recentWindowDays,
+            stale_after_days: config.staleAfterDays,
+            minimum_refresh_score: config.minimumRefreshScore,
+            default_collection_priority: config.defaultCollectionPriority,
+            default_change_probability: config.defaultChangeProbability,
+            default_interaction_need: config.defaultInteractionNeed,
+            change_ewma_alpha: config.changeEwmaAlpha,
+            remaining_player_cap: samplingPlanInput.capacity.player_cap,
+            next_cap: samplingPlanInput.capacity.next_cap,
+          },
         },
-        sampling: {
-          basis: "post_discovery_current",
-          recent_window_days: config.recentWindowDays,
-          stale_after_days: config.staleAfterDays,
-          minimum_refresh_score: config.minimumRefreshScore,
-          default_collection_priority: config.defaultCollectionPriority,
-          default_change_probability: config.defaultChangeProbability,
-          default_interaction_need: config.defaultInteractionNeed,
-          change_ewma_alpha: config.changeEwmaAlpha,
-          remaining_player_cap: samplingPlanInput.capacity.player_cap,
-          next_cap: samplingPlanInput.capacity.next_cap,
-        },
-      },
-      prepare: async ({ client: transactionClient, observationId }) => {
-        if (scan.complete !== true) {
+        prepare: async ({ client: transactionClient, observationId }) => {
+          if (scan.complete !== true) {
+            const discovery = await applyDiscovery({
+              plan,
+              runId,
+              scan,
+              candidateEntries: discoveryEntries,
+              captures: discoveryCaptures,
+              transactionClient,
+              observationId,
+              observedAt,
+              pendingDeferredVideoIds,
+              checkpointedFirstSeen,
+            });
+            const discoveryPayload = {
+              ...discovery.payload,
+              first_page_item_count: Number(scan.first_page_item_count ?? 0),
+              catch_up_item_count: Number(scan.catch_up_item_count ?? 0),
+              unclosed_video_ids: scan.entries.map((entry) => entry.id),
+            };
+            return {
+              outcome: "partial",
+              outcomeReasonCode: `video_cycle_discovery_${scan.stop_reason || "incomplete"}`,
+              resultSummary: {
+                discovery: {
+                  pages: discoveryPayload.pages,
+                  items: discoveryPayload.items,
+                  anchor_matched: discoveryPayload.anchor_matched,
+                  stop_reason: discoveryPayload.stop_reason,
+                  parse_gap_count: discoveryPayload.parse_gap_count,
+                  first_seen_count: discoveryPayload.first_seen_count,
+                  discovered_count: discoveryPayload.discovered_count,
+                  silent_drop_count: discoveryPayload.silent_drop_count,
+                  stored_count: discoveryPayload.stored_count,
+                  deferred_count: discoveryPayload.deferred_count,
+                  terminal_excluded_count: discoveryPayload.terminal_excluded_count,
+                  detail_success_count: discoveryPayload.detail_success_count,
+                  detail_failure_count: discoveryPayload.detail_failure_count,
+                },
+                recent_sampling: {
+                  selected_count: 0,
+                  success_count: 0,
+                  failure_count: 0,
+                  skipped_reason: "discovery_incomplete",
+                },
+              },
+              payload: {
+                discovery: { outcome: "partial", payload: discoveryPayload },
+                recent_sampling: {
+                  outcome: "skipped",
+                  payload: { skipped_reason: "discovery_incomplete" },
+                },
+              },
+              anchorVideoIds: null,
+              sourceCursor: null,
+              result: {
+                firstSeen: discovery.firstSeen,
+                selectedCount: 0,
+                lifecycleStatus: null,
+                lifecycleTransitioned: false,
+                dormantRecheckDay: null,
+              },
+            };
+          }
           const discovery = await applyDiscovery({
             plan,
             runId,
@@ -1546,203 +2320,131 @@ async function recordVideoCycle({
             observationId,
             observedAt,
             pendingDeferredVideoIds,
+            checkpointedFirstSeen,
           });
-          const discoveryPayload = {
-            ...discovery.payload,
-            first_page_item_count: Number(scan.first_page_item_count ?? 0),
-            catch_up_item_count: Number(scan.catch_up_item_count ?? 0),
-            unclosed_video_ids: scan.entries.map((entry) => entry.id),
-          };
+          const { samplePlan } = preparedSampling;
+          const recentSampling = await applyRecentSampling({
+            runId,
+            preparedSampling,
+            transactionClient,
+            observationId,
+            observedAt,
+            changeAlpha: config.changeEwmaAlpha,
+          });
+          const publicationRows = await transactionClient.query(
+            `SELECT content_key
+             FROM crawler.contents
+             WHERE channel_id=$1
+               AND (
+                 source_content_id=ANY($2::text[])
+                 OR content_key=ANY($3::text[])
+               )
+             ORDER BY content_key`,
+            [
+              plan.channel_id,
+              scan.entries.map((entry) => entry.id),
+              [
+                ...samplePlan.rows.map((row) => row.content_key),
+                ...discovery.claimedFirstSeen.map((current) => current.contentKey),
+              ],
+            ],
+          );
+          await refreshVideoPublicationItemHashes(
+            transactionClient,
+            publicationRows.rows.map((row) => row.content_key),
+          );
+          const lifecycle = await applyVideoActivityLifecycle(transactionClient, {
+            channelId: plan.channel_id,
+            observedAt,
+            discoveryComplete: scan.complete === true,
+          });
+          const outcome = discovery.outcome === "complete" && recentSampling.outcome === "complete"
+            ? "complete"
+            : "partial";
           return {
-            outcome: "partial",
-            outcomeReasonCode: `video_cycle_discovery_${scan.stop_reason || "incomplete"}`,
+            outcome,
+            outcomeReasonCode: outcome === "complete"
+              ? scan.stop_reason === GAP_ABANDONMENT_STOP_REASON
+                ? "video_cycle_gap_abandoned_latest_30"
+                : "video_cycle_complete"
+              : `video_cycle_${discovery.outcome}_${recentSampling.outcome}`,
             resultSummary: {
-              discovery: {
-                pages: discoveryPayload.pages,
-                items: discoveryPayload.items,
-                anchor_matched: discoveryPayload.anchor_matched,
-                stop_reason: discoveryPayload.stop_reason,
-                parse_gap_count: discoveryPayload.parse_gap_count,
-                first_seen_count: discoveryPayload.first_seen_count,
-                discovered_count: discoveryPayload.discovered_count,
-                silent_drop_count: discoveryPayload.silent_drop_count,
-                stored_count: discoveryPayload.stored_count,
-                deferred_count: discoveryPayload.deferred_count,
-                terminal_excluded_count: discoveryPayload.terminal_excluded_count,
-                detail_success_count: discoveryPayload.detail_success_count,
-                detail_failure_count: discoveryPayload.detail_failure_count,
-              },
-              recent_sampling: {
-                selected_count: 0,
-                success_count: 0,
-                failure_count: 0,
-                skipped_reason: "discovery_incomplete",
+              discovery: discovery.summary,
+              recent_sampling: recentSampling.summary,
+              activity: {
+                lifecycle_status: lifecycle.lifecycle_status,
+                recent_published_content_count: lifecycle.recent_published_content_count,
+                conclusive: lifecycle.conclusive,
               },
             },
             payload: {
-              discovery: { outcome: "partial", payload: discoveryPayload },
+              discovery: { outcome: discovery.outcome, payload: discovery.payload },
               recent_sampling: {
-                outcome: "skipped",
-                payload: { skipped_reason: "discovery_incomplete" },
+                outcome: recentSampling.outcome,
+                payload: recentSampling.payload,
               },
+              ...(lifecycle.activity ? { activity: lifecycle.activity } : {}),
             },
-            anchorVideoIds: null,
-            sourceCursor: null,
+            anchorVideoIds: discovery.outcome === "complete"
+              ? mergedDiscoveryAnchorIds(scan.entries, anchors)
+              : null,
+            sourceCursor: discovery.outcome === "complete"
+              ? {
+                  playlist_id: scan.playlist_id,
+                  matched_anchor_id: scan.matched_anchor_id,
+                  crossed_anchor_ids: scan.crossed_anchor_ids ?? [],
+                  terminal_reason: scan.terminal_reason,
+                  ...(scan.gap_abandonment ? {
+                    gap_abandonment: {
+                      policy_version: scan.gap_abandonment.policy_version,
+                      source_stop_reason: scan.gap_abandonment.source_stop_reason,
+                      scanned_item_count: scan.gap_abandonment.scanned_item_count,
+                      first_page_item_count: scan.gap_abandonment.first_page_item_count,
+                      catch_up_item_count: scan.gap_abandonment.catch_up_item_count,
+                      catch_up_item_limit: scan.gap_abandonment.catch_up_item_limit,
+                      selected_item_count: scan.gap_abandonment.selected_item_count,
+                    },
+                  } : {}),
+                }
+              : null,
             result: {
               firstSeen: discovery.firstSeen,
-              selectedCount: 0,
-              lifecycleStatus: null,
-              lifecycleTransitioned: false,
-              dormantRecheckDay: null,
+              selectedCount: samplePlan.rows.length,
+              lifecycleStatus: lifecycle.lifecycle_status,
+              lifecycleTransitioned: lifecycle.transitioned === true,
+              dormantRecheckDay: lifecycle.dormant_recheck_day ?? null,
             },
           };
-        }
-        const discovery = await applyDiscovery({
-          plan,
-          runId,
-          scan,
-          candidateEntries: discoveryEntries,
-          captures: discoveryCaptures,
-          transactionClient,
-          observationId,
-          observedAt,
-          pendingDeferredVideoIds,
-        });
-        const recentRows = await transactionClient.query(
-          `WITH candidate AS (
-             SELECT content.*,
-                    EXISTS (
-                      SELECT 1 FROM crawler.content_enrich_tasks task
-                      WHERE task.content_key=content.content_key
-                        AND task.job_type IN ('player-refresh','next-refresh')
-                        AND task.status IN ('queued','failed')
-                        AND COALESCE(task.next_retry_at,now())<=now()
-                    ) AS enrich_pending
-             FROM crawler.contents content
-             WHERE content.channel_id=$1
-               AND content.content_type IN ('video','short','live')
-           )
-           SELECT candidate.*
-           FROM candidate
-           WHERE candidate.enrich_pending
-              OR candidate.published_at>=($2::date - ($3::int * interval '1 day'))
-           ORDER BY candidate.published_at DESC NULLS LAST,candidate.content_key`,
-          [plan.channel_id, plan.plan_day, config.recentWindowDays],
-        );
-        const samplePlan = planRecentVideoSampling(recentRows.rows, {
-          plan: samplingPlanInput,
-          config,
-          excludeVideoIds,
-          now: new Date(observedAt),
-        });
-        const samplingCaptures = await captureDetails(
-          samplePlan.rows.map((row) => ({ id: row.source_content_id })),
-          fetchDetail,
-          samplePlan.rows.length,
-        );
-        const recentSampling = await applyRecentSampling({
-          runId,
-          samplePlan,
-          captures: samplingCaptures,
-          transactionClient,
-          observationId,
-          observedAt,
-          changeAlpha: config.changeEwmaAlpha,
-        });
-        const publicationRows = await transactionClient.query(
-          `SELECT content_key
-           FROM crawler.contents
-           WHERE channel_id=$1
-             AND (
-               source_content_id=ANY($2::text[])
-               OR content_key=ANY($3::text[])
-             )
-           ORDER BY content_key`,
-          [
-            plan.channel_id,
-            scan.entries.map((entry) => entry.id),
-            samplePlan.rows.map((row) => row.content_key),
-          ],
-        );
-        await refreshVideoPublicationItemHashes(
-          transactionClient,
-          publicationRows.rows.map((row) => row.content_key),
-        );
-        const lifecycle = await applyVideoActivityLifecycle(transactionClient, {
-          channelId: plan.channel_id,
-          observedAt,
-          discoveryComplete: scan.complete === true,
-        });
-        const outcome = discovery.outcome === "complete" && recentSampling.outcome === "complete"
-          ? "complete"
-          : "partial";
-        return {
-          outcome,
-          outcomeReasonCode: outcome === "complete"
-            ? scan.stop_reason === GAP_ABANDONMENT_STOP_REASON
-              ? "video_cycle_gap_abandoned_latest_30"
-              : "video_cycle_complete"
-            : `video_cycle_${discovery.outcome}_${recentSampling.outcome}`,
-          resultSummary: {
-            discovery: discovery.summary,
-            recent_sampling: recentSampling.summary,
-            activity: {
-              lifecycle_status: lifecycle.lifecycle_status,
-              recent_published_content_count: lifecycle.recent_published_content_count,
-              conclusive: lifecycle.conclusive,
-            },
-          },
-          payload: {
-            discovery: { outcome: discovery.outcome, payload: discovery.payload },
-            recent_sampling: {
-              outcome: recentSampling.outcome,
-              payload: recentSampling.payload,
-            },
-            ...(lifecycle.activity ? { activity: lifecycle.activity } : {}),
-          },
-          anchorVideoIds: discovery.outcome === "complete"
-            ? mergedDiscoveryAnchorIds(scan.entries, anchors)
-            : null,
-          sourceCursor: discovery.outcome === "complete"
-            ? {
-                playlist_id: scan.playlist_id,
-                matched_anchor_id: scan.matched_anchor_id,
-                crossed_anchor_ids: scan.crossed_anchor_ids ?? [],
-                terminal_reason: scan.terminal_reason,
-                ...(scan.gap_abandonment ? {
-                  gap_abandonment: {
-                    policy_version: scan.gap_abandonment.policy_version,
-                    source_stop_reason: scan.gap_abandonment.source_stop_reason,
-                    scanned_item_count: scan.gap_abandonment.scanned_item_count,
-                    first_page_item_count: scan.gap_abandonment.first_page_item_count,
-                    catch_up_item_count: scan.gap_abandonment.catch_up_item_count,
-                    catch_up_item_limit: scan.gap_abandonment.catch_up_item_limit,
-                    selected_item_count: scan.gap_abandonment.selected_item_count,
-                  },
-                } : {}),
-              }
-            : null,
-          result: {
-            firstSeen: discovery.firstSeen,
-            selectedCount: samplePlan.rows.length,
-            lifecycleStatus: lifecycle.lifecycle_status,
-            lifecycleTransitioned: lifecycle.transitioned === true,
-            dormantRecheckDay: lifecycle.dormant_recheck_day ?? null,
-          },
-        };
-      },
-    });
-    if (scan.complete === true) {
-      await reconcilePublication(client, {
-        channelId: plan.channel_id,
-        domains: recorded.result?.lifecycleTransitioned === true
-          ? ["channel", "video"]
-          : ["video"],
-        asOf: observedAt,
+        },
       });
+      if (scan.complete === true) {
+        await reconcilePublication(client, {
+          channelId: plan.channel_id,
+          domains: ["channel", "video"],
+          asOf: observedAt,
+        });
+      }
+      return observation;
+    });
+  } catch (error) {
+    transactionError = error;
+  }
+  let reservationCleanupDeferred = false;
+  try {
+    await releaseClockContentEnrichReservations(withTransaction, preparedSampling);
+  } catch (releaseError) {
+    if (transactionError && (
+      typeof transactionError === "object" || typeof transactionError === "function"
+    )) {
+      transactionError.clock_content_enrich_release_error = releaseError;
+    } else {
+      reservationCleanupDeferred = true;
     }
-    return recorded;
-  });
+  }
+  if (transactionError) throw transactionError;
+  return reservationCleanupDeferred
+    ? { ...recorded, reservation_cleanup_deferred: true }
+    : recorded;
 }
 
 export async function executeIncrementalVideo({
@@ -1789,6 +2491,14 @@ export async function executeIncrementalVideo({
     observedAt,
     { allowDueRechecks: scan.complete === true },
   );
+  const samplingPlanInput = {
+    ...plan,
+    capacity: {
+      ...plan.capacity,
+      factor: 1,
+      player_cap: storedVideoPlayerBudget,
+    },
+  };
   let recorded;
   if (scan.complete !== true) {
     recorded = await recordVideoCycle({
@@ -1797,15 +2507,12 @@ export async function executeIncrementalVideo({
       scan,
       discoveryEntries: scannedWork.workEntries,
       discoveryCaptures: new Map(),
+      checkpointedFirstSeen: [],
       pendingDeferredVideoIds: scannedWork.pendingDeferredVideoIds,
       anchors,
-      excludeVideoIds: [],
-      samplingPlanInput: {
-        ...plan,
-        capacity: { ...plan.capacity, factor: 1, player_cap: storedVideoPlayerBudget },
-      },
+      preparedSampling: null,
+      samplingPlanInput,
       config,
-      fetchDetail: detailFetcher,
       withTransaction,
       startedAt,
       observedAt,
@@ -1813,6 +2520,9 @@ export async function executeIncrementalVideo({
       executionAttemptId,
     });
   } else {
+    const recoveredFirstSeen = await loadPendingFirstSeenCheckpoints(query, {
+      channelId: plan.channel_id,
+    });
     const dueDispositionEntries = await loadDueVideoDispositionEntries(
       query,
       plan.channel_id,
@@ -1829,25 +2539,42 @@ export async function executeIncrementalVideo({
       detailFetcher,
       detailEligibleFirstSeen.length,
     );
+    const newlyCheckpointedFirstSeen = await checkpointFirstSeenEnrichFailures({
+      plan,
+      runId,
+      candidateEntries: discoveryEntries,
+      captures: discoveryCaptures,
+      withTransaction,
+      observedAt,
+    });
+    const checkpointedFirstSeen = [
+      ...recoveredFirstSeen,
+      ...newlyCheckpointedFirstSeen,
+    ];
+    const preparedSampling = await prepareClockRecentSampling({
+      plan,
+      runId,
+      scanEntries: scan.entries,
+      excludeVideoIds: discoveryEntries.map((entry) => entry.id),
+      samplingPlanInput,
+      config,
+      fetchDetail: detailFetcher,
+      withTransaction,
+      executionAttemptId,
+      observedAt,
+    });
     recorded = await recordVideoCycle({
       plan,
       runId,
       scan,
       discoveryEntries,
       discoveryCaptures,
+      checkpointedFirstSeen,
       pendingDeferredVideoIds: scannedWork.pendingDeferredVideoIds,
       anchors,
-      excludeVideoIds: discoveryEntries.map((entry) => entry.id),
-      samplingPlanInput: {
-        ...plan,
-        capacity: {
-          ...plan.capacity,
-          factor: 1,
-          player_cap: storedVideoPlayerBudget,
-        },
-      },
+      preparedSampling,
+      samplingPlanInput,
       config,
-      fetchDetail: detailFetcher,
       withTransaction,
       startedAt,
       observedAt,
@@ -1864,5 +2591,8 @@ export async function executeIncrementalVideo({
     selected_count: recorded.result?.selectedCount ?? 0,
     lifecycle_status: recorded.result?.lifecycleStatus ?? null,
     dormant_recheck_day: recorded.result?.dormantRecheckDay ?? null,
+    ...(recorded.reservation_cleanup_deferred === true
+      ? { reservation_cleanup_deferred: true }
+      : {}),
   };
 }

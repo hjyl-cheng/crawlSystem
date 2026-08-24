@@ -126,18 +126,49 @@ Dispatch from immutable `pachongsys` images:
 QY_DEPLOYMENT_MODE=shared-qy-workers \
   ./scripts/compose.sh newcrawler up -d --no-build \
     local-agent-config controller \
-    worker-channel worker-incremental worker-discover worker-query-quality \
+    worker-channel worker-incremental worker-content-enrich \
+    worker-discover worker-query-quality \
     worker-data-api worker-agent worker-finalize \
     feature-scheduler-daily feature-dispatch
 ```
 
-The default persistent scale is 20 Full workers and 20 Incremental workers,
-matching the last stable QY production topology.
-Override `QY_CHANNEL_WORKER_REPLICAS` and `QY_INCREMENTAL_WORKER_REPLICAS` in
-the ignored runtime environment when Rota capacity changes. Never run the old
-and new consumers together against the shared Redis queues. Never run old and
-new Scheduler or Dispatch processes together against the same Feature Clock
-tables.
+The default persistent scale is 20 Full workers, 20 Incremental workers, and
+2 Content Enrich workers. Override `QY_CHANNEL_WORKER_REPLICAS`,
+`QY_INCREMENTAL_WORKER_REPLICAS`, and `QY_CONTENT_ENRICH_WORKER_REPLICAS` in
+the ignored runtime environment when Rota capacity changes. The matching
+channel-role Slot capacity must cover all three worker groups. Never run the
+old and new consumers together against the shared Redis queues. Never run old
+and new Scheduler or Dispatch processes together against the same Feature
+Clock tables.
+
+### 9.1 Content Enrich Drain Cutover
+
+Content Enrich ships with both safety controls closed: the Controller gate is
+`false`, and the database owner mode is `clock`. Apply the Crawler schema and
+deploy the Rota `content_enrich` Task Kind before starting the dedicated Worker.
+Confirm actual ready channel-role Slot capacity before changing either control.
+
+Preview the database transition first:
+
+```bash
+npm --prefix services/qybullmq run content-enrich:mode -- queue
+```
+
+After the Worker is healthy and the Controller has been restarted with
+`CONTENT_ENRICH_DISPATCH_ENABLED=true`, apply the transition only with an
+explicit operator, reason, and target confirmation:
+
+```bash
+CONTENT_ENRICH_MODE_CONFIRM=queue \
+CONTENT_ENRICH_MODE_OPERATOR='<operator>' \
+CONTENT_ENRICH_MODE_REASON='<change-ticket>' \
+  npm --prefix services/qybullmq run content-enrich:mode -- queue --apply
+```
+
+Rollback in the opposite ownership order: switch the database mode to `clock`
+first, then restart the Controller with the dispatch gate disabled. Existing
+leased Jobs may drain; Clock skips live leases and takes over only after they
+finish or expire. Do not bulk-update historical Content rows or Task states.
 
 ## 10. Shared QY Feature Bridge Takeover
 

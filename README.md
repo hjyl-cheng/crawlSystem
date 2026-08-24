@@ -61,6 +61,7 @@ ready capacity:
 QY_IMAGE_TAG=<immutable-tag> ./scripts/compose.sh production up -d \
   --scale worker-channel=20 \
   --scale worker-incremental=20 \
+  --scale worker-content-enrich=2 \
   --scale worker-agent=1
 ```
 

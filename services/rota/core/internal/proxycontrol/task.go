@@ -257,7 +257,7 @@ func validateBeginTaskRequest(request BeginTaskRequest) error {
 
 func validTaskKind(taskKind string) bool {
 	switch taskKind {
-	case TaskKindChannelFull, TaskKindChannelIncremental, TaskKindDiscoverPage, TaskKindQueryQualityChunk:
+	case TaskKindChannelFull, TaskKindChannelIncremental, TaskKindContentEnrich, TaskKindDiscoverPage, TaskKindQueryQualityChunk:
 		return true
 	default:
 		return false
@@ -267,7 +267,7 @@ func validTaskKind(taskKind string) bool {
 func roleAllowsTaskKind(role, taskKind string) bool {
 	switch role {
 	case RoleChannel:
-		return taskKind == TaskKindChannelFull || taskKind == TaskKindChannelIncremental
+		return taskKind == TaskKindChannelFull || taskKind == TaskKindChannelIncremental || taskKind == TaskKindContentEnrich
 	case RoleDiscover:
 		return taskKind == TaskKindDiscoverPage
 	case RoleQueryQuality:

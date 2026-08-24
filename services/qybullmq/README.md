@@ -27,6 +27,7 @@ Migration input --^
 
 Feature Clock -> Feature Dispatch -> youtube-channel-incremental
               -> Local Agent incremental -> Finalize -> Publication
+Content Enrich Tasks -> Controller -> youtube-content-enrich -> Publication
 ```
 
 Uploads provides video discovery and ordering. Per-video watch/player detail
