@@ -1563,6 +1563,7 @@ const migrationTargetStateCte = `target_state AS (
   LEFT JOIN crawler.finalized_profiles finalized ON finalized.channel_id=intent.channel_id
   WHERE intent.source_id=$1
 )`;
+const migrationWorkStatusesSql = "('discovered','queued','validating','failed','finishing')";
 
 function migrationTargetSearchClause(args, search) {
   const normalized = String(search || "").trim();
@@ -1576,7 +1577,9 @@ function migrationTargetSearchClause(args, search) {
 
 function migrationTargetFilterClause(args, { channelStatus, agentStatus, finalStatus }) {
   const where = [];
-  if (channelStatus !== "all") {
+  if (channelStatus === "all") {
+    where.push(`state.candidate_status IN ${migrationWorkStatusesSql}`);
+  } else {
     args.push(channelStatus);
     where.push(`state.candidate_status=$${args.length}`);
   }
@@ -1746,7 +1749,7 @@ async function migrationChannelListData(req) {
     let channels = [];
     if (offset < total) {
       const unfiltered = channelStatus === "all" && !agentStatus && !finalStatus;
-      if (unfiltered) {
+      if (unfiltered && Number(targetSummary.started || 0) === 0) {
         const sourceRows = await loadMigrationSourcePage({
           read: migrationRead,
           search,
@@ -3652,6 +3655,8 @@ function migrationChannelListPage(migration) {
   const finalOptions = ["", "pending", "pending_detail", "pending_api", "pending_agent", "ready_auto", "ready_partial", "failed"];
   const batchOptions = [
     ["100", "100"],
+    ["200", "200"],
+    ["500", "500"],
     ["1000", "1000"],
     ["2000", "2000"],
   ];

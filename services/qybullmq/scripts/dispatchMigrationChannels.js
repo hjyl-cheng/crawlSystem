@@ -3,18 +3,18 @@
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 
-const APPROVED_SELECTIONS = new Set(["100", "1000", "2000"]);
+const APPROVED_SELECTIONS = new Set(["100", "200", "500", "1000", "2000"]);
 const SAFE_BATCH_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 
 export function controlledMigrationUsage() {
-  return `Usage: npm run dispatch:migration-channels -- --selection <100|1000|2000> [options]
+  return `Usage: npm run dispatch:migration-channels -- --selection <100|200|500|1000|2000> [options]
 
 Default mode is a read-only local plan. Execute reads the legacy Migration
 Source in a separate read-only transaction, then writes idempotent intents to
 the fresh Crawler database.
 
 Options:
-  --selection <100|1000|2000>  Approved canary size
+  --selection <100|200|500|1000|2000>  Approved canary size
   --batch-id <id>              Optional fresh Crawler dispatch batch ID
   --execute                    Materialize Target intents and Candidates
   --confirm <token>            Exact confirmation emitted by plan mode
@@ -45,7 +45,7 @@ export function parseControlledMigrationCommand(argv = [], environment = process
   const sourceId = requiredText(environment.MIGRATION_SOURCE_ID, "MIGRATION_SOURCE_ID");
   const selection = requiredText(values.selection, "--selection");
   if (!APPROVED_SELECTIONS.has(selection)) {
-    throw new TypeError("--selection must be one of: 100, 1000, 2000");
+    throw new TypeError("--selection must be one of: 100, 200, 500, 1000, 2000");
   }
   const batchId = String(values["batch-id"] ?? "").trim() || null;
   if (batchId && !SAFE_BATCH_ID.test(batchId)) {

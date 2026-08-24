@@ -3,11 +3,12 @@ import { channelSnapshotPayload } from "./migrationDispatchPolicy.js";
 import {
   loadMigrationSourceBatch,
   loadMigrationSourceChannel,
+  migrationSourceCandidateIsPending,
   sourceSnapshotHash,
 } from "./migrationSource.js";
 
 export const DEFAULT_MANUAL_MIGRATION_BATCH_ID = "legacy-results-manual-v2";
-export const MANUAL_MIGRATION_BATCH_SELECTIONS = Object.freeze([100, 1000, 2000]);
+export const MANUAL_MIGRATION_BATCH_SELECTIONS = Object.freeze([100, 200, 500, 1000, 2000]);
 
 const ACTIVE_SCHEDULER_STATUSES = new Set(["running", "finishing", "repairing"]);
 const IN_PROGRESS_CANDIDATE_STATUSES = new Set(["queued", "validating"]);
@@ -96,9 +97,12 @@ export function normalizeManualMigrationBatchSelection(value) {
   const normalized = String(value ?? "").trim();
   const limit = Number(normalized);
   if (!Number.isSafeInteger(limit) || !MANUAL_MIGRATION_BATCH_SELECTIONS.includes(limit)) {
-    throw new ManualMigrationDispatchError("selection must be one of: 100, 1000, 2000", {
+    throw new ManualMigrationDispatchError(
+      `selection must be one of: ${MANUAL_MIGRATION_BATCH_SELECTIONS.join(", ")}`,
+      {
       code: "invalid_batch_selection",
-    });
+      },
+    );
   }
   return { selection: String(limit), limit };
 }
@@ -114,11 +118,18 @@ export function validateMigrationSourceSnapshot(snapshot) {
     "source_database",
     "source_database_oid",
     "source_candidate_id",
+    "source_candidate_status",
     "channel_id",
     "channel_url",
     "snapshot_sha256",
   ]) {
     requiredText(snapshot[field], field);
+  }
+  if (!migrationSourceCandidateIsPending(snapshot.source_candidate_status)) {
+    throw new ManualMigrationDispatchError(
+      `Migration Source candidate is not pending: ${snapshot.source_candidate_status}`,
+      { code: "source_candidate_not_pending" },
+    );
   }
   const expectedHash = sourceSnapshotHash(snapshot);
   if (snapshot.snapshot_sha256 !== expectedHash) {

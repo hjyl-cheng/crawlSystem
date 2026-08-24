@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  loadMigrationSourceBatch,
   loadMigrationSourceChannel,
   migrationSourceRuntimeConfig,
   sourceSnapshotHash,
@@ -91,6 +92,7 @@ test("source snapshots are canonical and carry an immutable hash", async () => {
     search_subscriber_count_text: "1.2K",
     is_verified: false,
     priority: 100,
+    source_candidate_status: "discovered",
     snapshot_json: { b: 2, a: 1 },
     source_json: { source: "legacy_results_db" },
     created_at: new Date("2026-08-01T00:00:00.000Z"),
@@ -115,7 +117,60 @@ test("source snapshots are canonical and carry an immutable hash", async () => {
   assert.equal(snapshot.source_database, "bullmq_crawler_migration");
   assert.equal(snapshot.source_database_oid, "16384");
   assert.equal(snapshot.source_candidate_id, "42");
+  assert.equal(snapshot.source_candidate_status, "discovered");
   assert.equal(snapshot.snapshot_sha256, sourceSnapshotHash(snapshot));
   assert.match(snapshot.snapshot_sha256, /^[a-f0-9]{64}$/);
   assert.equal(sourceSnapshotHash({ ...snapshot, snapshot_sha256: "ignored" }), snapshot.snapshot_sha256);
+});
+
+test("single and batch Source reads select only canonical pending migration candidates", async () => {
+  const sourceSql = [];
+  const candidate = {
+    candidate_id: "42",
+    dispatch_batch_id: "legacy-results-full-v1",
+    channel_id: "UC1234567890123456789012",
+    channel_url: "https://www.youtube.com/channel/UC1234567890123456789012",
+    priority: 100,
+    source_candidate_status: "discovered",
+    snapshot_json: {},
+    source_json: { source: "legacy_results_db" },
+  };
+  const client = {
+    async query(sql) {
+      if (sql.includes("current_database() AS database_name")) return { rows: [identityRow()] };
+      if (sql.includes("FROM crawler.channel_candidates")) {
+        sourceSql.push(sql.replace(/\s+/g, " "));
+        return { rows: [candidate] };
+      }
+      return { rows: [] };
+    },
+    release() {},
+  };
+  const pool = { async connect() { return client; } };
+
+  await loadMigrationSourceChannel({
+    channelId: candidate.channel_id,
+    candidateId: candidate.candidate_id,
+    pool,
+    environment,
+  });
+  await loadMigrationSourceBatch({ limit: 100, pool, environment });
+
+  assert.equal(sourceSql.length, 2);
+  for (const sql of sourceSql) {
+    assert.match(sql, /channel_rank=1/);
+    assert.match(
+      sql,
+      /source_candidate_status IN \('discovered','queued','validating','failed'\)/,
+    );
+  }
+  assert.match(sourceSql[1], /source_page AS \(/);
+  assert.match(
+    sourceSql[1],
+    /FROM source_page page JOIN crawler\.channel_candidates candidate/,
+  );
+  assert.doesNotMatch(
+    sourceSql[1].slice(0, sourceSql[1].indexOf("source_page AS")),
+    /snapshot_json|source_json,created_at/,
+  );
 });

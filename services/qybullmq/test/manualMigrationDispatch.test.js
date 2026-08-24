@@ -16,6 +16,7 @@ function sourceSnapshot(overrides = {}) {
     source_database: "bullmq_crawler_migration",
     source_database_oid: "16384",
     source_candidate_id: "42",
+    source_candidate_status: "discovered",
     source_dispatch_batch_id: "legacy-results-full-v1",
     channel_id: "UC1234567890123456789012",
     channel_url: "https://www.youtube.com/channel/UC1234567890123456789012",
@@ -48,11 +49,13 @@ test("manual migration does not replace another active crawler pipeline", () => 
   assert.equal(schedulerConflict({ status: "stopped", pipeline_cycle_id: "old-batch" }), null);
 });
 
-test("canary batch selections are deliberately capped at 100, 1000, or 2000", () => {
+test("canary batch selections are deliberately capped at approved sizes up to 2000", () => {
   assert.deepEqual(normalizeManualMigrationBatchSelection("100"), { selection: "100", limit: 100 });
+  assert.deepEqual(normalizeManualMigrationBatchSelection("200"), { selection: "200", limit: 200 });
+  assert.deepEqual(normalizeManualMigrationBatchSelection("500"), { selection: "500", limit: 500 });
   assert.deepEqual(normalizeManualMigrationBatchSelection("1000"), { selection: "1000", limit: 1000 });
   assert.deepEqual(normalizeManualMigrationBatchSelection("2000"), { selection: "2000", limit: 2000 });
-  for (const forbidden of ["all", "500", "5000", "10000"]) {
+  for (const forbidden of ["all", "300", "5000", "10000"]) {
     assert.throws(
       () => normalizeManualMigrationBatchSelection(forbidden),
       (error) => error.code === "invalid_batch_selection",
@@ -66,6 +69,11 @@ test("Migration Source snapshots reject changed payloads before Target writes", 
   assert.throws(
     () => validateMigrationSourceSnapshot({ ...snapshot, title: "changed" }),
     /snapshot hash mismatch/,
+  );
+  const accepted = sourceSnapshot({ source_candidate_status: "accepted" });
+  assert.throws(
+    () => validateMigrationSourceSnapshot(accepted),
+    (error) => error.code === "source_candidate_not_pending",
   );
 });
 

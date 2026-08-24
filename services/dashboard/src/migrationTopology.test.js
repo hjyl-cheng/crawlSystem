@@ -6,6 +6,7 @@ import {
   assertMigrationSourceIdentity,
   loadMigrationSourceCount,
   loadMigrationSourcePage,
+  migrationCandidateMatches,
   migrationFiltersIncludeUnstarted,
   mergeMigrationCandidate,
   mergeMigrationCandidates,
@@ -166,6 +167,10 @@ test("Migration Source applies pagination in SQL before loading wide candidate r
   assert.equal(calls.length, 1);
   const normalizedSql = calls[0].sql.replace(/\s+/g, " ");
   assert.match(normalizedSql, /source_page AS \(/);
+  assert.match(
+    normalizedSql,
+    /source_candidate_status IN \('discovered','queued','validating','failed'\)/,
+  );
   assert.match(normalizedSql, /LIMIT \$2::int OFFSET \$3::int/);
   assert.match(
     normalizedSql,
@@ -190,7 +195,12 @@ test("Migration Source total uses a narrow aggregate query", async () => {
 
   assert.equal(total, 410_292);
   assert.equal(calls.length, 1);
-  assert.match(calls[0].sql, /count\(DISTINCT candidate\.channel_id\)/);
+  assert.match(calls[0].sql, /count\(\*\)::int AS total/);
+  assert.match(calls[0].sql, /candidate\.channel_rank=1/);
+  assert.match(
+    calls[0].sql,
+    /candidate\.source_candidate_status IN \('discovered','queued','validating','failed'\)/,
+  );
   assert.doesNotMatch(calls[0].sql, /snapshot_json|candidate\.\*/);
   assert.deepEqual(calls[0].params, []);
 });
@@ -211,6 +221,15 @@ test("Migration filter planning includes unstarted rows only when their default 
     agentStatus: "",
     finalStatus: "",
   }), false);
+  assert.equal(migrationCandidateMatches({
+    candidate_status: "accepted",
+    agent_status: "done",
+    final_status: "ready_auto",
+  }, {
+    channelStatus: "all",
+    agentStatus: "",
+    finalStatus: "",
+  }), false);
 });
 
 test("Migration Target snapshot restores the immutable Source candidate fields", () => {
@@ -224,6 +243,7 @@ test("Migration Target snapshot restores the immutable Source candidate fields",
       title: "Forty Two",
       avatar_url: "https://example.test/avatar.jpg",
       search_subscriber_count: "1200",
+      source_candidate_status: "discovered",
       snapshot_json: { channel_header: { title: "Forty Two" } },
       source_json: {
         source: "legacy_results_db",
@@ -242,6 +262,7 @@ test("Migration Target snapshot restores the immutable Source candidate fields",
     title: "Forty Two",
     avatar_url: "https://example.test/avatar.jpg",
     search_subscriber_count: "1200",
+    source_candidate_status: "discovered",
     snapshot_json: { channel_header: { title: "Forty Two" } },
     source_json: {
       source: "legacy_results_db",
@@ -261,7 +282,7 @@ test("Migration Target snapshot restores the immutable Source candidate fields",
 
 test("Migration stats combine Source inventory with Target aggregates", () => {
   assert.deepEqual(migrationReadModelStatsFromSummary(1000, {
-    started: 12,
+    started: 20,
     discovered: 1,
     queued: 3,
     validating: 2,
@@ -270,8 +291,8 @@ test("Migration stats combine Source inventory with Target aggregates", () => {
     migration_done: 5,
     final_done: 6,
   }), {
-    total: 1000,
-    discovered: 989,
+    total: 992,
+    discovered: 981,
     queued: 3,
     validating: 2,
     finishing: 4,
@@ -286,5 +307,8 @@ test("Dashboard source and target SQL stay on separate connection helpers", asyn
   assert.match(server, /BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY/);
   assert.match(server, /assertMigrationSourceIdentity/);
   assert.match(server, /crawler\.migration_channel_intents/);
+  for (const selection of ["100", "200", "500", "1000", "2000"]) {
+    assert.match(server, new RegExp(`\\["${selection}", "${selection}"\\]`));
+  }
   assert.doesNotMatch(server, /migrationRead\([\s\S]{0,120}UPDATE\s+crawler\./);
 });

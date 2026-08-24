@@ -4,6 +4,19 @@ import { verifyMigrationSourceDatabase } from "./databaseIdentity.js";
 
 let defaultPool = null;
 
+export const MIGRATION_SOURCE_PENDING_STATUSES = Object.freeze([
+  "discovered",
+  "queued",
+  "validating",
+  "failed",
+]);
+const MIGRATION_SOURCE_PENDING_SQL = "('discovered','queued','validating','failed')";
+const migrationSourcePendingStatuses = new Set(MIGRATION_SOURCE_PENDING_STATUSES);
+
+export function migrationSourceCandidateIsPending(status) {
+  return migrationSourcePendingStatuses.has(String(status ?? ""));
+}
+
 function requiredText(value, name) {
   const normalized = String(value ?? "").trim();
   if (!normalized) throw new TypeError(`${name} is required`);
@@ -125,6 +138,10 @@ function migrationSourceSnapshot(row, identity, config) {
     source_database: identity.database,
     source_database_oid: identity.databaseOid,
     source_candidate_id: String(row.candidate_id),
+    source_candidate_status: requiredText(
+      row.source_candidate_status,
+      "Migration Source candidate status",
+    ),
     source_dispatch_batch_id: row.dispatch_batch_id == null
       ? null
       : String(row.dispatch_batch_id),
@@ -158,15 +175,28 @@ export async function loadMigrationSourceChannel({
     : requiredText(candidateId, "candidate_id");
   return withMigrationSourceReadTransaction(async (client, identity, config) => {
     const result = await client.query(
-      `SELECT candidate_id,dispatch_batch_id,channel_id,channel_url,handle,title,
+      `WITH source_candidates AS (
+         SELECT candidate_id,dispatch_batch_id,channel_id,channel_url,handle,title,
+                description,avatar_url,search_subscriber_count,
+                search_subscriber_count_text,is_verified,priority,
+                status AS source_candidate_status,snapshot_json,source_json,
+                created_at,updated_at,
+                row_number() OVER (
+                  PARTITION BY channel_id
+                  ORDER BY priority DESC,candidate_id DESC
+                ) AS channel_rank
+         FROM crawler.channel_candidates
+         WHERE channel_id=$1
+           AND source_json->>'source'='legacy_results_db'
+       )
+       SELECT candidate_id,dispatch_batch_id,channel_id,channel_url,handle,title,
               description,avatar_url,search_subscriber_count,
-              search_subscriber_count_text,is_verified,priority,snapshot_json,
-              source_json,created_at,updated_at
-       FROM crawler.channel_candidates
-       WHERE channel_id=$1
-         AND source_json->>'source'='legacy_results_db'
+              search_subscriber_count_text,is_verified,priority,
+              source_candidate_status,snapshot_json,source_json,created_at,updated_at
+       FROM source_candidates
+       WHERE channel_rank=1
+         AND source_candidate_status IN ${MIGRATION_SOURCE_PENDING_SQL}
          AND ($2::bigint IS NULL OR candidate_id=$2::bigint)
-       ORDER BY candidate_id DESC
        LIMIT 1`,
       [normalizedChannelId, normalizedCandidateId],
     );
@@ -197,27 +227,33 @@ export async function loadMigrationSourceBatch({
   return withMigrationSourceReadTransaction(async (client, identity, config) => {
     const result = await client.query(
       `WITH source_candidates AS (
-         SELECT candidate_id,dispatch_batch_id,channel_id,channel_url,handle,title,
-                description,avatar_url,search_subscriber_count,
-                search_subscriber_count_text,is_verified,priority,snapshot_json,
-                source_json,created_at,updated_at,
+         SELECT candidate_id,channel_id,priority,
+                status AS source_candidate_status,
                 row_number() OVER (
                   PARTITION BY channel_id
                   ORDER BY priority DESC,candidate_id DESC
                 ) AS channel_rank
          FROM crawler.channel_candidates
          WHERE source_json->>'source'='legacy_results_db'
+       ), source_page AS (
+         SELECT candidate_id,priority
+         FROM source_candidates
+         WHERE channel_rank=1
+           AND source_candidate_status IN ${MIGRATION_SOURCE_PENDING_SQL}
+           AND NOT (candidate_id=ANY($1::bigint[]))
+           AND NOT (channel_id=ANY($2::text[]))
+         ORDER BY priority DESC,candidate_id
+         LIMIT $3::int
        )
-       SELECT candidate_id,dispatch_batch_id,channel_id,channel_url,handle,title,
-              description,avatar_url,search_subscriber_count,
-              search_subscriber_count_text,is_verified,priority,snapshot_json,
-              source_json,created_at,updated_at
-       FROM source_candidates
-       WHERE channel_rank=1
-         AND NOT (candidate_id=ANY($1::bigint[]))
-         AND NOT (channel_id=ANY($2::text[]))
-       ORDER BY priority DESC,candidate_id
-       LIMIT $3::int`,
+       SELECT candidate.candidate_id,candidate.dispatch_batch_id,
+              candidate.channel_id,candidate.channel_url,candidate.handle,candidate.title,
+              candidate.description,candidate.avatar_url,candidate.search_subscriber_count,
+              candidate.search_subscriber_count_text,candidate.is_verified,candidate.priority,
+              candidate.status AS source_candidate_status,candidate.snapshot_json,
+              candidate.source_json,candidate.created_at,candidate.updated_at
+       FROM source_page page
+       JOIN crawler.channel_candidates candidate ON candidate.candidate_id=page.candidate_id
+       ORDER BY page.priority DESC,page.candidate_id`,
       [candidateIds, channelIds, normalizedLimit],
     );
     return result.rows.map((row) => migrationSourceSnapshot(row, identity, config));

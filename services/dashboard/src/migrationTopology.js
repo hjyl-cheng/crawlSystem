@@ -55,6 +55,14 @@ export function assertMigrationSourceIdentity(row, {
 }
 
 const FINAL_STATUSES = new Set(["ready_auto", "ready_partial"]);
+const MIGRATION_WORK_STATUSES = new Set([
+  "discovered",
+  "queued",
+  "validating",
+  "failed",
+  "finishing",
+]);
+const MIGRATION_SOURCE_PENDING_SQL = "('discovered','queued','validating','failed')";
 
 function boundedInteger(value, name, { min, max }) {
   const parsed = Number(value);
@@ -64,8 +72,8 @@ function boundedInteger(value, name, { min, max }) {
   return parsed;
 }
 
-function migrationSourceWhere(search, args) {
-  const where = ["candidate.source_json->>'source'='legacy_results_db'"];
+function migrationSourceSearchWhere(search, args) {
+  const where = [];
   const normalizedSearch = String(search || "").trim();
   if (normalizedSearch) {
     args.push(`%${normalizedSearch}%`);
@@ -76,7 +84,19 @@ function migrationSourceWhere(search, args) {
       OR candidate.title ILIKE $${args.length}
     )`);
   }
-  return where.join(" AND ");
+  return where.length > 0 ? where.join(" AND ") : "TRUE";
+}
+
+function rankedMigrationSourceSql() {
+  return `SELECT candidate.candidate_id,candidate.channel_id,candidate.channel_url,
+                 candidate.handle,candidate.title,candidate.priority,
+                 candidate.status AS source_candidate_status,
+                 row_number() OVER (
+                   PARTITION BY candidate.channel_id
+                   ORDER BY candidate.priority DESC,candidate.candidate_id DESC
+                 ) AS channel_rank
+          FROM crawler.channel_candidates candidate
+          WHERE candidate.source_json->>'source'='legacy_results_db'`;
 }
 
 export async function loadMigrationSourcePage({
@@ -89,29 +109,26 @@ export async function loadMigrationSourcePage({
   const normalizedLimit = boundedInteger(limit, "limit", { min: 1, max: 500 });
   const normalizedOffset = boundedInteger(offset, "offset", { min: 0, max: 1_000_000 });
   const args = [];
-  const whereSql = migrationSourceWhere(search, args);
+  const searchSql = migrationSourceSearchWhere(search, args);
   args.push(normalizedLimit, normalizedOffset);
   const limitParameter = args.length - 1;
   const offsetParameter = args.length;
   const result = await read(`WITH ranked_source AS (
-      SELECT candidate.candidate_id,candidate.channel_id,candidate.priority,
-             row_number() OVER (
-               PARTITION BY candidate.channel_id
-               ORDER BY candidate.priority DESC,candidate.candidate_id DESC
-             ) AS channel_rank
-      FROM crawler.channel_candidates candidate
-      WHERE ${whereSql}
+      ${rankedMigrationSourceSql()}
     ), source_page AS (
       SELECT candidate_id,priority
-      FROM ranked_source
-      WHERE channel_rank=1
+      FROM ranked_source candidate
+      WHERE candidate.channel_rank=1
+        AND candidate.source_candidate_status IN ${MIGRATION_SOURCE_PENDING_SQL}
+        AND ${searchSql}
       ORDER BY priority DESC,candidate_id
       LIMIT $${limitParameter}::int OFFSET $${offsetParameter}::int
     )
     SELECT
       candidate.candidate_id,candidate.dispatch_batch_id,candidate.channel_id,
       candidate.channel_url,candidate.handle,candidate.title,candidate.avatar_url,
-      candidate.search_subscriber_count,candidate.snapshot_json,candidate.source_json,
+      candidate.search_subscriber_count,candidate.status AS source_candidate_status,
+      candidate.snapshot_json,candidate.source_json,
       candidate.source_json #>> '{legacy_import,country}' AS legacy_country,
       candidate.source_json #>> '{legacy_import,target_reason}' AS legacy_target_reason,
       candidate.source_json #>> '{legacy_import,br_evidence_score}' AS legacy_evidence_score,
@@ -128,11 +145,15 @@ export async function loadMigrationSourcePage({
 export async function loadMigrationSourceCount({ read, search = "" } = {}) {
   if (typeof read !== "function") throw new TypeError("read is required");
   const args = [];
-  const whereSql = migrationSourceWhere(search, args);
-  const result = await read(`
-    SELECT count(DISTINCT candidate.channel_id)::int AS total
-    FROM crawler.channel_candidates candidate
-    WHERE ${whereSql}
+  const searchSql = migrationSourceSearchWhere(search, args);
+  const result = await read(`WITH ranked_source AS (
+      ${rankedMigrationSourceSql()}
+    )
+    SELECT count(*)::int AS total
+    FROM ranked_source candidate
+    WHERE candidate.channel_rank=1
+      AND candidate.source_candidate_status IN ${MIGRATION_SOURCE_PENDING_SQL}
+      AND ${searchSql}
   `, args);
   return Number(result.rows[0]?.total || 0);
 }
@@ -209,7 +230,8 @@ export function migrationCandidateMatches(row, {
   agentStatus = "",
   finalStatus = "",
 } = {}) {
-  return (channelStatus === "all" || row.candidate_status === channelStatus)
+  return MIGRATION_WORK_STATUSES.has(String(row.candidate_status || ""))
+    && (channelStatus === "all" || row.candidate_status === channelStatus)
     && (!agentStatus || row.agent_status === agentStatus)
     && (!finalStatus || row.final_status === finalStatus);
 }
@@ -241,6 +263,7 @@ export function migrationSourceCandidateFromIntent(row) {
     title: snapshot.title ?? "",
     avatar_url: snapshot.avatar_url ?? null,
     search_subscriber_count: snapshot.search_subscriber_count ?? null,
+    source_candidate_status: snapshot.source_candidate_status ?? null,
     snapshot_json: snapshot.snapshot_json ?? {},
     source_json: sourceJson,
     legacy_country: legacyImport.country ?? null,
@@ -257,13 +280,18 @@ export function migrationSourceCandidateFromIntent(row) {
 export function migrationReadModelStatsFromSummary(sourceTotal, summary = {}) {
   const total = Number(sourceTotal || 0);
   const started = Number(summary.started || 0);
+  const discovered = Number(summary.discovered || 0);
+  const queued = Number(summary.queued || 0);
+  const validating = Number(summary.validating || 0);
+  const finishing = Number(summary.finishing || 0);
+  const failed = Number(summary.failed || 0);
   return {
-    total,
-    discovered: Math.max(0, total - started) + Number(summary.discovered || 0),
-    queued: Number(summary.queued || 0),
-    validating: Number(summary.validating || 0),
-    finishing: Number(summary.finishing || 0),
-    failed: Number(summary.failed || 0),
+    total: Math.max(0, total - started) + discovered + queued + validating + finishing + failed,
+    discovered: Math.max(0, total - started) + discovered,
+    queued,
+    validating,
+    finishing,
+    failed,
     migration_done: Number(summary.migration_done || 0),
     final_done: Number(summary.final_done || 0),
   };

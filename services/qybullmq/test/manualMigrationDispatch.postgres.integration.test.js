@@ -21,6 +21,7 @@ test("Target SQL materializes one immutable idempotent intent without a Source w
     source_database: "migration_source_test",
     source_database_oid: "16384",
     source_candidate_id: "42",
+    source_candidate_status: "discovered",
     source_dispatch_batch_id: "legacy-source-batch",
     channel_id: channelId,
     channel_url: `https://www.youtube.com/channel/${channelId}`,
