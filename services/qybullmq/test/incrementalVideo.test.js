@@ -267,6 +267,8 @@ function databaseFixture({
           next_attempt_at: params[15],
           result_json: JSON.parse(params[16]),
           error_message: params[17],
+          first_seen_ledger_status: params[20],
+          first_seen_ledger_observation_id: params[21],
         };
         const existing = state.candidateRows.find(
           (row) => row.run_id === candidate.run_id
@@ -283,10 +285,35 @@ function databaseFixture({
               resolved_at: candidate.result_json.disposition.observed_at,
             };
           }
+          if (["pending", "consumed"].includes(existing.first_seen_ledger_status)) {
+            candidate.first_seen_ledger_status = existing.first_seen_ledger_status;
+            candidate.first_seen_ledger_observation_id = existing.first_seen_ledger_observation_id;
+          }
           Object.assign(existing, candidate);
         }
-        else state.candidateRows.push(candidate);
-        return { rowCount: 1, rows: [{ candidate_id: state.candidateRows.length }] };
+        else {
+          candidate.candidate_id = String(state.candidateRows.length + 1);
+          state.candidateRows.push(candidate);
+        }
+        return { rowCount: 1, rows: [{ candidate_id: existing?.candidate_id ?? candidate.candidate_id }] };
+      }
+      if (sql.includes("UPDATE crawler.content_candidates candidate")
+          && sql.includes("first_seen_ledger_status='consumed'")) {
+        const requested = new Set(params[2].map(String));
+        const claimed = state.candidateRows.filter((row) => (
+          requested.has(String(row.candidate_id))
+          && row.run_id === params[0]
+          && row.channel_id === params[1]
+          && row.first_seen_ledger_status === "pending"
+        ));
+        for (const row of claimed) {
+          row.first_seen_ledger_status = "consumed";
+          row.first_seen_ledger_observation_id = params[3];
+        }
+        return {
+          rowCount: claimed.length,
+          rows: claimed.map((row) => ({ candidate_id: String(row.candidate_id) })),
+        };
       }
       if (sql.includes("row_number() OVER") && sql.includes("ranked.disposition='deferred'")) {
         const latest = new Map();
@@ -480,8 +507,25 @@ function databaseFixture({
         return { rows: [...latest.values()] };
       }
       if (sql.includes("FROM crawler.content_candidates candidate")
-          && sql.includes("content.last_observation_id IS NULL")) {
-        return { rows: [] };
+          && sql.includes("candidate.first_seen_ledger_status='pending'")) {
+        return {
+          rows: state.candidateRows
+            .filter((row) => row.run_id === params[0] && row.channel_id === params[1])
+            .filter((row) => row.first_seen_ledger_status === "pending")
+            .map((row) => {
+              const content = state.contents.find((item) => (
+                item.channel_id === row.channel_id
+                && item.source_content_id === row.source_content_id
+              ));
+              return {
+                ...row,
+                video_id: row.source_content_id,
+                content_key: content?.content_key ?? row.content_key,
+                published_at: content?.published_at ?? null,
+                published_at_precision: content?.published_at_precision ?? "unknown",
+              };
+            }),
+        };
       }
       if (sql.includes("SELECT * FROM crawler.contents")) {
         return { rows: state.contents.map((row) => ({ ...row })) };
@@ -559,6 +603,7 @@ test("Video discovery defers a public detail without authoritative type evidence
   );
   assert.equal(fixture.state.candidateRows.length, 1);
   assert.deepEqual(fixture.state.candidateRows[0], {
+    candidate_id: "1",
     run_id: "incremental:deferred-type",
     channel_id: "UCvideo",
     source_content_id: "public-without-type",
@@ -570,6 +615,8 @@ test("Video discovery defers a public detail without authoritative type evidence
     missing_fields: ["content_type"],
     disposition: "deferred",
     next_attempt_at: "2026-07-20T06:00:00.000Z",
+    first_seen_ledger_status: "not_applicable",
+    first_seen_ledger_observation_id: null,
     result_json: {
       flat: {
         id: "public-without-type",

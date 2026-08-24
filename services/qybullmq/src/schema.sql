@@ -1449,6 +1449,8 @@ CREATE TABLE IF NOT EXISTS crawler.content_candidates (
   error_message TEXT,
   disposition TEXT,
   next_attempt_at TIMESTAMPTZ,
+  first_seen_ledger_status TEXT NOT NULL DEFAULT 'not_applicable',
+  first_seen_ledger_observation_id UUID,
   first_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   finished_at TIMESTAMPTZ,
@@ -1462,6 +1464,12 @@ CREATE TABLE IF NOT EXISTS crawler.content_candidates (
         disposition IN ('deferred','terminal_excluded')
         AND next_attempt_at IS NOT NULL
       )
+    ),
+  CONSTRAINT content_candidates_first_seen_ledger_shape_check
+    CHECK (
+      (first_seen_ledger_status='not_applicable' AND first_seen_ledger_observation_id IS NULL)
+      OR (first_seen_ledger_status='pending' AND first_seen_ledger_observation_id IS NULL)
+      OR (first_seen_ledger_status='consumed' AND first_seen_ledger_observation_id IS NOT NULL)
     ),
   UNIQUE (run_id, source_content_id),
   UNIQUE (run_id, position)
@@ -2596,6 +2604,33 @@ ON crawler.crawl_observations (channel_id, observation_kind, observed_at DESC);
 
 CREATE INDEX IF NOT EXISTS idx_crawler_crawl_observations_created_at
 ON crawler.crawl_observations (created_at);
+
+ALTER TABLE crawler.content_candidates
+ADD COLUMN IF NOT EXISTS first_seen_ledger_status TEXT NOT NULL DEFAULT 'not_applicable';
+ALTER TABLE crawler.content_candidates
+ADD COLUMN IF NOT EXISTS first_seen_ledger_observation_id UUID;
+
+ALTER TABLE crawler.content_candidates
+DROP CONSTRAINT IF EXISTS content_candidates_first_seen_ledger_shape_check;
+ALTER TABLE crawler.content_candidates
+ADD CONSTRAINT content_candidates_first_seen_ledger_shape_check
+CHECK (
+  (first_seen_ledger_status='not_applicable' AND first_seen_ledger_observation_id IS NULL)
+  OR (first_seen_ledger_status='pending' AND first_seen_ledger_observation_id IS NULL)
+  OR (first_seen_ledger_status='consumed' AND first_seen_ledger_observation_id IS NOT NULL)
+);
+
+ALTER TABLE crawler.content_candidates
+DROP CONSTRAINT IF EXISTS content_candidates_first_seen_ledger_observation_id_fkey;
+ALTER TABLE crawler.content_candidates
+ADD CONSTRAINT content_candidates_first_seen_ledger_observation_id_fkey
+FOREIGN KEY (first_seen_ledger_observation_id)
+REFERENCES crawler.crawl_observations(observation_id)
+ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED NOT VALID;
+
+CREATE INDEX IF NOT EXISTS idx_crawler_content_candidates_first_seen_ledger_pending
+ON crawler.content_candidates (run_id,channel_id,candidate_id)
+WHERE first_seen_ledger_status='pending';
 
 CREATE TABLE IF NOT EXISTS crawler.channel_about_metric_snapshots (
   observation_id UUID PRIMARY KEY REFERENCES crawler.crawl_observations(observation_id) ON DELETE CASCADE,

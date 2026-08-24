@@ -27,7 +27,7 @@ export async function applyVideoActivityLifecycle(client, {
             dormant_last_probe_at,dormant_cycle
      FROM crawler.channels
      WHERE channel_id=$1
-     FOR UPDATE`,
+     FOR NO KEY UPDATE`,
     [channelId],
   );
   const channel = channelRows.rows[0];
@@ -132,4 +132,3 @@ export async function applyVideoActivityLifecycle(client, {
     dormant_recheck_day: dormantState.dormant_recheck_day,
   };
 }
-

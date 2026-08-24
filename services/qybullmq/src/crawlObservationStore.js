@@ -199,6 +199,7 @@ export async function recordCrawlerObservation(client, input) {
   }
   const command = normalizeCommand(input);
   const observationId = randomUUID();
+  // Migration writers already hold the Channel row, so keep Channel-before-cursor lock order.
   const duplicate = await claimKey(client, command, observationId);
   if (duplicate) return duplicate;
   const cursor = await lockCursor(client, command);

@@ -1506,6 +1506,8 @@ CREATE TABLE crawler.content_candidates (
     error_message text,
     disposition text,
     next_attempt_at timestamp with time zone,
+    first_seen_ledger_status text DEFAULT 'not_applicable'::text NOT NULL,
+    first_seen_ledger_observation_id uuid,
     first_seen_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     finished_at timestamp with time zone,
@@ -1514,6 +1516,7 @@ CREATE TABLE crawler.content_candidates (
     CONSTRAINT content_candidates_detail_status_check CHECK ((detail_status = ANY (ARRAY['queued'::text, 'running'::text, 'api_pending'::text, 'done'::text, 'unavailable'::text, 'failed'::text]))),
     CONSTRAINT content_candidates_disposition_kind_check CHECK ((disposition = ANY (ARRAY['stored'::text, 'deferred'::text, 'terminal_excluded'::text]))),
     CONSTRAINT content_candidates_disposition_schedule_check CHECK ((((disposition IS NULL) AND (next_attempt_at IS NULL)) OR ((disposition = 'stored'::text) AND (next_attempt_at IS NULL)) OR ((disposition = ANY (ARRAY['deferred'::text, 'terminal_excluded'::text])) AND (next_attempt_at IS NOT NULL)))),
+    CONSTRAINT content_candidates_first_seen_ledger_shape_check CHECK ((((first_seen_ledger_status = 'not_applicable'::text) AND (first_seen_ledger_observation_id IS NULL)) OR ((first_seen_ledger_status = 'pending'::text) AND (first_seen_ledger_observation_id IS NULL)) OR ((first_seen_ledger_status = 'consumed'::text) AND (first_seen_ledger_observation_id IS NOT NULL)))),
     CONSTRAINT content_candidates_type_status_check CHECK ((type_status = ANY (ARRAY['unresolved'::text, 'resolved'::text, 'unavailable'::text])))
 );
 
@@ -4128,6 +4131,13 @@ CREATE INDEX idx_crawler_content_candidates_disposition_history ON crawler.conte
 
 
 --
+-- Name: idx_crawler_content_candidates_first_seen_ledger_pending; Type: INDEX; Schema: crawler; Owner: -
+--
+
+CREATE INDEX idx_crawler_content_candidates_first_seen_ledger_pending ON crawler.content_candidates USING btree (run_id, channel_id, candidate_id) WHERE (first_seen_ledger_status = 'pending'::text);
+
+
+--
 -- Name: idx_crawler_content_candidates_open_api_source; Type: INDEX; Schema: crawler; Owner: -
 --
 
@@ -5023,6 +5033,14 @@ ALTER TABLE ONLY crawler.content_candidates
 
 ALTER TABLE ONLY crawler.content_candidates
     ADD CONSTRAINT content_candidates_content_key_fkey FOREIGN KEY (content_key) REFERENCES crawler.contents(content_key) ON DELETE SET NULL;
+
+
+--
+-- Name: content_candidates content_candidates_first_seen_ledger_observation_id_fkey; Type: FK CONSTRAINT; Schema: crawler; Owner: -
+--
+
+ALTER TABLE ONLY crawler.content_candidates
+    ADD CONSTRAINT content_candidates_first_seen_ledger_observation_id_fkey FOREIGN KEY (first_seen_ledger_observation_id) REFERENCES crawler.crawl_observations(observation_id) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED;
 
 
 --

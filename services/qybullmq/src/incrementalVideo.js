@@ -847,16 +847,19 @@ async function persistIncrementalCandidate(client, {
   errorMessage = null,
   observedAt,
   attempted = false,
+  firstSeenLedgerStatus = "not_applicable",
+  firstSeenLedgerObservationId = null,
 }) {
-  await client.query(
+  const persisted = await client.query(
     `INSERT INTO crawler.content_candidates (
        run_id,channel_id,source_content_id,position,title,source_url,thumbnail_url,
        content_type,type_status,type_source,detail_status,api_status,missing_fields,
        content_key,disposition,next_attempt_at,result_json,error_message,attempts,
-       finished_at,updated_at
+       finished_at,updated_at,first_seen_ledger_status,first_seen_ledger_observation_id
      ) VALUES (
        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::text[],$14,$15,$16,$17::jsonb,$18,
-       $19::integer,CASE WHEN $15='deferred' THEN NULL ELSE $20::timestamptz END,now()
+       $19::integer,CASE WHEN $15='deferred' THEN NULL ELSE $20::timestamptz END,now(),
+       $21,$22::uuid
      )
      ON CONFLICT (run_id,source_content_id) DO UPDATE
      SET position=EXCLUDED.position,title=COALESCE(EXCLUDED.title,crawler.content_candidates.title),
@@ -883,6 +886,14 @@ async function persistIncrementalCandidate(client, {
          error_message=EXCLUDED.error_message,
          attempts=crawler.content_candidates.attempts+EXCLUDED.attempts,
          finished_at=CASE WHEN EXCLUDED.disposition='deferred' THEN NULL ELSE EXCLUDED.finished_at END,
+         first_seen_ledger_status=CASE
+           WHEN crawler.content_candidates.first_seen_ledger_status IN ('pending','consumed')
+             THEN crawler.content_candidates.first_seen_ledger_status
+           ELSE EXCLUDED.first_seen_ledger_status END,
+         first_seen_ledger_observation_id=CASE
+           WHEN crawler.content_candidates.first_seen_ledger_status IN ('pending','consumed')
+             THEN crawler.content_candidates.first_seen_ledger_observation_id
+           ELSE EXCLUDED.first_seen_ledger_observation_id END,
          updated_at=now()
      RETURNING candidate_id`,
     [
@@ -907,8 +918,13 @@ async function persistIncrementalCandidate(client, {
       errorMessage,
       attempted ? 1 : 0,
       observedAt,
+      firstSeenLedgerStatus,
+      firstSeenLedgerObservationId,
     ],
   );
+  const candidateId = text(persisted.rows?.[0]?.candidate_id);
+  if (!candidateId) throw new Error(`Incremental Candidate was not persisted: ${entry.id}`);
+  return candidateId;
 }
 
 function collectionErrorEvidence(error) {
@@ -1272,7 +1288,7 @@ async function upsertFirstSeenContent(client, {
     ],
   );
   const storedContentKey = text(stored.rows?.[0]?.content_key) ?? contentKey;
-  await persistIncrementalCandidate(client, {
+  const candidateId = await persistIncrementalCandidate(client, {
     runId,
     channelId,
     entry,
@@ -1306,6 +1322,8 @@ async function upsertFirstSeenContent(client, {
         ?? "Content Enrich detail is missing the required public Video surface",
     observedAt,
     attempted: detail != null || capture?.error != null,
+    firstSeenLedgerStatus: observationId == null ? "pending" : "consumed",
+    firstSeenLedgerObservationId: observationId,
   });
   if (!preparedEnrich.skipped) {
     await persistClockContentEnrichOutcome(client, {
@@ -1320,6 +1338,7 @@ async function upsertFirstSeenContent(client, {
   }
   return {
     disposition,
+    candidateId,
     contentKey: storedContentKey,
     contentType,
     classification,
@@ -1377,7 +1396,7 @@ async function checkpointFirstSeenEnrichFailures({
 
 async function loadPendingFirstSeenCheckpoints(query, { channelId, runId }) {
   const pending = await query(
-    `SELECT candidate.source_content_id AS video_id,
+    `SELECT candidate.candidate_id,candidate.source_content_id AS video_id,
             candidate.position,candidate.title,candidate.thumbnail_url,
             candidate.result_json,
             content.content_key,content.content_type,
@@ -1395,7 +1414,7 @@ async function loadPendingFirstSeenCheckpoints(query, { channelId, runId }) {
        AND candidate.disposition='stored'
        AND candidate.detail_status='failed'
        AND candidate.result_json #>> '{disposition,kind}'='stored'
-       AND content.last_observation_id IS NULL
+       AND candidate.first_seen_ledger_status='pending'
      ORDER BY candidate.position,candidate.candidate_id`,
     [runId, channelId],
   );
@@ -1406,13 +1425,15 @@ async function loadPendingFirstSeenCheckpoints(query, { channelId, runId }) {
     const flat = evidence.flat && typeof evidence.flat === "object" ? evidence.flat : {};
     const detail = evidence.detail && typeof evidence.detail === "object" ? evidence.detail : null;
     const disposition = evidence.disposition;
+    const candidateId = text(row.candidate_id);
     const videoId = text(row.video_id);
     const contentKey = text(row.content_key);
     const contentType = text(row.content_type);
-    if (!videoId || !contentKey || !contentType || disposition?.kind !== "stored") {
+    if (!candidateId || !videoId || !contentKey || !contentType || disposition?.kind !== "stored") {
       throw new Error(`Invalid pending First-Seen checkpoint: ${videoId ?? contentKey ?? "unknown"}`);
     }
     return {
+      candidateId,
       entry: {
         ...flat,
         id: videoId,
@@ -1433,6 +1454,30 @@ async function loadPendingFirstSeenCheckpoints(query, { channelId, runId }) {
   });
 }
 
+async function claimPendingFirstSeenCheckpoints(transactionClient, {
+  channelId,
+  runId,
+  observationId,
+  checkpoints,
+}) {
+  const candidateIds = stringList(checkpoints.map((checkpoint) => checkpoint.candidateId));
+  if (candidateIds.length === 0) return [];
+  const claimed = await transactionClient.query(
+    `UPDATE crawler.content_candidates candidate
+     SET first_seen_ledger_status='consumed',
+         first_seen_ledger_observation_id=$4::uuid,
+         updated_at=now()
+     WHERE candidate.run_id=$1
+       AND candidate.channel_id=$2
+       AND candidate.candidate_id=ANY($3::bigint[])
+       AND candidate.first_seen_ledger_status='pending'
+     RETURNING candidate.candidate_id::text AS candidate_id`,
+    [runId, channelId, candidateIds, observationId],
+  );
+  const claimedIds = new Set(claimed.rows.map((row) => text(row.candidate_id)).filter(Boolean));
+  return checkpoints.filter((checkpoint) => claimedIds.has(checkpoint.candidateId));
+}
+
 async function applyDiscovery({
   plan,
   runId,
@@ -1445,6 +1490,14 @@ async function applyDiscovery({
   pendingDeferredVideoIds = [],
   checkpointedFirstSeen = [],
 }) {
+  const claimedFirstSeen = scan.complete === true
+    ? await claimPendingFirstSeenCheckpoints(transactionClient, {
+        channelId: plan.channel_id,
+        runId,
+        observationId,
+        checkpoints: checkpointedFirstSeen,
+      })
+    : [];
   const discoveryDeferred = scan.complete === true
     ? null
     : {
@@ -1491,7 +1544,7 @@ async function applyDiscovery({
     );
   }
   const checkpointedContentKeys = stringList(
-    checkpointedFirstSeen.map((current) => current.contentKey),
+    claimedFirstSeen.map((current) => current.contentKey),
   );
   if (checkpointedContentKeys.length > 0) {
     const linked = await transactionClient.query(
@@ -1525,7 +1578,7 @@ async function applyDiscovery({
   const recheckDeferredVideoIds = [];
   let detailSuccessCount = 0;
   let detailFailureCount = 0;
-  for (const current of checkpointedFirstSeen) {
+  for (const current of claimedFirstSeen) {
     const entry = current.entry;
     const dispositionSummary = videoDispositionSummary(entry.id, current.disposition);
     if (entry.disposition_recheck) recheckDispositions.push(dispositionSummary);
@@ -1578,7 +1631,7 @@ async function applyDiscovery({
     });
   }
   const discoveredVideoIds = [...new Set(
-    [...checkpointedFirstSeen.map((current) => current.entry), ...firstSeenEntries]
+    [...claimedFirstSeen.map((current) => current.entry), ...firstSeenEntries]
       .filter((entry) => !entry.disposition_recheck)
       .map((entry) => entry.id),
   )];
@@ -1675,6 +1728,7 @@ async function applyDiscovery({
       } : {}),
     },
     firstSeen,
+    claimedFirstSeen,
   };
 }
 
@@ -2295,7 +2349,7 @@ async function recordVideoCycle({
               scan.entries.map((entry) => entry.id),
               [
                 ...samplePlan.rows.map((row) => row.content_key),
-                ...checkpointedFirstSeen.map((current) => current.contentKey),
+                ...discovery.claimedFirstSeen.map((current) => current.contentKey),
               ],
             ],
           );
