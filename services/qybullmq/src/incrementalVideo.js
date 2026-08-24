@@ -1405,7 +1405,6 @@ async function loadPendingFirstSeenCheckpoints(query, { channelId }) {
      JOIN crawler.contents content
        ON content.content_key=candidate.content_key
       AND content.channel_id=candidate.channel_id
-      AND content.run_id=candidate.run_id
      JOIN crawler.channel_runs run
        ON run.run_id=candidate.run_id
       AND run.channel_id=candidate.channel_id

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
-import { databaseUrl } from "../src/databaseConnection.js";
+import { environmentValue } from "../src/runtimeEnvironment.js";
 
 const { Client } = pg;
 
@@ -16,6 +16,44 @@ export const CREATE_FIRST_SEEN_LEDGER_PENDING_INDEX_SQL = `
 const SHAPE_CONSTRAINT = "content_candidates_first_seen_ledger_shape_check";
 const OBSERVATION_FKEY = "content_candidates_first_seen_ledger_observation_id_fkey";
 const MIGRATION_LOCK = "first-seen-ledger-online-schema-v1";
+const EXPECTED_SHAPE_EXPRESSION = `
+  (((first_seen_ledger_status='not_applicable')
+      AND (first_seen_ledger_observation_id IS NULL))
+    OR ((first_seen_ledger_status='pending')
+      AND (first_seen_ledger_observation_id IS NULL))
+    OR ((first_seen_ledger_status='consumed')
+      AND (first_seen_ledger_observation_id IS NOT NULL)))`;
+
+function directAdminDatabase(environment) {
+  const databaseUrl = environmentValue("FIRST_SEEN_LEDGER_ADMIN_DATABASE_URL", { environment });
+  let endpoint;
+  try {
+    endpoint = new URL(databaseUrl);
+  } catch (error) {
+    throw new TypeError("FIRST_SEEN_LEDGER_ADMIN_DATABASE_URL must be a PostgreSQL URL", {
+      cause: error,
+    });
+  }
+  if (!new Set(["postgres:", "postgresql:"]).has(endpoint.protocol)) {
+    throw new TypeError(
+      "FIRST_SEEN_LEDGER_ADMIN_DATABASE_URL must use postgres:// or postgresql://",
+    );
+  }
+  if (!endpoint.hostname || !endpoint.pathname.slice(1)) {
+    throw new TypeError(
+      "FIRST_SEEN_LEDGER_ADMIN_DATABASE_URL must include a host and database",
+    );
+  }
+  if (/pgbouncer/i.test(endpoint.hostname)) {
+    throw new TypeError(
+      "FIRST_SEEN_LEDGER_ADMIN_DATABASE_URL must target a direct PostgreSQL endpoint, not PgBouncer",
+    );
+  }
+  return {
+    databaseUrl,
+    expectedServerPort: postgresPort(environment, endpoint.port || 5432),
+  };
+}
 
 function nonnegativeInteger(environment, name) {
   const raw = String(environment[name] ?? "").trim();
@@ -23,6 +61,19 @@ function nonnegativeInteger(environment, name) {
   assert.ok(
     /^(0|[1-9][0-9]*)$/.test(raw) && Number.isSafeInteger(value),
     `${name} must be an explicit non-negative integer`,
+  );
+  return value;
+}
+
+function postgresPort(environment, fallback) {
+  const name = "EXPECTED_FIRST_SEEN_LEDGER_POSTGRES_SERVER_PORT";
+  const raw = String(environment[name] ?? fallback).trim();
+  const value = Number(raw);
+  assert.ok(
+    /^(?:[1-9][0-9]*)$/.test(raw)
+      && Number.isSafeInteger(value)
+      && value <= 65535,
+    `${name} must be an explicit PostgreSQL server port`,
   );
   return value;
 }
@@ -40,8 +91,9 @@ export function firstSeenLedgerOnlineSchemaApplyGuard(
       "CONFIRM_FIRST_SEEN_LEDGER_SCHEMA_APPLY must equal the target database name",
     );
   }
+  const directAdmin = directAdminDatabase(environment);
   return {
-    databaseUrl: databaseUrl(environment),
+    ...directAdmin,
     confirmedDatabase,
     expectedMinimumCandidateRows: nonnegativeInteger(
       environment,
@@ -63,19 +115,19 @@ function numericCount(row, name) {
 async function preflight(client) {
   const identity = (await client.query(
     `SELECT current_database() AS database_name,
-            to_regclass('crawler.content_candidates') IS NOT NULL AS candidates_ready,
-            count(*) FILTER (
-              WHERE constraint_state.conname IN ($1,$2)
-            )::int AS ledger_constraint_count
-     FROM pg_constraint constraint_state
-     WHERE constraint_state.conrelid=to_regclass('crawler.content_candidates')`,
-    [SHAPE_CONSTRAINT, OBSERVATION_FKEY],
+            to_regclass('crawler.content_candidates') IS NOT NULL AS candidates_ready`,
   )).rows[0] ?? {};
   assert.equal(identity.candidates_ready, true, "Crawler Content Candidates table is missing");
+  const constraints = await constraintStates(client);
   assert.equal(
-    Number(identity.ledger_constraint_count),
+    constraints.length,
     2,
     "First-Seen ledger compatibility constraints are not installed",
+  );
+  assert.equal(
+    constraintsHaveFinalShape(constraints, { requireValidated: false }),
+    true,
+    "First-Seen ledger compatibility constraints have the wrong definition",
   );
   const state = (await client.query(
     `SELECT count(*)::bigint AS candidate_count,
@@ -137,7 +189,34 @@ async function indexState(client) {
   )).rows[0] ?? null;
 }
 
-function indexHasFinalShape(state) {
+function normalizedSql(value) {
+  return String(value ?? "")
+    .toLowerCase()
+    .replaceAll('"', "")
+    .replace(/::(?:pg_catalog\.)?text/g, "")
+    .replace(/\s/g, "");
+}
+
+function withoutRedundantOuterParentheses(value) {
+  let expression = value;
+  while (expression.startsWith("(") && expression.endsWith(")")) {
+    let depth = 0;
+    let wrapsWholeExpression = true;
+    for (let index = 0; index < expression.length; index += 1) {
+      if (expression[index] === "(") depth += 1;
+      if (expression[index] === ")") depth -= 1;
+      if (depth === 0 && index < expression.length - 1) {
+        wrapsWholeExpression = false;
+        break;
+      }
+    }
+    if (!wrapsWholeExpression || depth !== 0) break;
+    expression = expression.slice(1, -1);
+  }
+  return expression;
+}
+
+export function indexHasFinalShape(state) {
   return state?.indisvalid === true
     && state?.indisready === true
     && state?.indislive === true
@@ -145,22 +224,83 @@ function indexHasFinalShape(state) {
     && state?.table_schema === "crawler"
     && state?.table_name === "content_candidates"
     && JSON.stringify(state?.key_columns) === JSON.stringify(["channel_id", "candidate_id"])
-    && /first_seen_ledger_status/.test(String(state?.predicate ?? ""))
-    && /pending/.test(String(state?.predicate ?? ""));
+    && withoutRedundantOuterParentheses(normalizedSql(state?.predicate))
+      === normalizedSql("first_seen_ledger_status='pending'");
 }
 
 function verifyIndex(state) {
   assert.equal(indexHasFinalShape(state), true, "First-Seen pending index has the wrong shape");
 }
 
-async function constraintsValidated(client) {
+async function constraintStates(client) {
   return (await client.query(
-    `SELECT count(*)=2 AND bool_and(constraint_state.convalidated) AS validated
+    `SELECT constraint_state.conname AS constraint_name,
+            constraint_state.contype AS constraint_type,
+            constraint_state.convalidated AS validated,
+            constraint_state.condeferrable AS deferrable,
+            constraint_state.condeferred AS initially_deferred,
+            constraint_state.confdeltype AS delete_action,
+            constraint_state.confupdtype AS update_action,
+            constraint_state.confmatchtype AS match_type,
+            constraint_state.connoinherit AS no_inherit,
+            pg_get_expr(
+              constraint_state.conbin,constraint_state.conrelid,false
+            ) AS check_expression,
+            ARRAY(
+              SELECT attribute.attname
+              FROM unnest(constraint_state.conkey)
+                WITH ORDINALITY key(attnum,position)
+              JOIN pg_attribute attribute
+                ON attribute.attrelid=constraint_state.conrelid
+               AND attribute.attnum=key.attnum
+              ORDER BY key.position
+            )::text[] AS key_columns,
+            referenced_namespace.nspname AS referenced_schema,
+            referenced_table.relname AS referenced_table,
+            ARRAY(
+              SELECT attribute.attname
+              FROM unnest(constraint_state.confkey)
+                WITH ORDINALITY key(attnum,position)
+              JOIN pg_attribute attribute
+                ON attribute.attrelid=constraint_state.confrelid
+               AND attribute.attnum=key.attnum
+              ORDER BY key.position
+            )::text[] AS referenced_columns
      FROM pg_constraint constraint_state
+     LEFT JOIN pg_class referenced_table
+       ON referenced_table.oid=constraint_state.confrelid
+     LEFT JOIN pg_namespace referenced_namespace
+       ON referenced_namespace.oid=referenced_table.relnamespace
      WHERE constraint_state.conrelid='crawler.content_candidates'::regclass
-       AND constraint_state.conname IN ($1,$2)`,
+       AND constraint_state.conname IN ($1,$2)
+     ORDER BY constraint_state.conname`,
     [SHAPE_CONSTRAINT, OBSERVATION_FKEY],
-  )).rows[0]?.validated === true;
+  )).rows;
+}
+
+export function constraintsHaveFinalShape(states, { requireValidated = true } = {}) {
+  if (!Array.isArray(states) || states.length !== 2) return false;
+  const byName = new Map(states.map((state) => [state.constraint_name, state]));
+  const shape = byName.get(SHAPE_CONSTRAINT);
+  const foreignKey = byName.get(OBSERVATION_FKEY);
+  const validationMatches = (state) => !requireValidated || state?.validated === true;
+  return shape?.constraint_type === "c"
+    && validationMatches(shape)
+    && shape?.no_inherit === false
+    && normalizedSql(shape?.check_expression) === normalizedSql(EXPECTED_SHAPE_EXPRESSION)
+    && foreignKey?.constraint_type === "f"
+    && validationMatches(foreignKey)
+    && JSON.stringify(foreignKey?.key_columns) === JSON.stringify([
+      "first_seen_ledger_observation_id",
+    ])
+    && foreignKey?.referenced_schema === "crawler"
+    && foreignKey?.referenced_table === "crawl_observations"
+    && JSON.stringify(foreignKey?.referenced_columns) === JSON.stringify(["observation_id"])
+    && foreignKey?.delete_action === "r"
+    && foreignKey?.update_action === "a"
+    && foreignKey?.match_type === "s"
+    && foreignKey?.deferrable === true
+    && foreignKey?.initially_deferred === true;
 }
 
 async function main() {
@@ -173,6 +313,16 @@ async function main() {
   let advisoryLock = false;
   try {
     await client.connect();
+    const endpoint = (await client.query(
+      `SELECT current_database() AS database_name,
+              inet_server_port()::int AS server_port`,
+    )).rows[0] ?? {};
+    assert.equal(endpoint.database_name, guard.confirmedDatabase, "unexpected Crawler database");
+    assert.equal(
+      Number(endpoint.server_port),
+      guard.expectedServerPort,
+      "FIRST_SEEN_LEDGER_ADMIN_DATABASE_URL is not a direct PostgreSQL endpoint",
+    );
     await client.query("SET TIME ZONE 'UTC'");
     await client.query("SET lock_timeout='5s'");
     await client.query("SET statement_timeout='1800s'");
@@ -229,7 +379,11 @@ async function main() {
     assert.equal(after.pendingCount, guard.expectedPendingCount, "pending ledger rows changed");
     assert.equal(after.invalidShapeCount, 0, "invalid First-Seen ledger rows remain");
     assert.equal(after.orphanObservationCount, 0, "orphan First-Seen Observations remain");
-    assert.equal(await constraintsValidated(client), true, "ledger constraints are not validated");
+    assert.equal(
+      constraintsHaveFinalShape(await constraintStates(client)),
+      true,
+      "ledger constraints are not validated or have the wrong definition",
+    );
     verifyIndex(await indexState(client));
 
     console.log(JSON.stringify({

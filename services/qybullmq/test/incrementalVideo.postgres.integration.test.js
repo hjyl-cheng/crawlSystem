@@ -1242,6 +1242,7 @@ test("a new Clock Run recovers a pending First-Seen checkpoint after the old Run
   const channelId = `UCfirstseenpartial${suffix}`;
   const oldRunId = `incremental:first-seen-partial-old:${suffix}`;
   const newRunId = `incremental:first-seen-partial-new:${suffix}`;
+  const interveningFullRunId = `full:first-seen-partial:${suffix}`;
   const oldPlanId = randomUUID();
   const newPlanId = randomUUID();
   const streamId = randomUUID();
@@ -1329,6 +1330,21 @@ test("a new Clock Run recovers a pending First-Seen checkpoint after the old Run
     await pool.query(
       `UPDATE crawler.channel_runs SET status='done',finished_at=now() WHERE run_id=$1`,
       [oldRunId],
+    );
+    await insertClockRun(pool, {
+      channelId,
+      runId: interveningFullRunId,
+      planId: randomUUID(),
+    });
+    await pool.query(
+      `UPDATE crawler.channel_runs
+       SET crawl_mode='full',status='done',finished_at=now()
+       WHERE run_id=$1`,
+      [interveningFullRunId],
+    );
+    await pool.query(
+      `UPDATE crawler.contents SET run_id=$2 WHERE content_key=$1`,
+      [incompleteContentKey, interveningFullRunId],
     );
     await insertClockRun(pool, {
       channelId,

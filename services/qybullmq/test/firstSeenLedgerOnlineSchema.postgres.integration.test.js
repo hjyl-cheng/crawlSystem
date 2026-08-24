@@ -77,8 +77,9 @@ test("First-Seen ledger online migration replaces the legacy index and validates
 
     const environment = {
       ...process.env,
-      DATABASE_URL: targetUrl,
-      DATABASE_URL_FILE: "",
+      FIRST_SEEN_LEDGER_ADMIN_DATABASE_URL: targetUrl,
+      FIRST_SEEN_LEDGER_ADMIN_DATABASE_URL_FILE: "",
+      EXPECTED_FIRST_SEEN_LEDGER_POSTGRES_SERVER_PORT: "5432",
       CONFIRM_FIRST_SEEN_LEDGER_SCHEMA_APPLY: databaseName,
       EXPECTED_CRAWLER_CANDIDATE_MIN_ROWS: "1002",
       EXPECTED_FIRST_SEEN_LEDGER_PENDING_COUNT: "1",
@@ -133,6 +134,18 @@ test("First-Seen ledger online migration replaces the legacy index and validates
     assert.equal(state.indislive, true);
     assert.deepEqual(state.key_columns, ["channel_id", "candidate_id"]);
     assert.match(state.predicate, /first_seen_ledger_status.*pending/);
+
+    await pool.query(`
+      ALTER TABLE crawler.content_candidates
+      DROP CONSTRAINT content_candidates_first_seen_ledger_shape_check;
+      ALTER TABLE crawler.content_candidates
+      ADD CONSTRAINT content_candidates_first_seen_ledger_shape_check
+      CHECK (first_seen_ledger_status <> 'impossible') NOT VALID;
+    `);
+    await assert.rejects(
+      execFileAsync(process.execPath, [script.pathname, "--apply"], { env: environment }),
+      /compatibility constraints have the wrong definition/,
+    );
   } finally {
     if (pool) await pool.end().catch(() => {});
     await adminPool.query(`DROP DATABASE IF EXISTS ${quoteIdentifier(databaseName)} WITH (FORCE)`)
