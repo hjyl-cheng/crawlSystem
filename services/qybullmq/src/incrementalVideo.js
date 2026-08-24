@@ -1394,7 +1394,7 @@ async function checkpointFirstSeenEnrichFailures({
   });
 }
 
-async function loadPendingFirstSeenCheckpoints(query, { channelId, runId }) {
+async function loadPendingFirstSeenCheckpoints(query, { channelId }) {
   const pending = await query(
     `SELECT candidate.candidate_id,candidate.source_content_id AS video_id,
             candidate.position,candidate.title,candidate.thumbnail_url,
@@ -1409,14 +1409,14 @@ async function loadPendingFirstSeenCheckpoints(query, { channelId, runId }) {
      JOIN crawler.channel_runs run
        ON run.run_id=candidate.run_id
       AND run.channel_id=candidate.channel_id
-     WHERE candidate.run_id=$1 AND candidate.channel_id=$2
+     WHERE candidate.channel_id=$1
        AND run.crawl_mode='incremental'
        AND candidate.disposition='stored'
        AND candidate.detail_status='failed'
        AND candidate.result_json #>> '{disposition,kind}'='stored'
        AND candidate.first_seen_ledger_status='pending'
-     ORDER BY candidate.position,candidate.candidate_id`,
-    [runId, channelId],
+     ORDER BY candidate.candidate_id`,
+    [channelId],
   );
   return pending.rows.map((row) => {
     const evidence = row.result_json && typeof row.result_json === "object"
@@ -1456,7 +1456,6 @@ async function loadPendingFirstSeenCheckpoints(query, { channelId, runId }) {
 
 async function claimPendingFirstSeenCheckpoints(transactionClient, {
   channelId,
-  runId,
   observationId,
   checkpoints,
 }) {
@@ -1465,14 +1464,13 @@ async function claimPendingFirstSeenCheckpoints(transactionClient, {
   const claimed = await transactionClient.query(
     `UPDATE crawler.content_candidates candidate
      SET first_seen_ledger_status='consumed',
-         first_seen_ledger_observation_id=$4::uuid,
+         first_seen_ledger_observation_id=$3::uuid,
          updated_at=now()
-     WHERE candidate.run_id=$1
-       AND candidate.channel_id=$2
-       AND candidate.candidate_id=ANY($3::bigint[])
+     WHERE candidate.channel_id=$1
+       AND candidate.candidate_id=ANY($2::bigint[])
        AND candidate.first_seen_ledger_status='pending'
      RETURNING candidate.candidate_id::text AS candidate_id`,
-    [runId, channelId, candidateIds, observationId],
+    [channelId, candidateIds, observationId],
   );
   const claimedIds = new Set(claimed.rows.map((row) => text(row.candidate_id)).filter(Boolean));
   return checkpoints.filter((checkpoint) => claimedIds.has(checkpoint.candidateId));
@@ -1493,7 +1491,6 @@ async function applyDiscovery({
   const claimedFirstSeen = scan.complete === true
     ? await claimPendingFirstSeenCheckpoints(transactionClient, {
         channelId: plan.channel_id,
-        runId,
         observationId,
         checkpoints: checkpointedFirstSeen,
       })
@@ -2526,7 +2523,6 @@ export async function executeIncrementalVideo({
   } else {
     const recoveredFirstSeen = await loadPendingFirstSeenCheckpoints(query, {
       channelId: plan.channel_id,
-      runId,
     });
     const dueDispositionEntries = await loadDueVideoDispositionEntries(
       query,

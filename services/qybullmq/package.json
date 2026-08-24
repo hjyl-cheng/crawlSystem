@@ -21,6 +21,7 @@
     "schema:v16:apply": "node scripts/applyV16CrawlerSchema.mjs --apply",
     "schema:video-identity": "node scripts/applyVideoIdentitySchema.mjs --apply",
     "schema:video-disposition": "node scripts/applyVideoDispositionSchema.mjs --apply",
+    "schema:first-seen-ledger-online": "node scripts/applyFirstSeenLedgerOnlineSchema.mjs --apply",
     "schema:youtube-business-email": "node scripts/applyYoutubeBusinessEmailCrawlerSchema.mjs --apply",
     "backfill:metadata-queries": "node scripts/backfillMetadataQueries.mjs --apply",
     "agent:local-config": "node scripts/ensureLocalOfflineAgentConfig.mjs --apply",

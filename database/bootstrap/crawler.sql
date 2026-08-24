@@ -4134,7 +4134,7 @@ CREATE INDEX idx_crawler_content_candidates_disposition_history ON crawler.conte
 -- Name: idx_crawler_content_candidates_first_seen_ledger_pending; Type: INDEX; Schema: crawler; Owner: -
 --
 
-CREATE INDEX idx_crawler_content_candidates_first_seen_ledger_pending ON crawler.content_candidates USING btree (run_id, channel_id, candidate_id) WHERE (first_seen_ledger_status = 'pending'::text);
+CREATE INDEX idx_crawler_content_candidates_first_seen_ledger_pending ON crawler.content_candidates USING btree (channel_id, candidate_id) WHERE (first_seen_ledger_status = 'pending'::text);
 
 
 --

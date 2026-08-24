@@ -23,7 +23,7 @@ function clientFixture() {
   };
 }
 
-test("generic Observation writers lock the Channel FK before the domain cursor", async () => {
+test("generic Observation writers explicitly lock the Channel before keys and cursors", async () => {
   const fixture = clientFixture();
   await recordCrawlerObservation(fixture.client, {
     idempotencyKey: "video:lock-order:test",
@@ -39,6 +39,10 @@ test("generic Observation writers lock the Channel FK before the domain cursor",
     }),
   });
 
+  const channelLock = fixture.calls.findIndex((call) => (
+    call.sql.includes("FROM crawler.channels")
+      && call.sql.includes("FOR NO KEY UPDATE")
+  ));
   const keyClaim = fixture.calls.findIndex((call) => (
     call.sql.includes("INSERT INTO crawler.crawl_observation_keys")
   ));
@@ -47,7 +51,7 @@ test("generic Observation writers lock the Channel FK before the domain cursor",
       && call.sql.includes("FOR UPDATE")
   ));
   assert.ok(
-    keyClaim >= 0 && cursorLock > keyClaim,
-    "Channel FK lock must precede the cursor lock to match Migration writers",
+    channelLock >= 0 && keyClaim > channelLock && cursorLock > keyClaim,
+    "the explicit Channel lock must precede key and cursor claims",
   );
 });

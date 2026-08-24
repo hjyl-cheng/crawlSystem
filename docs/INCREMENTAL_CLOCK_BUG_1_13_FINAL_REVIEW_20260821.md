@@ -397,6 +397,13 @@ Observation 的占位 Content 恢复一次 First-Seen ledger；不能因 Content
 事务内用条件 `UPDATE ... RETURNING` 原子取得唯一消费权。partial Observation 不消费
 checkpoint；Publication 回滚也会把消费权一起回滚为 pending。
 
+最后一轮跨 Run 复审进一步确认：partial 扫描会正常结束旧 Run，下一次 Clock 使用新的
+`run_id`，因此恢复条件不能绑定产生 checkpoint 的 Run。当前实现按频道读取所有历史
+Incremental Run 的 pending ledger，并按 `channel_id + candidate_id + pending` 原子消费；
+Candidate 和占位 Content 保留原 Run 身份，成功 Observation、crawler outbox、游标与
+Publication 则归当前 Run。共享 Observation writer 同时在幂等键和域 cursor 前显式取得
+Channel `FOR NO KEY UPDATE`，不再依赖外键 `KEY SHARE` 偶然形成锁序。
+
 2026-08-21 原始核对时：
 
 | 状态 | 任务数 | 频道数 | 说明 |
@@ -492,8 +499,9 @@ queued / failed / 到期的 terminal
 - 因而 Publication 失败会回滚对应 Content/Hash/terminal/done 写入，但不能抹掉同批已经记录的 retry attempts；未变化的 retryable/dead-letter 不刷新 Hash 或调用 Publication；
 - Clock 第一事务只提交真实 retryable/dead-letter checkpoint；对 success/terminal 则把已有 Task 变为带 `lease_owner`、expiry 和新 `dispatch_generation` 的 `running` reservation，不提前提交 Content、Hash、Observation、游标或 crawler outbox；
 - First-Seen 仅在复用现有类型、访问状态与 Enrich outcome 状态机确认结果为 retryable/dead-letter 后，才用独立短事务保存 Candidate、未补全 Content 和累计 attempts；成功或权威 terminal 不提前提交。Publication 失败时这些真实失败证据保留，而 Hash、Observation、游标和 crawler outbox 仍全部回滚；
-- 同一 Run 重试会从数据库恢复显式标记为 `first_seen_ledger_status=pending` 的 First-Seen checkpoint，不依赖 `Content.last_observation_id` 或当前 Uploads 页面再次返回该 ID，也不绕过 `next_retry_at` 重抓详情。只有完整扫描能在成功事务内把它原子改为 `consumed` 并关联唯一 Observation；partial 扫描不能消费，竞争失败的并发事务不能生成第二份 `first_seen`/disposition。恢复事务同时刷新 Hash 并进入 Publication；事务失败时 claim 回滚，Candidate 不重复写入，Task attempts 和退避时间不重置；
-- Crawler Observation 先领取带 Channel 外键的幂等键，再锁定频道/域 cursor，与已经先锁 Channel 的 Migration writer 保持同一锁序；同频道重叠事务仍按 cursor 串行取得 sequence。Video activity 对 Channel 使用 `FOR NO KEY UPDATE`，与另一个 Observation 外键取得的 `KEY SHARE` 兼容，避免“持有 cursor 等 Channel”和“持有 Channel key-share 等 cursor”的锁环；
+- 完整扫描按频道跨 Run 恢复显式标记为 `first_seen_ledger_status=pending` 的 First-Seen checkpoint，不依赖 `Content.last_observation_id`、原 Run 继续执行或当前 Uploads 页面再次返回该 ID，也不绕过 `next_retry_at` 重抓详情。partial 扫描可以正常结束但不能消费 ledger；下一 Run 在成功事务内按 `candidate_id` 原子改为 `consumed` 并关联唯一 Observation，竞争失败的并发事务不能生成第二份 `first_seen`/disposition。恢复事务同时刷新 Hash 并进入 Publication；事务失败时 claim 回滚，原 Candidate 不重复写入，Task attempts 和退避时间不重置；
+- Crawler Observation 在共享 writer 入口显式锁定 Channel `FOR NO KEY UPDATE`，随后才领取幂等键并锁定频道/域 cursor；Migration、Incremental 和其他 Observation 调用者因此统一遵守 Channel-before-cursor 顺序。同频道重叠事务仍按 cursor 串行取得 sequence，Video lifecycle 后续取得 Channel 锁只是同一事务重入；
+- First-Seen ledger 的运行时 schema 只在约束缺失时添加 `NOT VALID` CHECK/FK，不再每次启动 drop/re-add 已验证约束，也不在启动事务中普通创建大表索引。受控 CLI 在显式数据库名、Candidate 最低行数和 pending 数量确认后，以 `CREATE INDEX CONCURRENTLY` 建立 `(channel_id,candidate_id)` pending 索引，再 `VALIDATE CONSTRAINT` 并执行 postflight；fresh bootstrap 直接包含最终约束和索引；
 - Clock 第二事务重新锁定并验证 reservation，随后把 success/terminal Task、Content、Video Item Hash、Observation、游标、crawler outbox 和 `channel + video` Publication Reconciler 一起提交。Publication 失败时第二事务全部回滚，前置短事务已记录的失败 attempts 保留；失败路径按 fence 尽力恢复未消费 reservation，进程崩溃或 cleanup 故障则由现有 expired-running 回收路径接管；
 - 主事务一旦提交，cleanup 只是缩短未消费 reservation 恢复时间的补偿优化，不能反转 Job、Domain 或 Run 的成功结果。cleanup 故障返回并持久化 `reservation_cleanup_deferred=true`，已消费 Task 保持 done/terminal，未消费 reservation 等待 lease 到期后按新 generation 接管；
 - 拆分事务不能把 Recent Sampling 从 `post_discovery_current` 偷换成旧快照；规划查询用本轮 Uploads 日期证据对既有 Content 做只读 overlay，因此刚补到 `published_at` 的已知视频仍可在同一轮采样，而真正的 Discovery/Content/游标写入继续等第二事务与 Publication 原子提交；
@@ -522,11 +530,11 @@ private/unavailable 的低频复查继续使用同一条 `content_enrich_tasks` 
 
 ### 9.3 本地验证
 
-- qybullmq 全量按文件执行 217/221 通过；受沙箱限制的 Build Images 和 Business Publication HTTP 两个文件解除限制后共 3/3 子测试通过。剩余 Fingerprint Gateway 与 yt-dlp Session 两个文件仅因宿主缺少 Python `aiohttp`、`yt_dlp` 无法执行，未把环境缺依赖记为代码通过；
+- qybullmq 全量按文件执行 220/224 通过；受沙箱限制的 Build Images 和 Business Publication HTTP 两个文件解除限制后共 3/3 子测试通过。剩余 Fingerprint Gateway 与 yt-dlp Session 两个文件仅因宿主缺少 Python `aiohttp`、`yt_dlp` 无法执行，未把环境缺依赖记为代码通过；
 - Content Enrich 真实 PostgreSQL 16 生命周期 2/2 通过、0 skip，覆盖已提交 mutex 争用和过期接管、`SKIP LOCKED`、Worker 在 `queue.add()` 内即时 claim 的事务可见性、投递崩溃恢复、attempts/实际失败时间退避、generation fencing、heartbeat、行锁等待后 lease 过期、Rota checkpoint fencing、terminal、工程 dead-letter、Content、Item Hash、真实 Publication revision/outbox、部分失败指标和重复 Job；
-- runtime schema 和 fresh `database/bootstrap/crawler.sql` 均在空 PostgreSQL 16 测试库完整应用；bootstrap 默认 mode、cursor 和 mutex 已读取验证；
-- Incremental Video PostgreSQL 9/9 通过、0 skip；除存量 public success、authoritative terminal 与 retry 混合批次外，还覆盖重复 First-Seen 不完整详情第一次 Publication 失败后只累计一次 attempts、保留 Candidate/占位 Content 且不提交发布数据，第二次同 Run 在 Uploads 已不再返回该视频时仍从数据库恢复并恰好一次提交 `first_seen`/disposition、Observation、crawler outbox、Hash、游标以及真实 Publication revision/current/outbox；另覆盖“完整失败 -> partial -> 完整成功”时 partial Observation 不消费 checkpoint、两个并发恢复事务只有一个原子消费 ledger，以及主事务成功后 cleanup 事务入口故障仍返回 complete、保留 Task/Content/Hash/游标/outbox；
-- Enrich、Clock、Controller 接线的针对性单元回归全部通过，并新增共享 Observation writer 的 Channel-before-cursor 锁序契约；Migration、Query、Full Crawl 和正常 Incremental 聚焦回归 197 pass、8 条环境条件跳过、0 fail；Dashboard 前序 3/3 通过；
+- runtime schema 和 fresh `database/bootstrap/crawler.sql` 均在空 PostgreSQL 16 测试库完整应用；bootstrap 默认 mode、cursor 和 mutex 已读取验证；First-Seen 在线迁移另在临时数据库中 1/1 通过，覆盖旧 run 向索引的并发替换、CHECK/FK 验证、行数守恒和重复执行；
+- Incremental Video PostgreSQL 9/9 通过、0 skip；除存量 public success、authoritative terminal 与 retry 混合批次外，还覆盖重复 First-Seen 不完整详情第一次 Publication 失败后只累计一次 attempts、保留 Candidate/占位 Content 且不提交发布数据；旧 Run 随后以 partial 正常结束，下一新 Run 在 Uploads 已不再返回该视频时仍按频道恢复原 Candidate，并恰好一次提交 `first_seen`/disposition、Observation、crawler outbox、Hash、游标以及真实 Publication revision/current/outbox；另覆盖两个并发恢复事务只有一个原子消费 ledger，以及主事务成功后 cleanup 事务入口故障仍返回 complete、保留 Task/Content/Hash/游标/outbox；
+- Enrich、Clock、Controller 接线的针对性单元回归全部通过；Migration、Query、Full Crawl、Content Enrich 和正常 Incremental 聚焦回归 25/25 文件通过。共享 Observation writer 的显式 Channel-before-key-before-cursor 契约和真实 Migration/Incremental 双事务 PostgreSQL 验收 1/1、Full Crawl PostgreSQL 1/1、Content Enrich PostgreSQL 2/2 通过；Dashboard 前序 3/3 通过；
 - 本次最终修正未修改 Rota；前序分支验收已有 `internal/proxycontrol` 通过记录，但当前宿主没有 `go` 可执行文件，因此本次未独立重跑 Go 测试；
 - Node 语法检查、`git diff --check` 和隔离 PostgreSQL 测试均通过。
 
@@ -536,20 +544,21 @@ private/unavailable 的低频复查继续使用同一条 `content_enrich_tasks` 
 
 上线顺序必须保持：
 
-1. 应用 crawler schema，确认 mode 仍为 `clock`；
-2. 先部署支持 `content_enrich` task kind 的 Rota；
-3. 确认实际提供至少 42 个 ready channel Slots/代理，而不只是修改期望值；
-4. 部署 Queue、Controller 和 Worker 代码，保持 `CONTENT_ENRICH_DISPATCH_ENABLED=false`，并显式确认监控查询 deadline（默认 `CONTENT_ENRICH_METRICS_QUERY_TIMEOUT_SECONDS=5`）；
-5. 启动 Enrich Worker，确认独立并发和 Rota 身份正常；
-6. 开启 Controller gate，但 mode 仍保持 `clock`；
-7. 先执行 `npm run content-enrich:mode -- queue` dry-run，再提供 operator、reason 和精确确认值执行 `--apply`；
-8. 小流量观察后再调整 High Water、refill 或 Worker 数量，不能一次性放大。
+1. 应用 crawler 运行时兼容 schema，确认 mode 仍为 `clock`；该步骤只添加缺失列和 `NOT VALID` 约束，不创建 First-Seen 大表索引；
+2. 只读确认目标数据库名、`content_candidates` 最低行数和 pending ledger 数量，设置 `CONFIRM_FIRST_SEEN_LEDGER_SCHEMA_APPLY`、`EXPECTED_CRAWLER_CANDIDATE_MIN_ROWS`、`EXPECTED_FIRST_SEEN_LEDGER_PENDING_COUNT` 后执行 `npm run schema:first-seen-ledger-online`；确认两个约束均 validated 且 pending 索引为 `(channel_id,candidate_id)`；超时则保持 `clock` 并安全重跑，不能跳过；
+3. 先部署支持 `content_enrich` task kind 的 Rota；
+4. 确认实际提供至少 42 个 ready channel Slots/代理，而不只是修改期望值；
+5. 部署 Queue、Controller 和 Worker 代码，保持 `CONTENT_ENRICH_DISPATCH_ENABLED=false`，并显式确认监控查询 deadline（默认 `CONTENT_ENRICH_METRICS_QUERY_TIMEOUT_SECONDS=5`）；
+6. 启动 Enrich Worker，确认独立并发和 Rota 身份正常；
+7. 开启 Controller gate，但 mode 仍保持 `clock`；
+8. 先执行 `npm run content-enrich:mode -- queue` dry-run，再提供 operator、reason 和精确确认值执行 `--apply`；
+9. 小流量观察后再调整 High Water、refill 或 Worker 数量，不能一次性放大。
 
 代码已提供 Queue 开放 Job 数、queued/leased/running/failed/terminal/dead_letter/done、最老 queued 年龄、claim/success/retry/terminal/dead-letter rate、当前 dispatch mutex contention、积压和年龄阈值告警。上线仍需把结构化告警日志接入现有告警平台，并联合监控 High Water、mutex expiry/heartbeat、Worker lease renewal/loss、恢复投递失败、过期 lease、`reservation_cleanup_deferred`、attempts 与 next retry、terminal access source、`last_enriched_at`、Item Hash、Publication revision/outbox，以及 Rota channel ready/claimed 和 `content_enrich` Task 结果。
 
 回滚时先把 mode 切为 `clock`，再关闭 Controller gate；保留 Worker 让已领取 Job 排空，或接受它们在 lease 到期后由 Clock 接管。不得先强停 Worker 后直接让 Clock 忽略有效 lease，也不得直接批量改 BUG-7 数据。
 
-剩余风险是生产代理容量和单条详情延迟尚未用真实积压压测，结构化告警日志也尚未在生产告警平台验证送达。监控全表聚合若持续超过 deadline，Controller 会保持运行但 Dashboard 将显示旧快照；金丝雀必须同时观察 stale 状态和数据库查询耗时，必要时再基于生产 `EXPLAIN` 优化索引或改为增量指标。heartbeat 能覆盖正常长抓取；若数据库不可续租，Worker 会 fail closed，数据不会被旧 Worker 覆盖，但当前底层抓取适配器可能要等正在执行的单次上游调用返回后才能完全退出，仍可能浪费一次请求。`incrementalVideo.js` 当前已超过 2,600 行，Clock reservation/First-Seen checkpoint 状态机宜在本次行为稳定后拆成独立深模块；为避免在上线热修中同时改变接口和事务行为，本次不做该重构。上线后必须用 p95/p99 单条和批次时长校准 batch size、lease 与 heartbeat，并观察失租率。
+剩余风险是生产代理容量和单条详情延迟尚未用真实积压压测，结构化告警日志也尚未在生产告警平台验证送达。在线约束验证和并发索引只在隔离 PostgreSQL 验证过；生产仍须在 `clock` 模式下观察执行时长、锁等待和磁盘空间，任何 guard 不一致或 timeout 都必须停止发布并重跑 preflight。监控全表聚合若持续超过 deadline，Controller 会保持运行但 Dashboard 将显示旧快照；金丝雀必须同时观察 stale 状态和数据库查询耗时，必要时再基于生产 `EXPLAIN` 优化索引或改为增量指标。heartbeat 能覆盖正常长抓取；若数据库不可续租，Worker 会 fail closed，数据不会被旧 Worker 覆盖，但当前底层抓取适配器可能要等正在执行的单次上游调用返回后才能完全退出，仍可能浪费一次请求。`incrementalVideo.js` 当前已超过 2,600 行，Clock reservation/First-Seen checkpoint 状态机宜在本次行为稳定后拆成独立深模块；为避免在上线热修中同时改变接口和事务行为，本次不做该重构。上线后必须用 p95/p99 单条和批次时长校准 batch size、lease 与 heartbeat，并观察失租率。
 
 ### 9.5 生产验收
 

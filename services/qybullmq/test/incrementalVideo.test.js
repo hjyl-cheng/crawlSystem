@@ -299,16 +299,15 @@ function databaseFixture({
       }
       if (sql.includes("UPDATE crawler.content_candidates candidate")
           && sql.includes("first_seen_ledger_status='consumed'")) {
-        const requested = new Set(params[2].map(String));
+        const requested = new Set(params[1].map(String));
         const claimed = state.candidateRows.filter((row) => (
           requested.has(String(row.candidate_id))
-          && row.run_id === params[0]
-          && row.channel_id === params[1]
+          && row.channel_id === params[0]
           && row.first_seen_ledger_status === "pending"
         ));
         for (const row of claimed) {
           row.first_seen_ledger_status = "consumed";
-          row.first_seen_ledger_observation_id = params[3];
+          row.first_seen_ledger_observation_id = params[2];
         }
         return {
           rowCount: claimed.length,
@@ -510,7 +509,7 @@ function databaseFixture({
           && sql.includes("candidate.first_seen_ledger_status='pending'")) {
         return {
           rows: state.candidateRows
-            .filter((row) => row.run_id === params[0] && row.channel_id === params[1])
+            .filter((row) => row.channel_id === params[0])
             .filter((row) => row.first_seen_ledger_status === "pending")
             .map((row) => {
               const content = state.contents.find((item) => (

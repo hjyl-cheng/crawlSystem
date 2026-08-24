@@ -87,19 +87,7 @@ async function insertClockBase(pool, { channelId, runId, planId, anchorVideoId }
      VALUES ($1,$2,'Clock failure-boundary integration','active')`,
     [channelId, `https://www.youtube.com/channel/${channelId}`],
   );
-  await pool.query(
-    `INSERT INTO crawler.channel_runs (
-       run_id,channel_id,status,crawl_mode,content_limit,detail_status,
-       plan_id,plan_day,trigger_reason,task_mask,scheduled_at,
-       clock_version,policy_version,planner_config_version,capacity_version,
-       crawler_version,started_at
-     ) VALUES (
-       $1,$2,'running','incremental',0,'pending',$3,'2026-08-24','clock_due',
-       '{"video":true}'::jsonb,
-       '2026-08-24T00:00:00Z',7,'v16-rule-1','video-plan-1','capacity-1','test',now()
-     )`,
-    [runId, channelId, planId],
-  );
+  await insertClockRun(pool, { channelId, runId, planId });
   await pool.query(
     `INSERT INTO crawler.contents (
        content_key,channel_id,run_id,content_type,content_type_source,
@@ -123,6 +111,22 @@ async function insertClockBase(pool, { channelId, runId, planId, anchorVideoId }
     `INSERT INTO crawler.channel_domain_cursors (channel_id,observation_kind,anchor_video_ids)
      VALUES ($1,'video',ARRAY[$2]::text[])`,
     [channelId, anchorVideoId],
+  );
+}
+
+async function insertClockRun(pool, { channelId, runId, planId }) {
+  await pool.query(
+    `INSERT INTO crawler.channel_runs (
+       run_id,channel_id,status,crawl_mode,content_limit,detail_status,
+       plan_id,plan_day,trigger_reason,task_mask,scheduled_at,
+       clock_version,policy_version,planner_config_version,capacity_version,
+       crawler_version,started_at
+     ) VALUES (
+       $1,$2,'running','incremental',0,'pending',$3,'2026-08-24','clock_due',
+       '{"video":true}'::jsonb,
+       '2026-08-24T00:00:00Z',7,'v16-rule-1','video-plan-1','capacity-1','test',now()
+     )`,
+    [runId, channelId, planId],
   );
 }
 
@@ -1230,14 +1234,17 @@ test("First-Seen failure checkpoint publishes exactly once through an owned Publ
   }
 });
 
-test("an intervening partial Observation cannot consume a pending First-Seen checkpoint", {
+test("a new Clock Run recovers a pending First-Seen checkpoint after the old Run ends partial", {
   skip: !integrationUrl,
 }, async () => {
   const pool = incrementalPool(5);
   const suffix = randomUUID().replaceAll("-", "");
   const channelId = `UCfirstseenpartial${suffix}`;
-  const runId = `incremental:first-seen-partial:${suffix}`;
-  const planId = randomUUID();
+  const oldRunId = `incremental:first-seen-partial-old:${suffix}`;
+  const newRunId = `incremental:first-seen-partial-new:${suffix}`;
+  const oldPlanId = randomUUID();
+  const newPlanId = randomUUID();
+  const streamId = randomUUID();
   const anchorVideoId = `first-seen-partial-anchor-${suffix}`;
   const incompleteVideoId = `first-seen-partial-video-${suffix}`;
   const incompleteContentKey = `${channelId}:video:${incompleteVideoId}`;
@@ -1254,7 +1261,7 @@ test("an intervening partial Observation cannot consume a pending First-Seen che
       if (publicationAttempts === 1) throw publicationFailure;
     },
   });
-  const execute = ({ job, scan }) => executeIncrementalVideo({
+  const execute = ({ job, scan, runId = oldRunId, planId = oldPlanId }) => executeIncrementalVideo({
     plan: clockPlan({
       channelId,
       planId,
@@ -1281,7 +1288,13 @@ test("an intervening partial Observation cannot consume a pending First-Seen che
       `UPDATE crawler.settings SET value_json='{"mode":"clock"}'::jsonb
        WHERE setting_key='content_enrich_dispatch'`,
     );
-    await insertClockBase(pool, { channelId, runId, planId, anchorVideoId });
+    await insertClockBase(pool, {
+      channelId,
+      runId: oldRunId,
+      planId: oldPlanId,
+      anchorVideoId,
+    });
+    await insertPublicationOwnership(pool, { channelId, streamId });
 
     await assert.rejects(
       execute({
@@ -1307,26 +1320,42 @@ test("an intervening partial Observation cannot consume a pending First-Seen che
       `SELECT first_seen_ledger_status,first_seen_ledger_observation_id
        FROM crawler.content_candidates
        WHERE run_id=$1 AND source_content_id=$2`,
-      [runId, incompleteVideoId],
+      [oldRunId, incompleteVideoId],
     )).rows[0], {
       first_seen_ledger_status: "pending",
       first_seen_ledger_observation_id: null,
     });
 
+    await pool.query(
+      `UPDATE crawler.channel_runs SET status='done',finished_at=now() WHERE run_id=$1`,
+      [oldRunId],
+    );
+    await insertClockRun(pool, {
+      channelId,
+      runId: newRunId,
+      planId: newPlanId,
+    });
+
     const recovered = await execute({
-      job: "complete",
+      job: "new-run-complete",
       scan: completeAnchorScan(channelId, anchorVideoId),
+      runId: newRunId,
+      planId: newPlanId,
     });
     assert.equal(recovered.outcome, "complete");
     assert.equal(recovered.first_seen_count, 1);
     assert.equal(detailAttempts, 1);
 
     const candidates = (await pool.query(
-      `SELECT attempts,content_key FROM crawler.content_candidates
-       WHERE run_id=$1 AND source_content_id=$2`,
-      [runId, incompleteVideoId],
+      `SELECT run_id,attempts,content_key FROM crawler.content_candidates
+       WHERE channel_id=$1 AND source_content_id=$2`,
+      [channelId, incompleteVideoId],
     )).rows;
-    assert.deepEqual(candidates, [{ attempts: 1, content_key: incompleteContentKey }]);
+    assert.deepEqual(candidates, [{
+      run_id: oldRunId,
+      attempts: 1,
+      content_key: incompleteContentKey,
+    }]);
     assert.deepEqual((await pool.query(
       `SELECT status,attempts FROM crawler.content_enrich_tasks
        WHERE content_key=$1 AND job_type='player-refresh'`,
@@ -1334,14 +1363,15 @@ test("an intervening partial Observation cannot consume a pending First-Seen che
     )).rows[0], { status: "failed", attempts: 1 });
 
     const observations = (await pool.query(
-      `SELECT observation_id,outcome,result_summary_json
+      `SELECT observation_id,run_id,outcome,result_summary_json
        FROM crawler.crawl_observations
-       WHERE channel_id=$1 AND run_id=$2 AND observation_kind='video'
+       WHERE channel_id=$1 AND observation_kind='video'
        ORDER BY kind_sequence`,
-      [channelId, runId],
+      [channelId],
     )).rows;
     assert.equal(observations.length, 2);
     assert.deepEqual(observations.map((row) => row.outcome), ["partial", "complete"]);
+    assert.deepEqual(observations.map((row) => row.run_id), [oldRunId, newRunId]);
     assert.deepEqual(
       observations.map((row) => row.result_summary_json.discovery.first_seen_count),
       [0, 1],
@@ -1367,7 +1397,7 @@ test("an intervening partial Observation cannot consume a pending First-Seen che
       `SELECT first_seen_ledger_status,first_seen_ledger_observation_id
        FROM crawler.content_candidates
        WHERE run_id=$1 AND source_content_id=$2`,
-      [runId, incompleteVideoId],
+      [oldRunId, incompleteVideoId],
     )).rows[0], {
       first_seen_ledger_status: "consumed",
       first_seen_ledger_observation_id: recovered.observation_id,
@@ -1382,6 +1412,30 @@ test("an intervening partial Observation cannot consume a pending First-Seen che
       latest_observation_id: recovered.observation_id,
       latest_complete_observation_id: recovered.observation_id,
     });
+
+    assert.deepEqual((await pool.query(
+      `SELECT current.data_sequence,
+              (SELECT count(*)::int
+               FROM publication.revision revision
+               WHERE revision.publication_stream_id=current.publication_stream_id
+                 AND revision.channel_id=current.channel_id
+                 AND revision.domain=current.domain) AS revision_count,
+              (SELECT count(*)::int
+               FROM publication.outbox outbox
+               JOIN publication.revision revision USING (revision_id)
+               WHERE revision.publication_stream_id=current.publication_stream_id
+                 AND revision.channel_id=current.channel_id
+                 AND revision.domain=current.domain) AS publication_outbox_count
+       FROM publication.domain_current current
+       WHERE current.publication_stream_id=$1
+         AND current.channel_id=$2
+         AND current.domain='video'`,
+      [streamId, channelId],
+    )).rows, [{
+      data_sequence: "1",
+      revision_count: 1,
+      publication_outbox_count: 1,
+    }]);
   } finally {
     await pool.query(
       `UPDATE crawler.settings SET value_json=$1::jsonb
