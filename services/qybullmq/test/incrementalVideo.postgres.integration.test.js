@@ -856,7 +856,7 @@ test("Clock keeps failure attempts but rolls back successful cycle state when Pu
   }
 });
 
-test("First-Seen failure evidence survives a Publication rollback", {
+test("First-Seen failure checkpoint is published exactly once when the same Run retries", {
   skip: !integrationUrl,
 }, async () => {
   const pool = new Pool({ connectionString: integrationUrl, max: 4 });
@@ -868,16 +868,56 @@ test("First-Seen failure evidence survives a Publication rollback", {
   const incompleteVideoId = `first-seen-incomplete-${suffix}`;
   const incompleteContentKey = `${channelId}:video:${incompleteVideoId}`;
   const publicationFailure = new Error("injected First-Seen Publication failure");
-  let publicationAttempted = false;
+  let publicationAttempts = 0;
+  let incompleteDetailAttempts = 0;
+  let scanAttempts = 0;
   const originalMode = (await pool.query(
     `SELECT value_json FROM crawler.settings WHERE setting_key='content_enrich_dispatch'`,
   )).rows[0]?.value_json ?? { mode: "clock" };
   const withTransaction = postgresTransactionRunner(pool, {
     beforeQuery(sql) {
       if (!sql.includes("publication-reconciler:transaction-guard")) return;
-      publicationAttempted = true;
-      throw publicationFailure;
+      publicationAttempts += 1;
+      if (publicationAttempts === 1) throw publicationFailure;
     },
+  });
+
+  const execute = () => executeIncrementalVideo({
+    plan: clockPlan({
+      channelId,
+      planId,
+      jobId: `incremental__first_seen_atomic__${suffix}`,
+    }),
+    runId,
+    startedAt: "2026-08-24T00:00:00.000Z",
+    query: (sql, params) => pool.query(sql, params),
+    withTransaction,
+    getChannelSnapshot: async () => ({
+      scanUploads: async () => {
+        scanAttempts += 1;
+        return completeAnchorScan(channelId, anchorVideoId, scanAttempts === 1 ? [{
+          id: incompleteVideoId,
+          position: 1,
+          title: "First-Seen incomplete",
+          content_type: "video",
+          published_day: "2026-08-23",
+        }, {
+          id: incompleteVideoId,
+          position: 2,
+          title: "First-Seen incomplete duplicate",
+          content_type: "video",
+          published_day: "2026-08-23",
+        }] : []);
+      },
+    }),
+    fetchDetail: async (videoId) => {
+      if (videoId === incompleteVideoId) incompleteDetailAttempts += 1;
+      return completePublicDetail(videoId, {
+        duration_seconds: videoId === incompleteVideoId ? null : 90,
+      });
+    },
+    now: () => new Date("2026-08-24T00:00:00.000Z"),
+    crawlerVersion: "qy-v16-integration-test",
   });
 
   try {
@@ -888,41 +928,11 @@ test("First-Seen failure evidence survives a Publication rollback", {
     await insertClockBase(pool, { channelId, runId, planId, anchorVideoId });
 
     await assert.rejects(
-      executeIncrementalVideo({
-        plan: clockPlan({
-          channelId,
-          planId,
-          jobId: `incremental__first_seen_atomic__${suffix}`,
-        }),
-        runId,
-        startedAt: "2026-08-24T00:00:00.000Z",
-        query: (sql, params) => pool.query(sql, params),
-        withTransaction,
-        getChannelSnapshot: async () => ({
-          scanUploads: async () => completeAnchorScan(channelId, anchorVideoId, [{
-            id: incompleteVideoId,
-            position: 1,
-            title: "First-Seen incomplete",
-            content_type: "video",
-            published_day: "2026-08-23",
-          }, {
-            id: incompleteVideoId,
-            position: 2,
-            title: "First-Seen incomplete duplicate",
-            content_type: "video",
-            published_day: "2026-08-23",
-          }]),
-        }),
-        fetchDetail: async (videoId) => completePublicDetail(videoId, {
-          duration_seconds: videoId === incompleteVideoId ? null : 90,
-        }),
-        now: () => new Date("2026-08-24T00:00:00.000Z"),
-        crawlerVersion: "qy-v16-integration-test",
-      }),
+      execute(),
       (error) => error === publicationFailure,
     );
 
-    assert.equal(publicationAttempted, true);
+    assert.equal(publicationAttempts, 1);
     assert.deepEqual((await pool.query(
       `SELECT detail_status,missing_fields,error_message,attempts,content_key
        FROM crawler.content_candidates
@@ -988,6 +998,98 @@ test("First-Seen failure evidence survives a Publication rollback", {
           WHERE revision.channel_id=$1) AS outbox_rows`,
       [channelId],
     )).rows[0], { revisions: 0, currents: 0, outbox_rows: 0 });
+
+    const detailAttemptsAfterCheckpoint = incompleteDetailAttempts;
+    const recovered = await execute();
+
+    assert.equal(publicationAttempts, 2);
+    assert.equal(scanAttempts, 2);
+    assert.equal(incompleteDetailAttempts, detailAttemptsAfterCheckpoint);
+    assert.equal(recovered.outcome, "complete");
+    assert.equal(recovered.first_seen_count, 1);
+
+    const candidates = (await pool.query(
+      `SELECT detail_status,missing_fields,error_message,attempts,content_key
+       FROM crawler.content_candidates
+       WHERE run_id=$1 AND source_content_id=$2
+       ORDER BY candidate_id`,
+      [runId, incompleteVideoId],
+    )).rows;
+    assert.equal(candidates.length, 1);
+    assert.deepEqual(candidates[0], {
+      detail_status: "failed",
+      missing_fields: ["detail"],
+      error_message: "Content Enrich detail is missing the required public Video surface",
+      attempts: 1,
+      content_key: incompleteContentKey,
+    });
+    assert.deepEqual((await pool.query(
+      `SELECT status,attempts,last_success_at,lease_owner,lease_expires_at
+       FROM crawler.content_enrich_tasks
+       WHERE content_key=$1 AND job_type='player-refresh'`,
+      [incompleteContentKey],
+    )).rows[0], {
+      status: "failed",
+      attempts: 1,
+      last_success_at: null,
+      lease_owner: null,
+      lease_expires_at: null,
+    });
+
+    const observations = (await pool.query(
+      `SELECT observation_id,outcome,result_summary_json
+       FROM crawler.crawl_observations
+       WHERE channel_id=$1 AND run_id=$2 AND observation_kind='video'
+       ORDER BY kind_sequence`,
+      [channelId, runId],
+    )).rows;
+    assert.equal(observations.length, 1);
+    assert.equal(observations[0].outcome, "complete");
+    assert.equal(observations[0].result_summary_json.discovery.first_seen_count, 1);
+    assert.equal(observations[0].result_summary_json.discovery.discovered_count, 1);
+    assert.equal(observations[0].result_summary_json.discovery.stored_count, 1);
+
+    const outboxRows = (await pool.query(
+      `SELECT observation_id,payload_json
+       FROM crawler.crawler_outbox
+       WHERE aggregate_key=$1 AND payload_json->>'observation_kind'='video'
+       ORDER BY kind_sequence`,
+      [`${channelId}:video`],
+    )).rows;
+    assert.equal(outboxRows.length, 1);
+    assert.equal(outboxRows[0].observation_id, observations[0].observation_id);
+    const discovery = outboxRows[0].payload_json.payload.discovery.payload;
+    assert.deepEqual(discovery.first_seen.map((item) => item.video_id), [incompleteVideoId]);
+    assert.deepEqual(discovery.dispositions.map((item) => item.video_id), [incompleteVideoId]);
+    assert.equal(discovery.dispositions[0].kind, "stored");
+
+    const content = (await pool.query(
+      `SELECT last_enriched_at,last_observation_id,publication_item_hash
+       FROM crawler.contents WHERE content_key=$1`,
+      [incompleteContentKey],
+    )).rows[0];
+    assert.equal(content.last_enriched_at, null);
+    assert.equal(content.last_observation_id, observations[0].observation_id);
+    assert.match(content.publication_item_hash, /^sha256:[0-9a-f]{64}$/);
+
+    assert.deepEqual((await pool.query(
+      `SELECT latest_sequence,latest_observation_id,latest_complete_observation_id,
+              source_cursor,anchor_video_ids
+       FROM crawler.channel_domain_cursors
+       WHERE channel_id=$1 AND observation_kind='video'`,
+      [channelId],
+    )).rows[0], {
+      latest_sequence: "1",
+      latest_observation_id: observations[0].observation_id,
+      latest_complete_observation_id: observations[0].observation_id,
+      source_cursor: {
+        playlist_id: `UU${channelId.slice(2)}`,
+        matched_anchor_id: anchorVideoId,
+        crossed_anchor_ids: [],
+        terminal_reason: "anchor_matched",
+      },
+      anchor_video_ids: [anchorVideoId],
+    });
   } finally {
     await pool.query(
       `UPDATE crawler.settings SET value_json=$1::jsonb

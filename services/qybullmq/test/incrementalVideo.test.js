@@ -479,6 +479,10 @@ function databaseFixture({
         });
         return { rows: [...latest.values()] };
       }
+      if (sql.includes("FROM crawler.content_candidates candidate")
+          && sql.includes("content.last_observation_id IS NULL")) {
+        return { rows: [] };
+      }
       if (sql.includes("SELECT * FROM crawler.contents")) {
         return { rows: state.contents.map((row) => ({ ...row })) };
       }

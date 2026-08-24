@@ -1375,6 +1375,64 @@ async function checkpointFirstSeenEnrichFailures({
   });
 }
 
+async function loadPendingFirstSeenCheckpoints(query, { channelId, runId }) {
+  const pending = await query(
+    `SELECT candidate.source_content_id AS video_id,
+            candidate.position,candidate.title,candidate.thumbnail_url,
+            candidate.result_json,
+            content.content_key,content.content_type,
+            content.published_at,content.published_at_precision
+     FROM crawler.content_candidates candidate
+     JOIN crawler.contents content
+       ON content.content_key=candidate.content_key
+      AND content.channel_id=candidate.channel_id
+      AND content.run_id=candidate.run_id
+     JOIN crawler.channel_runs run
+       ON run.run_id=candidate.run_id
+      AND run.channel_id=candidate.channel_id
+     WHERE candidate.run_id=$1 AND candidate.channel_id=$2
+       AND run.crawl_mode='incremental'
+       AND candidate.disposition='stored'
+       AND candidate.detail_status='failed'
+       AND candidate.result_json #>> '{disposition,kind}'='stored'
+       AND content.last_observation_id IS NULL
+     ORDER BY candidate.position,candidate.candidate_id`,
+    [runId, channelId],
+  );
+  return pending.rows.map((row) => {
+    const evidence = row.result_json && typeof row.result_json === "object"
+      ? row.result_json
+      : {};
+    const flat = evidence.flat && typeof evidence.flat === "object" ? evidence.flat : {};
+    const detail = evidence.detail && typeof evidence.detail === "object" ? evidence.detail : null;
+    const disposition = evidence.disposition;
+    const videoId = text(row.video_id);
+    const contentKey = text(row.content_key);
+    const contentType = text(row.content_type);
+    if (!videoId || !contentKey || !contentType || disposition?.kind !== "stored") {
+      throw new Error(`Invalid pending First-Seen checkpoint: ${videoId ?? contentKey ?? "unknown"}`);
+    }
+    return {
+      entry: {
+        ...flat,
+        id: videoId,
+        position: Number(row.position),
+        title: text(flat.title) ?? text(row.title),
+        thumbnail_url: text(flat.thumbnail_url) ?? text(row.thumbnail_url),
+      },
+      disposition,
+      classification: evidence.classification ?? null,
+      facts: detailFacts(detail),
+      contentKey,
+      contentType,
+      publishedAt: row.published_at == null
+        ? null
+        : new Date(row.published_at).toISOString(),
+      publishedAtPrecision: text(row.published_at_precision) ?? "unknown",
+    };
+  });
+}
+
 async function applyDiscovery({
   plan,
   runId,
@@ -1431,6 +1489,27 @@ async function applyDiscovery({
            WHERE content.channel_id=$1 AND content.source_content_id=input.video_id`,
           [plan.channel_id, observedAt, JSON.stringify(scanInput), observationId],
     );
+  }
+  const checkpointedContentKeys = stringList(
+    checkpointedFirstSeen.map((current) => current.contentKey),
+  );
+  if (checkpointedContentKeys.length > 0) {
+    const linked = await transactionClient.query(
+      `UPDATE crawler.contents content
+       SET last_observation_id=$3::uuid,
+           raw_json=COALESCE(content.raw_json,'{}'::jsonb)
+             || jsonb_build_object(
+                  'incremental',
+                  COALESCE(content.raw_json->'incremental','{}'::jsonb)
+                    || jsonb_build_object('observation_id',($3::uuid)::text)
+                )
+       WHERE content.channel_id=$1
+         AND content.content_key=ANY($2::text[])`,
+      [plan.channel_id, checkpointedContentKeys, observationId],
+    );
+    if (resultRowCount(linked) !== checkpointedContentKeys.length) {
+      throw new Error("Pending First-Seen checkpoint Content changed before Observation commit");
+    }
   }
   const candidateIds = candidateEntries.map((entry) => entry.id);
   const alreadyKnown = await knownVideoIds(
@@ -2214,7 +2293,10 @@ async function recordVideoCycle({
             [
               plan.channel_id,
               scan.entries.map((entry) => entry.id),
-              samplePlan.rows.map((row) => row.content_key),
+              [
+                ...samplePlan.rows.map((row) => row.content_key),
+                ...checkpointedFirstSeen.map((current) => current.contentKey),
+              ],
             ],
           );
           await refreshVideoPublicationItemHashes(
@@ -2388,6 +2470,10 @@ export async function executeIncrementalVideo({
       executionAttemptId,
     });
   } else {
+    const recoveredFirstSeen = await loadPendingFirstSeenCheckpoints(query, {
+      channelId: plan.channel_id,
+      runId,
+    });
     const dueDispositionEntries = await loadDueVideoDispositionEntries(
       query,
       plan.channel_id,
@@ -2404,7 +2490,7 @@ export async function executeIncrementalVideo({
       detailFetcher,
       detailEligibleFirstSeen.length,
     );
-    const checkpointedFirstSeen = await checkpointFirstSeenEnrichFailures({
+    const newlyCheckpointedFirstSeen = await checkpointFirstSeenEnrichFailures({
       plan,
       runId,
       candidateEntries: discoveryEntries,
@@ -2412,6 +2498,10 @@ export async function executeIncrementalVideo({
       withTransaction,
       observedAt,
     });
+    const checkpointedFirstSeen = [
+      ...recoveredFirstSeen,
+      ...newlyCheckpointedFirstSeen,
+    ];
     const preparedSampling = await prepareClockRecentSampling({
       plan,
       runId,
