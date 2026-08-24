@@ -51,7 +51,7 @@ test("shared QY Feature bridge is owned by pachongsys and pins one immutable ima
     assert.doesNotMatch(block, /^\s+build:/m);
   }
 
-  assert.match(compose, /name: \$\{QY_SHARED_CRAWLER_NETWORK:-bullmq-crawler\}/);
+  assert.match(compose, /name: \$\{QY_FRESH_CRAWLER_NETWORK:-qy-newcrawler-crawler-runtime\}/);
   assert.match(compose, /name: \$\{QY_SHARED_FEATURE_PRIVATE_NETWORK:-qy-feature-private\}/);
   assert.match(compose, /name: \$\{QY_SHARED_FEATURE_RUNTIME_SECRETS_VOLUME:-qy-feature-runtime-secrets\}/);
   assert.match(launcher, /deploy\/compose\.qy-feature-bridge-runtime\.yml/);

@@ -32,8 +32,9 @@ services:
     command: ["feature-ingest"]
     environment:
       FEATURE_DATABASE_URL_FILE: /run/qy-feature-secrets/feature_database_url
-      EXPECTED_FEATURE_DATABASE: ${CRAWLER_DB_NAME:-bullmq_crawler_migration}
+      EXPECTED_FEATURE_DATABASE: ${CRAWLER_DB_NAME:-newcrawler_crawler}
       EXPECTED_FEATURE_DATABASE_USER: feature_user
+      FORBIDDEN_CRAWLER_DATABASE: bullmq_crawler_migration
       FEATURE_INGEST_HOST: 0.0.0.0
       FEATURE_INGEST_PORT: 8090
       FEATURE_INGEST_TOKEN_FILE: /run/qy-feature-secrets/feature_ingest_token
@@ -62,7 +63,7 @@ services:
     command: ["node", "src/runFeatureRecalcRelay.js"]
     environment:
       NODE_ENV: production
-      REDIS_HOST: ${CRAWLER_REDIS_HOST:-bullmq-crawler-migration-redis}
+      REDIS_HOST: ${CRAWLER_REDIS_HOST:-redis}
       REDIS_PORT: ${CRAWLER_REDIS_PORT:-6379}
       FEATURE_RECALC_QUEUE: feature-recalc
       FEATURE_INGEST_URL: http://feature-ingest:8090/v1/crawler-observations
@@ -83,15 +84,16 @@ services:
     environment:
       NODE_ENV: production
       SKIP_SCHEMA_MIGRATION: "true"
-      EXPECTED_CRAWLER_DATABASE: ${CRAWLER_DB_NAME:-bullmq_crawler_migration}
-      POSTGRES_HOST: ${CRAWLER_DB_HOST:-bullmq-crawler-migration-pgbouncer}
+      EXPECTED_CRAWLER_DATABASE: ${CRAWLER_DB_NAME:-newcrawler_crawler}
+      FORBIDDEN_CRAWLER_DATABASE: bullmq_crawler_migration
+      POSTGRES_HOST: ${CRAWLER_DB_HOST:-crawler-pgbouncer}
       POSTGRES_PORT: ${CRAWLER_DB_PORT:-6432}
       POSTGRES_USER: ${CRAWLER_DB_USER:-bullmq}
       POSTGRES_PASSWORD: ${CRAWLER_DB_PASSWORD:?CRAWLER_DB_PASSWORD is required}
-      POSTGRES_DB: ${CRAWLER_DB_NAME:-bullmq_crawler_migration}
+      POSTGRES_DB: ${CRAWLER_DB_NAME:-newcrawler_crawler}
       POSTGRES_POOL_MIN: 0
       POSTGRES_POOL_MAX: 4
-      REDIS_HOST: ${CRAWLER_REDIS_HOST:-bullmq-crawler-migration-redis}
+      REDIS_HOST: ${CRAWLER_REDIS_HOST:-redis}
       REDIS_PORT: ${CRAWLER_REDIS_PORT:-6379}
       FEATURE_RECALC_QUEUE: feature-recalc
       OUTBOX_PUBLISH_BATCH_SIZE: 50
@@ -102,7 +104,7 @@ services:
 networks:
   crawler:
     external: true
-    name: ${QY_SHARED_CRAWLER_NETWORK:-bullmq-crawler}
+    name: ${QY_FRESH_CRAWLER_NETWORK:-qy-newcrawler-crawler-runtime}
   feature_private:
     external: true
     name: ${QY_SHARED_FEATURE_PRIVATE_NETWORK:-qy-feature-private}

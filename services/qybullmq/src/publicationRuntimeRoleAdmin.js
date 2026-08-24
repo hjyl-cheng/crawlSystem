@@ -21,8 +21,9 @@ const ROLE_SPECIFICATIONS = Object.freeze({
       role: "publication_publisher",
       connectionLimit: 8,
       controlledSchemas: Object.freeze(["crawler", "publication"]),
-      schemas: Object.freeze(["publication"]),
+      schemas: Object.freeze(["crawler", "publication"]),
       tables: Object.freeze({
+        "crawler.database_identity": Object.freeze(["SELECT"]),
         "publication.outbox": Object.freeze(["SELECT", "UPDATE"]),
         "publication.revision": Object.freeze(["SELECT"]),
       }),
@@ -41,6 +42,7 @@ const ROLE_SPECIFICATIONS = Object.freeze({
       schemas: Object.freeze(["publication"]),
       tables: Object.freeze({
         "publication.channel_ownership": Object.freeze(["SELECT", "INSERT"]),
+        "publication.database_identity": Object.freeze(["SELECT"]),
         "publication.inbox": Object.freeze(["SELECT", "INSERT", "UPDATE"]),
         "publication.inbox_conflict": Object.freeze(["SELECT", "INSERT", "UPDATE"]),
         "publication.quarantine": Object.freeze(["SELECT", "INSERT", "UPDATE"]),
@@ -66,6 +68,7 @@ const ROLE_SPECIFICATIONS = Object.freeze({
         // PostgreSQL requires UPDATE privilege for SELECT ... FOR UPDATE.
         "publication.channel_ownership": Object.freeze(["SELECT", "UPDATE"]),
         "publication.consumer_cursor": Object.freeze(["SELECT", "INSERT", "UPDATE"]),
+        "publication.database_identity": Object.freeze(["SELECT"]),
         "publication.inbox": Object.freeze(["SELECT"]),
         "publication.projection_outbox": Object.freeze(["SELECT", "INSERT"]),
         "publication.quarantine": Object.freeze(["SELECT", "INSERT", "UPDATE"]),
@@ -80,6 +83,52 @@ const ROLE_SPECIFICATIONS = Object.freeze({
         "public.channels": Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]),
         "publication.inbox": Object.freeze(["INSERT", "UPDATE", "DELETE"]),
         "publication.stream": Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]),
+      }),
+    }),
+    Object.freeze({
+      role: "business_publication_projector",
+      connectionLimit: 8,
+      controlledSchemas: Object.freeze(["public", "publication", "result"]),
+      schemas: Object.freeze(["public", "publication", "result"]),
+      tables: Object.freeze({
+        "public.category_taxonomy": Object.freeze(["SELECT"]),
+        "public.channel_links": Object.freeze(["SELECT", "INSERT"]),
+        "public.channel_metric_values": Object.freeze(["SELECT", "INSERT"]),
+        "public.channel_profile_facts": Object.freeze(["SELECT", "INSERT"]),
+        "public.channel_snapshots": Object.freeze(["SELECT", "INSERT"]),
+        "public.channels": Object.freeze(["SELECT", "INSERT", "UPDATE"]),
+        "public.content_items": Object.freeze(["SELECT", "INSERT", "UPDATE"]),
+        "public.content_snapshots": Object.freeze(["SELECT", "INSERT"]),
+        "public.creator_search_active": Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]),
+        "public.creator_search_current": Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]),
+        "public.creator_search_live": Object.freeze(["SELECT", "INSERT", "DELETE"]),
+        "public.creator_search_releases": Object.freeze(["SELECT", "INSERT", "UPDATE"]),
+        "public.import_batches": Object.freeze(["SELECT", "INSERT", "UPDATE"]),
+        "publication.activation_item": Object.freeze(["SELECT"]),
+        "publication.channel_ownership": Object.freeze(["SELECT", "UPDATE"]),
+        "publication.consumer_cursor": Object.freeze(["SELECT"]),
+        "publication.creator_search_changes": Object.freeze(["SELECT", "INSERT"]),
+        "publication.creator_search_storage_state": Object.freeze(["SELECT", "UPDATE"]),
+        "publication.database_identity": Object.freeze(["SELECT"]),
+        "publication.projection_batch": Object.freeze(["SELECT", "INSERT", "UPDATE"]),
+        "publication.projection_batch_item": Object.freeze(["SELECT", "INSERT"]),
+        "publication.projection_cutover": Object.freeze(["SELECT", "UPDATE"]),
+        "publication.projection_outbox": Object.freeze(["SELECT", "UPDATE"]),
+        "publication.revision": Object.freeze(["SELECT"]),
+        "result.agent_current": Object.freeze(["SELECT"]),
+        "result.content_current": Object.freeze(["SELECT"]),
+        "result.entity_current": Object.freeze(["SELECT"]),
+        "result.video_current": Object.freeze(["SELECT"]),
+      }),
+      functions: Object.freeze([
+        "public.refresh_creator_search_release_v9(text,text[],text[])",
+        "public.replay_creator_search_release_v9(text)",
+        "public.restore_creator_search_live_from_legacy_v1(text)",
+      ]),
+      denied: Object.freeze({
+        "publication.inbox": Object.freeze(["INSERT", "UPDATE", "DELETE"]),
+        "publication.revision": Object.freeze(["INSERT", "UPDATE", "DELETE"]),
+        "result.entity_current": Object.freeze(["INSERT", "UPDATE", "DELETE"]),
       }),
     }),
   ]),
@@ -135,6 +184,20 @@ function parseRuntimeCredential(raw, { name, expectedRole, expectedDatabase }) {
 export function publicationRuntimeRoleConfig(environment = process.env) {
   const expectedCrawlerDatabase = safeKey(environment, "EXPECTED_CRAWLER_DATABASE");
   const expectedBusinessDatabase = safeKey(environment, "EXPECTED_BUSINESS_DATABASE");
+  const forbiddenCrawlerDatabase = safeKey({
+    FORBIDDEN_CRAWLER_DATABASE:
+      environment.FORBIDDEN_CRAWLER_DATABASE || "bullmq_crawler_migration",
+  }, "FORBIDDEN_CRAWLER_DATABASE");
+  const forbiddenBusinessDatabase = safeKey({
+    FORBIDDEN_BUSINESS_DATABASE:
+      environment.FORBIDDEN_BUSINESS_DATABASE || "yewu_business",
+  }, "FORBIDDEN_BUSINESS_DATABASE");
+  if (expectedCrawlerDatabase === forbiddenCrawlerDatabase) {
+    throw new TypeError(`refusing forbidden Crawler database ${expectedCrawlerDatabase}`);
+  }
+  if (expectedBusinessDatabase === forbiddenBusinessDatabase) {
+    throw new TypeError(`refusing forbidden Business database ${expectedBusinessDatabase}`);
+  }
   if (expectedCrawlerDatabase === expectedBusinessDatabase) {
     throw new TypeError("Crawler and Business database names must be different");
   }
@@ -167,6 +230,14 @@ export function publicationRuntimeRoleConfig(environment = process.env) {
         {
           name: "PUBLICATION_BUSINESS_RECONCILER_DATABASE_URL",
           expectedRole: "business_publication_reconciler",
+          expectedDatabase: expectedBusinessDatabase,
+        },
+      ),
+      business_publication_projector: parseRuntimeCredential(
+        environmentValue("PUBLICATION_BUSINESS_PROJECTOR_DATABASE_URL", { environment }),
+        {
+          name: "PUBLICATION_BUSINESS_PROJECTOR_DATABASE_URL",
+          expectedRole: "business_publication_projector",
           expectedDatabase: expectedBusinessDatabase,
         },
       ),
@@ -211,6 +282,13 @@ function tableParts(table) {
 
 function qualifiedTable(table) {
   return tableParts(table).map(quoteIdentifier).join(".");
+}
+
+function qualifiedFunction(signature) {
+  if (!/^[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*\([a-z0-9_,\[\] ]*\)$/.test(signature)) {
+    throw new TypeError(`invalid role specification function: ${signature}`);
+  }
+  return signature;
 }
 
 function expectedPrivilegeRows(specification) {
@@ -271,6 +349,7 @@ async function inspectRole(client, specification) {
       schema_usage: [],
       table_privileges: [],
       sequence_privileges: [],
+      function_privileges: [],
       denied_privileges: [],
     };
   }
@@ -321,6 +400,14 @@ async function inspectRole(client, specification) {
      ORDER BY namespace.nspname,sequence.relname,privilege.name`,
     [specification.role, specification.controlledSchemas],
   )).rows.map((row) => `${row.sequence_schema}.${row.sequence_name}:${row.privilege}`);
+  const functionPrivileges = [];
+  for (const signature of specification.functions ?? []) {
+    const allowed = (await client.query(
+      "SELECT has_function_privilege($1,$2,'EXECUTE') AS allowed",
+      [specification.role, qualifiedFunction(signature)],
+    )).rows[0]?.allowed === true;
+    if (allowed) functionPrivileges.push(signature);
+  }
   const deniedPrivileges = [];
   for (const [table, privileges] of Object.entries(specification.denied)) {
     for (const privilege of privileges) {
@@ -354,12 +441,14 @@ async function inspectRole(client, specification) {
       && isDeepStrictEqual(schemaUsage.sort(), [...specification.schemas].sort())
       && isDeepStrictEqual(actualPrivileges, expectedPrivileges)
       && sequencePrivileges.length === 0
+      && isDeepStrictEqual(functionPrivileges, [...(specification.functions ?? [])])
       && deniedPrivileges.length === 0,
     attributes: actualAttributes,
     memberships,
     schema_usage: schemaUsage,
     table_privileges: actualPrivileges,
     sequence_privileges: sequencePrivileges,
+    function_privileges: functionPrivileges,
     denied_privileges: deniedPrivileges.sort(),
   };
 }
@@ -452,6 +541,11 @@ async function provisionRole(client, specification, password) {
     await client.query(
       `GRANT ${privileges.join(",")} ON TABLE ${qualifiedTable(table)} TO ${role}`,
     );
+  }
+  for (const signature of specification.functions ?? []) {
+    const target = qualifiedFunction(signature);
+    await client.query(`REVOKE ALL PRIVILEGES ON FUNCTION ${target} FROM ${role}`);
+    await client.query(`GRANT EXECUTE ON FUNCTION ${target} TO ${role}`);
   }
 }
 

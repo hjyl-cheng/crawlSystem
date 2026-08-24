@@ -28,7 +28,7 @@ upstream qy_rota_api {
 }
 upstream qy_rota_dashboard {
     zone qy_rota_dashboard 64k;
-    server rota-dashboard:3000 resolve;
+    server ${QY_ROTA_DASHBOARD_UPSTREAM} resolve;
 }
 upstream qy_minio_console {
     zone qy_minio_console 64k;

@@ -2,6 +2,17 @@ SET TIME ZONE 'UTC';
 
 CREATE SCHEMA IF NOT EXISTS crawler;
 
+CREATE TABLE IF NOT EXISTS crawler.database_identity (
+  singleton BOOLEAN PRIMARY KEY DEFAULT true CHECK (singleton),
+  database_kind TEXT NOT NULL CHECK (database_kind='crawler'),
+  database_name TEXT NOT NULL,
+  initialized_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+INSERT INTO crawler.database_identity (singleton, database_kind, database_name)
+VALUES (true, 'crawler', current_database())
+ON CONFLICT (singleton) DO NOTHING;
+
 CREATE TABLE IF NOT EXISTS crawler.query_sets (
   query_set_id BIGSERIAL PRIMARY KEY,
   name TEXT NOT NULL,
@@ -238,6 +249,68 @@ ON crawler.channel_candidates (channel_id, created_at DESC);
 
 CREATE UNIQUE INDEX IF NOT EXISTS ux_crawler_channel_candidates_identity
 ON crawler.channel_candidates (candidate_id, channel_id);
+
+CREATE TABLE IF NOT EXISTS crawler.migration_channel_intents (
+  migration_intent_id BIGSERIAL PRIMARY KEY,
+  source_id TEXT NOT NULL,
+  source_database TEXT NOT NULL,
+  source_database_oid OID NOT NULL,
+  source_candidate_id BIGINT NOT NULL,
+  channel_id TEXT NOT NULL,
+  source_snapshot JSONB NOT NULL,
+  snapshot_sha256 TEXT NOT NULL CHECK (snapshot_sha256 ~ '^[a-f0-9]{64}$'),
+  target_candidate_id BIGINT UNIQUE
+    REFERENCES crawler.channel_candidates(candidate_id) ON DELETE RESTRICT,
+  first_dispatch_batch_id TEXT NOT NULL,
+  dispatch_attempts INTEGER NOT NULL DEFAULT 0 CHECK (dispatch_attempts >= 0),
+  last_dispatch_at TIMESTAMPTZ,
+  last_error TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (source_id, channel_id),
+  UNIQUE (source_id, source_candidate_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_crawler_migration_intents_target
+ON crawler.migration_channel_intents (target_candidate_id)
+WHERE target_candidate_id IS NOT NULL;
+
+CREATE OR REPLACE FUNCTION crawler.prevent_migration_intent_source_update()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF ROW(
+    NEW.source_id,
+    NEW.source_database,
+    NEW.source_database_oid,
+    NEW.source_candidate_id,
+    NEW.channel_id,
+    NEW.source_snapshot,
+    NEW.snapshot_sha256,
+    NEW.first_dispatch_batch_id
+  ) IS DISTINCT FROM ROW(
+    OLD.source_id,
+    OLD.source_database,
+    OLD.source_database_oid,
+    OLD.source_candidate_id,
+    OLD.channel_id,
+    OLD.source_snapshot,
+    OLD.snapshot_sha256,
+    OLD.first_dispatch_batch_id
+  ) THEN
+    RAISE EXCEPTION 'Migration intent source identity is immutable';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS prevent_migration_intent_source_update
+ON crawler.migration_channel_intents;
+CREATE TRIGGER prevent_migration_intent_source_update
+BEFORE UPDATE ON crawler.migration_channel_intents
+FOR EACH ROW
+EXECUTE FUNCTION crawler.prevent_migration_intent_source_update();
 
 CREATE TABLE IF NOT EXISTS crawler.channel_candidate_sources (
   candidate_source_id BIGSERIAL PRIMARY KEY,
@@ -1807,6 +1880,14 @@ CREATE TABLE IF NOT EXISTS crawler.settings (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+INSERT INTO crawler.settings (setting_key,value_json,updated_at)
+VALUES (
+  'query_scheduler',
+  '{"status":"stopped","stop_reason":"fresh_migration_bootstrap","updated_by":"bootstrap"}'::jsonb,
+  now()
+)
+ON CONFLICT (setting_key) DO NOTHING;
+
 CREATE TABLE IF NOT EXISTS crawler.agent_profiles (
   channel_id TEXT NOT NULL REFERENCES crawler.channels(channel_id) ON DELETE CASCADE,
   agent_mode TEXT NOT NULL DEFAULT 'basic',
@@ -2717,6 +2798,7 @@ CREATE TABLE IF NOT EXISTS publication.stream (
     CHECK (status IN ('active', 'sealed')),
   minimum_writer_version TEXT,
   capture_enabled_at TIMESTAMPTZ,
+  automatic_onboarding_destination TEXT,
   created_by TEXT NOT NULL,
   created_reason TEXT NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -2730,11 +2812,36 @@ CREATE TABLE IF NOT EXISTS publication.stream (
   CHECK (btrim(status_changed_by) <> '' AND btrim(status_reason) <> ''),
   CHECK (minimum_writer_version IS NULL OR btrim(minimum_writer_version) <> ''),
   CHECK (capture_enabled_at IS NULL OR minimum_writer_version IS NOT NULL),
+  CONSTRAINT chk_publication_stream_automatic_onboarding_destination CHECK (
+    automatic_onboarding_destination IS NULL
+    OR btrim(automatic_onboarding_destination) <> ''
+  ),
   CHECK (
     (status = 'active' AND sealed_at IS NULL)
     OR (status = 'sealed' AND sealed_at IS NOT NULL)
   )
 );
+
+ALTER TABLE publication.stream
+ADD COLUMN IF NOT EXISTS automatic_onboarding_destination TEXT;
+
+DO $publication_schema$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_constraint
+    WHERE conrelid='publication.stream'::regclass
+      AND conname='chk_publication_stream_automatic_onboarding_destination'
+  ) THEN
+    ALTER TABLE publication.stream
+    ADD CONSTRAINT chk_publication_stream_automatic_onboarding_destination
+    CHECK (
+      automatic_onboarding_destination IS NULL
+      OR btrim(automatic_onboarding_destination) <> ''
+    );
+  END IF;
+END
+$publication_schema$;
 
 DROP INDEX IF EXISTS publication.ux_publication_stream_active_deployment;
 CREATE INDEX IF NOT EXISTS idx_publication_stream_deployment_status
@@ -2752,6 +2859,8 @@ BEGIN
   IF NEW.publication_stream_id IS DISTINCT FROM OLD.publication_stream_id
      OR NEW.source_deployment_key IS DISTINCT FROM OLD.source_deployment_key
      OR NEW.source_identity_json IS DISTINCT FROM OLD.source_identity_json
+     OR NEW.automatic_onboarding_destination
+        IS DISTINCT FROM OLD.automatic_onboarding_destination
      OR NEW.created_by IS DISTINCT FROM OLD.created_by
      OR NEW.created_reason IS DISTINCT FROM OLD.created_reason
      OR NEW.created_at IS DISTINCT FROM OLD.created_at THEN

@@ -19,6 +19,7 @@ test("Publication Runtime Compose preserves the database and transport network b
   const ingress = serviceBlock(compose, "business-publication-ingress");
   const publisher = serviceBlock(compose, "publication-publisher");
   const reconciler = serviceBlock(compose, "business-publication-reconciler");
+  const projector = serviceBlock(compose, "business-publication-projector");
 
   assert.match(ingress, /networks: \[business_database, publication_transport\]/);
   assert.doesNotMatch(ingress, /networks:.*internal/);
@@ -45,7 +46,15 @@ test("Publication Runtime Compose preserves the database and transport network b
   assert.match(reconciler, /BUSINESS_PUBLICATION_AUDIT_MAX_ERROR_RETRY_SECONDS: 300/);
   assert.doesNotMatch(reconciler, /shm_size|max_parallel_workers_per_gather/);
   assert.match(compose, /publication_transport:\n    driver: bridge\n    internal: true/);
-  for (const block of [ingress, publisher, reconciler]) {
+  assert.match(
+    compose,
+    /name: \$\{QY_FRESH_CRAWLER_NETWORK:-qy-newcrawler-crawler-runtime\}/,
+  );
+  assert.match(
+    compose,
+    /name: \$\{QY_FRESH_BUSINESS_NETWORK:-qy-newcrawler-business-database\}/,
+  );
+  for (const block of [ingress, publisher, reconciler, projector]) {
     assert.doesNotMatch(block, /^\s+ports:/m);
   }
 });
@@ -58,14 +67,16 @@ test("Publication Runtime Compose mounts credentials and token only as file-back
   const ingress = serviceBlock(compose, "business-publication-ingress");
   const publisher = serviceBlock(compose, "publication-publisher");
   const reconciler = serviceBlock(compose, "business-publication-reconciler");
+  const projector = serviceBlock(compose, "business-publication-projector");
 
   assert.match(publisher, /DATABASE_URL_FILE: \/run\/secrets\/crawler_publication_database_url/);
   assert.match(publisher, /BUSINESS_PUBLICATION_INGRESS_TOKEN_FILE: \/run\/secrets\/business_publication_ingress_token/);
-  assert.match(ingress, /BUSINESS_DATABASE_URL_FILE: \/run\/secrets\/business_database_url/);
+  assert.match(ingress, /BUSINESS_DATABASE_URL_FILE: \/run\/secrets\/business_publication_ingress_database_url/);
   assert.match(ingress, /BUSINESS_PUBLICATION_INGRESS_TOKEN_FILE: \/run\/secrets\/business_publication_ingress_token/);
-  assert.match(reconciler, /BUSINESS_DATABASE_URL_FILE: \/run\/secrets\/business_database_url/);
+  assert.match(reconciler, /BUSINESS_DATABASE_URL_FILE: \/run\/secrets\/business_publication_reconciler_database_url/);
+  assert.match(projector, /BUSINESS_DATABASE_URL_FILE: \/run\/secrets\/business_publication_projector_database_url/);
 
-  for (const block of [ingress, publisher, reconciler]) {
+  for (const block of [ingress, publisher, reconciler, projector]) {
     assert.doesNotMatch(
       block,
       /^\s+(?:DATABASE_URL|BUSINESS_DATABASE_URL|BUSINESS_PUBLICATION_INGRESS_TOKEN):/m,
@@ -177,4 +188,15 @@ test("database health gates wait for TCP and initialized schemas", async () => {
   }
   assert.match(crawler, /SELECT 1 FROM crawler\.channels LIMIT 0/);
   assert.match(business, /SELECT 1 FROM public\.channels LIMIT 0/);
+});
+
+test("source verification renders the standalone Publication Runtime Compose", async () => {
+  const verify = await readFile(
+    new URL("../../../scripts/verify.sh", import.meta.url),
+    "utf8",
+  );
+  assert.match(verify, /QYBULLMQ_IMAGE_TAG=pachongsys-verify/);
+  assert.match(verify, /-f deploy\/compose\.qy-publication-runtime\.yml/);
+  assert.match(verify, /--project-name bullmq-publication-runtime/);
+  assert.match(verify, /config --quiet/);
 });

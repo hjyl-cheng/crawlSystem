@@ -8,6 +8,7 @@ function environment(overrides = {}) {
   return {
     BUSINESS_DATABASE_URL: "postgres://business-test",
     BUSINESS_PUBLICATION_RECONCILER_ID: "reconciler-test",
+    EXPECTED_BUSINESS_DATABASE: "newcrawler_business",
     ...overrides,
   };
 }
@@ -15,7 +16,7 @@ function environment(overrides = {}) {
 test("Business Reconciler runtime validates bounded settings before PostgreSQL", () => {
   assert.deepEqual(businessPublicationReconcilerRuntimeConfig(environment()), {
     databaseUrl: "postgres://business-test",
-    expectedDatabase: "yewu_business",
+    expectedDatabase: "newcrawler_business",
     workerId: "reconciler-test",
     pollMs: 1000,
     poolMaximum: 12,

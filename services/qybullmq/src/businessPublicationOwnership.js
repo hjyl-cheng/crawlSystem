@@ -48,20 +48,28 @@ export async function ensureAutomaticBusinessBootstrapOwnership(clientValue, env
 
   const policy = await client.query(
     `/* business-publication-ownership:inherit-policy */
-     SELECT count(*)::int AS owner_count,
-            bool_and(projection_mode='online') AS all_online
-     FROM publication.channel_ownership
-     WHERE active_publication_stream_id=$1::uuid
-       AND status IN ('active','cutover_pending')`,
+     SELECT stream.automatic_onboarding_projection_mode,
+            count(owner.channel_id)::int AS owner_count,
+            bool_and(owner.projection_mode='online') AS all_online
+     FROM publication.stream AS stream
+     LEFT JOIN publication.channel_ownership AS owner
+       ON owner.active_publication_stream_id=stream.publication_stream_id
+      AND owner.status IN ('active','cutover_pending')
+     WHERE stream.publication_stream_id=$1::uuid AND stream.status='active'
+     GROUP BY stream.publication_stream_id,
+              stream.automatic_onboarding_projection_mode`,
     [streamId],
   );
   const inherited = policy.rows[0] ?? {};
-  if (Number(inherited.owner_count ?? 0) === 0) {
+  const explicitProjectionMode = String(
+    inherited.automatic_onboarding_projection_mode ?? "",
+  ).trim();
+  if (!explicitProjectionMode && Number(inherited.owner_count ?? 0) === 0) {
     return { status: "automatic_onboarding_not_enabled", created: false, ownership: null };
   }
-  const projectionMode = inherited.all_online === true
-    ? "online"
-    : "held_shadow";
+  const projectionMode = explicitProjectionMode || (
+    inherited.all_online === true ? "online" : "held_shadow"
+  );
   const ownershipReference = {
     onboarding_mode: "automatic_bootstrap",
     publication_stream_id: streamId,

@@ -6,6 +6,7 @@ function environment(overrides = {}) {
   return {
     BUSINESS_DATABASE_URL: "postgres://business-test",
     BUSINESS_PUBLICATION_INGRESS_TOKEN: "test-token",
+    EXPECTED_BUSINESS_DATABASE: "newcrawler_business",
     ...overrides,
   };
 }
@@ -14,7 +15,7 @@ test("Business Ingress runtime validates all settings before opening PostgreSQL"
   assert.deepEqual(businessPublicationIngressRuntimeConfig(environment()), {
     databaseUrl: "postgres://business-test",
     token: "test-token",
-    expectedDatabase: "yewu_business",
+    expectedDatabase: "newcrawler_business",
     tls: null,
     host: "127.0.0.1",
     port: 8081,

@@ -19,6 +19,8 @@ function environment(overrides = {}) {
       "postgres://business_publication_ingress:ingress-password@postgres:5432/business_test",
     PUBLICATION_BUSINESS_RECONCILER_DATABASE_URL:
       "postgres://business_publication_reconciler:reconciler-password@postgres:5432/business_test",
+    PUBLICATION_BUSINESS_PROJECTOR_DATABASE_URL:
+      "postgres://business_publication_projector:projector-password@postgres:5432/business_test",
     EXPECTED_CRAWLER_DATABASE: "crawler_test",
     EXPECTED_BUSINESS_DATABASE: "business_test",
     EXPECTED_CRAWLER_CHANNEL_COUNT: "17",
@@ -31,15 +33,34 @@ test("Runtime role config binds fixed identities without exposing passwords in c
   const config = publicationRuntimeRoleConfig(environment());
   assert.equal(config.credentials.publication_publisher.role, "publication_publisher");
   assert.equal(config.credentials.business_publication_ingress.database, "business_test");
+  assert.equal(
+    config.credentials.business_publication_projector.role,
+    "business_publication_projector",
+  );
   const confirmation = publicationRuntimeRoleConfirmation(config);
   assert.match(confirmation, /^PROVISION_PUBLICATION_RUNTIME_ROLES:/);
   assert.ok(confirmation.includes(PUBLICATION_RUNTIME_ROLE_SPEC_HASH));
   assert.equal(confirmation.includes("crawler-password"), false);
   assert.equal(confirmation.includes("ingress-password"), false);
   assert.equal(confirmation.includes("reconciler-password"), false);
+  assert.equal(confirmation.includes("projector-password"), false);
+});
+
+test("Runtime role CLI documents the Projector credential", async () => {
+  const cli = await readFile(
+    new URL("../scripts/managePublicationRuntimeRoles.mjs", import.meta.url),
+    "utf8",
+  );
+  assert.match(cli, /PUBLICATION_BUSINESS_PROJECTOR_DATABASE_URL or its _FILE form/);
 });
 
 test("Runtime role config rejects wrong roles, databases, and ambiguous database identity", () => {
+  assert.throws(() => publicationRuntimeRoleConfig(environment({
+    EXPECTED_CRAWLER_DATABASE: "bullmq_crawler_migration",
+  })), /forbidden Crawler database/);
+  assert.throws(() => publicationRuntimeRoleConfig(environment({
+    EXPECTED_BUSINESS_DATABASE: "yewu_business",
+  })), /forbidden Business database/);
   assert.throws(() => publicationRuntimeRoleConfig(environment({
     PUBLICATION_CRAWLER_PUBLISHER_DATABASE_URL:
       "postgres://bullmq:password@pgbouncer:6432/crawler_test",
@@ -56,13 +77,16 @@ test("Runtime role config rejects wrong roles, databases, and ambiguous database
 test("Runtime role specifications grant only the SQL surfaces used by each process", () => {
   const specifications = publicationRuntimeRoleSpecifications();
   const publisher = specifications.source[0];
+  assert.deepEqual(publisher.schemas, ["crawler", "publication"]);
   assert.deepEqual(publisher.tables, {
+    "crawler.database_identity": ["SELECT"],
     "publication.outbox": ["SELECT", "UPDATE"],
     "publication.revision": ["SELECT"],
   });
   const ingress = specifications.business.find((role) => (
     role.role === "business_publication_ingress"
   ));
+  assert.deepEqual(ingress.tables["publication.database_identity"], ["SELECT"]);
   assert.deepEqual(ingress.tables["publication.inbox"], ["SELECT", "INSERT", "UPDATE"]);
   assert.deepEqual(
     ingress.tables["publication.channel_ownership"],
@@ -76,11 +100,29 @@ test("Runtime role specifications grant only the SQL surfaces used by each proce
   const reconciler = specifications.business.find((role) => (
     role.role === "business_publication_reconciler"
   ));
+  assert.deepEqual(reconciler.tables["publication.database_identity"], ["SELECT"]);
   assert.deepEqual(
     reconciler.tables["result.entity_current"],
     ["SELECT", "INSERT", "UPDATE"],
   );
   assert.deepEqual(reconciler.tables["publication.inbox"], ["SELECT"]);
+  const projector = specifications.business.find((role) => (
+    role.role === "business_publication_projector"
+  ));
+  assert.deepEqual(projector.tables["publication.database_identity"], ["SELECT"]);
+  assert.deepEqual(
+    projector.tables["publication.projection_outbox"],
+    ["SELECT", "UPDATE"],
+  );
+  assert.deepEqual(
+    projector.tables["result.entity_current"],
+    ["SELECT"],
+  );
+  assert.deepEqual(projector.functions, [
+    "public.refresh_creator_search_release_v9(text,text[],text[])",
+    "public.replay_creator_search_release_v9(text)",
+    "public.restore_creator_search_live_from_legacy_v1(text)",
+  ]);
 });
 
 test("Runtime role password is bound as a query parameter instead of SQL text", async () => {

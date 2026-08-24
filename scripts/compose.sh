@@ -32,6 +32,9 @@ DEPLOYMENT_MODE="${DEPLOYMENT_MODE:-bundled}"
 
 COMPOSE_FILES=(-f "${ROOT_DIR}/deploy/compose.yml")
 case "${DEPLOYMENT_MODE}" in
+  fresh-migration)
+    COMPOSE_FILES+=(-f "${ROOT_DIR}/deploy/compose.fresh-migration.yml")
+    ;;
   bundled)
     ;;
   shared-qy)

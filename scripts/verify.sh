@@ -9,6 +9,7 @@ bash -n \
   scripts/build-images.sh \
   scripts/compose.sh \
   scripts/feature-bridge-compose.sh \
+  scripts/publication-compose.sh \
   scripts/setup-dev.sh \
   scripts/test.sh \
   ops/adopt-qy-shared-runtime.sh \
@@ -54,6 +55,12 @@ fi
 
 if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
   QY_RUNTIME_ROOT="${ROOT_DIR}/runtime/verify-template" \
+  QY_DEPLOYMENT_MODE=fresh-migration \
+    docker compose --env-file .env.example \
+      -f deploy/compose.yml \
+      -f deploy/compose.fresh-migration.yml \
+      config --quiet
+  QY_RUNTIME_ROOT="${ROOT_DIR}/runtime/verify-template" \
     docker compose --env-file .env.example -f deploy/compose.yml config --quiet
   QY_RUNTIME_ROOT="${ROOT_DIR}/runtime/verify-template" \
   QY_DEPLOYMENT_MODE=shared-qy \
@@ -75,6 +82,11 @@ if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; 
     docker compose --env-file .env.example \
       --project-name qy-feature-bridge-runtime \
       -f deploy/compose.qy-feature-bridge-runtime.yml \
+      config --quiet
+  QYBULLMQ_IMAGE_TAG=pachongsys-verify \
+    docker compose --env-file .env.example \
+      --project-name bullmq-publication-runtime \
+      -f deploy/compose.qy-publication-runtime.yml \
       config --quiet
 else
   echo "docker compose unavailable; skipped Compose validation" >&2

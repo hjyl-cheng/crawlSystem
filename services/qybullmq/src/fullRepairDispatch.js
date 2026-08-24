@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { parseArgs } from "node:util";
+import { verifyCrawlerWriterDatabase } from "./databaseIdentity.js";
 import {
   CHANNEL_QUEUE_PRESSURE_STATES,
   channelDispatchCapacity,
@@ -115,18 +116,10 @@ export function assertFullRepairExecutionAuthorized(options, manifest) {
 
 export async function assertFullRepairDatabaseIdentity(
   dbQuery,
-  expectedDatabase = "bullmq_crawler_migration",
+  environment = process.env,
 ) {
   if (typeof dbQuery !== "function") throw new TypeError("dbQuery is required");
-  const expected = requiredText(expectedDatabase, "expectedDatabase");
-  const result = await dbQuery("SELECT current_database() AS database_name");
-  const actual = String(result.rows[0]?.database_name ?? "").trim() || null;
-  if (actual !== expected) {
-    const error = new Error(`Full Repair database mismatch: expected ${expected}, received ${actual ?? "unknown"}`);
-    error.code = "full_repair_database_mismatch";
-    throw error;
-  }
-  return { database_name: actual };
+  return verifyCrawlerWriterDatabase(dbQuery, environment);
 }
 
 export function fullRepairSchedulerConflict(scheduler = {}, batchId) {

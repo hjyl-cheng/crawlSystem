@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import pg from "pg";
 import { assertChannelExecutionIdentity } from "./channelExecutionContext.js";
 import { databaseUrl } from "./databaseConnection.js";
+import { verifyCrawlerWriterDatabase } from "./databaseIdentity.js";
 import { crawlerRuntimeSchema } from "./publicationCurrentSchema.js";
 import { PUBLICATION_WRITER_VERSION } from "./publicationWriterVersion.js";
 
@@ -34,6 +35,7 @@ pool.on("error", (error) => {
 
 let schemaReady = null;
 let schemaSkipLogged = false;
+let databaseIdentityReady = null;
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -69,18 +71,31 @@ async function runSchemaMigration(schema) {
   }
 }
 
-export async function ensureSchema() {
-  if (String(process.env.SKIP_SCHEMA_MIGRATION || "").toLowerCase() === "true") {
-    if (!schemaSkipLogged) {
-      schemaSkipLogged = true;
-      console.log("schema migration skipped by SKIP_SCHEMA_MIGRATION=true");
-    }
-    return;
+async function ensureDatabaseIdentity() {
+  if (!databaseIdentityReady) {
+    databaseIdentityReady = verifyCrawlerWriterDatabase(pool.query.bind(pool)).catch((error) => {
+      databaseIdentityReady = null;
+      throw error;
+    });
   }
+  return databaseIdentityReady;
+}
+
+export async function ensureSchema() {
   if (!schemaReady) {
     schemaReady = (async () => {
+      await ensureDatabaseIdentity();
+      if (String(process.env.SKIP_SCHEMA_MIGRATION || "").toLowerCase() === "true") {
+        if (!schemaSkipLogged) {
+          schemaSkipLogged = true;
+          console.log("schema migration skipped by SKIP_SCHEMA_MIGRATION=true");
+        }
+        return;
+      }
       const schema = await readFile(join(__dirname, "schema.sql"), "utf8");
       await withStartupRetry(() => runSchemaMigration(crawlerRuntimeSchema(schema)));
+      databaseIdentityReady = null;
+      await ensureDatabaseIdentity();
     })().catch((error) => {
       schemaReady = null;
       throw error;

@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 import pg from "pg";
 import { PostgresBusinessPublicationAuditor } from "./businessPublicationAuditor.js";
 import { PostgresBusinessPublicationReconciler } from "./businessPublicationReconciler.js";
+import { verifyBusinessWriterDatabase } from "./databaseIdentity.js";
 import { environmentValue } from "./runtimeEnvironment.js";
 
 const { Pool } = pg;
@@ -18,7 +19,7 @@ function integerSetting(environment, name, fallback, { minimum, maximum }) {
 }
 
 export function businessPublicationReconcilerRuntimeConfig(environment = process.env) {
-  const expectedDatabase = String(environment.EXPECTED_BUSINESS_DATABASE || "yewu_business").trim();
+  const expectedDatabase = String(environment.EXPECTED_BUSINESS_DATABASE || "").trim();
   if (!expectedDatabase) throw new TypeError("EXPECTED_BUSINESS_DATABASE is required");
   const concurrency = integerSetting(
     environment,
@@ -172,6 +173,7 @@ async function main() {
   process.once("SIGINT", stop);
   process.once("SIGTERM", stop);
   try {
+    await verifyBusinessWriterDatabase(pool.query.bind(pool));
     await assertBusinessPublicationDatabase(pool, config.expectedDatabase);
     const auditor = new PostgresBusinessPublicationAuditor(auditPool, {
       gapAlertSeconds: config.gapAlertSeconds,

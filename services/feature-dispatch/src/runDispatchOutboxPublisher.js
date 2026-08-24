@@ -34,17 +34,24 @@ async function assertFeatureDatabase() {
   const result = await query(
     `SELECT current_database() AS database_name,
             current_user AS database_user,
+            identity.database_kind AS identity_kind,
+            identity.database_name AS identity_database,
             to_regclass('feature_clock.dispatch_outbox') IS NOT NULL AS outbox_ready,
             to_regnamespace('crawler') IS NOT NULL AS crawler_ready,
             to_regclass('crawler.channels') IS NOT NULL AS channels_ready,
             CASE WHEN to_regclass('crawler.channels') IS NULL THEN NULL
                  ELSE has_table_privilege(current_user,'crawler.channels','SELECT')
             END AS crawler_channels_readable,
-            current_setting('TimeZone') = 'UTC' AS timezone_utc`,
+            current_setting('TimeZone') = 'UTC' AS timezone_utc
+     FROM crawler.database_identity identity
+     WHERE identity.singleton=true`,
   );
   assertSharedFeatureDatabase(result.rows[0], {
     expectedDatabase: expected,
     expectedUser,
+    forbiddenDatabase: String(
+      process.env.FORBIDDEN_CRAWLER_DATABASE || "bullmq_crawler_migration",
+    ).trim(),
   });
 }
 

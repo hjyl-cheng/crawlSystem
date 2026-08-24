@@ -17,7 +17,11 @@ function bootstrapEnvelope(overrides = {}) {
   };
 }
 
-function ownershipClient({ existing = null, projectionModes = ["held_shadow"] } = {}) {
+function ownershipClient({
+  existing = null,
+  projectionModes = ["held_shadow"],
+  automaticProjectionMode = null,
+} = {}) {
   const calls = [];
   let ownership = existing;
   return {
@@ -34,6 +38,7 @@ function ownershipClient({ existing = null, projectionModes = ["held_shadow"] } 
             owner_count: projectionModes.length,
             all_online: projectionModes.length > 0
               && projectionModes.every((projectionMode) => projectionMode === "online"),
+            automatic_onboarding_projection_mode: automaticProjectionMode,
           }],
         };
       }
@@ -74,6 +79,17 @@ test("a fully online Stream gives new Channels online projection ownership", asy
   assert.equal(result.ownership.projection_mode, "online");
   const policy = client.calls.find((call) => call.sql.includes("inherit-policy"));
   assert.match(policy.sql, /status IN \('active','cutover_pending'\)/);
+});
+
+test("the first Channel uses the explicit Business Stream projection policy", async () => {
+  const client = ownershipClient({
+    projectionModes: [],
+    automaticProjectionMode: "online",
+  });
+  const result = await ensureAutomaticBusinessBootstrapOwnership(client, bootstrapEnvelope());
+
+  assert.equal(result.status, "registered");
+  assert.equal(result.ownership.projection_mode, "online");
 });
 
 test("a held cutover-pending Owner prevents a new Channel from inheriting online", async () => {

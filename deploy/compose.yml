@@ -25,7 +25,9 @@ x-crawler-database: &crawler-database
   POSTGRES_PORT: ${CRAWLER_DB_PORT:-6432}
   POSTGRES_USER: ${CRAWLER_DB_USER:-bullmq}
   POSTGRES_PASSWORD: ${CRAWLER_DB_PASSWORD:?CRAWLER_DB_PASSWORD is required}
-  POSTGRES_DB: ${CRAWLER_DB_NAME:-bullmq_crawler_migration}
+  POSTGRES_DB: ${CRAWLER_DB_NAME:-newcrawler_crawler}
+  EXPECTED_CRAWLER_DATABASE: ${CRAWLER_DB_NAME:-newcrawler_crawler}
+  FORBIDDEN_CRAWLER_DATABASE: bullmq_crawler_migration
   POSTGRES_POOL_MIN: 0
   POSTGRES_POOL_MAX: 4
   POSTGRES_IDLE_TIMEOUT_MS: 300000
@@ -36,7 +38,7 @@ x-crawler-database: &crawler-database
 
 x-crawler-storage: &crawler-storage
   S3_ENDPOINT: ${CRAWLER_S3_ENDPOINT:-http://minio:9000}
-  S3_BUCKET: ${MINIO_BUCKET:-crawler-raw-migration}
+  S3_BUCKET: ${MINIO_BUCKET:-newcrawler-raw-20260824-v1}
   S3_ACCESS_KEY: ${MINIO_ROOT_USER:-crawler}
   S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD is required}
   S3_REGION: local
@@ -95,7 +97,7 @@ services:
     environment:
       POSTGRES_USER: ${CRAWLER_DB_USER:-bullmq}
       POSTGRES_PASSWORD: ${CRAWLER_DB_PASSWORD:?CRAWLER_DB_PASSWORD is required}
-      POSTGRES_DB: ${CRAWLER_DB_NAME:-bullmq_crawler_migration}
+      POSTGRES_DB: ${CRAWLER_DB_NAME:-newcrawler_crawler}
       FEATURE_DB_PASSWORD: ${FEATURE_DB_PASSWORD:?FEATURE_DB_PASSWORD is required}
       PUBLICATION_DB_PASSWORD: ${PUBLICATION_DB_PASSWORD:?PUBLICATION_DB_PASSWORD is required}
       TZ: UTC
@@ -128,7 +130,7 @@ services:
       DB_PORT: 5432
       DB_USER: ${CRAWLER_DB_USER:-bullmq}
       DB_PASSWORD: ${CRAWLER_DB_PASSWORD:?CRAWLER_DB_PASSWORD is required}
-      DB_NAME: ${CRAWLER_DB_NAME:-bullmq_crawler_migration}
+      DB_NAME: ${CRAWLER_DB_NAME:-newcrawler_crawler}
       LISTEN_PORT: 6432
       AUTH_TYPE: scram-sha-256
       AUTH_QUERY: "SELECT usename,passwd FROM pg_shadow WHERE usename=$$1 AND usename IN ('bullmq','feature_user','publication_publisher')"
@@ -203,7 +205,7 @@ services:
         condition: service_healthy
     environment:
       MC_HOST_qy: http://${MINIO_ROOT_USER:-crawler}:${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD is required}@minio:9000
-      MINIO_BUCKET: ${MINIO_BUCKET:-crawler-raw-migration}
+      MINIO_BUCKET: ${MINIO_BUCKET:-newcrawler-raw-20260824-v1}
     entrypoint: ["/bin/sh", "-c"]
     command:
       - mc mb --ignore-existing "qy/$$MINIO_BUCKET" && mc anonymous set none "qy/$$MINIO_BUCKET"
@@ -330,6 +332,13 @@ services:
       YOUTUBE_LANGUAGE: ${YOUTUBE_LANGUAGE:-pt-BR}
       YOUTUBE_COUNTRY: ${YOUTUBE_COUNTRY:-BR}
       MIN_SUBSCRIBER_COUNT: ${MIN_SUBSCRIBER_COUNT:-1000}
+      MIGRATION_DATABASE_URL_FILE: /run/secrets/migration_database_url
+      MIGRATION_SOURCE_ID: ${MIGRATION_SOURCE_ID:-qy-migration-v1}
+      EXPECTED_MIGRATION_DATABASE: ${MIGRATION_POSTGRES_DB:-bullmq_crawler_migration}
+      EXPECTED_MIGRATION_DATABASE_OID: ${MIGRATION_POSTGRES_DATABASE_OID:-0}
+      EXPECTED_MIGRATION_DATABASE_USER: ${MIGRATION_POSTGRES_USER:-migration_reader}
+    secrets:
+      - migration_database_url
     networks: [internal]
     healthcheck:
       test: ["CMD", "curl", "-f", "http://127.0.0.1:3000/health"]
@@ -514,7 +523,8 @@ services:
     command: ["feature-ingest"]
     environment:
       FEATURE_DATABASE_URL_FILE: /run/secrets/feature_database_url
-      EXPECTED_FEATURE_DATABASE: ${CRAWLER_DB_NAME:-bullmq_crawler_migration}
+      EXPECTED_FEATURE_DATABASE: ${CRAWLER_DB_NAME:-newcrawler_crawler}
+      FORBIDDEN_CRAWLER_DATABASE: bullmq_crawler_migration
       EXPECTED_FEATURE_DATABASE_USER: feature_user
       FEATURE_INGEST_HOST: 0.0.0.0
       FEATURE_INGEST_PORT: 8090
@@ -549,7 +559,8 @@ services:
     command: ["python", "/app/deployment/run_daily_scheduler.py"]
     environment:
       FEATURE_DATABASE_URL_FILE: /run/secrets/feature_database_url
-      EXPECTED_FEATURE_DATABASE: ${CRAWLER_DB_NAME:-bullmq_crawler_migration}
+      EXPECTED_FEATURE_DATABASE: ${CRAWLER_DB_NAME:-newcrawler_crawler}
+      FORBIDDEN_CRAWLER_DATABASE: bullmq_crawler_migration
       EXPECTED_FEATURE_DATABASE_USER: feature_user
       SCHEDULER_PLANNER_CONFIG_VERSION: video-plan-1
       SCHEDULER_CAPACITY_VERSION: capacity-v1
@@ -586,7 +597,8 @@ services:
         condition: service_healthy
     environment:
       FEATURE_DATABASE_URL_FILE: /run/secrets/feature_database_url
-      EXPECTED_FEATURE_DATABASE: ${CRAWLER_DB_NAME:-bullmq_crawler_migration}
+      EXPECTED_FEATURE_DATABASE: ${CRAWLER_DB_NAME:-newcrawler_crawler}
+      FORBIDDEN_CRAWLER_DATABASE: bullmq_crawler_migration
       EXPECTED_FEATURE_DATABASE_USER: feature_user
       REDIS_HOST: ${CRAWLER_REDIS_HOST:-redis}
       REDIS_PORT: ${CRAWLER_REDIS_PORT:-6379}
@@ -646,7 +658,8 @@ services:
     environment:
       <<: *crawler-database
       NODE_ENV: production
-      EXPECTED_CRAWLER_DATABASE: ${CRAWLER_DB_NAME:-bullmq_crawler_migration}
+      EXPECTED_CRAWLER_DATABASE: ${CRAWLER_DB_NAME:-newcrawler_crawler}
+      FORBIDDEN_CRAWLER_DATABASE: bullmq_crawler_migration
       FEATURE_RECALC_QUEUE: feature-recalc
       OUTBOX_PUBLISH_BATCH_SIZE: 50
       OUTBOX_PUBLISH_POLL_MS: 1000
@@ -661,7 +674,7 @@ services:
     environment:
       POSTGRES_USER: ${BUSINESS_DB_USER:-business}
       POSTGRES_PASSWORD: ${BUSINESS_DB_PASSWORD:?BUSINESS_DB_PASSWORD is required}
-      POSTGRES_DB: ${BUSINESS_DB_NAME:-yewu_business}
+      POSTGRES_DB: ${BUSINESS_DB_NAME:-newcrawler_business}
       TZ: UTC
     volumes:
       - business-postgres-data:/var/lib/postgresql
@@ -681,6 +694,81 @@ services:
       retries: 30
     logging: *default-logging
 
+  publication-runtime-role-admin:
+    <<: *qybullmq-image
+    profiles: [manual-publication-runtime-role-admin]
+    restart: "no"
+    depends_on:
+      crawler-postgres:
+        condition: service_healthy
+      business-postgres:
+        condition: service_healthy
+    command: ["node", "scripts/managePublicationRuntimeRoles.mjs"]
+    environment:
+      CRAWLER_ADMIN_DATABASE_URL_FILE: /run/secrets/crawler_admin_database_url
+      BUSINESS_ADMIN_DATABASE_URL_FILE: /run/secrets/business_admin_database_url
+      PUBLICATION_CRAWLER_PUBLISHER_DATABASE_URL_FILE: /run/secrets/crawler_publication_database_url
+      PUBLICATION_BUSINESS_INGRESS_DATABASE_URL_FILE: /run/secrets/business_publication_ingress_database_url
+      PUBLICATION_BUSINESS_RECONCILER_DATABASE_URL_FILE: /run/secrets/business_publication_reconciler_database_url
+      PUBLICATION_BUSINESS_PROJECTOR_DATABASE_URL_FILE: /run/secrets/business_publication_projector_database_url
+      EXPECTED_CRAWLER_DATABASE: ${CRAWLER_DB_NAME:-newcrawler_crawler}
+      EXPECTED_BUSINESS_DATABASE: ${BUSINESS_DB_NAME:-newcrawler_business}
+      EXPECTED_CRAWLER_CHANNEL_COUNT: ${EXPECTED_CRAWLER_CHANNEL_COUNT:-0}
+      EXPECTED_BUSINESS_CHANNEL_COUNT: ${EXPECTED_BUSINESS_CHANNEL_COUNT:-0}
+      TZ: UTC
+    secrets:
+      - crawler_admin_database_url
+      - business_admin_database_url
+      - crawler_publication_database_url
+      - business_publication_ingress_database_url
+      - business_publication_reconciler_database_url
+      - business_publication_projector_database_url
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    networks: [internal, business_database]
+    logging: *default-logging
+
+  fresh-publication-bootstrap:
+    <<: *qybullmq-image
+    profiles: [manual-fresh-publication-bootstrap]
+    restart: "no"
+    depends_on:
+      crawler-postgres:
+        condition: service_healthy
+      business-postgres:
+        condition: service_healthy
+    command: ["node", "scripts/bootstrapFreshPublication.mjs"]
+    environment:
+      CRAWLER_ADMIN_DATABASE_URL_FILE: /run/secrets/crawler_admin_database_url
+      BUSINESS_ADMIN_DATABASE_URL_FILE: /run/secrets/business_admin_database_url
+      EXPECTED_CRAWLER_DATABASE: ${CRAWLER_DB_NAME:-newcrawler_crawler}
+      EXPECTED_BUSINESS_DATABASE: ${BUSINESS_DB_NAME:-newcrawler_business}
+      FORBIDDEN_CRAWLER_DATABASE: bullmq_crawler_migration
+      FORBIDDEN_BUSINESS_DATABASE: yewu_business
+      EXPECTED_CRAWLER_CHANNEL_COUNT: "0"
+      EXPECTED_BUSINESS_CHANNEL_COUNT: "0"
+      PUBLICATION_STREAM_ID: ${PUBLICATION_STREAM_ID:?PUBLICATION_STREAM_ID is required}
+      PUBLICATION_SOURCE_DEPLOYMENT_KEY: ${PUBLICATION_SOURCE_DEPLOYMENT_KEY:?PUBLICATION_SOURCE_DEPLOYMENT_KEY is required}
+      PUBLICATION_SOURCE_IDENTITY_JSON: '${PUBLICATION_SOURCE_IDENTITY_JSON:?PUBLICATION_SOURCE_IDENTITY_JSON is required}'
+      PUBLICATION_DESTINATION: ${PUBLICATION_DESTINATION:-business}
+      PUBLICATION_BOOTSTRAP_PROJECTION_MODE: ${PUBLICATION_BOOTSTRAP_PROJECTION_MODE:-online}
+      PUBLICATION_OPERATOR: ${PUBLICATION_OPERATOR:?PUBLICATION_OPERATOR is required}
+      PUBLICATION_ACTION_REASON: ${PUBLICATION_ACTION_REASON:?PUBLICATION_ACTION_REASON is required}
+      PUBLICATION_WRITER_DEPLOYMENT_REF: ${PUBLICATION_WRITER_DEPLOYMENT_REF:?PUBLICATION_WRITER_DEPLOYMENT_REF is required}
+      PUBLICATION_RUNTIME_DEPLOYMENT_REF: ${PUBLICATION_RUNTIME_DEPLOYMENT_REF:?PUBLICATION_RUNTIME_DEPLOYMENT_REF is required}
+      TZ: UTC
+    secrets:
+      - crawler_admin_database_url
+      - business_admin_database_url
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    networks: [internal, business_database]
+    logging: *default-logging
+
   business-publication-ingress:
     <<: *qybullmq-image
     restart: unless-stopped
@@ -690,14 +778,15 @@ services:
     command: ["node", "src/runBusinessPublicationIngress.js"]
     environment:
       NODE_ENV: production
-      BUSINESS_DATABASE_URL_FILE: /run/secrets/business_database_url
-      EXPECTED_BUSINESS_DATABASE: ${BUSINESS_DB_NAME:-yewu_business}
+      BUSINESS_DATABASE_URL_FILE: /run/secrets/business_publication_ingress_database_url
+      EXPECTED_BUSINESS_DATABASE: ${BUSINESS_DB_NAME:-newcrawler_business}
+      FORBIDDEN_BUSINESS_DATABASE: yewu_business
       BUSINESS_PUBLICATION_INGRESS_HOST: 0.0.0.0
       BUSINESS_PUBLICATION_INGRESS_PORT: 8081
       BUSINESS_PUBLICATION_INGRESS_TOKEN_FILE: /run/secrets/business_publication_ingress_token
       TZ: UTC
     secrets:
-      - business_database_url
+      - business_publication_ingress_database_url
       - business_publication_ingress_token
     read_only: true
     tmpfs: [/tmp]
@@ -727,7 +816,8 @@ services:
       POSTGRES_POOL_MAX: 4
       POSTGRES_IDLE_TIMEOUT_MS: 300000
       SKIP_SCHEMA_MIGRATION: "true"
-      EXPECTED_CRAWLER_DATABASE: ${CRAWLER_DB_NAME:-bullmq_crawler_migration}
+      EXPECTED_CRAWLER_DATABASE: ${CRAWLER_DB_NAME:-newcrawler_crawler}
+      FORBIDDEN_CRAWLER_DATABASE: bullmq_crawler_migration
       PUBLICATION_DESTINATION: ${PUBLICATION_DESTINATION:-business}
       BUSINESS_PUBLICATION_INGRESS_URL: http://business-publication-ingress:8081/internal/publications/v1/shards
       BUSINESS_PUBLICATION_INGRESS_TRUSTED_HTTP_HOSTNAME: business-publication-ingress
@@ -757,8 +847,9 @@ services:
     command: ["node", "src/runBusinessPublicationReconciler.js"]
     environment:
       NODE_ENV: production
-      BUSINESS_DATABASE_URL_FILE: /run/secrets/business_database_url
-      EXPECTED_BUSINESS_DATABASE: ${BUSINESS_DB_NAME:-yewu_business}
+      BUSINESS_DATABASE_URL_FILE: /run/secrets/business_publication_reconciler_database_url
+      EXPECTED_BUSINESS_DATABASE: ${BUSINESS_DB_NAME:-newcrawler_business}
+      FORBIDDEN_BUSINESS_DATABASE: yewu_business
       BUSINESS_PUBLICATION_RECONCILE_POLL_MS: 1000
       BUSINESS_PUBLICATION_RECONCILE_BATCH_SIZE: 100
       BUSINESS_PUBLICATION_RECONCILE_CONCURRENCY: 4
@@ -767,7 +858,7 @@ services:
       BUSINESS_PUBLICATION_AUDIT_MAX_ERROR_RETRY_SECONDS: 300
       TZ: UTC
     secrets:
-      - business_database_url
+      - business_publication_reconciler_database_url
     read_only: true
     tmpfs: [/tmp]
     cap_drop: [ALL]
@@ -784,15 +875,16 @@ services:
     command: ["node", "src/runBusinessPublicationProjector.js"]
     environment:
       NODE_ENV: production
-      BUSINESS_DATABASE_URL_FILE: /run/secrets/business_database_url
-      EXPECTED_BUSINESS_DATABASE: ${BUSINESS_DB_NAME:-yewu_business}
-      EXPECTED_BUSINESS_PROJECTOR_ROLE: ${BUSINESS_DB_USER:-business}
+      BUSINESS_DATABASE_URL_FILE: /run/secrets/business_publication_projector_database_url
+      EXPECTED_BUSINESS_DATABASE: ${BUSINESS_DB_NAME:-newcrawler_business}
+      FORBIDDEN_BUSINESS_DATABASE: yewu_business
+      EXPECTED_BUSINESS_PROJECTOR_ROLE: business_publication_projector
       BUSINESS_PUBLICATION_PROJECT_POLL_MS: 1000
       BUSINESS_PUBLICATION_PROJECT_BATCH_SIZE: 100
       BUSINESS_PUBLICATION_PROJECT_LEASE_SECONDS: 120
       TZ: UTC
     secrets:
-      - business_database_url
+      - business_publication_projector_database_url
     read_only: true
     tmpfs: [/tmp]
     cap_drop: [ALL]
@@ -821,18 +913,20 @@ services:
       POSTGRES_PORT: ${CRAWLER_DB_PORT:-6432}
       POSTGRES_USER: ${CRAWLER_DB_USER:-bullmq}
       POSTGRES_PASSWORD: ${CRAWLER_DB_PASSWORD:?CRAWLER_DB_PASSWORD is required}
-      POSTGRES_DB: ${CRAWLER_DB_NAME:-bullmq_crawler_migration}
+      POSTGRES_DB: ${CRAWLER_DB_NAME:-newcrawler_crawler}
+      EXPECTED_CRAWLER_DATABASE: ${CRAWLER_DB_NAME:-newcrawler_crawler}
+      FORBIDDEN_CRAWLER_DATABASE: bullmq_crawler_migration
       POSTGRES_POOL_MAX: 8
-      MIGRATION_POSTGRES_HOST: ${CRAWLER_DB_HOST:-crawler-pgbouncer}
-      MIGRATION_POSTGRES_PORT: ${CRAWLER_DB_PORT:-6432}
-      MIGRATION_POSTGRES_USER: ${CRAWLER_DB_USER:-bullmq}
-      MIGRATION_POSTGRES_PASSWORD: ${CRAWLER_DB_PASSWORD:?CRAWLER_DB_PASSWORD is required}
-      MIGRATION_POSTGRES_DB: ${CRAWLER_DB_NAME:-bullmq_crawler_migration}
+      MIGRATION_DATABASE_URL_FILE: /run/secrets/migration_database_url
+      MIGRATION_SOURCE_ID: ${MIGRATION_SOURCE_ID:-qy-migration-v1}
+      EXPECTED_MIGRATION_DATABASE: ${MIGRATION_POSTGRES_DB:-bullmq_crawler_migration}
+      EXPECTED_MIGRATION_DATABASE_OID: ${MIGRATION_POSTGRES_DATABASE_OID:-0}
+      EXPECTED_MIGRATION_DATABASE_USER: ${MIGRATION_POSTGRES_USER:-migration_reader}
       REDIS_HOST: ${CRAWLER_REDIS_HOST:-redis}
       REDIS_PORT: ${CRAWLER_REDIS_PORT:-6379}
       REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
       S3_ENDPOINT: ${CRAWLER_S3_ENDPOINT:-http://minio:9000}
-      S3_BUCKET: ${MINIO_BUCKET:-crawler-raw-migration}
+      S3_BUCKET: ${MINIO_BUCKET:-newcrawler-raw-20260824-v1}
       S3_ACCESS_KEY: ${MINIO_ROOT_USER:-crawler}
       S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD is required}
       S3_REGION: local
@@ -842,13 +936,14 @@ services:
       PROXY_DASHBOARD_URL: https://${QY_ROTA_HOST}
       ROTA_PROXY_CONTROL_URL: ${ROTA_PROXY_CONTROL_URL:-http://rota-core:8001/api/v1/proxy-control}
       BUSINESS_PUBLICATION_AUDIT_DATABASE_URL_FILE: /run/secrets/business_publication_audit_database_url
-      EXPECTED_BUSINESS_DATABASE: ${BUSINESS_DB_NAME:-yewu_business}
+      EXPECTED_BUSINESS_DATABASE: ${BUSINESS_DB_NAME:-newcrawler_business}
       EXPECTED_BUSINESS_AUDITOR_ROLE: ${BUSINESS_AUDITOR_ROLE:-${BUSINESS_DB_USER:-business}}
       PUBLICATION_DESTINATION: ${PUBLICATION_DESTINATION:-business}
       YOUTUBE_CHANNEL_CONTENT_LIMIT: ${YOUTUBE_CHANNEL_CONTENT_LIMIT:-30}
       YOUTUBE_CONTENT_MAX_AGE_DAYS: ${YOUTUBE_CONTENT_MAX_AGE_DAYS:-90}
       MIN_SUBSCRIBER_COUNT: ${MIN_SUBSCRIBER_COUNT:-1000}
     secrets:
+      - migration_database_url
       - business_publication_audit_database_url
     networks: [internal, business_database]
     healthcheck:
@@ -944,6 +1039,7 @@ services:
       QY_ROTA_HOST: ${QY_ROTA_HOST}
       QY_MINIO_HOST: ${QY_MINIO_HOST}
       QY_ROTA_API_UPSTREAM: ${QY_NGINX_ROTA_API_UPSTREAM:-rota-core:8001}
+      QY_ROTA_DASHBOARD_UPSTREAM: ${QY_NGINX_ROTA_DASHBOARD_UPSTREAM:-rota-dashboard:3000}
       QY_MINIO_CONSOLE_UPSTREAM: ${QY_NGINX_MINIO_CONSOLE_UPSTREAM:-minio:9001}
     volumes:
       - ./nginx/qy.conf.template:/etc/nginx/templates/default.conf.template:ro
@@ -961,18 +1057,32 @@ services:
 networks:
   internal:
     driver: bridge
+    name: ${QY_FRESH_CRAWLER_NETWORK:-qy-newcrawler-crawler-runtime}
   business_database:
     driver: bridge
     internal: true
+    name: ${QY_FRESH_BUSINESS_NETWORK:-qy-newcrawler-business-database}
   publication_transport:
     driver: bridge
     internal: true
 
 secrets:
+  migration_database_url:
+    file: ${QY_RUNTIME_ROOT:?QY_RUNTIME_ROOT is required}/secrets/migration_database_url
+  crawler_admin_database_url:
+    file: ${QY_RUNTIME_ROOT:?QY_RUNTIME_ROOT is required}/secrets/crawler_admin_database_url
+  business_admin_database_url:
+    file: ${QY_RUNTIME_ROOT:?QY_RUNTIME_ROOT is required}/secrets/business_admin_database_url
   crawler_publication_database_url:
     file: ${QY_RUNTIME_ROOT:?QY_RUNTIME_ROOT is required}/secrets/crawler_publication_database_url
   business_database_url:
     file: ${QY_RUNTIME_ROOT:?QY_RUNTIME_ROOT is required}/secrets/business_database_url
+  business_publication_ingress_database_url:
+    file: ${QY_RUNTIME_ROOT:?QY_RUNTIME_ROOT is required}/secrets/business_publication_ingress_database_url
+  business_publication_reconciler_database_url:
+    file: ${QY_RUNTIME_ROOT:?QY_RUNTIME_ROOT is required}/secrets/business_publication_reconciler_database_url
+  business_publication_projector_database_url:
+    file: ${QY_RUNTIME_ROOT:?QY_RUNTIME_ROOT is required}/secrets/business_publication_projector_database_url
   business_publication_audit_database_url:
     file: ${QY_RUNTIME_ROOT:?QY_RUNTIME_ROOT is required}/secrets/business_publication_audit_database_url
   business_publication_ingress_token:
@@ -984,8 +1094,12 @@ secrets:
 
 volumes:
   crawler-postgres-data:
+    name: ${CRAWLER_POSTGRES_VOLUME_NAME:-qy-newcrawler-crawler-postgres-20260824-v1}
   business-postgres-data:
+    name: ${BUSINESS_POSTGRES_VOLUME_NAME:-qy-newcrawler-business-postgres-20260824-v1}
   redis-data:
+    name: ${CRAWLER_REDIS_VOLUME_NAME:-qy-newcrawler-redis-20260824-v1}
   minio-data:
+    name: ${CRAWLER_MINIO_VOLUME_NAME:-qy-newcrawler-minio-20260824-v1}
   rota-postgres-data:
   rota-geoip-data:

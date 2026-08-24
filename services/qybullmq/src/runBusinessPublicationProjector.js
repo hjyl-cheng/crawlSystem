@@ -2,6 +2,7 @@ import { hostname } from "node:os";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
 import { PostgresBusinessPublicationProjector } from "./businessPublicationProjector.js";
+import { verifyBusinessWriterDatabase } from "./databaseIdentity.js";
 import { environmentValue } from "./runtimeEnvironment.js";
 
 const { Pool } = pg;
@@ -17,7 +18,7 @@ function integerSetting(environment, name, fallback, { minimum, maximum }) {
 }
 
 export function businessPublicationProjectorRuntimeConfig(environment = process.env) {
-  const expectedDatabase = String(environment.EXPECTED_BUSINESS_DATABASE || "yewu_business").trim();
+  const expectedDatabase = String(environment.EXPECTED_BUSINESS_DATABASE || "").trim();
   if (!expectedDatabase) throw new TypeError("EXPECTED_BUSINESS_DATABASE is required");
   const retrySeconds = integerSetting(
     environment,
@@ -136,6 +137,7 @@ async function main() {
   process.once("SIGINT", stop);
   process.once("SIGTERM", stop);
   try {
+    await verifyBusinessWriterDatabase(pool.query.bind(pool));
     await assertBusinessPublicationDatabase(pool, config);
     const projector = new PostgresBusinessPublicationProjector(pool, config);
     console.log(JSON.stringify({

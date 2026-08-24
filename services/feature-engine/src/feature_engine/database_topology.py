@@ -17,6 +17,7 @@ def validate_shared_feature_database(
     expected_database: str,
     expected_user: str,
     required_feature_relations: Iterable[str],
+    forbidden_database: str = "bullmq_crawler_migration",
 ) -> SharedDatabaseIdentity:
     """Validate the shared PostgreSQL topology without reading Crawler facts."""
 
@@ -25,6 +26,8 @@ def validate_shared_feature_database(
         raise RuntimeError("expected shared database name is required")
     if not expected_user.strip():
         raise RuntimeError("expected Feature database user is required")
+    if not forbidden_database.strip():
+        raise RuntimeError("forbidden Crawler database is required")
     if not required or any(not relation.startswith("feature_clock.") for relation in required):
         raise RuntimeError("required Feature relations must be feature_clock-qualified")
 
@@ -41,6 +44,8 @@ def validate_shared_feature_database(
             if row is None:
                 raise RuntimeError("shared Crawler/Feature database identity is unavailable")
             database, user, timezone, crawler_ready, channels_ready = row
+            if database == forbidden_database:
+                raise RuntimeError(f"refusing forbidden Crawler database {database}")
             if (
                 database != expected_database
                 or user != expected_user
@@ -49,6 +54,17 @@ def validate_shared_feature_database(
                 or not channels_ready
             ):
                 raise RuntimeError("unexpected or unmigrated shared Crawler/Feature database")
+
+            cursor.execute(
+                """
+                SELECT database_kind,database_name
+                FROM crawler.database_identity
+                WHERE singleton=true
+                """
+            )
+            marker = cursor.fetchone()
+            if marker is None or marker != ("crawler", database):
+                raise RuntimeError("Crawler database identity marker is missing or mismatched")
 
             cursor.execute(
                 "SELECT has_table_privilege(current_user,'crawler.channels','SELECT')"

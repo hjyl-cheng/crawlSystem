@@ -66,11 +66,13 @@ function onboardingClient({
               ? {
                 publication_stream_id: stream,
                 source_identity_json: {},
+                automatic_onboarding_destination: null,
                 capture_enabled_at: "2026-07-28T02:00:00.000Z",
               }
               : {
                 capture_enabled_at: "2026-07-28T02:00:00.000Z",
                 source_identity_json: {},
+                automatic_onboarding_destination: null,
                 ...stream,
               }
           )),
@@ -156,6 +158,33 @@ test("a newly created Channel inherits the fully online Publication route exactl
   assert.match(streamLookup.sql, /\$1::timestamptz>=capture_enabled_at/);
   assert.equal(client.calls.filter((call) => call.sql.includes("insert-owner")).length, 1);
   assert.equal(client.calls.filter((call) => call.sql.includes("insert-delivery")).length, 1);
+});
+
+test("the first Channel uses an explicit Stream route before any Channel delivery exists", async () => {
+  const client = onboardingClient({
+    streams: [{
+      publication_stream_id: STREAM_ID,
+      automatic_onboarding_destination: "business",
+    }],
+  });
+  const inheritedRouteQuery = client.query.bind(client);
+  client.query = async (sql, params = []) => {
+    if (String(sql).includes("publication-auto-onboarding:online-routes")) {
+      throw new Error("the first Channel cannot inherit a route from another Channel");
+    }
+    return inheritedRouteQuery(sql, params);
+  };
+
+  const result = await ensureAutomaticPublicationOnboarding(client, {
+    channelId: "UCnew",
+    runId: "run:new",
+  });
+
+  assert.deepEqual(result, {
+    status: "registered",
+    publication_stream_id: STREAM_ID,
+    destinations: ["business"],
+  });
 });
 
 test("a Full Crawl without accepted Candidate promotion evidence cannot auto-register a Channel", async () => {

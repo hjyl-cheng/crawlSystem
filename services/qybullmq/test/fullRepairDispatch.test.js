@@ -75,18 +75,38 @@ test("Full Repair defaults to dry-run and execute requires the exact manifest co
   }, manifest), true);
 });
 
-test("Full Repair refuses any database other than the explicit QY crawler database", async () => {
+test("Full Repair accepts only the initialized fresh Crawler Writer database", async () => {
   await assert.rejects(
     assertFullRepairDatabaseIdentity(async () => ({
-      rows: [{ database_name: "bullmq_crawler" }],
-    }), "bullmq_crawler_migration"),
-    /expected bullmq_crawler_migration, received bullmq_crawler/,
+      rows: [{
+        database_name: "bullmq_crawler_migration",
+        database_user: "bullmq",
+        transaction_read_only: "off",
+        identity_kind: "crawler",
+        identity_database: "bullmq_crawler_migration",
+        schema_ready: true,
+      }],
+    }), {
+      EXPECTED_CRAWLER_DATABASE: "bullmq_crawler_migration",
+      FORBIDDEN_CRAWLER_DATABASE: "bullmq_crawler_migration",
+    }),
+    /forbidden Crawler database bullmq_crawler_migration/,
   );
   assert.deepEqual(
     await assertFullRepairDatabaseIdentity(async () => ({
-      rows: [{ database_name: "bullmq_crawler_migration" }],
-    }), "bullmq_crawler_migration"),
-    { database_name: "bullmq_crawler_migration" },
+      rows: [{
+        database_name: "newcrawler_crawler",
+        database_user: "bullmq",
+        transaction_read_only: "off",
+        identity_kind: "crawler",
+        identity_database: "newcrawler_crawler",
+        schema_ready: true,
+      }],
+    }), {
+      EXPECTED_CRAWLER_DATABASE: "newcrawler_crawler",
+      FORBIDDEN_CRAWLER_DATABASE: "bullmq_crawler_migration",
+    }),
+    { database: "newcrawler_crawler", user: "bullmq" },
   );
 });
 

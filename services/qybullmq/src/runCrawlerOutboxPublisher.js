@@ -13,7 +13,8 @@ function sleep(ms) {
 }
 
 async function assertQyCrawlerDatabase() {
-  const expected = String(process.env.EXPECTED_CRAWLER_DATABASE || "bullmq_crawler_migration").trim();
+  const expected = String(process.env.EXPECTED_CRAWLER_DATABASE || "").trim();
+  if (!expected) throw new Error("EXPECTED_CRAWLER_DATABASE is required");
   const result = await query(
     `SELECT current_database() AS database_name,
             to_regclass('crawler.crawler_outbox') IS NOT NULL AS outbox_ready`,

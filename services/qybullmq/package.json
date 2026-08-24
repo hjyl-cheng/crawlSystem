@@ -36,6 +36,7 @@
     "recover:stored-data-api-evidence": "node scripts/recoverStoredDataApiEvidence.mjs",
     "recover:migration-business-run-intent": "node scripts/recoverMigrationBusinessRunIntentFailures.mjs",
     "publication:runtime-roles": "node scripts/managePublicationRuntimeRoles.mjs",
+    "publication:fresh:bootstrap": "node scripts/bootstrapFreshPublication.mjs",
     "publication:video-hashes": "node scripts/backfillVideoPublicationItemHashes.mjs --apply",
     "schema:v16:validate": "node scripts/validateV16CrawlerMigration.mjs",
     "outbox-publisher": "node src/runCrawlerOutboxPublisher.js",

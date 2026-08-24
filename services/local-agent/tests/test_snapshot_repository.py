@@ -36,6 +36,12 @@ class _Connection:
         self.statements.append((normalized, parameters))
         if normalized == "SHOW transaction_read_only":
             return _Cursor([{"transaction_read_only": "on"}])
+        if "current_database() AS database_name" in normalized:
+            return _Cursor([{
+                "database_name": "newcrawler_crawler",
+                "identity_kind": "crawler",
+                "identity_database": "newcrawler_crawler",
+            }])
         if "transaction_timestamp() AS as_of" in normalized:
             return _Cursor([{"as_of": datetime(2026, 8, 14, 9, 0, tzinfo=timezone.utc)}])
         if "FROM crawler.channels" in normalized:
@@ -117,7 +123,11 @@ class _Repository:
 class SnapshotRepositoryTest(unittest.TestCase):
     def test_postgres_repository_freezes_one_read_only_snapshot(self):
         connection = _Connection()
-        repository = PostgresSnapshotRepository(connection_factory=lambda: connection)
+        repository = PostgresSnapshotRepository(
+            connection_factory=lambda: connection,
+            expected_database="newcrawler_crawler",
+            forbidden_database="bullmq_crawler_migration",
+        )
 
         records = repository.load_many([CHANNEL_ID])
 
@@ -127,8 +137,30 @@ class SnapshotRepositoryTest(unittest.TestCase):
         statements = [statement for statement, _ in connection.statements]
         self.assertIn("BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY", statements)
         self.assertIn("SHOW transaction_read_only", statements)
+        self.assertTrue(any("current_database() AS database_name" in value for value in statements))
         self.assertEqual(statements[-1], "ROLLBACK")
         self.assertTrue(connection.closed)
+
+    def test_postgres_repository_rejects_legacy_crawler_identity(self):
+        class LegacyConnection(_Connection):
+            def execute(self, statement, parameters=None):
+                normalized = " ".join(statement.split())
+                if "current_database() AS database_name" in normalized:
+                    self.statements.append((normalized, parameters))
+                    return _Cursor([{
+                        "database_name": "bullmq_crawler_migration",
+                        "identity_kind": "crawler",
+                        "identity_database": "bullmq_crawler_migration",
+                    }])
+                return super().execute(statement, parameters)
+
+        repository = PostgresSnapshotRepository(
+            connection_factory=LegacyConnection,
+            expected_database="bullmq_crawler_migration",
+            forbidden_database="bullmq_crawler_migration",
+        )
+        with self.assertRaisesRegex(Exception, "forbidden Crawler database"):
+            repository.load_many([CHANNEL_ID])
 
     def test_database_runtime_accepts_only_channel_ids_and_derives_url(self):
         report = analyze_database_request(

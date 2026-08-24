@@ -1,5 +1,16 @@
 CREATE SCHEMA IF NOT EXISTS publication;
 
+CREATE TABLE IF NOT EXISTS publication.database_identity (
+  singleton BOOLEAN PRIMARY KEY DEFAULT true CHECK (singleton),
+  database_kind TEXT NOT NULL CHECK (database_kind='business'),
+  database_name TEXT NOT NULL,
+  initialized_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+INSERT INTO publication.database_identity (singleton, database_kind, database_name)
+VALUES (true, 'business', current_database())
+ON CONFLICT (singleton) DO NOTHING;
+
 CREATE TABLE IF NOT EXISTS publication.stream (
   publication_stream_id UUID PRIMARY KEY,
   source_deployment_key TEXT NOT NULL UNIQUE,
@@ -7,6 +18,7 @@ CREATE TABLE IF NOT EXISTS publication.stream (
   status TEXT NOT NULL DEFAULT 'active'
     CHECK (status IN ('active', 'sealed', 'revoked')),
   accepted_contract_versions INTEGER[] NOT NULL DEFAULT ARRAY[1,2]::integer[],
+  automatic_onboarding_projection_mode TEXT,
   registered_by TEXT NOT NULL,
   registered_reason TEXT NOT NULL,
   registered_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -18,12 +30,32 @@ CREATE TABLE IF NOT EXISTS publication.stream (
   CHECK (cardinality(accepted_contract_versions) > 0),
   CHECK (array_position(accepted_contract_versions,NULL) IS NULL),
   CHECK (0 < ALL(accepted_contract_versions)),
+  CONSTRAINT chk_business_publication_automatic_onboarding_projection_mode
+    CHECK (automatic_onboarding_projection_mode IN ('held_shadow','online')),
   CHECK (btrim(registered_by) <> '' AND btrim(registered_reason) <> ''),
   CHECK (btrim(status_changed_by) <> '' AND btrim(status_reason) <> '')
 );
 
 ALTER TABLE publication.stream
 ALTER COLUMN accepted_contract_versions SET DEFAULT ARRAY[1,2]::integer[];
+
+ALTER TABLE publication.stream
+ADD COLUMN IF NOT EXISTS automatic_onboarding_projection_mode TEXT;
+
+DO $publication_schema$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_constraint
+    WHERE conrelid='publication.stream'::regclass
+      AND conname='chk_business_publication_automatic_onboarding_projection_mode'
+  ) THEN
+    ALTER TABLE publication.stream
+    ADD CONSTRAINT chk_business_publication_automatic_onboarding_projection_mode
+    CHECK (automatic_onboarding_projection_mode IN ('held_shadow','online'));
+  END IF;
+END
+$publication_schema$;
 
 CREATE TABLE IF NOT EXISTS publication.channel_ownership (
   channel_id TEXT PRIMARY KEY,

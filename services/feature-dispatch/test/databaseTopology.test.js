@@ -4,8 +4,10 @@ import { assertSharedFeatureDatabase } from "../src/databaseTopology.js";
 
 function row(overrides = {}) {
   return {
-    database_name: "bullmq_crawler_migration",
+    database_name: "newcrawler_crawler",
     database_user: "feature_user",
+    identity_kind: "crawler",
+    identity_database: "newcrawler_crawler",
     outbox_ready: true,
     crawler_ready: true,
     channels_ready: true,
@@ -16,8 +18,9 @@ function row(overrides = {}) {
 }
 
 const expected = {
-  expectedDatabase: "bullmq_crawler_migration",
+  expectedDatabase: "newcrawler_crawler",
   expectedUser: "feature_user",
+  forbiddenDatabase: "bullmq_crawler_migration",
 };
 
 test("shared database topology accepts a schema-only Feature role", () => {
@@ -39,5 +42,19 @@ test("shared database topology rejects Crawler table read access", () => {
   assert.throws(
     () => assertSharedFeatureDatabase(row({ crawler_channels_readable: true }), expected),
     /shared Crawler\/Feature database/,
+  );
+});
+
+test("shared database topology rejects the legacy Crawler database even when expected", () => {
+  assert.throws(
+    () => assertSharedFeatureDatabase(row({
+      database_name: "bullmq_crawler_migration",
+      identity_database: "bullmq_crawler_migration",
+    }), {
+      expectedDatabase: "bullmq_crawler_migration",
+      expectedUser: "feature_user",
+      forbiddenDatabase: "bullmq_crawler_migration",
+    }),
+    /forbidden Crawler database/,
   );
 });

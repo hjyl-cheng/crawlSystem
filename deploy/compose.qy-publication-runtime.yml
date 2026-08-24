@@ -24,7 +24,8 @@ services:
     environment:
       NODE_ENV: production
       TZ: UTC
-      EXPECTED_BUSINESS_DATABASE: ${BUSINESS_DB_NAME:-yewu_business}
+      EXPECTED_BUSINESS_DATABASE: ${BUSINESS_DB_NAME:-newcrawler_business}
+      FORBIDDEN_BUSINESS_DATABASE: yewu_business
       BUSINESS_DATABASE_URL_FILE: /run/secrets/business_ingress_database_url
       BUSINESS_PUBLICATION_INGRESS_TOKEN_FILE: /run/secrets/publication_ingress_token
       BUSINESS_PUBLICATION_TLS_CERT_FILE: /run/secrets/publication_ingress_tls_cert
@@ -67,7 +68,8 @@ services:
       NODE_ENV: production
       TZ: UTC
       DATABASE_URL_FILE: /run/secrets/crawler_publisher_database_url
-      EXPECTED_CRAWLER_DATABASE: ${CRAWLER_DB_NAME:-bullmq_crawler_migration}
+      EXPECTED_CRAWLER_DATABASE: ${CRAWLER_DB_NAME:-newcrawler_crawler}
+      FORBIDDEN_CRAWLER_DATABASE: bullmq_crawler_migration
       PUBLICATION_DESTINATION: ${PUBLICATION_DESTINATION:-business}
       BUSINESS_PUBLICATION_INGRESS_URL: https://business-publication-ingress:8081/internal/publications/v1/shards
       BUSINESS_PUBLICATION_INGRESS_TRUSTED_HTTP_HOSTNAME: business-publication-ingress
@@ -93,7 +95,8 @@ services:
     environment:
       NODE_ENV: production
       TZ: UTC
-      EXPECTED_BUSINESS_DATABASE: ${BUSINESS_DB_NAME:-yewu_business}
+      EXPECTED_BUSINESS_DATABASE: ${BUSINESS_DB_NAME:-newcrawler_business}
+      FORBIDDEN_BUSINESS_DATABASE: yewu_business
       BUSINESS_DATABASE_URL_FILE: /run/secrets/business_reconciler_database_url
       BUSINESS_PUBLICATION_RECONCILE_POLL_MS: ${BUSINESS_PUBLICATION_RECONCILE_POLL_MS:-1000}
       BUSINESS_PUBLICATION_RECONCILE_BATCH_SIZE: ${BUSINESS_PUBLICATION_RECONCILE_BATCH_SIZE:-100}
@@ -114,7 +117,8 @@ services:
     environment:
       NODE_ENV: production
       TZ: UTC
-      EXPECTED_BUSINESS_DATABASE: ${BUSINESS_DB_NAME:-yewu_business}
+      EXPECTED_BUSINESS_DATABASE: ${BUSINESS_DB_NAME:-newcrawler_business}
+      FORBIDDEN_BUSINESS_DATABASE: yewu_business
       EXPECTED_BUSINESS_PROJECTOR_ROLE: business_publication_projector
       BUSINESS_DATABASE_URL_FILE: /run/secrets/business_projector_database_url
       BUSINESS_PUBLICATION_PROJECT_POLL_MS: ${BUSINESS_PUBLICATION_PROJECT_POLL_MS:-1000}
@@ -131,10 +135,10 @@ services:
 networks:
   crawler_database:
     external: true
-    name: ${QY_SHARED_CRAWLER_NETWORK:-bullmq-crawler}
+    name: ${QY_FRESH_CRAWLER_NETWORK:-qy-newcrawler-crawler-runtime}
   business_database:
     external: true
-    name: ${QY_SHARED_BUSINESS_NETWORK:-yewu_business_network}
+    name: ${QY_FRESH_BUSINESS_NETWORK:-qy-newcrawler-business-database}
   publication_transport:
     internal: true
     name: ${QY_PUBLICATION_TRANSPORT_NETWORK:-bullmq-publication-runtime_publication_transport}

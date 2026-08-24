@@ -38,7 +38,13 @@ replace_marker() {
   if ! grep -q "${marker}" "${ENV_FILE}"; then
     return
   fi
-  value="$(openssl rand -hex 32)"
+  if [[ "${marker}" == "CHANGE_ME_PUBLICATION_STREAM_ID" ]]; then
+    local uuid_hex
+    uuid_hex="$(openssl rand -hex 16)"
+    value="${uuid_hex:0:8}-${uuid_hex:8:4}-4${uuid_hex:13:3}-8${uuid_hex:17:3}-${uuid_hex:20:12}"
+  else
+    value="$(openssl rand -hex 32)"
+  fi
   sed -i "s/${marker}/${value}/g" "${ENV_FILE}"
 }
 
@@ -68,35 +74,72 @@ write_secret() {
 }
 
 crawler_db_name="$(environment_value CRAWLER_DB_NAME)"
-crawler_db_name="${crawler_db_name:-bullmq_crawler_migration}"
+crawler_db_name="${crawler_db_name:-newcrawler_crawler}"
+crawler_db_user="$(environment_value CRAWLER_DB_USER)"
+crawler_db_user="${crawler_db_user:-bullmq}"
+crawler_db_password="$(environment_value CRAWLER_DB_PASSWORD)"
 feature_db_password="$(environment_value FEATURE_DB_PASSWORD)"
 publication_db_password="$(environment_value PUBLICATION_DB_PASSWORD)"
 business_db_name="$(environment_value BUSINESS_DB_NAME)"
-business_db_name="${business_db_name:-yewu_business}"
+business_db_name="${business_db_name:-newcrawler_business}"
 business_db_user="$(environment_value BUSINESS_DB_USER)"
 business_db_user="${business_db_user:-business}"
 business_db_password="$(environment_value BUSINESS_DB_PASSWORD)"
+business_publication_ingress_db_password="$(environment_value BUSINESS_PUBLICATION_INGRESS_DB_PASSWORD)"
+business_publication_reconciler_db_password="$(environment_value BUSINESS_PUBLICATION_RECONCILER_DB_PASSWORD)"
+business_publication_projector_db_password="$(environment_value BUSINESS_PUBLICATION_PROJECTOR_DB_PASSWORD)"
 publication_ingress_token="$(environment_value BUSINESS_PUBLICATION_INGRESS_TOKEN)"
 feature_ingest_token="$(environment_value FEATURE_INGEST_TOKEN)"
+migration_db_host="$(environment_value MIGRATION_POSTGRES_HOST)"
+migration_db_host="${migration_db_host:-migration-postgres}"
+migration_db_port="$(environment_value MIGRATION_POSTGRES_PORT)"
+migration_db_port="${migration_db_port:-6432}"
+migration_db_name="$(environment_value MIGRATION_POSTGRES_DB)"
+migration_db_name="${migration_db_name:-bullmq_crawler_migration}"
+migration_db_user="$(environment_value MIGRATION_POSTGRES_USER)"
+migration_db_user="${migration_db_user:-migration_reader}"
+migration_db_password="$(environment_value MIGRATION_POSTGRES_PASSWORD)"
 
 for entry in \
   "CRAWLER_DB_NAME:${crawler_db_name}" \
+  "CRAWLER_DB_USER:${crawler_db_user}" \
+  "CRAWLER_DB_PASSWORD:${crawler_db_password}" \
   "FEATURE_DB_PASSWORD:${feature_db_password}" \
   "PUBLICATION_DB_PASSWORD:${publication_db_password}" \
   "BUSINESS_DB_NAME:${business_db_name}" \
   "BUSINESS_DB_USER:${business_db_user}" \
-  "BUSINESS_DB_PASSWORD:${business_db_password}"; do
+  "BUSINESS_DB_PASSWORD:${business_db_password}" \
+  "BUSINESS_PUBLICATION_INGRESS_DB_PASSWORD:${business_publication_ingress_db_password}" \
+  "BUSINESS_PUBLICATION_RECONCILER_DB_PASSWORD:${business_publication_reconciler_db_password}" \
+  "BUSINESS_PUBLICATION_PROJECTOR_DB_PASSWORD:${business_publication_projector_db_password}" \
+  "MIGRATION_POSTGRES_HOST:${migration_db_host}" \
+  "MIGRATION_POSTGRES_PORT:${migration_db_port}" \
+  "MIGRATION_POSTGRES_DB:${migration_db_name}" \
+  "MIGRATION_POSTGRES_USER:${migration_db_user}" \
+  "MIGRATION_POSTGRES_PASSWORD:${migration_db_password}"; do
   safe_url_component "${entry%%:*}" "${entry#*:}"
 done
 
+write_secret crawler_admin_database_url \
+  "postgresql://${crawler_db_user}:${crawler_db_password}@crawler-postgres:5432/${crawler_db_name}"
 write_secret crawler_publication_database_url \
   "postgresql://publication_publisher:${publication_db_password}@crawler-pgbouncer:6432/${crawler_db_name}"
 write_secret feature_database_url \
   "postgresql://feature_user:${feature_db_password}@crawler-pgbouncer:6432/${crawler_db_name}"
 write_secret business_database_url \
   "postgresql://${business_db_user}:${business_db_password}@business-postgres:5432/${business_db_name}"
+write_secret business_admin_database_url \
+  "postgresql://${business_db_user}:${business_db_password}@business-postgres:5432/${business_db_name}"
+write_secret business_publication_ingress_database_url \
+  "postgresql://business_publication_ingress:${business_publication_ingress_db_password}@business-postgres:5432/${business_db_name}"
+write_secret business_publication_reconciler_database_url \
+  "postgresql://business_publication_reconciler:${business_publication_reconciler_db_password}@business-postgres:5432/${business_db_name}"
+write_secret business_publication_projector_database_url \
+  "postgresql://business_publication_projector:${business_publication_projector_db_password}@business-postgres:5432/${business_db_name}"
 write_secret business_publication_audit_database_url \
   "postgresql://${business_db_user}:${business_db_password}@business-postgres:5432/${business_db_name}"
+write_secret migration_database_url \
+  "postgresql://${migration_db_user}:${migration_db_password}@${migration_db_host}:${migration_db_port}/${migration_db_name}"
 write_secret business_publication_ingress_token "${publication_ingress_token}"
 write_secret feature_ingest_token "${feature_ingest_token}"
 
@@ -120,4 +163,5 @@ fi
 
 echo "Bootstrap complete: ${ENV_FILE}"
 echo "Runtime directory: ${RUNTIME_DIR}"
-echo "Next: ./scripts/compose.sh ${ENVIRONMENT} up -d --build"
+echo "Next: follow docs/NEWCRAWLER_FRESH_DATABASE_MIGRATION.md for staged preflight and startup."
+echo "Do not run a blanket Compose up before the database, role, and Publication gates pass."

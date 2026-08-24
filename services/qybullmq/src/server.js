@@ -16,6 +16,7 @@ import {
   dispatchManualMigrationBatch,
   dispatchManualMigrationChannel,
 } from "./manualMigrationDispatch.js";
+import { closeMigrationSourcePool } from "./migrationSource.js";
 import {
   ManagedJobOutboxDispatcher,
   PostgresManagedJobDispatchRepository,
@@ -54,6 +55,16 @@ const app = express();
 app.disable("x-powered-by");
 app.use(express.json({ limit: "2mb" }));
 app.use(morgan("combined"));
+app.use((req, res, next) => {
+  const controlled = String(process.env.CONTROLLED_MIGRATION_ONLY || "").toLowerCase() === "true";
+  const readMethod = req.method === "GET" || req.method === "HEAD" || req.method === "OPTIONS";
+  if (!controlled || readMethod || req.path.startsWith("/api/migration/channels")) return next();
+  return res.status(423).json({
+    ok: false,
+    code: "controlled_migration_only",
+    error: "non-Migration writes are disabled during the controlled canary",
+  });
+});
 
 const asyncRoute = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 
@@ -626,7 +637,7 @@ async function shutdown(signal) {
   console.log(`received ${signal}, shutting down`);
   server.close(async () => {
     await closeQueues(queues);
-    await closeDb();
+    await Promise.all([closeDb(), closeMigrationSourcePool()]);
     process.exit(0);
   });
 }

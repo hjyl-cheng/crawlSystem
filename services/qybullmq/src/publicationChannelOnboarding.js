@@ -256,7 +256,8 @@ async function loadNewChannel(client, channelId, runId, revisionType = "incremen
 async function eligibleOnlineStreams(client, channel) {
   const streams = await client.query(
     `/* publication-auto-onboarding:active-streams */
-     SELECT publication_stream_id,source_identity_json,capture_enabled_at
+     SELECT publication_stream_id,source_identity_json,capture_enabled_at,
+            automatic_onboarding_destination
      FROM publication.stream
      WHERE status='active' AND capture_enabled_at IS NOT NULL
        AND $1::timestamptz>=capture_enabled_at
@@ -267,6 +268,17 @@ async function eligibleOnlineStreams(client, channel) {
   const eligible = [];
   for (const stream of streams.rows) {
     if (!supportsAutomaticChannelOnboarding(stream)) continue;
+    const explicitDestination = String(
+      stream.automatic_onboarding_destination ?? "",
+    ).trim();
+    if (explicitDestination) {
+      eligible.push({
+        publicationStreamId: String(stream.publication_stream_id),
+        captureEnabledAt: timestamp(stream.capture_enabled_at, "capture_enabled_at"),
+        destinations: [explicitDestination],
+      });
+      continue;
+    }
     const deliveries = await client.query(
       `/* publication-auto-onboarding:online-routes */
        SELECT count(*)::int AS route_count,

@@ -5357,6 +5357,7 @@ CREATE TABLE publication.stream (
     source_identity_json jsonb NOT NULL,
     status text DEFAULT 'active'::text NOT NULL,
     accepted_contract_versions integer[] DEFAULT ARRAY[1, 2] NOT NULL,
+    automatic_onboarding_projection_mode text,
     registered_by text NOT NULL,
     registered_reason text NOT NULL,
     registered_at timestamp with time zone DEFAULT now() NOT NULL,
@@ -5368,6 +5369,7 @@ CREATE TABLE publication.stream (
     CONSTRAINT stream_accepted_contract_versions_check2 CHECK ((0 < ALL (accepted_contract_versions))),
     CONSTRAINT stream_check CHECK (((btrim(registered_by) <> ''::text) AND (btrim(registered_reason) <> ''::text))),
     CONSTRAINT stream_check1 CHECK (((btrim(status_changed_by) <> ''::text) AND (btrim(status_reason) <> ''::text))),
+    CONSTRAINT chk_business_publication_automatic_onboarding_projection_mode CHECK ((automatic_onboarding_projection_mode = ANY (ARRAY['held_shadow'::text, 'online'::text]))),
     CONSTRAINT stream_source_deployment_key_check CHECK ((btrim(source_deployment_key) <> ''::text)),
     CONSTRAINT stream_source_identity_json_check CHECK ((jsonb_typeof(source_identity_json) = 'object'::text)),
     CONSTRAINT stream_status_check CHECK ((status = ANY (ARRAY['active'::text, 'sealed'::text, 'revoked'::text])))
@@ -8523,9 +8525,55 @@ ALTER TABLE ONLY result.video_current
     ADD CONSTRAINT video_current_publication_stream_id_fkey FOREIGN KEY (publication_stream_id) REFERENCES publication.stream(publication_stream_id) ON DELETE RESTRICT;
 
 
+INSERT INTO public.import_batches (
+    id, source_file, source_sha256, captured_at, schema_version, raw_payload,
+    parse_warnings, source_kind, status, row_counts
+)
+SELECT 'fresh-business-empty-v1', 'bootstrap://fresh-business-empty-v1',
+       '44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a',
+       '1970-01-01T00:00:00Z'::timestamptz, 1, '{}'::jsonb, '[]'::jsonb,
+       'derived_baseline', 'published', '{"channels":0}'::jsonb
+WHERE NOT EXISTS (SELECT 1 FROM public.creator_search_releases);
+
+INSERT INTO public.creator_search_releases (
+    watermark, status, activated_at, generation, rebuilt_at, storage_mode, changed_channel_count
+)
+SELECT 'fresh-business-empty-v1', 'active', clock_timestamp(), 1,
+       clock_timestamp(), 'shadow', 0
+WHERE NOT EXISTS (SELECT 1 FROM public.creator_search_releases);
+
+INSERT INTO public.creator_search_active (singleton, watermark)
+SELECT true, 'fresh-business-empty-v1'
+WHERE NOT EXISTS (SELECT 1 FROM public.creator_search_active)
+  AND EXISTS (
+      SELECT 1 FROM public.creator_search_releases
+      WHERE watermark = 'fresh-business-empty-v1' AND status = 'active'
+  );
+
+INSERT INTO publication.creator_search_storage_state (
+    singleton, write_mode, read_mode, initialized_watermark, initialized_row_count
+)
+SELECT true, 'shadow', 'legacy', active.watermark, 0
+FROM public.creator_search_active AS active
+WHERE active.singleton = true
+  AND NOT EXISTS (SELECT 1 FROM publication.creator_search_storage_state);
+
+
+CREATE TABLE publication.database_identity (
+    singleton boolean DEFAULT true NOT NULL,
+    database_kind text NOT NULL,
+    database_name text NOT NULL,
+    initialized_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT database_identity_kind_check CHECK ((database_kind = 'business'::text)),
+    CONSTRAINT database_identity_singleton_check CHECK (singleton),
+    CONSTRAINT database_identity_pkey PRIMARY KEY (singleton)
+);
+
+INSERT INTO publication.database_identity (singleton, database_kind, database_name)
+VALUES (true, 'business', current_database());
+
 --
 -- PostgreSQL database dump complete
 --
 
 \unrestrict Sf4gQ0ucPgbD9EiBQYZfjZedS6nldo10cznALxvzrPwEuo798jq2FGMuR3WhMrH
-

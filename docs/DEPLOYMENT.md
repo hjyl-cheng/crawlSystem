@@ -58,16 +58,15 @@ not export the large QYBullMQ image repeatedly.
 
 ## 5. Start Infrastructure And Applications
 
-For a fresh isolated environment:
+Do not use a blanket `up -d` for `fresh-migration`. Database identity, empty
+state, runtime roles, Publication stream routing, Redis isolation, MinIO
+isolation, and the read-only Migration Source must pass before any worker is
+started. Follow
+[`NEWCRAWLER_FRESH_DATABASE_MIGRATION.md`](NEWCRAWLER_FRESH_DATABASE_MIGRATION.md)
+for the only approved staged service lists and plan/apply commands.
 
-```bash
-QY_IMAGE_TAG=pachongsys-$(git rev-parse --short=7 HEAD)-smoke \
-  ./scripts/compose.sh smoke up -d
-```
-
-The bundled topology starts empty PostgreSQL databases, PgBouncer, Redis,
-MinIO, Rota, applications, and Nginx. Configure usable proxy sources in the
-isolated Rota before dispatching YouTube jobs.
+The bundled mode is a separate topology and is not an alternative procedure
+for a legacy-to-fresh newcrawler migration.
 
 A production cutover must connect to the approved persistent volumes and
 networks, preserve the old immutable tag for rollback, and first replace one

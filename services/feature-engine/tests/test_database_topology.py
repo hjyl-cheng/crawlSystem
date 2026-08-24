@@ -46,7 +46,8 @@ class SharedDatabaseTopologyTests(unittest.TestCase):
 
     def test_accepts_shared_database_with_schema_only_feature_role(self) -> None:
         connect = self.connect_with(
-            ("bullmq_crawler_migration", "feature_user", "UTC", True, True),
+            ("newcrawler_crawler", "feature_user", "UTC", True, True),
+            ("crawler", "newcrawler_crawler"),
             (False,),
             (True,),
             (True,),
@@ -54,7 +55,7 @@ class SharedDatabaseTopologyTests(unittest.TestCase):
 
         identity = validate_shared_feature_database(
             connect,
-            expected_database="bullmq_crawler_migration",
+            expected_database="newcrawler_crawler",
             expected_user="feature_user",
             required_feature_relations=(
                 "feature_clock.channel_feature_state",
@@ -62,7 +63,7 @@ class SharedDatabaseTopologyTests(unittest.TestCase):
             ),
         )
 
-        self.assertEqual(identity.database, "bullmq_crawler_migration")
+        self.assertEqual(identity.database, "newcrawler_crawler")
         self.assertEqual(identity.user, "feature_user")
 
     def test_rejects_the_legacy_physically_separate_database(self) -> None:
@@ -73,6 +74,18 @@ class SharedDatabaseTopologyTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "shared Crawler/Feature database"):
             validate_shared_feature_database(
                 connect,
+                expected_database="newcrawler_crawler",
+                expected_user="feature_user",
+                required_feature_relations=("feature_clock.channel_clock_state",),
+            )
+
+    def test_rejects_legacy_crawler_even_when_configured_as_expected(self) -> None:
+        connect = self.connect_with(
+            ("bullmq_crawler_migration", "feature_user", "UTC", True, True),
+        )
+        with self.assertRaisesRegex(RuntimeError, "forbidden Crawler database"):
+            validate_shared_feature_database(
+                connect,
                 expected_database="bullmq_crawler_migration",
                 expected_user="feature_user",
                 required_feature_relations=("feature_clock.channel_clock_state",),
@@ -80,14 +93,15 @@ class SharedDatabaseTopologyTests(unittest.TestCase):
 
     def test_rejects_feature_role_with_crawler_table_read_access(self) -> None:
         connect = self.connect_with(
-            ("bullmq_crawler_migration", "feature_user", "UTC", True, True),
+            ("newcrawler_crawler", "feature_user", "UTC", True, True),
+            ("crawler", "newcrawler_crawler"),
             (True,),
         )
 
         with self.assertRaisesRegex(RuntimeError, "must not read Crawler business tables"):
             validate_shared_feature_database(
                 connect,
-                expected_database="bullmq_crawler_migration",
+                expected_database="newcrawler_crawler",
                 expected_user="feature_user",
                 required_feature_relations=("feature_clock.channel_clock_state",),
             )
@@ -119,6 +133,10 @@ class SharedDatabaseTopologyTests(unittest.TestCase):
         self.assertIn(
             "ALTER DEFAULT PRIVILEGES IN SCHEMA crawler\n"
             "  REVOKE ALL ON TABLES FROM feature_user",
+            script,
+        )
+        self.assertIn(
+            "GRANT SELECT ON TABLE crawler.database_identity TO feature_user",
             script,
         )
 

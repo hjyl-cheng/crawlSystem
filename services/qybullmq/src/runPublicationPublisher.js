@@ -15,7 +15,8 @@ function sleep(ms) {
 }
 
 async function assertPublicationDatabase() {
-  const expected = String(process.env.EXPECTED_CRAWLER_DATABASE || "bullmq_crawler_migration").trim();
+  const expected = String(process.env.EXPECTED_CRAWLER_DATABASE || "").trim();
+  if (!expected) throw new Error("EXPECTED_CRAWLER_DATABASE is required");
   const result = await query(
     `SELECT current_database() AS database_name,
             to_regclass('publication.revision') IS NOT NULL AS revision_ready,

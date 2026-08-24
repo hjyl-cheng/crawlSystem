@@ -109,7 +109,7 @@ async function main() {
     const dbQuery = client.query.bind(client);
     const database = await assertFullRepairDatabaseIdentity(
       dbQuery,
-      process.env.EXPECTED_CRAWLER_DATABASE || "bullmq_crawler_migration",
+      process.env,
     );
     const previewTargets = await loadFullRepairTargets(dbQuery, manifest);
     const scheduler = await schedulerState(dbQuery);

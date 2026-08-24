@@ -6,6 +6,7 @@ import {
   PostgresBusinessPublicationStore,
   createBusinessPublicationIngressApp,
 } from "./businessPublicationIngress.js";
+import { verifyBusinessWriterDatabase } from "./databaseIdentity.js";
 import { environmentValue } from "./runtimeEnvironment.js";
 
 const { Pool } = pg;
@@ -21,7 +22,7 @@ function integerSetting(environment, name, fallback, { minimum, maximum }) {
 }
 
 export function businessPublicationIngressRuntimeConfig(environment = process.env) {
-  const expectedDatabase = String(environment.EXPECTED_BUSINESS_DATABASE || "yewu_business").trim();
+  const expectedDatabase = String(environment.EXPECTED_BUSINESS_DATABASE || "").trim();
   const host = String(environment.BUSINESS_PUBLICATION_INGRESS_HOST || "127.0.0.1").trim();
   if (!expectedDatabase) throw new TypeError("EXPECTED_BUSINESS_DATABASE is required");
   if (!host) throw new TypeError("BUSINESS_PUBLICATION_INGRESS_HOST is required");
@@ -77,6 +78,7 @@ async function main() {
   });
   let server = null;
   try {
+    await verifyBusinessWriterDatabase(pool.query.bind(pool));
     const preflight = await pool.query(
       `SELECT current_database() AS database_name,
               to_regclass('publication.inbox') IS NOT NULL AS inbox_ready,

@@ -104,6 +104,33 @@ ON public.creator_search_live
 FOR EACH ROW
 EXECUTE FUNCTION public.normalize_creator_search_verified_status();
 
+INSERT INTO public.import_batches (
+  id,source_file,source_sha256,captured_at,schema_version,raw_payload,
+  parse_warnings,source_kind,status,row_counts
+)
+SELECT 'fresh-business-empty-v1','bootstrap://fresh-business-empty-v1',
+       '44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a',
+       '1970-01-01T00:00:00Z'::timestamptz,1,'{}'::jsonb,'[]'::jsonb,
+       'derived_baseline','published','{"channels":0}'::jsonb
+WHERE NOT EXISTS (SELECT 1 FROM public.creator_search_releases)
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO public.creator_search_releases (
+  watermark,status,activated_at,generation,rebuilt_at,storage_mode,changed_channel_count
+)
+SELECT 'fresh-business-empty-v1','active',clock_timestamp(),1,clock_timestamp(),'shadow',0
+WHERE NOT EXISTS (SELECT 1 FROM public.creator_search_releases)
+ON CONFLICT (watermark) DO NOTHING;
+
+INSERT INTO public.creator_search_active (singleton,watermark)
+SELECT true,'fresh-business-empty-v1'
+WHERE NOT EXISTS (SELECT 1 FROM public.creator_search_active)
+  AND EXISTS (
+    SELECT 1 FROM public.creator_search_releases
+    WHERE watermark='fresh-business-empty-v1' AND status='active'
+  )
+ON CONFLICT (singleton) DO NOTHING;
+
 CREATE TABLE IF NOT EXISTS publication.creator_search_storage_state (
   singleton BOOLEAN PRIMARY KEY DEFAULT true CHECK (singleton),
   write_mode TEXT NOT NULL DEFAULT 'shadow'
@@ -162,8 +189,8 @@ INSERT INTO publication.creator_search_storage_state (
   singleton,write_mode,read_mode,initialized_watermark,initialized_row_count
 )
 SELECT true,'shadow','legacy',active.watermark,
-       (SELECT count(*)::int FROM public.creator_search_current search
-        WHERE search.watermark=active.watermark)
+       COALESCE((SELECT count(*)::int FROM public.creator_search_current search
+                 WHERE search.watermark=active.watermark),0)
 FROM public.creator_search_active active
 WHERE active.singleton=true
 ON CONFLICT (singleton) DO NOTHING;

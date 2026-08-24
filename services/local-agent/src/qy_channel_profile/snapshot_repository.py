@@ -139,6 +139,8 @@ class PostgresSnapshotRepository:
         content_limit: int = 30,
         include_comments: bool = True,
         statement_timeout_seconds: int = 60,
+        expected_database: str | None = None,
+        forbidden_database: str = "bullmq_crawler_migration",
     ) -> None:
         if not 1 <= int(content_limit) <= 100:
             raise ContractError("content_limit must be in [1, 100]")
@@ -148,6 +150,10 @@ class PostgresSnapshotRepository:
         self.content_limit = int(content_limit)
         self.include_comments = bool(include_comments)
         self.statement_timeout_seconds = int(statement_timeout_seconds)
+        self.expected_database = str(expected_database or "").strip() or None
+        self.forbidden_database = str(forbidden_database or "").strip()
+        if not self.forbidden_database:
+            raise ContractError("forbidden_database is required")
 
     @classmethod
     def from_environment(
@@ -157,10 +163,24 @@ class PostgresSnapshotRepository:
         include_comments: bool = True,
         statement_timeout_seconds: int = 60,
     ) -> "PostgresSnapshotRepository":
+        expected_database = str(
+            os.environ.get("LOCAL_PROFILE_EXPECTED_DATABASE")
+            or os.environ.get("EXPECTED_CRAWLER_DATABASE")
+            or ""
+        ).strip()
+        if not expected_database:
+            raise ContractError(
+                "LOCAL_PROFILE_EXPECTED_DATABASE or EXPECTED_CRAWLER_DATABASE is required"
+            )
         return cls(
             content_limit=content_limit,
             include_comments=include_comments,
             statement_timeout_seconds=statement_timeout_seconds,
+            expected_database=expected_database,
+            forbidden_database=str(
+                os.environ.get("FORBIDDEN_CRAWLER_DATABASE")
+                or "bullmq_crawler_migration"
+            ).strip(),
         )
 
     def load_many(self, channel_ids: Sequence[str]) -> dict[str, SnapshotRecord]:
@@ -179,6 +199,32 @@ class PostgresSnapshotRepository:
             read_only_row = _mapping(connection.execute("SHOW transaction_read_only").fetchone())
             if read_only_row.get("transaction_read_only") != "on":
                 raise SnapshotError("PostgreSQL snapshot transaction is not read-only")
+            identity_row = _mapping(
+                connection.execute(
+                    """
+                    SELECT current_database() AS database_name,
+                           identity.database_kind AS identity_kind,
+                           identity.database_name AS identity_database
+                    FROM crawler.database_identity identity
+                    WHERE identity.singleton=true
+                    """
+                ).fetchone()
+            )
+            database_name = str(identity_row.get("database_name") or "").strip()
+            if database_name == self.forbidden_database:
+                raise SnapshotError(f"refusing forbidden Crawler database {database_name}")
+            if self.expected_database is not None and database_name != self.expected_database:
+                raise SnapshotError(
+                    f"refusing unexpected Crawler database {database_name or 'unknown'}; "
+                    f"expected {self.expected_database}"
+                )
+            if (
+                identity_row.get("identity_kind") != "crawler"
+                or identity_row.get("identity_database") != database_name
+            ):
+                raise SnapshotError(
+                    f"refusing uninitialized or mismatched Crawler database {database_name}"
+                )
             as_of_row = _mapping(
                 connection.execute("SELECT transaction_timestamp() AS as_of").fetchone()
             )

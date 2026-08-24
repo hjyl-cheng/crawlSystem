@@ -24,6 +24,7 @@ ALTER ROLE feature_user LOGIN PASSWORD :'feature_password';
 GRANT CONNECT ON DATABASE :DBNAME TO feature_user;
 GRANT USAGE ON SCHEMA crawler,feature_clock TO feature_user;
 REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA crawler FROM feature_user;
+GRANT SELECT ON TABLE crawler.database_identity TO feature_user;
 GRANT SELECT,INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA feature_clock TO feature_user;
 GRANT USAGE,SELECT,UPDATE ON ALL SEQUENCES IN SCHEMA feature_clock TO feature_user;
 
@@ -46,6 +47,8 @@ ALTER ROLE publication_publisher WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE
   NOINHERIT NOREPLICATION NOBYPASSRLS CONNECTION LIMIT 8
   PASSWORD :'publication_password';
 GRANT CONNECT ON DATABASE :DBNAME TO publication_publisher;
+GRANT USAGE ON SCHEMA crawler TO publication_publisher;
+GRANT SELECT ON TABLE crawler.database_identity TO publication_publisher;
 GRANT USAGE ON SCHEMA publication TO publication_publisher;
 GRANT SELECT,UPDATE ON TABLE publication.outbox TO publication_publisher;
 GRANT SELECT ON TABLE publication.revision TO publication_publisher;

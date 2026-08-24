@@ -1,0 +1,118 @@
+name: qy-newcrawler-fresh-migration
+
+services:
+  rota-db:
+    profiles: [bundled-rota-disabled]
+
+  rota-core:
+    profiles: [bundled-rota-disabled]
+
+  rota-dashboard:
+    profiles: [bundled-rota-disabled]
+
+  worker-incremental:
+    profiles: [automatic-work-disabled-during-canary]
+
+  worker-discover:
+    profiles: [automatic-work-disabled-during-canary]
+
+  worker-query-quality:
+    profiles: [automatic-work-disabled-during-canary]
+
+  feature-scheduler-daily:
+    profiles: [automatic-work-disabled-during-canary]
+
+  feature-dispatch:
+    profiles: [automatic-work-disabled-during-canary]
+
+  qybullmq-api:
+    environment:
+      CONTROLLED_MIGRATION_ONLY: "true"
+      MIGRATION_DATABASE_URL_FILE: /run/secrets/migration_database_url
+    secrets: !override [migration_database_url]
+    networks: !override [internal, migration_source]
+
+  dashboard:
+    environment:
+      CONTROLLED_MIGRATION_ONLY: "true"
+      MIGRATION_DATABASE_URL_FILE: /run/secrets/migration_database_url
+    secrets: !override
+      - migration_database_url
+      - business_publication_audit_database_url
+    networks: !override [internal, business_database, qy_rota, migration_source]
+
+  local-agent-config:
+    networks: !override [internal]
+
+  controller:
+    depends_on: !override
+      crawler-pgbouncer:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      local-agent-config:
+        condition: service_completed_successfully
+    networks: !override [internal, qy_rota]
+
+  worker-channel:
+    depends_on: !override
+      crawler-pgbouncer:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    networks: !override [internal, qy_rota]
+
+  worker-data-api:
+    networks: !override [internal]
+
+  worker-agent:
+    networks: !override [internal]
+
+  worker-finalize:
+    networks: !override [internal]
+
+  feature-ingest:
+    networks: !override [internal]
+
+  feature-relay:
+    networks: !override [internal]
+
+  crawler-outbox-publisher:
+    networks: !override [internal]
+
+  publication-publisher:
+    networks: !override [internal, publication_transport]
+
+  business-publication-ingress:
+    networks: !override [business_database, publication_transport]
+
+  business-publication-reconciler:
+    networks: !override [business_database]
+
+  business-publication-projector:
+    networks: !override [business_database]
+
+  nginx:
+    depends_on: !override
+      dashboard:
+        condition: service_healthy
+      qybullmq-api:
+        condition: service_healthy
+      auth:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    environment:
+      QY_ROTA_API_UPSTREAM: ${QY_NGINX_ROTA_API_UPSTREAM:-rota-core:8001}
+      QY_ROTA_DASHBOARD_UPSTREAM: ${QY_NGINX_ROTA_DASHBOARD_UPSTREAM:-rota-dashboard:3000}
+    networks: !override [internal, qy_rota]
+
+networks:
+  migration_source:
+    external: true
+    name: ${QY_MIGRATION_SOURCE_NETWORK:-newcrawler-migration-source}
+  qy_rota:
+    external: true
+    name: ${QY_SHARED_ROTA_NETWORK:-youtube-rota-qy-internal}
