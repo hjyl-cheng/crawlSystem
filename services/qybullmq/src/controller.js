@@ -235,6 +235,12 @@ const contentEnrichMetricsSampleMs = intEnv(
   15,
   86_400,
 ) * 1_000;
+const contentEnrichMetricsQueryTimeoutMs = intEnv(
+  "CONTENT_ENRICH_METRICS_QUERY_TIMEOUT_SECONDS",
+  5,
+  1,
+  60,
+) * 1_000;
 const contentEnrichBacklogAlertThreshold = intEnv(
   "CONTENT_ENRICH_BACKLOG_ALERT_THRESHOLD",
   10_000,
@@ -284,9 +290,14 @@ const contentEnrichDispatcher = new ContentEnrichDispatcher({
   leaseDurationMs: contentEnrichLeaseMs,
 });
 const contentEnrichMonitor = new ContentEnrichMonitor({
-  repository: new PostgresContentEnrichObservabilityRepository({ queryFn: query }),
+  repository: new PostgresContentEnrichObservabilityRepository({
+    queryFn: query,
+    withTransaction,
+    queryTimeoutMs: contentEnrichMetricsQueryTimeoutMs,
+  }),
   windowMs: contentEnrichMetricsWindowMs,
   sampleIntervalMs: contentEnrichMetricsSampleMs,
+  queryTimeoutMs: contentEnrichMetricsQueryTimeoutMs,
   backlogAlertThreshold: contentEnrichBacklogAlertThreshold,
   queuedAgeAlertSeconds: contentEnrichQueuedAgeAlertSeconds,
   alertRepeatMs: contentEnrichAlertRepeatMs,

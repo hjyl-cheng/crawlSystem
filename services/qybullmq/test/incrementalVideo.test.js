@@ -181,6 +181,9 @@ function databaseFixture({
         for (const input of JSON.parse(params[2])) {
           const row = state.contents.find((item) => item.source_content_id === input.video_id);
           if (row && input.content_type) row.content_type = input.content_type;
+          if (row && row.published_at == null && input.published_at) {
+            row.published_at = input.published_at;
+          }
         }
         return { rowCount: 1, rows: [] };
       }
@@ -304,6 +307,9 @@ function databaseFixture({
       if (sql.includes("AS enrich_pending") && sql.includes("FROM crawler.contents content")) {
         const cutoff = new Date(`${params[1]}T00:00:00.000Z`);
         cutoff.setUTCDate(cutoff.getUTCDate() - Number(params[2]));
+        const observedPublishedAt = new Map(
+          JSON.parse(params[4] ?? "[]").map((item) => [item.video_id, item.published_at]),
+        );
         const pendingBypassesWindow = sql.includes("candidate.enrich_pending");
         const clockOwnsEnrich = params[3] !== false;
         const protectsLiveLease = sql.includes("AS player_enrich_leased");
@@ -323,7 +329,10 @@ function databaseFixture({
             const retryWaiting = ["queued", "failed"].includes(taskState?.status)
               && taskState.retry_due === false;
             const terminalSchedule = state.enrichTerminalSchedule.get(row.content_key);
-            const published = row.published_at == null ? null : new Date(row.published_at);
+            const effectivePublishedAt = row.published_at
+              ?? observedPublishedAt.get(row.source_content_id)
+              ?? null;
+            const published = effectivePublishedAt == null ? null : new Date(effectivePublishedAt);
             const isRecent = published != null && published >= cutoff;
             if (isLeased && protectsLiveLease) return false;
             if (terminalSchedule === "future" && protectsTerminalWait) return false;
@@ -337,6 +346,9 @@ function databaseFixture({
           })
           .map((row) => ({
             ...row,
+            published_at: row.published_at
+              ?? observedPublishedAt.get(row.source_content_id)
+              ?? null,
             enrich_pending: state.enrichPending.has(row.content_key),
           }));
         return { rowCount: rows.length, rows };
@@ -1390,8 +1402,21 @@ test("an incomplete Uploads scan does not consume or downgrade a due terminal re
   assert.deepEqual(discovery.blocking_deferred_video_ids, []);
 });
 
-test("Video execution deduplicates only against Contents before sampling old Videos", async () => {
+test("Video execution deduplicates Contents and samples current Uploads dates in the same cycle", async () => {
   const fixture = databaseFixture();
+  fixture.state.contents.push({
+    content_key: "UCvideo:video:uploads-dated-video",
+    channel_id: "UCvideo",
+    source_content_id: "uploads-dated-video",
+    content_type: "video",
+    published_at: null,
+    last_seen_at: "2026-07-20T00:00:00.000Z",
+    view_count: null,
+    player_last_observed_at: null,
+    next_last_observed_at: null,
+    like_count: null,
+    comment_count: null,
+  });
   const fetched = [];
   const result = await executeIncrementalVideo({
     plan: plan(),
@@ -1410,10 +1435,17 @@ test("Video execution deduplicates only against Contents before sampling old Vid
           entries: [
             { id: "new-video", position: 1, content_type: "video", title: "New" },
             { id: "candidate-only", position: 2, content_type: "video", title: "Known Candidate" },
-            { id: "known-anchor", position: 3, content_type: "video", title: "Known" },
+            {
+              id: "uploads-dated-video",
+              position: 3,
+              content_type: "video",
+              title: "Uploads dated",
+              published_day: "2026-07-19",
+            },
+            { id: "known-anchor", position: 4, content_type: "video", title: "Known" },
           ],
           pages: 1,
-          item_count: 3,
+          item_count: 4,
           parse_gap_count: 0,
           anchor_matched: true,
           matched_anchor_id: "known-anchor",
@@ -1432,7 +1464,7 @@ test("Video execution deduplicates only against Contents before sampling old Vid
 
   assert.equal(result.outcome, "complete");
   assert.equal(result.first_seen_count, 2);
-  assert.deepEqual(fetched, ["new-video", "candidate-only", "old-video"]);
+  assert.deepEqual(fetched, ["new-video", "candidate-only", "uploads-dated-video", "old-video"]);
   assert.equal(fixture.state.contents.filter((row) => row.source_content_id === "new-video").length, 1);
   assert.equal(fixture.state.contents.filter((row) => row.source_content_id === "candidate-only").length, 1);
   assert.equal(fixture.state.contents.find((row) => row.source_content_id === "new-video").comments_disabled, null);
@@ -1442,6 +1474,10 @@ test("Video execution deduplicates only against Contents before sampling old Vid
     "comment-new-video",
   );
   assert.equal(fixture.state.contents.find((row) => row.source_content_id === "old-video").view_count, 100);
+  assert.equal(
+    fixture.state.contents.find((row) => row.source_content_id === "uploads-dated-video").view_count,
+    100,
+  );
   assert.equal(
     fixture.state.contents.find((row) => row.source_content_id === "old-video")
       .comments_first_page?.comments?.[0]?.comment_id,
@@ -1473,10 +1509,6 @@ test("Video execution deduplicates only against Contents before sampling old Vid
     /content_type=CASE[\s\S]*WHEN \$43::boolean THEN EXCLUDED\.content_type[\s\S]*ELSE crawler\.contents\.content_type/,
   );
   assert.doesNotMatch(discoverySql, /content_type=EXCLUDED\.content_type/);
-  const samplingRead = fixture.state.sql.findIndex((sql) => (
-    sql.includes("FROM crawler.contents") && sql.includes("published_at>=")
-  ));
-  assert.equal(discoveryWrite >= 0 && samplingRead > discoveryWrite, true);
   const crawlerOutbox = fixture.state.sql.findIndex((sql) => (
     sql.includes("INSERT INTO crawler.crawler_outbox")
   ));

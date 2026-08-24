@@ -27,6 +27,8 @@ async function assertPostgresObservability(pool) {
   const jobId = `content-enrich-observability:${randomUUID()}`;
   const repository = new PostgresContentEnrichObservabilityRepository({
     queryFn: (sql, params) => pool.query(sql, params),
+    withTransaction: transactionRunner(pool),
+    queryTimeoutMs: 5_000,
   });
   try {
     const before = await repository.loadSnapshot({ windowMs: 60_000 });
@@ -64,6 +66,28 @@ async function assertPostgresObservability(pool) {
       ])),
       { claimed: 5, success: 2, retry: 2, terminal: 1, dead_letter: 1 },
     );
+    assert.equal((await pool.query("SHOW statement_timeout")).rows[0].statement_timeout, "0");
+
+    const locker = await pool.connect();
+    try {
+      await locker.query("BEGIN");
+      await locker.query("LOCK TABLE crawler.content_enrich_tasks IN ACCESS EXCLUSIVE MODE");
+      const boundedRepository = new PostgresContentEnrichObservabilityRepository({
+        queryFn: (sql, params) => pool.query(sql, params),
+        withTransaction: transactionRunner(pool),
+        queryTimeoutMs: 50,
+      });
+      const startedAt = Date.now();
+      await assert.rejects(
+        boundedRepository.loadSnapshot({ windowMs: 60_000 }),
+        (error) => error?.code === "57014",
+      );
+      assert.ok(Date.now() - startedAt < 1_000, "observability aggregate ignored statement_timeout");
+    } finally {
+      await locker.query("ROLLBACK").catch(() => {});
+      locker.release();
+    }
+    assert.equal((await pool.query("SHOW statement_timeout")).rows[0].statement_timeout, "0");
   } finally {
     await pool.query(
       "DELETE FROM crawler.task_events WHERE job_id IN ($1,$1 || ':retry',$1 || ':legacy')",

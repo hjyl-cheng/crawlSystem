@@ -47,16 +47,34 @@ function ratio(count, claimed) {
   return claimed > 0 ? count / claimed : 0;
 }
 
+function timeoutAfter(promise, timeoutMs) {
+  let timer = null;
+  return Promise.race([
+    promise,
+    new Promise((resolve, reject) => {
+      timer = setTimeout(() => {
+        const error = new Error(`Content Enrich observability query exceeded ${timeoutMs}ms`);
+        error.name = "ContentEnrichObservabilityTimeoutError";
+        reject(error);
+      }, timeoutMs);
+    }),
+  ]).finally(() => clearTimeout(timer));
+}
+
 export class PostgresContentEnrichObservabilityRepository {
-  constructor({ queryFn } = {}) {
+  constructor({ queryFn, withTransaction = null, queryTimeoutMs = 5_000 } = {}) {
     if (typeof queryFn !== "function") throw new TypeError("queryFn is required");
+    if (withTransaction != null && typeof withTransaction !== "function") {
+      throw new TypeError("withTransaction must be a function");
+    }
     this.query = queryFn;
+    this.withTransaction = withTransaction;
+    this.queryTimeoutMs = positiveInteger(queryTimeoutMs, 5_000, 60_000);
   }
 
   async loadSnapshot({ windowMs = 5 * 60_000 } = {}) {
     const durationMs = positiveInteger(windowMs, 5 * 60_000, 24 * 60 * 60_000);
-    const result = await this.query(
-      `WITH task_metrics AS (
+    const sql = `WITH task_metrics AS (
          SELECT
            count(*) FILTER (WHERE status='queued')::bigint AS queued,
            count(*) FILTER (WHERE status='leased')::bigint AS leased,
@@ -85,9 +103,17 @@ export class PostgresContentEnrichObservabilityRepository {
          FROM event_payloads
        )
        SELECT task_metrics.*,event_metrics.*
-       FROM task_metrics CROSS JOIN event_metrics`,
-      [durationMs],
-    );
+       FROM task_metrics CROSS JOIN event_metrics`;
+    const load = (query) => query(sql, [durationMs]);
+    const result = this.withTransaction == null
+      ? await load(this.query)
+      : await this.withTransaction(async (client) => {
+          await client.query(
+            "SELECT set_config('statement_timeout',$1,true)",
+            [`${this.queryTimeoutMs}ms`],
+          );
+          return load((text, params) => client.query(text, params));
+        });
     const row = result.rows[0] ?? {};
     const oldestQueuedAtMs = Date.parse(String(row.oldest_queued_at ?? ""));
     return {
@@ -112,6 +138,7 @@ export class ContentEnrichMonitor {
     now = () => new Date(),
     windowMs = 5 * 60_000,
     sampleIntervalMs = 60_000,
+    queryTimeoutMs = 5_000,
     backlogAlertThreshold = 10_000,
     queuedAgeAlertSeconds = 24 * 60 * 60,
     alertRepeatMs = 15 * 60_000,
@@ -124,11 +151,37 @@ export class ContentEnrichMonitor {
     this.now = now;
     this.windowMs = positiveInteger(windowMs, 5 * 60_000, 24 * 60 * 60_000);
     this.sampleIntervalMs = positiveInteger(sampleIntervalMs, 60_000, 24 * 60 * 60_000);
+    this.queryTimeoutMs = positiveInteger(queryTimeoutMs, 5_000, 60_000);
     this.backlogAlertThreshold = nonnegativeInteger(backlogAlertThreshold);
     this.queuedAgeAlertSeconds = nonnegativeInteger(queuedAgeAlertSeconds);
     this.alertRepeatMs = positiveInteger(alertRepeatMs, 15 * 60_000, 24 * 60 * 60_000);
     this.alertState = new Map();
     this.sample = null;
+    this.sampleRefresh = null;
+    this.lastSampleAttemptAt = null;
+  }
+
+  #startSampleRefresh(observedAt) {
+    if (this.sampleRefresh) return this.sampleRefresh;
+    const refresh = {
+      observedAt,
+      promise: null,
+    };
+    refresh.promise = Promise.resolve()
+      .then(() => this.repository.loadSnapshot({
+        windowMs: this.windowMs,
+        observedAt,
+      }))
+      .then((snapshot) => {
+        this.sample = { observedAt, snapshot };
+        return this.sample;
+      })
+      .finally(() => {
+        if (this.sampleRefresh === refresh) this.sampleRefresh = null;
+      });
+    refresh.promise.catch(() => {});
+    this.sampleRefresh = refresh;
+    return refresh;
   }
 
   #alerts({ taskBacklog, oldestQueuedAgeSeconds, observedAt }) {
@@ -179,12 +232,19 @@ export class ContentEnrichMonitor {
     const sampleAgeMs = this.sample == null
       ? Number.POSITIVE_INFINITY
       : calledAt.getTime() - this.sample.observedAt.getTime();
-    if (sampleAgeMs < 0 || sampleAgeMs >= this.sampleIntervalMs) {
-      const snapshot = await this.repository.loadSnapshot({
-        windowMs: this.windowMs,
-        observedAt: calledAt,
-      });
-      this.sample = { observedAt: calledAt, snapshot };
+    const attemptAgeMs = this.lastSampleAttemptAt == null
+      ? Number.POSITIVE_INFINITY
+      : calledAt.getTime() - this.lastSampleAttemptAt.getTime();
+    const sampleDue = sampleAgeMs < 0 || sampleAgeMs >= this.sampleIntervalMs;
+    const attemptDue = attemptAgeMs < 0 || attemptAgeMs >= this.sampleIntervalMs;
+    if (sampleDue && attemptDue) {
+      this.lastSampleAttemptAt = calledAt;
+      const refresh = this.#startSampleRefresh(calledAt);
+      try {
+        await timeoutAfter(refresh.promise, this.queryTimeoutMs);
+      } catch (error) {
+        if (this.sample == null) throw error;
+      }
     }
     const { observedAt, snapshot } = this.sample;
     const taskCounts = normalizedCounts(snapshot?.task_counts, TASK_STATUSES);

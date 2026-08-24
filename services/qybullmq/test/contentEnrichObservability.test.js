@@ -111,6 +111,103 @@ test("Content Enrich monitor exposes backlog age, outcome rates, mutex contentio
   assert.equal(resolved.observed_at, "2026-08-23T12:01:00.000Z");
 });
 
+test("Content Enrich monitor times out a stalled refresh and serves the last database snapshot", async () => {
+  let currentTime = new Date(NOW);
+  let snapshotLoads = 0;
+  let releaseStalledRefresh = null;
+  const snapshot = {
+    task_counts: {
+      queued: 7,
+      leased: 0,
+      running: 0,
+      failed: 1,
+      terminal: 0,
+      dead_letter: 0,
+      done: 3,
+      skipped: 0,
+    },
+    oldest_queued_at: "2026-08-23T11:00:00.000Z",
+    outcome_counts: {
+      claimed: 4,
+      success: 3,
+      retry: 1,
+      terminal: 0,
+      dead_letter: 0,
+    },
+  };
+  const monitor = new ContentEnrichMonitor({
+    repository: {
+      async loadSnapshot() {
+        snapshotLoads += 1;
+        if (snapshotLoads === 1) return snapshot;
+        return new Promise((resolve) => {
+          releaseStalledRefresh = () => resolve(snapshot);
+        });
+      },
+    },
+    now: () => new Date(currentTime),
+    sampleIntervalMs: 1_000,
+    queryTimeoutMs: 5,
+  });
+
+  const initial = await monitor.observe({ queueCounts: { waiting: 1 } });
+  currentTime = new Date("2026-08-23T12:00:01.000Z");
+  const controllerDeadline = Symbol("controller deadline");
+  const refresh = monitor.observe({
+    queueCounts: { waiting: 4, active: 2 },
+    dispatchSummary: { reason: "dispatch_locked" },
+  });
+  const observed = await Promise.race([
+    refresh,
+    new Promise((resolve) => setTimeout(() => resolve(controllerDeadline), 100)),
+  ]);
+
+  currentTime = new Date("2026-08-23T12:00:02.000Z");
+  const repeated = await monitor.observe({ queueCounts: { waiting: 8 } });
+  releaseStalledRefresh?.();
+  await refresh;
+
+  assert.notEqual(observed, controllerDeadline, "a stalled metrics query blocked the Controller");
+  assert.equal(snapshotLoads, 2);
+  assert.equal(observed.observed_at, initial.observed_at);
+  assert.deepEqual(observed.task_counts, initial.task_counts);
+  assert.equal(observed.queue_open_jobs, 6);
+  assert.equal(observed.mutex_contention, true);
+  assert.equal(repeated.queue_open_jobs, 8);
+  assert.deepEqual(repeated.task_counts, initial.task_counts);
+});
+
+test("Content Enrich monitor serves the last database snapshot when a refresh fails", async () => {
+  let currentTime = new Date(NOW);
+  let snapshotLoads = 0;
+  const snapshot = {
+    task_counts: { queued: 5, failed: 2, done: 1 },
+    oldest_queued_at: "2026-08-23T11:00:00.000Z",
+    outcome_counts: { claimed: 3, success: 1, retry: 2 },
+  };
+  const monitor = new ContentEnrichMonitor({
+    repository: {
+      async loadSnapshot() {
+        snapshotLoads += 1;
+        if (snapshotLoads === 1) return snapshot;
+        throw new Error("isolated metrics database failure");
+      },
+    },
+    now: () => new Date(currentTime),
+    sampleIntervalMs: 1_000,
+    queryTimeoutMs: 50,
+  });
+
+  const initial = await monitor.observe({ queueCounts: { waiting: 1 } });
+  currentTime = new Date("2026-08-23T12:00:01.000Z");
+  const observed = await monitor.observe({ queueCounts: { waiting: 3, active: 1 } });
+
+  assert.equal(snapshotLoads, 2);
+  assert.equal(observed.observed_at, initial.observed_at);
+  assert.deepEqual(observed.task_counts, initial.task_counts);
+  assert.equal(observed.queue_open_jobs, 4);
+});
+
 test("PostgreSQL observability repository returns player-refresh state and Worker outcome totals", async () => {
   const calls = [];
   const repository = new PostgresContentEnrichObservabilityRepository({
@@ -163,4 +260,51 @@ test("PostgreSQL observability repository returns player-refresh state and Worke
   assert.deepEqual(calls[0].params, [300_000]);
   assert.match(calls[0].sql, /status IN \('claimed','checkpointed'\)/);
   assert.doesNotMatch(calls[0].sql, /status IN \('completed','failed'\)/);
+});
+
+test("PostgreSQL observability repository bounds the aggregate with a transaction-local timeout", async () => {
+  const queries = [];
+  let transactions = 0;
+  const repository = new PostgresContentEnrichObservabilityRepository({
+    queryFn: async () => {
+      throw new Error("unbounded query path was used");
+    },
+    withTransaction: async (action) => {
+      transactions += 1;
+      return action({
+        async query(sql, params = []) {
+          queries.push({ sql, params });
+          if (sql.includes("set_config('statement_timeout'")) return { rows: [{}] };
+          return {
+            rows: [{
+              queued: "0",
+              leased: "0",
+              running: "0",
+              failed: "0",
+              terminal: "0",
+              dead_letter: "0",
+              done: "0",
+              skipped: "0",
+              oldest_queued_at: null,
+              claimed: "0",
+              success: "0",
+              retry: "0",
+              outcome_terminal: "0",
+              outcome_dead_letter: "0",
+            }],
+          };
+        },
+      });
+    },
+    queryTimeoutMs: 1_234,
+  });
+
+  await repository.loadSnapshot({ windowMs: 300_000 });
+
+  assert.equal(transactions, 1);
+  assert.equal(queries.length, 2);
+  assert.match(queries[0].sql, /set_config\('statement_timeout'/);
+  assert.deepEqual(queries[0].params, ["1234ms"]);
+  assert.match(queries[1].sql, /FROM crawler\.content_enrich_tasks/);
+  assert.deepEqual(queries[1].params, [300_000]);
 });

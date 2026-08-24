@@ -17,6 +17,15 @@ test("Controller owns bounded Content Enrich dispatch behind a disabled-by-defau
   assert.match(source, /dispatchContentEnrichForController\(\{[\s\S]*dispatcher:\s*contentEnrichDispatcher/);
   assert.match(source, /new ContentEnrichMonitor\(/);
   assert.match(source, /PostgresContentEnrichObservabilityRepository\(\{[\s\S]*queryFn:\s*query/);
+  assert.match(source, /CONTENT_ENRICH_METRICS_QUERY_TIMEOUT_SECONDS/);
+  assert.match(
+    source,
+    /PostgresContentEnrichObservabilityRepository\(\{[\s\S]*withTransaction[\s\S]*queryTimeoutMs:\s*contentEnrichMetricsQueryTimeoutMs/,
+  );
+  assert.match(
+    source,
+    /new ContentEnrichMonitor\(\{[\s\S]*queryTimeoutMs:\s*contentEnrichMetricsQueryTimeoutMs/,
+  );
   assert.match(source, /monitor:\s*contentEnrichMonitor/);
   assert.match(source, /queueCounts:\s*stats\[queuesByRole\.contentEnrich\]/);
   assert.match(source, /content_enrich_operational/);
@@ -25,8 +34,13 @@ test("Controller owns bounded Content Enrich dispatch behind a disabled-by-defau
   assert.match(compose, /CONTENT_ENRICH_QUEUE_HIGH_WATER:/);
   assert.match(compose, /CONTENT_ENRICH_BACKLOG_ALERT_THRESHOLD:/);
   assert.match(compose, /CONTENT_ENRICH_METRICS_SAMPLE_SECONDS:\s*\$\{CONTENT_ENRICH_METRICS_SAMPLE_SECONDS:-60\}/);
+  assert.match(
+    compose,
+    /CONTENT_ENRICH_METRICS_QUERY_TIMEOUT_SECONDS:\s*\$\{CONTENT_ENRICH_METRICS_QUERY_TIMEOUT_SECONDS:-5\}/,
+  );
   assert.match(compose, /CONTENT_ENRICH_QUEUED_AGE_ALERT_SECONDS:/);
   assert.match(environment, /^CONTENT_ENRICH_METRICS_SAMPLE_SECONDS=60$/m);
+  assert.match(environment, /^CONTENT_ENRICH_METRICS_QUERY_TIMEOUT_SECONDS=5$/m);
   assert.match(environment, /^CONTENT_ENRICH_BACKLOG_ALERT_THRESHOLD=10000$/m);
   assert.match(environment, /^CONTENT_ENRICH_QUEUED_AGE_ALERT_SECONDS=86400$/m);
 });

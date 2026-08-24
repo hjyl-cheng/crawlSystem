@@ -69,6 +69,11 @@ test("incremental Video commits Current and aggregate events atomically", {
        (
          $5,$2,$3,'video','pending-detail','Pending detail','https://www.youtube.com/watch?v=pending-detail',
          NULL,'unresolved','unknown',NULL,NULL,'unresolved',now(),now(),NULL,NULL
+       ),
+       (
+         $6,$2,$3,'video','uploads-dated-video','Uploads dated',
+         'https://www.youtube.com/watch?v=uploads-dated-video',
+         NULL,'unresolved','unknown',NULL,NULL,'unresolved',now(),now(),NULL,NULL
        )`,
       [
         `${channelId}:video:old-video`,
@@ -76,6 +81,7 @@ test("incremental Video commits Current and aggregate events atomically", {
         runId,
         `${channelId}:video:known-anchor`,
         `${channelId}:video:pending-detail`,
+        `${channelId}:video:uploads-dated-video`,
       ],
     );
     await pool.query(
@@ -134,10 +140,17 @@ test("incremental Video commits Current and aggregate events atomically", {
             entries: [
               { id: "new-video", position: 1, content_type: "video", title: "New video" },
               { id: "candidate-only", position: 2, content_type: "video", title: "Candidate only" },
-              { id: "known-anchor", position: 3, content_type: "video", title: "Anchor" },
+              {
+                id: "uploads-dated-video",
+                position: 3,
+                content_type: "video",
+                title: "Uploads dated",
+                published_day: "2026-07-19",
+              },
+              { id: "known-anchor", position: 4, content_type: "video", title: "Anchor" },
             ],
             pages: 1,
-            item_count: 3,
+            item_count: 4,
             parse_gap_count: 0,
             anchor_matched: true,
             matched_anchor_id: "known-anchor",
@@ -199,7 +212,13 @@ test("incremental Video commits Current and aggregate events atomically", {
 
     assert.equal(result.outcome, "complete");
     assert.equal(result.first_seen_count, 2);
-    assert.deepEqual(fetched, ["new-video", "candidate-only", "pending-detail", "old-video"]);
+    assert.deepEqual(fetched, [
+      "new-video",
+      "candidate-only",
+      "pending-detail",
+      "uploads-dated-video",
+      "old-video",
+    ]);
 
     const dispositions = await pool.query(
       `SELECT source_content_id,disposition,next_attempt_at,
@@ -261,12 +280,12 @@ test("incremental Video commits Current and aggregate events atomically", {
     assert.deepEqual(cursor.rows[0].anchor_video_ids.slice(0, 3), [
       "new-video",
       "candidate-only",
-      "known-anchor",
+      "uploads-dated-video",
     ]);
     assert.equal(cursor.rows[0].source_cursor.matched_anchor_id, "known-anchor");
 
     const contents = await pool.query(
-      `SELECT source_content_id,view_count,comments_disabled,comments_first_page,video_change_probability,
+      `SELECT source_content_id,published_at,view_count,comments_disabled,comments_first_page,video_change_probability,
               description,description_status,hashtags,keywords,
               publication_item_hash
        FROM crawler.contents WHERE channel_id=$1 ORDER BY source_content_id`,
@@ -278,6 +297,7 @@ test("incremental Video commits Current and aggregate events atomically", {
       "new-video",
       "old-video",
       "pending-detail",
+      "uploads-dated-video",
     ]);
     assert.equal(contents.rows.some((row) => row.source_content_id === "candidate-only"), true);
     assert.equal(contents.rows.find((row) => row.source_content_id === "old-video").view_count, "100");
@@ -314,7 +334,19 @@ test("incremental Video commits Current and aggregate events atomically", {
       contents.rows.find((row) => row.source_content_id === "pending-detail").view_count,
       "10",
     );
-    for (const sourceContentId of ["candidate-only", "new-video", "old-video", "pending-detail"]) {
+    assert.equal(
+      new Date(contents.rows.find(
+        (row) => row.source_content_id === "uploads-dated-video",
+      ).published_at).toISOString(),
+      "2026-07-19T00:00:00.000Z",
+    );
+    for (const sourceContentId of [
+      "candidate-only",
+      "new-video",
+      "old-video",
+      "pending-detail",
+      "uploads-dated-video",
+    ]) {
       assert.match(
         contents.rows.find((row) => row.source_content_id === sourceContentId).publication_item_hash,
         /^sha256:[0-9a-f]{64}$/,
@@ -348,6 +380,339 @@ test("incremental Video commits Current and aggregate events atomically", {
     );
     assert.equal(snapshots.rows[0].count, 0);
   } finally {
+    await pool.query("DELETE FROM crawler.channels WHERE channel_id=$1", [channelId]).catch(() => {});
+    await pool.end();
+  }
+});
+
+test("Clock keeps failure attempts but rolls back successful cycle state when Publication fails", {
+  skip: !integrationUrl,
+}, async () => {
+  const pool = new Pool({ connectionString: integrationUrl, max: 4 });
+  const suffix = randomUUID().replaceAll("-", "");
+  const channelId = `UCclockatomic${suffix}`;
+  const runId = `incremental:clock-atomic:${suffix}`;
+  const planId = randomUUID();
+  const anchorVideoId = `atomic-anchor-${suffix}`;
+  const successVideoId = `atomic-success-${suffix}`;
+  const failedVideoId = `atomic-failed-${suffix}`;
+  const terminalVideoId = `atomic-terminal-${suffix}`;
+  const publicationFailure = new Error("injected Publication failure");
+  let publicationAttempted = false;
+  const originalMode = (await pool.query(
+    `SELECT value_json FROM crawler.settings WHERE setting_key='content_enrich_dispatch'`,
+  )).rows[0]?.value_json ?? { mode: "clock" };
+  const withTransaction = async (action) => {
+    const client = await pool.connect();
+    const transactionClient = {
+      query(sql, params = []) {
+        if (String(sql).includes("publication-reconciler:transaction-guard")) {
+          publicationAttempted = true;
+          throw publicationFailure;
+        }
+        return client.query(sql, params);
+      },
+    };
+    try {
+      await client.query("BEGIN");
+      const result = await action(transactionClient);
+      await client.query("COMMIT");
+      return result;
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+  };
+
+  try {
+    await pool.query(
+      `UPDATE crawler.settings SET value_json='{"mode":"clock"}'::jsonb
+       WHERE setting_key='content_enrich_dispatch'`,
+    );
+    await pool.query(
+      `INSERT INTO crawler.channels (channel_id,channel_url,title,status)
+       VALUES ($1,$2,'Clock atomicity integration','active')`,
+      [channelId, `https://www.youtube.com/channel/${channelId}`],
+    );
+    await pool.query(
+      `INSERT INTO crawler.channel_runs (
+         run_id,channel_id,status,crawl_mode,content_limit,detail_status,
+         plan_id,plan_day,trigger_reason,task_mask,scheduled_at,
+         clock_version,policy_version,planner_config_version,capacity_version,
+         crawler_version,started_at
+       ) VALUES (
+         $1,$2,'running','incremental',0,'pending',$3,'2026-08-24','clock_due',
+         '{"video":true}'::jsonb,
+         '2026-08-24T00:00:00Z',7,'v16-rule-1','video-plan-1','capacity-1','test',now()
+       )`,
+      [runId, channelId, planId],
+    );
+    await pool.query(
+      `INSERT INTO crawler.contents (
+         content_key,channel_id,run_id,content_type,content_type_source,
+         source_content_id,title,url,published_at,published_at_status,
+         published_at_source,published_at_precision,access_status,
+         access_status_source,first_seen_at,last_seen_at
+       ) VALUES
+       ($1,$2,$3,'video','youtube_watch_canonical',$4,'Original anchor',$5,
+        '2026-08-23T00:00:00Z','exact','youtubejs_player','second','public',
+        'youtubejs_player',now(),now()),
+       ($6,$2,$3,'video','youtube_watch_canonical',$7,'Original success',$8,
+        '2026-01-01T00:00:00Z','exact','youtubejs_player','second','public',
+        'youtubejs_player',now(),now()),
+       ($9,$2,$3,'video','youtube_watch_canonical',$10,'Original failure',$11,
+        '2026-01-02T00:00:00Z','exact','youtubejs_player','second','public',
+        'youtubejs_player',now(),now())`,
+      [
+        `${channelId}:video:${anchorVideoId}`,
+        channelId,
+        runId,
+        anchorVideoId,
+        `https://www.youtube.com/watch?v=${anchorVideoId}`,
+        `${channelId}:video:${successVideoId}`,
+        successVideoId,
+        `https://www.youtube.com/watch?v=${successVideoId}`,
+        `${channelId}:video:${failedVideoId}`,
+        failedVideoId,
+        `https://www.youtube.com/watch?v=${failedVideoId}`,
+      ],
+    );
+    await pool.query(
+      `INSERT INTO crawler.content_enrich_tasks (
+         task_id,content_key,channel_id,job_type,status,priority,attempts,next_retry_at
+       ) VALUES
+       ($1,$2,$3,'player-refresh','queued',10,0,clock_timestamp()-interval '1 second'),
+       ($4,$5,$3,'player-refresh','failed',10,2,clock_timestamp()-interval '1 second')`,
+      [
+        `player-refresh:${successVideoId}`,
+        `${channelId}:video:${successVideoId}`,
+        channelId,
+        `player-refresh:${failedVideoId}`,
+        `${channelId}:video:${failedVideoId}`,
+      ],
+    );
+    await pool.query(
+      `INSERT INTO crawler.contents (
+         content_key,channel_id,run_id,content_type,content_type_source,
+         source_content_id,title,url,published_at,published_at_status,
+         published_at_source,published_at_precision,access_status,
+         access_status_source,first_seen_at,last_seen_at
+       ) VALUES (
+         $1,$2,$3,'video','youtube_watch_canonical',$4,'Original terminal',$5,
+         '2026-01-03T00:00:00Z','exact','youtubejs_player','second','public',
+         'youtubejs_player',now(),now()
+       )`,
+      [
+        `${channelId}:video:${terminalVideoId}`,
+        channelId,
+        runId,
+        terminalVideoId,
+        `https://www.youtube.com/watch?v=${terminalVideoId}`,
+      ],
+    );
+    await pool.query(
+      `INSERT INTO crawler.content_enrich_tasks (
+         task_id,content_key,channel_id,job_type,status,priority,attempts,next_retry_at
+       ) VALUES (
+         $1,$2,$3,'player-refresh','queued',10,0,clock_timestamp()-interval '1 second'
+       )`,
+      [
+        `player-refresh:${terminalVideoId}`,
+        `${channelId}:video:${terminalVideoId}`,
+        channelId,
+      ],
+    );
+    await pool.query(
+      `INSERT INTO crawler.channel_domain_cursors (channel_id,observation_kind,anchor_video_ids)
+       VALUES ($1,'video',ARRAY[$2]::text[])`,
+      [channelId, anchorVideoId],
+    );
+
+    await assert.rejects(
+      executeIncrementalVideo({
+        plan: {
+          job_id: `incremental__clock_atomic__${suffix}`,
+          plan_id: planId,
+          plan_day: "2026-08-24",
+          scheduled_at: "2026-08-24T00:00:00.000Z",
+          channel_id: channelId,
+          capacity: { factor: 1, player_cap: 20, next_cap: 0, version: "capacity-1" },
+          planner_config_version: "video-plan-1",
+        },
+        runId,
+        startedAt: "2026-08-24T00:00:00.000Z",
+        query: (sql, params) => pool.query(sql, params),
+        withTransaction,
+        getChannelSnapshot: async () => ({
+          async scanUploads() {
+            return {
+              playlist_id: `UU${channelId.slice(2)}`,
+              entries: [{ id: anchorVideoId, position: 1, title: "Anchor" }],
+              pages: 1,
+              item_count: 1,
+              parse_gap_count: 0,
+              anchor_matched: true,
+              matched_anchor_id: anchorVideoId,
+              stop_reason: "anchor_matched",
+              terminal_reason: "anchor_matched",
+              complete: true,
+              raw: { engine: "youtubei.js@test" },
+            };
+          },
+        }),
+        fetchDetail: async (videoId) => {
+          if (videoId === failedVideoId) throw new Error("temporary Player timeout");
+          if (videoId === terminalVideoId) {
+            return {
+              id: videoId,
+              access_status: "private",
+              access_status_source: "youtubei_player",
+              availability: "private",
+              extractor_version: "youtubei.js@test",
+            };
+          }
+          return {
+            id: videoId,
+            title: `Updated ${videoId}`,
+            published_at: "2026-01-01T00:00:00.000Z",
+            published_at_precision: "second",
+            view_count: 123,
+            view_count_text: "123",
+            duration_seconds: 90,
+            access_status: "public",
+            availability: "public",
+            content_type_signals: {
+              source: "youtubei_player",
+              canonical_url: `https://www.youtube.com/watch?v=${videoId}`,
+              is_shorts_eligible: false,
+              is_live_content: false,
+              is_live: false,
+              is_upcoming: false,
+              is_live_now: false,
+            },
+            extractor_version: "youtubei.js@test",
+          };
+        },
+        now: () => new Date("2026-08-24T00:00:00.000Z"),
+        crawlerVersion: "qy-v16-integration-test",
+      }),
+      (error) => error === publicationFailure,
+    );
+
+    assert.equal(publicationAttempted, true);
+    assert.deepEqual((await pool.query(
+      `SELECT content.source_content_id,task.status,task.attempts,task.next_retry_at,
+              task.lease_owner,task.lease_expires_at,task.dispatch_generation
+       FROM crawler.content_enrich_tasks task
+       JOIN crawler.contents content USING (content_key)
+       WHERE task.channel_id=$1
+       ORDER BY content.source_content_id`,
+      [channelId],
+    )).rows.map((row) => ({
+      source_content_id: row.source_content_id,
+      status: row.status,
+      attempts: row.attempts,
+      has_next_retry: row.next_retry_at != null,
+      lease_owner: row.lease_owner,
+      lease_expires_at: row.lease_expires_at,
+      dispatch_generation: Number(row.dispatch_generation),
+    })), [
+      {
+        source_content_id: failedVideoId,
+        status: "failed",
+        attempts: 3,
+        has_next_retry: true,
+        lease_owner: null,
+        lease_expires_at: null,
+        dispatch_generation: 0,
+      },
+      {
+        source_content_id: successVideoId,
+        status: "queued",
+        attempts: 0,
+        has_next_retry: true,
+        lease_owner: null,
+        lease_expires_at: null,
+        dispatch_generation: 1,
+      },
+      {
+        source_content_id: terminalVideoId,
+        status: "queued",
+        attempts: 0,
+        has_next_retry: true,
+        lease_owner: null,
+        lease_expires_at: null,
+        dispatch_generation: 1,
+      },
+    ]);
+    assert.deepEqual((await pool.query(
+      `SELECT source_content_id,title,view_count,last_enriched_at,publication_item_hash,access_status
+       FROM crawler.contents
+       WHERE channel_id=$1
+       ORDER BY source_content_id`,
+      [channelId],
+    )).rows, [
+      {
+        source_content_id: anchorVideoId,
+        title: "Original anchor",
+        view_count: null,
+        last_enriched_at: null,
+        publication_item_hash: null,
+        access_status: "public",
+      },
+      {
+        source_content_id: failedVideoId,
+        title: "Original failure",
+        view_count: null,
+        last_enriched_at: null,
+        publication_item_hash: null,
+        access_status: "public",
+      },
+      {
+        source_content_id: successVideoId,
+        title: "Original success",
+        view_count: null,
+        last_enriched_at: null,
+        publication_item_hash: null,
+        access_status: "public",
+      },
+      {
+        source_content_id: terminalVideoId,
+        title: "Original terminal",
+        view_count: null,
+        last_enriched_at: null,
+        publication_item_hash: null,
+        access_status: "public",
+      },
+    ]);
+    assert.deepEqual((await pool.query(
+      `SELECT latest_sequence,source_cursor,anchor_video_ids
+       FROM crawler.channel_domain_cursors
+       WHERE channel_id=$1 AND observation_kind='video'`,
+      [channelId],
+    )).rows[0], {
+      latest_sequence: "0",
+      source_cursor: {},
+      anchor_video_ids: [anchorVideoId],
+    });
+    assert.equal((await pool.query(
+      `SELECT count(*)::int AS count FROM crawler.crawl_observations
+       WHERE channel_id=$1 AND run_id=$2`,
+      [channelId, runId],
+    )).rows[0].count, 0);
+    assert.equal((await pool.query(
+      `SELECT count(*)::int AS count FROM crawler.crawler_outbox
+       WHERE aggregate_key=$1`,
+      [`${channelId}:video`],
+    )).rows[0].count, 0);
+  } finally {
+    await pool.query(
+      `UPDATE crawler.settings SET value_json=$1::jsonb
+       WHERE setting_key='content_enrich_dispatch'`,
+      [JSON.stringify(originalMode)],
+    ).catch(() => {});
     await pool.query("DELETE FROM crawler.channels WHERE channel_id=$1", [channelId]).catch(() => {});
     await pool.end();
   }
