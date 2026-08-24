@@ -65,7 +65,13 @@ function detail(videoId, viewCount, { contentType = "video" } = {}) {
   };
 }
 
-function databaseFixture({ beforeTransaction = null, enrichMode = "clock" } = {}) {
+function databaseFixture({
+  beforeTransaction = null,
+  beforeEnrichTaskLock = null,
+  enrichMode = "clock",
+  failPublication = false,
+} = {}) {
+  let transactionCount = 0;
   const state = {
     candidates: new Set(["candidate-only"]),
     candidateRows: [],
@@ -115,6 +121,9 @@ function databaseFixture({ beforeTransaction = null, enrichMode = "clock" } = {}
   const client = {
     async query(sql, params = []) {
       state.sql.push(sql);
+      if (failPublication && sql.includes("publication-reconciler:find-owner")) {
+        throw new Error("simulated Publication failure");
+      }
       if (sql.includes("setting_key='content_enrich_dispatch'")) {
         return { rowCount: 1, rows: [{ mode: state.enrichMode }] };
       }
@@ -177,6 +186,7 @@ function databaseFixture({ beforeTransaction = null, enrichMode = "clock" } = {}
       }
       if (sql.includes("SELECT task.*") && sql.includes("FROM crawler.content_enrich_tasks task")) {
         const contentKey = params[0];
+        if (beforeEnrichTaskLock) await beforeEnrichTaskLock(state, contentKey);
         const recorded = state.enrichTaskStates.get(contentKey);
         if (recorded) return { rowCount: 1, rows: [{ ...recorded }] };
         if (state.enrichLeased.has(contentKey)) {
@@ -299,6 +309,8 @@ function databaseFixture({ beforeTransaction = null, enrichMode = "clock" } = {}
         const protectsLiveLease = sql.includes("AS player_enrich_leased");
         const protectsTerminalWait = sql.includes("AS player_enrich_terminal_waiting")
           && sql.includes("NOT candidate.player_enrich_terminal_waiting");
+        const protectsRetryWait = sql.includes("AS player_enrich_retry_waiting")
+          && sql.includes("NOT candidate.player_enrich_retry_waiting");
         const selectsDueTerminal = sql.includes("task.status='terminal'")
           && sql.includes("task.next_retry_at<=now()");
         const queueProtectsTerminal = sql.includes("AS player_enrich_open")
@@ -307,11 +319,15 @@ function databaseFixture({ beforeTransaction = null, enrichMode = "clock" } = {}
           .filter((row) => {
             const isPending = state.enrichPending.has(row.content_key);
             const isLeased = state.enrichLeased.has(row.content_key);
+            const taskState = state.enrichTaskStates.get(row.content_key);
+            const retryWaiting = ["queued", "failed"].includes(taskState?.status)
+              && taskState.retry_due === false;
             const terminalSchedule = state.enrichTerminalSchedule.get(row.content_key);
             const published = row.published_at == null ? null : new Date(row.published_at);
             const isRecent = published != null && published >= cutoff;
             if (isLeased && protectsLiveLease) return false;
             if (terminalSchedule === "future" && protectsTerminalWait) return false;
+            if (retryWaiting && protectsRetryWait) return false;
             if (terminalSchedule && !clockOwnsEnrich && queueProtectsTerminal) return false;
             if (terminalSchedule === "due" && selectsDueTerminal) {
               return clockOwnsEnrich && pendingBypassesWindow;
@@ -364,10 +380,17 @@ function databaseFixture({ beforeTransaction = null, enrichMode = "clock" } = {}
             : incrementsAttempts
               ? (["done", "skipped"].includes(prior?.status) ? 1 : priorAttempts + 1)
               : priorAttempts;
+          const guardsInitialSuccess = sql.includes(
+            "CASE WHEN $15::boolean THEN $13::timestamptz ELSE NULL END",
+          );
+          const lastSuccessAt = params[14] === true
+            ? params[12]
+            : prior?.last_success_at ?? (guardsInitialSuccess ? null : params[12]);
           state.enrichTaskStates.set(contentKey, {
             task_id: prior?.task_id ?? `player-refresh:${contentKey}`,
             status,
             attempts,
+            last_success_at: lastSuccessAt,
             dispatch_generation: prior?.dispatch_generation ?? 1,
             lease_live: false,
             retry_due: params[10] != null,
@@ -408,7 +431,8 @@ function databaseFixture({ beforeTransaction = null, enrichMode = "clock" } = {}
   return {
     state,
     withTransaction: async (action) => {
-      if (beforeTransaction) await beforeTransaction(state);
+      if (beforeTransaction && transactionCount === 0) await beforeTransaction(state);
+      transactionCount += 1;
       return action(client);
     },
     query: async (sql, params = []) => {
@@ -698,10 +722,22 @@ test("First-Seen Video keeps an incomplete public detail open for Enrich", async
   const content = fixture.state.contents.find((row) => row.content_key === contentKey);
   assert.equal(content.last_enriched_at, null);
   assert.deepEqual(
-    (({ status, attempts }) => ({ status, attempts }))(
+    (({ status, attempts, last_success_at }) => ({ status, attempts, last_success_at }))(
       fixture.state.enrichTaskStates.get(contentKey),
     ),
-    { status: "failed", attempts: 1 },
+    { status: "failed", attempts: 1, last_success_at: null },
+  );
+  assert.deepEqual(
+    (({ detail_status, missing_fields, error_message }) => ({
+      detail_status,
+      missing_fields,
+      error_message,
+    }))(fixture.state.candidateRows.find((row) => row.source_content_id === videoId)),
+    {
+      detail_status: "failed",
+      missing_fields: ["detail"],
+      error_message: "Content Enrich detail is missing the required public Video surface",
+    },
   );
 });
 
@@ -1828,6 +1864,238 @@ test("Video Clock does not consume an open Enrich Task after the database owner 
   assert.equal(result.outcome, "complete");
   assert.equal(fetched.includes("queue-owned"), false);
   assert.equal(fixture.state.enrichPending.has(contentKey), true);
+});
+
+test("Video Clock does not bypass a recent Enrich Task's retry schedule", async () => {
+  const contentKey = "UCvideo:video:retry-waiting";
+  const fixture = databaseFixture({
+    beforeTransaction(state) {
+      state.contents.push({
+        content_key: contentKey,
+        channel_id: "UCvideo",
+        source_content_id: "retry-waiting",
+        content_type: "video",
+        published_at: "2026-07-19T00:00:00.000Z",
+        last_seen_at: "2026-07-20T00:00:00.000Z",
+        view_count: null,
+        player_last_observed_at: null,
+        next_last_observed_at: null,
+        video_change_probability: null,
+        like_count: null,
+        comment_count: null,
+      });
+      state.enrichPending.add(contentKey);
+      state.enrichTaskStates.set(contentKey, {
+        task_id: `player-refresh:${contentKey}`,
+        status: "failed",
+        attempts: 3,
+        dispatch_generation: 1,
+        lease_live: false,
+        retry_due: false,
+      });
+    },
+  });
+  const fetched = [];
+
+  await executeIncrementalVideo({
+    plan: plan(),
+    runId: "incremental:retry-waiting",
+    startedAt: "2026-07-20T00:00:00.000Z",
+    query: fixture.query,
+    withTransaction: fixture.withTransaction,
+    getChannelSnapshot: async () => ({
+      async scanUploads() {
+        return {
+          playlist_id: "UUvideo",
+          entries: [{
+            id: "known-anchor",
+            position: 1,
+            content_type: "video",
+            title: "Known",
+            published_day: "2026-07-10",
+          }],
+          pages: 1,
+          item_count: 1,
+          parse_gap_count: 0,
+          anchor_matched: true,
+          matched_anchor_id: "known-anchor",
+          stop_reason: "anchor_matched",
+          terminal_reason: "anchor_matched",
+          complete: true,
+          raw: { engine: "youtubei.js@test" },
+        };
+      },
+    }),
+    fetchDetail: async (videoId) => {
+      fetched.push(videoId);
+      return detail(videoId, 123);
+    },
+  });
+
+  assert.equal(fetched.includes("retry-waiting"), false);
+  assert.deepEqual(
+    (({ status, attempts }) => ({ status, attempts }))(
+      fixture.state.enrichTaskStates.get(contentKey),
+    ),
+    { status: "failed", attempts: 3 },
+  );
+});
+
+test("Video Clock discards a result when the Task enters retry wait before its row lock", async () => {
+  const contentKey = "UCvideo:video:retry-race";
+  let movedToRetryWait = false;
+  const fixture = databaseFixture({
+    beforeTransaction(state) {
+      state.contents.push({
+        content_key: contentKey,
+        channel_id: "UCvideo",
+        source_content_id: "retry-race",
+        content_type: "video",
+        published_at: "2026-07-19T00:00:00.000Z",
+        last_seen_at: "2026-07-20T00:00:00.000Z",
+        view_count: null,
+        player_last_observed_at: null,
+        next_last_observed_at: null,
+        video_change_probability: null,
+        like_count: null,
+        comment_count: null,
+      });
+      state.enrichPending.add(contentKey);
+    },
+    beforeEnrichTaskLock(state, lockedContentKey) {
+      if (lockedContentKey !== contentKey || movedToRetryWait) return;
+      movedToRetryWait = true;
+      state.enrichTaskStates.set(contentKey, {
+        task_id: `player-refresh:${contentKey}`,
+        status: "failed",
+        attempts: 3,
+        dispatch_generation: 1,
+        lease_live: false,
+        retry_due: false,
+      });
+    },
+  });
+  const fetched = [];
+
+  await executeIncrementalVideo({
+    plan: plan(),
+    runId: "incremental:retry-race",
+    startedAt: "2026-07-20T00:00:00.000Z",
+    query: fixture.query,
+    withTransaction: fixture.withTransaction,
+    getChannelSnapshot: async () => ({
+      async scanUploads() {
+        return {
+          playlist_id: "UUvideo",
+          entries: [{ id: "known-anchor", position: 1, title: "Known" }],
+          pages: 1,
+          item_count: 1,
+          parse_gap_count: 0,
+          anchor_matched: true,
+          matched_anchor_id: "known-anchor",
+          stop_reason: "anchor_matched",
+          terminal_reason: "anchor_matched",
+          complete: true,
+          raw: { engine: "youtubei.js@test" },
+        };
+      },
+    }),
+    fetchDetail: async (videoId) => {
+      fetched.push(videoId);
+      return detail(videoId, 123);
+    },
+  });
+
+  assert.equal(fetched.includes("retry-race"), true);
+  assert.deepEqual(
+    (({ status, attempts }) => ({ status, attempts }))(
+      fixture.state.enrichTaskStates.get(contentKey),
+    ),
+    { status: "failed", attempts: 3 },
+  );
+  assert.equal(
+    fixture.state.contents.find((row) => row.content_key === contentKey).last_enriched_at,
+    undefined,
+  );
+});
+
+test("Video Clock commits a failed Task attempt before Publication reconciliation", async () => {
+  const contentKey = "UCvideo:video:publication-failed-retry";
+  const fixture = databaseFixture({ failPublication: true });
+  fixture.state.contents.push({
+    content_key: contentKey,
+    channel_id: "UCvideo",
+    source_content_id: "publication-failed-retry",
+    content_type: "video",
+    published_at: "2026-07-19T00:00:00.000Z",
+    last_seen_at: "2026-07-20T00:00:00.000Z",
+    view_count: null,
+    player_last_observed_at: null,
+    next_last_observed_at: null,
+    video_change_probability: null,
+    like_count: null,
+    comment_count: null,
+  });
+  fixture.state.enrichPending.add(contentKey);
+  fixture.state.enrichTaskStates.set(contentKey, {
+    task_id: `player-refresh:${contentKey}`,
+    status: "failed",
+    attempts: 2,
+    dispatch_generation: 1,
+    lease_live: false,
+    retry_due: true,
+  });
+  const rollbackTransactions = async (action) => {
+    const pendingBefore = structuredClone(fixture.state.enrichPending);
+    const tasksBefore = structuredClone(fixture.state.enrichTaskStates);
+    try {
+      return await fixture.withTransaction(action);
+    } catch (error) {
+      fixture.state.enrichPending.clear();
+      for (const value of pendingBefore) fixture.state.enrichPending.add(value);
+      fixture.state.enrichTaskStates.clear();
+      for (const [key, value] of tasksBefore) fixture.state.enrichTaskStates.set(key, value);
+      throw error;
+    }
+  };
+
+  await assert.rejects(executeIncrementalVideo({
+    plan: plan(),
+    runId: "incremental:publication-failed-retry",
+    startedAt: "2026-07-20T00:00:00.000Z",
+    query: fixture.query,
+    withTransaction: rollbackTransactions,
+    getChannelSnapshot: async () => ({
+      async scanUploads() {
+        return {
+          playlist_id: "UUvideo",
+          entries: [{ id: "known-anchor", position: 1, title: "Known" }],
+          pages: 1,
+          item_count: 1,
+          parse_gap_count: 0,
+          anchor_matched: true,
+          matched_anchor_id: "known-anchor",
+          stop_reason: "anchor_matched",
+          terminal_reason: "anchor_matched",
+          complete: true,
+          raw: { engine: "youtubei.js@test" },
+        };
+      },
+    }),
+    fetchDetail: async (videoId) => {
+      if (videoId === "publication-failed-retry") {
+        throw new Error("temporary Player timeout before Publication failure");
+      }
+      return detail(videoId, 123);
+    },
+  }), /simulated Publication failure/);
+
+  assert.deepEqual(
+    (({ status, attempts }) => ({ status, attempts }))(
+      fixture.state.enrichTaskStates.get(contentKey),
+    ),
+    { status: "failed", attempts: 3 },
+  );
 });
 
 test("Clock rollback does not sample a recent Video while its Enrich Worker lease is still live", async () => {

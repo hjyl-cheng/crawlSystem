@@ -34,26 +34,24 @@ async function assertPostgresObservability(pool) {
       `INSERT INTO crawler.task_events (
          queue_name,job_id,job_name,entity_key,status,payload_json
        ) VALUES
-         ('youtube-content-enrich',$1,'content-enrich','UC-observability','completed',$2::jsonb),
-         ('youtube-content-enrich',$1 || ':failed','content-enrich','UC-observability','failed',$3::jsonb),
-         ('youtube-content-enrich',$1 || ':legacy','content-enrich','UC-observability','failed',$4::jsonb)`,
+         ('youtube-content-enrich',$1,'content-enrich-claim','UC-observability','claimed',$2::jsonb),
+         ('youtube-content-enrich',$1 || ':retry','content-enrich-outcome','UC-observability','checkpointed',$3::jsonb),
+         ('youtube-content-enrich',$1 || ':legacy','content-enrich','UC-observability','completed',$4::jsonb)`,
       [
         jobId,
         JSON.stringify({
           claimed: 5,
-          done: 2,
-          retryable: 1,
-          terminal: 1,
-          dead_letter: 1,
+          done: 0,
+          retryable: 0,
+          terminal: 0,
+          dead_letter: 0,
         }),
         JSON.stringify({
-          content_enrich_result: {
-            claimed: 2,
-            done: 0,
-            retryable: 1,
-            terminal: 0,
-            dead_letter: 0,
-          },
+          claimed: 0,
+          done: 2,
+          retryable: 2,
+          terminal: 1,
+          dead_letter: 1,
         }),
         JSON.stringify({ tasks: [{ task_id: "legacy-event-without-result" }] }),
       ],
@@ -64,11 +62,11 @@ async function assertPostgresObservability(pool) {
         key,
         after.outcome_counts[key] - before.outcome_counts[key],
       ])),
-      { claimed: 7, success: 2, retry: 2, terminal: 1, dead_letter: 1 },
+      { claimed: 5, success: 2, retry: 2, terminal: 1, dead_letter: 1 },
     );
   } finally {
     await pool.query(
-      "DELETE FROM crawler.task_events WHERE job_id IN ($1,$1 || ':failed',$1 || ':legacy')",
+      "DELETE FROM crawler.task_events WHERE job_id IN ($1,$1 || ':retry',$1 || ':legacy')",
       [jobId],
     ).catch(() => {});
   }
@@ -526,6 +524,42 @@ test("Content Enrich PostgreSQL lifecycle is fenced, recoverable, and idempotent
 
     const retryResult = await retryExecutor.execute(firstJob);
     assert.equal(retryResult.retryable, 1);
+    assert.deepEqual((await pool.query(
+      `SELECT status,payload_json
+       FROM crawler.task_events
+       WHERE queue_name='youtube-content-enrich'
+         AND job_id=$1
+         AND status IN ('claimed','checkpointed')
+       ORDER BY event_id`,
+      [firstJob.id],
+    )).rows, [
+      {
+        status: "claimed",
+        payload_json: {
+          requested: 1,
+          claimed: 1,
+          attempted: 0,
+          done: 0,
+          terminal: 0,
+          retryable: 0,
+          dead_letter: 0,
+          skipped: 0,
+        },
+      },
+      {
+        status: "checkpointed",
+        payload_json: {
+        requested: 1,
+        claimed: 0,
+        attempted: 1,
+        done: 0,
+        terminal: 0,
+        retryable: 1,
+        dead_letter: 0,
+        skipped: 0,
+        },
+      },
+    ]);
     const failedTask = (await pool.query(
       `SELECT status,attempts,next_retry_at,dispatch_generation
        FROM crawler.content_enrich_tasks WHERE channel_id=$1`,
@@ -1018,7 +1052,7 @@ test("Content Enrich PostgreSQL lifecycle is fenced, recoverable, and idempotent
     ]);
     assert.deepEqual(priorityLease.result.map((batch) => batch.tasks.length), [1, 1, 1]);
     await context.test(
-      "observability aggregates completed, failed, and legacy Worker events",
+      "observability aggregates only durable Task claim and outcome events",
       () => assertPostgresObservability(pool),
     );
   } finally {

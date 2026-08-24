@@ -206,6 +206,69 @@ test("Worker telemetry recovers a persisted Enrich result through an error cause
   assert.equal(contentEnrichResultFromError(managedError), result);
 });
 
+test("a settled Task outcome records its metric in the same transaction", async () => {
+  const queries = [];
+  const repository = new PostgresContentEnrichExecutionRepository({
+    withTransaction: async (action) => action({
+      async query(sql, params = []) {
+        queries.push({ sql, params });
+        if (sql.includes("SELECT requested.disposition")) {
+          return {
+            rows: [{
+              disposition: "outcome",
+              task: {
+                task_id: "route-failure",
+                content_key: "UC-enrich:video:route-failure",
+              },
+              content: { content_key: "UC-enrich:video:route-failure" },
+            }],
+          };
+        }
+        if (sql.includes("SELECT task.task_id") && sql.includes("lease_expires_at>clock_timestamp()")) {
+          return { rows: [{ task_id: "route-failure" }] };
+        }
+        if (sql.includes("UPDATE crawler.content_enrich_tasks")) return { rowCount: 1, rows: [] };
+        return { rowCount: 1, rows: [] };
+      },
+    }),
+    applyDetail: async () => {},
+    refreshHashes: async () => {},
+    reconcilePublication: async () => {},
+  });
+
+  const summary = await repository.settleBatch({
+    jobId: "content_enrich__UC-enrich__route-failure",
+    channelId: "UC-enrich",
+    outcomes: [{
+      task_id: "route-failure",
+      dispatch_generation: 3,
+      kind: "retryable",
+      detail: null,
+      access_status: null,
+      observed_at: NOW,
+      next_retry_at: "2026-08-23T00:00:01.000Z",
+      error_message: "HTTP 429",
+      failure_decision: { kind: "youtube_rate_limited" },
+    }],
+    unattemptedTasks: [],
+    observedAt: new Date(NOW),
+  });
+
+  assert.equal(summary.retryable, 1);
+  const metric = queries.find(({ sql }) => sql.includes("INSERT INTO crawler.task_events"));
+  assert.ok(metric, "the durable Task transition must emit a transactional outcome event");
+  assert.deepEqual(JSON.parse(metric.params[3]), {
+    requested: 1,
+    claimed: 0,
+    attempted: 1,
+    done: 0,
+    terminal: 0,
+    retryable: 1,
+    dead_letter: 0,
+    skipped: 0,
+  });
+});
+
 function manualHeartbeatTimer() {
   let callback = null;
   return {
@@ -593,6 +656,18 @@ test("PostgreSQL settlement fences the Task and runs Content, Hash, and Publicat
         calls.push("task-closed");
         return { rowCount: 1, rows: [] };
       }
+      if (sql.includes("INSERT INTO crawler.task_events") && sql.includes("'claimed'")) {
+        assert.equal(JSON.parse(params[3]).claimed, 1);
+        calls.push("metric:claimed");
+        return { rowCount: 1, rows: [] };
+      }
+      if (sql.includes("INSERT INTO crawler.task_events") && sql.includes("'checkpointed'")) {
+        assert.equal(params[2], "UC-enrich");
+        assert.equal(JSON.parse(params[3]).done, 1);
+        assert.equal(JSON.parse(params[3]).claimed, 0);
+        calls.push("metric:checkpointed");
+        return { rowCount: 1, rows: [] };
+      }
       throw new Error(`unexpected SQL in PostgreSQL Enrich fixture: ${sql}`);
     },
   };
@@ -618,9 +693,11 @@ test("PostgreSQL settlement fences the Task and runs Content, Hash, and Publicat
   assert.equal(row.status, "done");
   assert.equal(row.title, "Enriched postgres-chain");
   assert.deepEqual(calls, [
+    "metric:claimed",
     "content",
     "task-closed",
     `hash:${row.content_key}`,
     "publication:UC-enrich",
+    "metric:checkpointed",
   ]);
 });

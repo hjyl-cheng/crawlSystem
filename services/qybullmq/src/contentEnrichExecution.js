@@ -387,6 +387,26 @@ export class PostgresContentEnrichExecutionRepository {
         [jobId, channelId, JSON.stringify(references), durationMs],
       );
       const claimedIds = new Set(claimed.rows.map((row) => row.task_id));
+      if (claimedIds.size > 0) {
+        await client.query(
+          `INSERT INTO crawler.task_events (
+             queue_name,job_id,job_name,entity_key,status,payload_json
+           ) VALUES (
+             'youtube-content-enrich',$1,$2,$3,'claimed',$4::jsonb
+           )`,
+          [
+            jobId,
+            "content-enrich-claim",
+            channelId,
+            JSON.stringify({
+              requested: tasks.length,
+              claimed: claimedIds.size,
+              attempted: 0,
+              ...emptySettlementSummary(),
+            }),
+          ],
+        );
+      }
       return selected.rows
         .filter((row) => claimedIds.has(row.task.task_id))
         .map((row) => ({ ...row.content, ...row.task, dispatch_generation: Number(row.task.dispatch_generation) }));
@@ -626,6 +646,30 @@ export class PostgresContentEnrichExecutionRepository {
           domains: ["video"],
           asOf: observedAt.toISOString(),
         });
+      }
+      const settled = summary.done
+        + summary.terminal
+        + summary.retryable
+        + summary.dead_letter;
+      if (settled > 0) {
+        await client.query(
+          `INSERT INTO crawler.task_events (
+             queue_name,job_id,job_name,entity_key,status,payload_json
+           ) VALUES (
+             'youtube-content-enrich',$1,$2,$3,'checkpointed',$4::jsonb
+           )`,
+          [
+            jobId,
+            "content-enrich-outcome",
+            channelId,
+            JSON.stringify({
+              requested: outcomes.length,
+              claimed: 0,
+              attempted: settled,
+              ...summary,
+            }),
+          ],
+        );
       }
       return summary;
     });

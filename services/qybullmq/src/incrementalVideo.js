@@ -10,6 +10,7 @@ import {
 } from "./contentEnrichPolicy.js";
 import { recordCrawlerObservation } from "./crawlObservationStore.js";
 import {
+  hasCompletePublicVideoSurface,
   isLiveInProgress,
   isUpcomingLiveDetail,
   videoAccessStatus,
@@ -549,7 +550,10 @@ async function prepareClockContentEnrichOutcome(client, {
                 AND task.lease_expires_at>clock_timestamp(),
               false
             ) AS lease_live,
-            COALESCE(task.next_retry_at<=clock_timestamp(),false) AS retry_due
+            COALESCE(
+              task.next_retry_at<=clock_timestamp(),
+              task.status IN ('queued','failed')
+            ) AS retry_due
      FROM crawler.content_enrich_tasks task
      WHERE task.content_key=$1 AND task.job_type=$2
      FOR UPDATE`,
@@ -557,6 +561,9 @@ async function prepareClockContentEnrichOutcome(client, {
   );
   const currentTask = locked.rows[0] ?? null;
   if (currentTask?.lease_live === true) return { skipped: true, currentTask, outcome: null };
+  if (["queued", "failed"].includes(currentTask?.status) && currentTask.retry_due !== true) {
+    return { skipped: true, currentTask, outcome: null };
+  }
   if (currentTask?.status === "terminal" && currentTask.retry_due !== true) {
     return { skipped: true, currentTask, outcome: null };
   }
@@ -602,7 +609,8 @@ async function persistClockContentEnrichOutcome(client, {
        next_retry_at,last_attempt_at,last_success_at,updated_at
      ) VALUES (
        $1,$2,$3,$4,$5,10,$6,
-       jsonb_build_object('last_outcome',$7::jsonb),$8,$9,$10,$11,$12,$13,now()
+       jsonb_build_object('last_outcome',$7::jsonb),$8,$9,$10,$11,$12,
+       CASE WHEN $15::boolean THEN $13::timestamptz ELSE NULL END,now()
      )
      ON CONFLICT (content_key,job_type) DO UPDATE
      SET status=$5,
@@ -916,6 +924,7 @@ async function upsertFirstSeenContent(client, {
   });
   const detailComplete = preparedEnrich.skipped === false
     && preparedEnrich.outcome?.detail != null;
+  const candidateDetailComplete = hasCompletePublicVideoSurface(detail);
   const url = contentType === "short"
     ? `https://www.youtube.com/shorts/${encodeURIComponent(entry.id)}`
     : `https://www.youtube.com/watch?v=${encodeURIComponent(entry.id)}`;
@@ -1123,9 +1132,9 @@ async function upsertFirstSeenContent(client, {
     detail,
     classification,
     disposition,
-    missingFields: [],
+    missingFields: candidateDetailComplete ? [] : ["detail"],
     contentKey: storedContentKey,
-    detailStatus: "done",
+    detailStatus: candidateDetailComplete ? "done" : "failed",
     apiStatus: "not_needed",
     typeStatus: "resolved",
     resultJson: {
@@ -1144,6 +1153,10 @@ async function upsertFirstSeenContent(client, {
       },
       content_key: storedContentKey,
     },
+    errorMessage: candidateDetailComplete
+      ? null
+      : preparedEnrich.outcome?.error_message
+        ?? "Content Enrich detail is missing the required public Video surface",
     observedAt,
     attempted: detail != null || capture?.error != null,
   });
@@ -1695,7 +1708,7 @@ async function recordVideoCycle({
       ?? uploadsPublishedFacts(entry)?.published_at
       ?? null,
   }));
-  return withTransaction(async (client) => {
+  const recorded = await withTransaction(async (client) => {
     const recorded = await recordCrawlerObservation(client, {
       idempotencyKey: `video:${runId}:${executionAttemptId}`,
       observationKind: "video",
@@ -1848,15 +1861,23 @@ async function recordVideoCycle({
                         AND task.job_type='player-refresh'
                         AND task.status='terminal'
                         AND task.next_retry_at>now()
-                    ) AS player_enrich_terminal_waiting
+                    ) AS player_enrich_terminal_waiting,
+                    EXISTS (
+                      SELECT 1 FROM crawler.content_enrich_tasks task
+                      WHERE task.content_key=content.content_key
+                        AND task.job_type='player-refresh'
+                        AND task.status IN ('queued','failed')
+                        AND task.next_retry_at>now()
+                    ) AS player_enrich_retry_waiting
              FROM crawler.contents content
              WHERE content.channel_id=$1
                AND content.content_type IN ('video','short','live')
            )
            SELECT candidate.*
            FROM candidate
-           WHERE NOT candidate.player_enrich_leased
-             AND NOT candidate.player_enrich_terminal_waiting
+             WHERE NOT candidate.player_enrich_leased
+               AND NOT candidate.player_enrich_terminal_waiting
+               AND NOT candidate.player_enrich_retry_waiting
              AND ($4::boolean OR NOT candidate.player_enrich_open)
              AND (
                candidate.enrich_pending
@@ -1968,17 +1989,16 @@ async function recordVideoCycle({
         };
       },
     });
-    if (scan.complete === true) {
-      await reconcilePublication(client, {
-        channelId: plan.channel_id,
-        domains: recorded.result?.lifecycleTransitioned === true
-          ? ["channel", "video"]
-          : ["video"],
-        asOf: observedAt,
-      });
-    }
     return recorded;
   });
+  if (scan.complete === true) {
+    await withTransaction((client) => reconcilePublication(client, {
+      channelId: plan.channel_id,
+      domains: ["channel", "video"],
+      asOf: observedAt,
+    }));
+  }
+  return recorded;
 }
 
 export async function executeIncrementalVideo({

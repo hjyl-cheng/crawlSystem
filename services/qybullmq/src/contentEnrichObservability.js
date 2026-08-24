@@ -70,13 +70,10 @@ export class PostgresContentEnrichObservabilityRepository {
          FROM crawler.content_enrich_tasks
          WHERE job_type='player-refresh'
        ), event_payloads AS (
-         SELECT CASE
-           WHEN status='failed' THEN COALESCE(payload_json->'content_enrich_result','{}'::jsonb)
-           ELSE payload_json
-         END AS result_json
+         SELECT payload_json AS result_json
          FROM crawler.task_events
          WHERE queue_name='youtube-content-enrich'
-           AND status IN ('completed','failed')
+           AND status IN ('claimed','checkpointed')
            AND created_at>=clock_timestamp()-($1::bigint*interval '1 millisecond')
        ), event_metrics AS (
          SELECT
@@ -114,6 +111,7 @@ export class ContentEnrichMonitor {
     repository,
     now = () => new Date(),
     windowMs = 5 * 60_000,
+    sampleIntervalMs = 60_000,
     backlogAlertThreshold = 10_000,
     queuedAgeAlertSeconds = 24 * 60 * 60,
     alertRepeatMs = 15 * 60_000,
@@ -125,10 +123,12 @@ export class ContentEnrichMonitor {
     this.repository = repository;
     this.now = now;
     this.windowMs = positiveInteger(windowMs, 5 * 60_000, 24 * 60 * 60_000);
+    this.sampleIntervalMs = positiveInteger(sampleIntervalMs, 60_000, 24 * 60 * 60_000);
     this.backlogAlertThreshold = nonnegativeInteger(backlogAlertThreshold);
     this.queuedAgeAlertSeconds = nonnegativeInteger(queuedAgeAlertSeconds);
     this.alertRepeatMs = positiveInteger(alertRepeatMs, 15 * 60_000, 24 * 60 * 60_000);
     this.alertState = new Map();
+    this.sample = null;
   }
 
   #alerts({ taskBacklog, oldestQueuedAgeSeconds, observedAt }) {
@@ -175,11 +175,18 @@ export class ContentEnrichMonitor {
   }
 
   async observe({ queueCounts = {}, dispatchSummary = null, dispatchOk = true } = {}) {
-    const observedAt = observedDate(this.now());
-    const snapshot = await this.repository.loadSnapshot({
-      windowMs: this.windowMs,
-      observedAt,
-    });
+    const calledAt = observedDate(this.now());
+    const sampleAgeMs = this.sample == null
+      ? Number.POSITIVE_INFINITY
+      : calledAt.getTime() - this.sample.observedAt.getTime();
+    if (sampleAgeMs < 0 || sampleAgeMs >= this.sampleIntervalMs) {
+      const snapshot = await this.repository.loadSnapshot({
+        windowMs: this.windowMs,
+        observedAt: calledAt,
+      });
+      this.sample = { observedAt: calledAt, snapshot };
+    }
+    const { observedAt, snapshot } = this.sample;
     const taskCounts = normalizedCounts(snapshot?.task_counts, TASK_STATUSES);
     const outcomeCounts = normalizedCounts(snapshot?.outcome_counts, [
       "claimed",

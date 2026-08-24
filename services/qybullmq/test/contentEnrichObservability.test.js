@@ -8,6 +8,8 @@ import {
 const NOW = "2026-08-23T12:00:00.000Z";
 
 test("Content Enrich monitor exposes backlog age, outcome rates, mutex contention, and alerts", async () => {
+  let currentTime = new Date(NOW);
+  let snapshotLoads = 0;
   let snapshot = {
     task_counts: {
       queued: 100,
@@ -29,9 +31,15 @@ test("Content Enrich monitor exposes backlog age, outcome rates, mutex contentio
     },
   };
   const monitor = new ContentEnrichMonitor({
-    repository: { loadSnapshot: async () => snapshot },
-    now: () => new Date(NOW),
+    repository: {
+      async loadSnapshot() {
+        snapshotLoads += 1;
+        return snapshot;
+      },
+    },
+    now: () => new Date(currentTime),
     windowMs: 5 * 60_000,
+    sampleIntervalMs: 60_000,
     backlogAlertThreshold: 100,
     queuedAgeAlertSeconds: 3_600,
     alertRepeatMs: 60 * 60_000,
@@ -72,10 +80,14 @@ test("Content Enrich monitor exposes backlog age, outcome rates, mutex contentio
     ],
   );
 
+  currentTime = new Date("2026-08-23T12:00:15.000Z");
   const repeated = await monitor.observe({
-    queueCounts: { waiting: 4, active: 1 },
+    queueCounts: { waiting: 7, active: 1 },
     dispatchSummary: { reason: "dispatch_locked" },
   });
+  assert.equal(snapshotLoads, 1);
+  assert.equal(repeated.observed_at, raised.observed_at);
+  assert.equal(repeated.queue_open_jobs, 8);
   assert.deepEqual(repeated.alerts.notifications, []);
 
   snapshot = {
@@ -83,6 +95,7 @@ test("Content Enrich monitor exposes backlog age, outcome rates, mutex contentio
     task_counts: { ...snapshot.task_counts, queued: 1, leased: 0, running: 0, failed: 0 },
     oldest_queued_at: "2026-08-23T11:59:00.000Z",
   };
+  currentTime = new Date("2026-08-23T12:01:00.000Z");
   const resolved = await monitor.observe({
     queueCounts: {},
     dispatchSummary: { reason: "high_water" },
@@ -94,6 +107,8 @@ test("Content Enrich monitor exposes backlog age, outcome rates, mutex contentio
       { code: "content_enrich_queued_age_high", state: "resolved" },
     ],
   );
+  assert.equal(snapshotLoads, 2);
+  assert.equal(resolved.observed_at, "2026-08-23T12:01:00.000Z");
 });
 
 test("PostgreSQL observability repository returns player-refresh state and Worker outcome totals", async () => {
@@ -146,4 +161,6 @@ test("PostgreSQL observability repository returns player-refresh state and Worke
   });
   assert.equal(calls.length, 1);
   assert.deepEqual(calls[0].params, [300_000]);
+  assert.match(calls[0].sql, /status IN \('claimed','checkpointed'\)/);
+  assert.doesNotMatch(calls[0].sql, /status IN \('completed','failed'\)/);
 });

@@ -11,7 +11,7 @@
 3. 容量、积压或部署治理问题；
 4. 既定业务契约或保护机制，被误判成 BUG。
 
-本文最初只做评审和方案设计。BUG-8 根因确认后，唯一源码已完成最小修复与上线验证。2026-08-23，BUG-6/BUG-7 的 Enrich Drain 修正候选已在隔离 Worktree 完成实现和隔离验收；该变更尚未部署，未连接或修改生产数据库、生产队列和业务数据。这里的“隔离验收通过”只表示代码候选具备上线条件，不表示生产积压已经下降或 BUG 已在生产关闭。
+本文最初只做评审和方案设计。BUG-8 根因确认后，唯一源码已完成最小修复与上线验证。2026-08-24，BUG-6/BUG-7 的 Enrich Drain 修正候选及后续边界修正已在隔离 Worktree 完成实现和隔离验收；该变更尚未部署，未连接或修改生产数据库、生产队列和业务数据。这里的“隔离验收通过”只表示代码候选具备上线条件，不表示生产积压已经下降或 BUG 已在生产关闭。
 
 ## 2. 复核边界与证据
 
@@ -439,8 +439,10 @@ queued / failed / 到期的 terminal
 - Worker 对已完成、过期、错误 generation、错误 lease owner 和重复 Job 均幂等跳过；
 - Queue Worker、Clock Recent Sampling 和 Clock First-Seen 共用完整 Video surface 契约；缺标题、发布时间、播放量或时长等关键事实时进入 retryable，不能写 `last_enriched_at` 或假装 done；
 - Clock 与 Queue 都按同一开放任务的累计 `attempts` 消耗预算；默认第 8 次失败进入 `dead_letter`。只有已关闭任务开始明确的新一轮时才从 0 计数，默认 Clock 模式和回滚模式不能成为无限重试旁路；
+- Clock 在 Recent Sampling 候选 SQL 和取得 Task `FOR UPDATE` 行锁后各执行一次 retry eligibility 门禁；`queued/failed` 且 `next_retry_at` 未到期的近期视频不能因“仍在最近窗口”提前抓取或消耗 attempts；
 - 只有失败策略给出 `content_terminal` 的权威 private/members-only/unavailable 证据才能写 `terminal` 和访问状态；解析器、数据库契约等 `retry_mode=none` 工程故障进入 `dead_letter`，不得伪造视频终态；
 - retryable 的 `next_retry_at` 从每条详情请求实际结束的时刻计算，并受指数退避上限约束；慢请求不能在刚失败时就因批次开始时间过早而立即重试；
+- 新建 failed/dead-letter Task 的 `last_success_at` 必须为 NULL；First-Seen 收到非空但不完整的 public detail 时，Candidate 写 `detail_status='failed'` 和缺失详情证据，不能把“收到对象”伪装成“详情完成”；
 - 已是 `dead_letter` 的视频若被后续正常 Incremental 取得完整详情，可以按真实成功结果转为 `done`；历史 attempts 保留作审计，避免出现数据已完整但任务仍显示死信的矛盾状态；
 - Worker 在抓取期间按不超过 lease 一半的间隔续租；任何续租异常或未续满整批都立即触发 `AbortSignal`、停止后续抓取并丢弃未结算结果，不能把失去所有权后的详情写入 Content；
 - lease 的创建、刷新、claim、续租、过期回收和 retry 到期判断都以 PostgreSQL `clock_timestamp()` 为准，不能混用 Controller/Worker 进程时钟；可能等待行锁的 claim/renew/settle 使用“先锁行、后用 DB 当前时间判 lease”的两阶段 fencing，等待前求出的时间戳不能复活已过期 lease；
@@ -468,7 +470,8 @@ queued / failed / 到期的 terminal
 - private/unavailable 权威证据更新 `contents.access_status/access_status_source`、关闭当前任务并写 7 天后的 `next_retry_at`；到期后才开启新一轮，复查仍为终态则再次低频排期；
 - retryable/dead-letter checkpoint 和未执行任务释放先在独立短事务提交；成功或 terminal 的 Content、Task、变化视频 Item Hash 与按频道 Publication Reconciler 保持在另一个原子事务；
 - 因而 Publication 失败会回滚对应 Content/Hash/terminal/done 写入，但不能抹掉同批已经记录的 retry attempts；未变化的 retryable/dead-letter 不刷新 Hash 或调用 Publication；
-- Publication 部分失败时，异常只携带已确认提交的 Enrich outcome；Worker 可沿 `cause` 和 `AggregateError.errors` 找回该结果写入失败事件，指标不会把已回滚的 done/terminal 误报为成功，也不会漏掉已提交的 retry/dead-letter；
+- Clock 先提交 Observation、Content、Task checkpoint 和 Item Hash，再在独立事务幂等 reconcile `channel + video`；Publication 失败仍使 Clock Job 失败并重试两个域，但不能回滚已经真实发生的失败 attempts，也不依赖上一次进程内的 lifecycle transition 标记恢复 channel 发布；
+- Queue Publication 部分失败时，异常只携带已确认提交的 Enrich outcome；`leased -> running` claim 与 `claimed` 事件同事务，fenced Task 状态迁移与 `checkpointed` outcome 事件同事务。监控只统计这两类已提交事件，不再依赖 Rota 最后一条 Job 事件，因此换身份前已落库的 claim/retry/dead-letter 不会在后续换线成功时消失，也不会把已回滚的 done/terminal 误报为成功；
 - Rota 增加真实 `content_enrich` task kind，并限定为 channel role；没有伪装成 Full Crawl 或 Incremental；
 - Enrich 使用独立 Worker 服务、独立 Queue concurrency 和新增的 channel Slot 容量。示例配置为 2 个 Enrich Worker、每实例并发 1、总 channel Slots 从 40 增至 42。
 
@@ -483,18 +486,19 @@ private/unavailable 的低频复查继续使用同一条 `content_enrich_tasks` 
 
 运行可观测性已经接入 Controller 和 Dashboard：
 
-- Controller 每个观察窗口统计 `player-refresh` 的 queued/leased/running/failed/terminal/dead_letter/done、最老 queued 年龄，以及 Worker claim/success/retry/terminal/dead-letter 数量、每分钟速率和比例；
+- Controller 按独立、可配置的数据库采样周期统计 `player-refresh` 的 queued/leased/running/failed/terminal/dead_letter/done、最老 queued 年龄，以及已提交 outcome 的 claim/success/retry/terminal/dead-letter 数量、每分钟速率和比例；默认每 60 秒采样一次，不再随 15 秒 Controller tick 全表统计；
+- 缓存周期内数据库指标和 `observed_at` 保持稳定，BullMQ 开放 Job 数、mutex contention 和派发结果仍逐 tick 更新，避免仅因时间戳变化每 15 秒写一条等价 `controller_ticks`；
 - 当前派发是否遇到 mutex contention、BullMQ 开放 Job 数和派发是否成功与同一快照一起写入 `crawler.controller_ticks`；
 - backlog 和 queued age 超阈值时产生带 raised/reminder/resolved 状态的结构化告警日志，并隔离指标查询或派发异常，不能阻断 Controller 后续正常工作；
 - Dashboard `/health` 和只读 `/api/content-enrich/operational` 返回最近快照，并区分 ok、alerting、stale 和 unavailable。
 
 ### 9.3 本地验证
 
-- qybullmq 全量执行 220 个测试文件：216 个在宿主直接通过；4 个受沙箱或宿主运行依赖限制的文件分别在解除沙箱限制或现有 qybullmq 依赖镜像中重跑，5 项断言全部通过；
+- qybullmq 全量执行 220 个测试文件：216 个在宿主直接通过；其中受沙箱限制的 Build Images 1 项和 Business Publication HTTP 2 项解除限制后全部通过。剩余 Fingerprint Gateway 与 yt-dlp Session 两项仅因宿主缺少 Python `aiohttp`、`yt_dlp` 无法执行，未把环境缺依赖记为代码通过；
 - Content Enrich 真实 PostgreSQL 16 生命周期 2/2 通过、0 skip，覆盖已提交 mutex 争用和过期接管、`SKIP LOCKED`、Worker 在 `queue.add()` 内即时 claim 的事务可见性、投递崩溃恢复、attempts/实际失败时间退避、generation fencing、heartbeat、行锁等待后 lease 过期、Rota checkpoint fencing、terminal、工程 dead-letter、Content、Item Hash、真实 Publication revision/outbox、部分失败指标和重复 Job；
 - runtime schema 和 fresh `database/bootstrap/crawler.sql` 均在空 PostgreSQL 16 测试库完整应用；bootstrap 默认 mode、cursor 和 mutex 已读取验证；
 - Incremental Video PostgreSQL 4/4 通过、0 skip，覆盖 Clock/Queue 所有权、完整性门禁、累计 dead-letter、terminal 新轮次和 dead-letter 后真实成功恢复；
-- Enrich 及 Migration、Query、Full Crawl、正常 Incremental 针对性回归 29/29 个测试文件通过、0 skip；Rota `internal/proxycontrol` Go 测试通过；Dashboard 2/2 通过；
+- Enrich、Clock、Controller、Rota 接线的针对性单元回归 137/137 通过；全量中的 Migration、Query、Full Crawl 和正常 Incremental 测试文件均通过；Rota `internal/proxycontrol` Go 测试通过；Dashboard 2/2 通过；
 - Node 语法检查、`git diff --check` 和隔离 PostgreSQL 测试均通过。
 
 这些是隔离测试证据，不代表生产积压已经下降。
