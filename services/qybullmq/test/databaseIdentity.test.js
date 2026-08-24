@@ -206,6 +206,20 @@ test("fresh Business bootstrap seeds an explicit zero-row Creator Search baselin
   }
 });
 
+test("fresh Business schemas seed the content taxonomy required by Projection", async () => {
+  const [bootstrap, projectionSchema] = await Promise.all([
+    readFile(new URL("../../../database/bootstrap/business.sql", import.meta.url), "utf8"),
+    readFile(new URL("../src/businessPublicationProjectionSchema.sql", import.meta.url), "utf8"),
+  ]);
+  for (const schema of [bootstrap, projectionSchema]) {
+    assert.match(schema, /INSERT INTO public\.content_type_taxonomy/);
+    assert.match(schema, /\('live'\s*,\s*'lives'\s*,\s*1\)/);
+    assert.match(schema, /\('short'\s*,\s*'shorts'\s*,\s*2\)/);
+    assert.match(schema, /\('video'\s*,\s*'videos'\s*,\s*3\)/);
+    assert.match(schema, /ON CONFLICT \(source_content_type,content_kind\) DO UPDATE/);
+  }
+});
+
 test("fresh Crawler bootstrap owns idempotent immutable Migration intents", async () => {
   const [runtime, bootstrap, dispatch] = await Promise.all([
     readFile(new URL("../src/schema.sql", import.meta.url), "utf8"),

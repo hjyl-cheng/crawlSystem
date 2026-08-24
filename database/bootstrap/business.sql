@@ -6169,6 +6169,16 @@ ALTER TABLE ONLY public.content_type_taxonomy
     ADD CONSTRAINT content_type_taxonomy_source_kind_key UNIQUE (source_content_type, content_kind);
 
 
+INSERT INTO public.content_type_taxonomy (
+    source_content_type, content_kind, canonical_priority
+) VALUES
+    ('live', 'lives', 1),
+    ('short', 'shorts', 2),
+    ('video', 'videos', 3)
+ON CONFLICT (source_content_type,content_kind) DO UPDATE
+SET canonical_priority = EXCLUDED.canonical_priority;
+
+
 --
 -- Name: crawler_ingest_batches crawler_ingest_batches_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --

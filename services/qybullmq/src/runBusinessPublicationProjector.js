@@ -86,7 +86,7 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function assertBusinessPublicationDatabase(pool, config) {
+export async function assertBusinessPublicationDatabase(pool, config) {
   const result = await pool.query(
     `SELECT current_database() AS database_name,current_user AS role_name,
             to_regclass('publication.projection_batch') IS NOT NULL AS projection_schema_ready,
@@ -108,7 +108,19 @@ async function assertBusinessPublicationDatabase(pool, config) {
             to_regprocedure('public.refresh_creator_search_release_v9(text,text[],text[])')
               IS NOT NULL AS search_release_ready,
             to_regprocedure('public.restore_creator_search_live_from_legacy_v1(text)')
-              IS NOT NULL AS search_legacy_restore_ready`,
+              IS NOT NULL AS search_legacy_restore_ready,
+            NOT EXISTS (
+              SELECT 1
+              FROM (VALUES
+                ('live'::text,'lives'::text,1::smallint),
+                ('short'::text,'shorts'::text,2::smallint),
+                ('video'::text,'videos'::text,3::smallint)
+              ) expected(source_content_type,content_kind,canonical_priority)
+              LEFT JOIN public.content_type_taxonomy actual
+                USING(source_content_type,content_kind)
+              WHERE actual.source_content_type IS NULL
+                 OR actual.canonical_priority IS DISTINCT FROM expected.canonical_priority
+            ) AS content_type_taxonomy_ready`,
   );
   const state = result.rows[0] ?? {};
   if (
@@ -122,6 +134,7 @@ async function assertBusinessPublicationDatabase(pool, config) {
       || state.search_storage_state_ready !== true
       || state.search_release_ready !== true
       || state.search_legacy_restore_ready !== true
+      || state.content_type_taxonomy_ready !== true
   ) {
     throw new Error(
       `refusing to project unexpected, privileged, or unmigrated Business database: ${state.database_name}`,

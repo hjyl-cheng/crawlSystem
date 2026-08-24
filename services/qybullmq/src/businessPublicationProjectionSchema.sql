@@ -1,3 +1,12 @@
+INSERT INTO public.content_type_taxonomy (
+  source_content_type,content_kind,canonical_priority
+) VALUES
+  ('live','lives',1),
+  ('short','shorts',2),
+  ('video','videos',3)
+ON CONFLICT (source_content_type,content_kind) DO UPDATE
+SET canonical_priority=EXCLUDED.canonical_priority;
+
 ALTER TABLE public.import_batches
 DROP CONSTRAINT IF EXISTS import_batches_contract_shape;
 

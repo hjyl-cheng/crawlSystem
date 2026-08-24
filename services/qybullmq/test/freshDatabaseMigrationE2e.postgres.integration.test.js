@@ -143,6 +143,11 @@ test("read-only Migration Source reaches fresh Crawler and Business Current with
   const streamId = randomUUID();
   const deploymentKey = `fresh-migration-e2e-${suffix}`;
   const observedAt = new Date().toISOString();
+  const contentFixtures = [
+    { kind: "video", id: `video-${suffix.slice(0, 12)}`, position: 1 },
+    { kind: "short", id: `short-${suffix.slice(0, 12)}`, position: 2 },
+    { kind: "live", id: `live-${suffix.slice(0, 12)}`, position: 3 },
+  ];
 
   try {
     await verifyCrawlerWriterDatabase(crawlerPool.query.bind(crawlerPool), crawlerEnvironment);
@@ -250,8 +255,8 @@ test("read-only Migration Source reaches fresh Crawler and Business Current with
           migration_intent_id: firstIntent.intentId,
           upload_scan: {
             pages: 1,
-            inspected_count: 0,
-            selected_count: 0,
+            inspected_count: contentFixtures.length,
+            selected_count: contentFixtures.length,
             requested_limit: 30,
             content_max_age_days: 90,
             scan_policy_version: "fresh-migration-e2e-v1",
@@ -285,10 +290,64 @@ test("read-only Migration Source reaches fresh Crawler and Business Current with
       await client.query(
         `UPDATE crawler.channel_runs
          SET status='waiting_agent',detail_status='done',crawler_version='integration-test',
+             expected_content_count=$2,
              trigger_reason='initial_full',updated_at=now()
          WHERE run_id=$1`,
-        [runId],
+        [runId, contentFixtures.length],
       );
+      for (const fixture of contentFixtures) {
+        const contentKey = `${sourceChannelId}:${fixture.id}`;
+        await client.query(
+          `INSERT INTO crawler.contents (
+             content_key,channel_id,run_id,content_type,content_type_source,
+             source_content_id,position,title,url,published_at,published_at_status,
+             published_at_source,published_at_precision,duration_seconds,duration_status,
+             duration_source,view_count,view_count_status,view_count_source,
+             like_count,like_count_status,like_count_source,comment_count,
+             comment_count_status,comment_count_source,comments_disabled,description,
+             description_status,description_source,access_status,access_status_source,
+             extractor_version,last_enriched_at,player_last_observed_at,next_last_observed_at
+           ) VALUES (
+             $1,$2,$3,$4,'integration_fixture',$5,$6,$7,$8,$9,'exact',
+             'integration_fixture','second',60,'exact','integration_fixture',100,'exact',
+             'integration_fixture',0,'zero_from_empty','integration_fixture',0,
+             'zero_from_surface','integration_fixture',false,'','empty',
+             'integration_fixture','public','integration_fixture','integration-test',$9,$9,$9
+           )`,
+          [
+            contentKey,
+            sourceChannelId,
+            runId,
+            fixture.kind,
+            fixture.id,
+            fixture.position,
+            `Fresh ${fixture.kind}`,
+            `https://www.youtube.com/watch?v=${fixture.id}`,
+            observedAt,
+          ],
+        );
+        await client.query(
+          `INSERT INTO crawler.content_candidates (
+             run_id,channel_id,source_content_id,position,title,source_url,
+             content_type,type_status,type_source,detail_status,api_status,
+             content_key,disposition,attempts,finished_at
+           ) VALUES (
+             $1,$2,$3,$4,$5,$6,$7,'resolved','integration_fixture','done',
+             'not_needed',$8,'stored',1,$9
+           )`,
+          [
+            runId,
+            sourceChannelId,
+            fixture.id,
+            fixture.position,
+            `Fresh ${fixture.kind}`,
+            `https://www.youtube.com/watch?v=${fixture.id}`,
+            fixture.kind,
+            contentKey,
+            observedAt,
+          ],
+        );
+      }
       return result;
     });
     assert.equal(promoted.promoted, true);
@@ -365,13 +424,21 @@ test("read-only Migration Source reaches fresh Crawler and Business Current with
        WHERE channel.channel_id=$1`,
       [sourceChannelId],
     )).rows[0];
+    const finalizedContents = (await crawlerPool.query(
+      `SELECT * FROM crawler.contents WHERE channel_id=$1 AND run_id=$2 ORDER BY position`,
+      [sourceChannelId, runId],
+    )).rows;
     const finalized = await transaction(crawlerPool, (client) => commitFinalizedProfile(client, {
       channelId: sourceChannelId,
       runId,
       status: "ready_auto",
       profile: {
         channel: crawlerState.channel,
-        contents: { videos: [], shorts: [], lives: [] },
+        contents: {
+          videos: finalizedContents.filter((row) => row.content_type === "video"),
+          shorts: finalizedContents.filter((row) => row.content_type === "short"),
+          lives: finalizedContents.filter((row) => row.content_type === "live"),
+        },
         metrics: crawlerState.metrics_json,
         agent_profile: crawlerState.metrics_json,
         quality: { quality_status: "ready_auto" },
@@ -379,6 +446,9 @@ test("read-only Migration Source reaches fresh Crawler and Business Current with
       quality: {
         quality_status: "ready_auto",
         data_complete: true,
+        expected_content_count: contentFixtures.length,
+        candidate_count: contentFixtures.length,
+        classified_content_count: contentFixtures.length,
         source_revision: `fresh-migration-e2e:${suffix}`,
       },
       publicationAsOf: observedAt,
@@ -435,7 +505,9 @@ test("read-only Migration Source reaches fresh Crawler and Business Current with
          (SELECT count(*)::int FROM result.video_current WHERE channel_id=$1) AS video_current,
          (SELECT count(*)::int FROM result.agent_current WHERE channel_id=$1) AS agent_current,
          (SELECT count(*)::int FROM public.channel_snapshots WHERE channel_id=$1) AS snapshots,
-         (SELECT count(*)::int FROM public.creator_search_live WHERE channel_id=$1) AS search_current`,
+         (SELECT count(*)::int FROM public.creator_search_live WHERE channel_id=$1) AS search_current,
+         (SELECT count(*)::int FROM public.content_items WHERE channel_id=$1) AS content_items,
+         (SELECT count(*)::int FROM public.content_snapshots WHERE channel_id=$1) AS content_snapshots`,
       [sourceChannelId],
     )).rows[0];
     assert.deepEqual(businessCurrent, {
@@ -444,6 +516,8 @@ test("read-only Migration Source reaches fresh Crawler and Business Current with
       agent_current: 1,
       snapshots: 1,
       search_current: 1,
+      content_items: contentFixtures.length,
+      content_snapshots: contentFixtures.length,
     });
 
     const sourceAfter = await sourceFingerprint(sourcePool, sourceEnvironment);
