@@ -199,7 +199,7 @@ def comment_state_from_initial_data(initial_data, info):
     if parsed_count is not None:
         return parsed_count, False, "exact", "yt_dlp_initial_data"
     if explicit_disabled:
-        return None, True, "disabled", "yt_dlp_initial_data"
+        return 0, True, "disabled", "yt_dlp_initial_data"
     if has_comment_surface:
         return 0, False, "zero_from_surface", "yt_dlp_initial_data"
     return None, None, "unresolved", None
@@ -1717,7 +1717,7 @@ export function detailFromYtDlpResult(parsed, url = null) {
     view_count_source: parsed.view_count != null ? "yt_dlp" : null,
     like_count: optionalInteger(parsed.like_count),
     like_count_source: parsed.like_count != null ? "yt_dlp" : null,
-    comment_count: optionalInteger(parsed.comment_count),
+    comment_count: parsed.comments_disabled === true ? 0 : optionalInteger(parsed.comment_count),
     comment_count_status: parsed.comment_count_status,
     comments_disabled: typeof parsed.comments_disabled === "boolean" ? parsed.comments_disabled : null,
     comments_status_source: parsed.comments_status_source,
@@ -2001,7 +2001,7 @@ export function dataApiVideoTargetUrl(videoIds) {
   return `https://www.googleapis.com/youtube/v3/videos?part=snippet,contentDetails,statistics,status,liveStreamingDetails&id=${encodeURIComponent(ids.filter(Boolean).join(","))}&key=REDACTED`;
 }
 
-function detailFromDataApiItem(item, url = null) {
+export function detailFromDataApiItem(item, url = null) {
   if (!item || typeof item !== "object") return {};
   const snippet = item.snippet ?? {};
   const contentDetails = item.contentDetails ?? {};
@@ -2017,7 +2017,9 @@ function detailFromDataApiItem(item, url = null) {
     view_count_source: statistics.viewCount != null ? "youtube_data_api_statistics" : null,
     like_count: optionalInteger(statistics.likeCount),
     like_count_source: statistics.likeCount != null ? "youtube_data_api_statistics" : null,
-    comment_count: optionalInteger(statistics.commentCount),
+    comment_count: hasCommentCount
+      ? optionalInteger(statistics.commentCount)
+      : item.status?.privacyStatus === "public" ? 0 : null,
     comment_count_status: hasCommentCount ? "exact" : item.status?.privacyStatus === "public" ? "disabled" : "unresolved",
     comments_disabled: item.status?.privacyStatus === "public" ? !hasCommentCount : null,
     comments_status_source: item.status?.privacyStatus === "public" ? "youtube_data_api_statistics" : null,
@@ -2106,6 +2108,7 @@ export async function fetchVideoCommentThreadsDataApi(videoId, apiKey, {
   totalCount = null,
   collectedAt = new Date(),
   retryDays = 7,
+  fetchImpl = persistentFetch,
 } = {}) {
   const cleanVideoId = String(videoId ?? "").trim();
   const cleanApiKey = String(apiKey ?? "").trim();
@@ -2119,7 +2122,7 @@ export async function fetchVideoCommentThreadsDataApi(videoId, apiKey, {
     textFormat: "plainText",
     key: cleanApiKey,
   });
-  const response = await persistentFetch(`https://www.googleapis.com/youtube/v3/commentThreads?${params.toString()}`, {
+  const response = await fetchImpl(`https://www.googleapis.com/youtube/v3/commentThreads?${params.toString()}`, {
     headers: { accept: "application/json" },
     signal: AbortSignal.timeout(timeoutMs),
   });
@@ -2148,7 +2151,7 @@ export async function fetchVideoCommentThreadsDataApi(videoId, apiKey, {
       targetUrl: dataApiCommentThreadsTargetUrl(cleanVideoId),
       detail: {
         comments_disabled: true,
-        comment_count: null,
+        comment_count: 0,
         comment_count_status: "disabled",
         comments_status_source: "youtube_data_api_comment_threads",
         comment_count_source: "youtube_data_api_comment_threads",

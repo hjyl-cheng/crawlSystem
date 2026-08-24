@@ -153,6 +153,7 @@ export async function upsertFullVideoContent(client, {
     ? `https://www.youtube.com/shorts/${candidate.source_content_id}`
     : `https://www.youtube.com/watch?v=${candidate.source_content_id}`;
   const views = normalizeFullVideoViewCount(detail, { locale });
+  const commentsDisabled = detail.comments_disabled === true;
 
   const stored = await client.query(
     `INSERT INTO crawler.contents (
@@ -304,7 +305,7 @@ export async function upsertFullVideoContent(client, {
                      ELSE EXCLUDED.like_count_source
                    END,
                    comment_count=CASE
-                     WHEN EXCLUDED.comments_disabled=true THEN NULL
+                     WHEN EXCLUDED.comments_disabled=true THEN 0
                      ELSE COALESCE(EXCLUDED.comment_count,crawler.contents.comment_count)
                    END,
                    comment_count_status=CASE
@@ -385,8 +386,8 @@ export async function upsertFullVideoContent(client, {
       nonnegativeInteger(detail.like_count),
       detail.like_count_status ?? "unresolved",
       detail.like_count_source ?? null,
-      nonnegativeInteger(detail.comment_count),
-      detail.comment_count_status ?? "unresolved",
+      commentsDisabled ? 0 : nonnegativeInteger(detail.comment_count),
+      commentsDisabled ? "disabled" : detail.comment_count_status ?? "unresolved",
       typeof detail.comments_disabled === "boolean" ? detail.comments_disabled : null,
       detail.comment_count_source ?? detail.comments_status_source ?? null,
       detail.comments_first_page ? JSON.stringify(detail.comments_first_page) : null,

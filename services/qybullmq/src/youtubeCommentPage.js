@@ -492,7 +492,7 @@ export function classifyYoutubeCommentPage(page, {
   if (disabled === true || page?.comments_disabled === true) {
     return {
       comments_disabled: true,
-      comment_count: null,
+      comment_count: 0,
       comment_count_status: "disabled",
       comment_count_source: "youtubejs_comments",
     };

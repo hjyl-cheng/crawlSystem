@@ -35,6 +35,26 @@ ADD CONSTRAINT import_batches_contract_shape CHECK (
   END
 );
 
+ALTER TABLE public.content_snapshots
+DROP CONSTRAINT IF EXISTS content_snapshots_access_shape;
+
+ALTER TABLE public.content_snapshots
+ADD CONSTRAINT content_snapshots_access_shape CHECK (
+  access_status IN ('public','login_required','members_only','unavailable','unknown')
+  AND (access_status_source IS NULL OR btrim(access_status_source)<>'')
+  AND (source_position IS NULL OR source_position>0)
+  AND (
+    comments_disabled IS DISTINCT FROM true
+    OR CASE
+      WHEN raw_item->>'adapter_version'='business-publication-projection-v4'
+        THEN comment_count=0 AND comment_count_status='exact'
+      ELSE
+        (comment_count IS NULL AND comment_count_status='unavailable')
+        OR (comment_count=0 AND comment_count_status='exact')
+    END
+  )
+);
+
 ALTER TABLE publication.stream
 ALTER COLUMN accepted_contract_versions SET DEFAULT ARRAY[1,2]::integer[];
 
@@ -111,7 +131,8 @@ WITH RECURSIVE snapshot_chain AS (
     AND NOT (
       chain.raw_channel->>'adapter_version' IN (
         'business-publication-projection-v2',
-        'business-publication-projection-v3'
+        'business-publication-projection-v3',
+        'business-publication-projection-v4'
       )
       AND NULLIF(chain.raw_channel->>'source_observed_at','') IS NOT NULL
     )
@@ -127,7 +148,8 @@ WITH RECURSIVE snapshot_chain AS (
       CASE
         WHEN chain.raw_channel->>'adapter_version' IN (
           'business-publication-projection-v2',
-          'business-publication-projection-v3'
+          'business-publication-projection-v3',
+          'business-publication-projection-v4'
         )
           THEN NULLIF(chain.raw_channel->>'source_observed_at','')::timestamptz
       END,
@@ -145,7 +167,8 @@ WITH RECURSIVE snapshot_chain AS (
      OR (
        chain.raw_channel->>'adapter_version' IN (
          'business-publication-projection-v2',
-         'business-publication-projection-v3'
+         'business-publication-projection-v3',
+         'business-publication-projection-v4'
        )
        AND NULLIF(chain.raw_channel->>'source_observed_at','') IS NOT NULL
      )

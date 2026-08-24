@@ -245,6 +245,7 @@ function databaseFixture({
           next_last_observed_at: params[40] ? params[39] : null,
           like_count: params[27],
           comment_count: params[30],
+          comment_count_status: params[31],
           comments_disabled: params[32],
           comments_first_page: params[43] == null ? null : JSON.parse(params[43]),
           access_status: params[35],
@@ -1509,7 +1510,16 @@ test("Video execution deduplicates Contents and samples current Uploads dates in
     }),
     fetchDetail: async (videoId) => {
       fetched.push(videoId);
-      return detail(videoId, videoId === "new-video" ? 10 : 100);
+      const resolved = detail(videoId, videoId === "new-video" ? 10 : 100);
+      return videoId === "new-video"
+        ? {
+            ...resolved,
+            comment_count: null,
+            comment_count_status: "disabled",
+            comments_disabled: true,
+            comments_first_page: null,
+          }
+        : resolved;
     },
   });
 
@@ -1518,11 +1528,17 @@ test("Video execution deduplicates Contents and samples current Uploads dates in
   assert.deepEqual(fetched, ["new-video", "candidate-only", "uploads-dated-video", "old-video"]);
   assert.equal(fixture.state.contents.filter((row) => row.source_content_id === "new-video").length, 1);
   assert.equal(fixture.state.contents.filter((row) => row.source_content_id === "candidate-only").length, 1);
-  assert.equal(fixture.state.contents.find((row) => row.source_content_id === "new-video").comments_disabled, null);
-  assert.equal(
-    fixture.state.contents.find((row) => row.source_content_id === "new-video")
-      .comments_first_page?.comments?.[0]?.comment_id,
-    "comment-new-video",
+  assert.deepEqual(
+    (({ comment_count, comment_count_status, comments_disabled }) => ({
+      comment_count,
+      comment_count_status,
+      comments_disabled,
+    }))(fixture.state.contents.find((row) => row.source_content_id === "new-video")),
+    {
+      comment_count: 0,
+      comment_count_status: "disabled",
+      comments_disabled: true,
+    },
   );
   assert.equal(fixture.state.contents.find((row) => row.source_content_id === "old-video").view_count, 100);
   assert.equal(
@@ -1548,7 +1564,7 @@ test("Video execution deduplicates Contents and samples current Uploads dates in
   const discoverySql = fixture.state.sql[discoveryWrite];
   assert.match(
     discoverySql,
-    /comments_disabled=CASE[\s\S]*EXCLUDED\.comments_disabled IS NOT NULL/,
+    /comments_disabled=CASE[\s\S]*WHEN EXCLUDED\.comments_disabled OR EXCLUDED\.comment_count IS NOT NULL[\s\S]*WHEN crawler\.contents\.comments_disabled OR crawler\.contents\.comment_count IS NOT NULL/,
   );
   assert.match(
     discoverySql,
@@ -2399,6 +2415,47 @@ test("shared Video detail storage preserves an explicit terminal access evidence
 
   assert.equal(update.params[27], "private");
   assert.equal(update.params[28], "yt_dlp_detail");
+});
+
+test("shared Video detail storage persists disabled comments as an authoritative zero", async () => {
+  let update = null;
+  const client = {
+    async query(sql, params) {
+      update = { sql, params };
+      return { rowCount: 1, rows: [] };
+    },
+  };
+
+  await applyIncrementalVideoDetail(client, {
+    row: {
+      content_key: "UCvideo:video:comments-disabled",
+      channel_id: "UCvideo",
+      source_content_id: "comments-disabled",
+      content_type: "video",
+      content_type_source: "youtube_uploads",
+      view_count: null,
+      like_count: null,
+      comment_count: 12,
+      comments_disabled: false,
+      video_change_probability: null,
+    },
+    detail: {
+      comments_disabled: true,
+      comment_count: null,
+      comment_count_status: "disabled",
+      comment_count_source: "youtubejs_comments",
+      access_status: "public",
+      access_status_source: "youtubejs_player",
+    },
+    observedAt: "2026-08-24T00:00:00.000Z",
+  });
+
+  assert.equal(update.params[4], 0);
+  assert.equal(update.params[5], true);
+  assert.match(
+    update.sql,
+    /WHEN \$35::boolean AND \$6::boolean THEN 0/,
+  );
 });
 
 test("Video detail falls back to yt-dlp when YouTube.js is challenged", async () => {

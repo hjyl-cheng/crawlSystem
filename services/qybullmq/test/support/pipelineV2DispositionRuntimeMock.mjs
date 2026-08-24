@@ -230,7 +230,8 @@ export async function fetchVideoYtDlpDetail(videoId) {
   }
   const privateAccess = ["terminal_private", "existing_private"].includes(state().scenario);
   const authoritativeType = privateAccess
-    || ["stored_public", "disposition_write_retry"].includes(state().scenario);
+    || ["stored_public", "disabled_comments", "disposition_write_retry"].includes(state().scenario);
+  const commentsDisabled = state().scenario === "disabled_comments";
   return {
     id: videoId,
     title: "Public detail without authoritative type",
@@ -241,8 +242,9 @@ export async function fetchVideoYtDlpDetail(videoId) {
     view_count: 100,
     view_count_text: "100",
     like_count: 3,
-    comment_count: 0,
-    comments_disabled: false,
+    comment_count: commentsDisabled ? null : 0,
+    comment_count_status: commentsDisabled ? "disabled" : "exact",
+    comments_disabled: commentsDisabled,
     access_status: privateAccess ? "private" : "public",
     availability: privateAccess ? "private" : "public",
     ytdlp_client: "web",

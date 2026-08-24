@@ -2,7 +2,10 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import test from "node:test";
 import pg from "pg";
-import { executeIncrementalVideo } from "../src/incrementalVideo.js";
+import {
+  applyIncrementalVideoDetail,
+  executeIncrementalVideo,
+} from "../src/incrementalVideo.js";
 import { PUBLICATION_WRITER_VERSION } from "../src/publicationWriterVersion.js";
 
 const { Pool } = pg;
@@ -226,6 +229,106 @@ function twoPartyBarrier() {
   };
 }
 
+test("Incremental detail refresh persists disabled comments as an authoritative zero", {
+  skip: !integrationUrl,
+}, async () => {
+  const pool = incrementalPool(2);
+  const suffix = randomUUID().replaceAll("-", "");
+  const channelId = `UCdisabledcomments${suffix}`;
+  const videoId = `disabled-comments-${suffix}`;
+  const contentKey = `${channelId}:video:${videoId}`;
+
+  try {
+    await pool.query(
+      `INSERT INTO crawler.channels (channel_id,channel_url,title,status)
+       VALUES ($1,$2,'Disabled comments integration','active')`,
+      [channelId, `https://www.youtube.com/channel/${channelId}`],
+    );
+    await pool.query(
+      `INSERT INTO crawler.contents (
+         content_key,channel_id,content_type,content_type_source,source_content_id,
+         title,url,comment_count,comment_count_status,comments_disabled,
+         comment_count_source,access_status,access_status_source
+       ) VALUES (
+         $1,$2,'video','youtube_watch_canonical',$3,'Disabled comments',$4,
+         12,'exact',false,'youtubejs_comments','public','youtubejs_player'
+       )`,
+      [contentKey, channelId, videoId, `https://www.youtube.com/watch?v=${videoId}`],
+    );
+    const row = (await pool.query(
+      "SELECT * FROM crawler.contents WHERE content_key=$1",
+      [contentKey],
+    )).rows[0];
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      await applyIncrementalVideoDetail(client, {
+        row,
+        detail: completePublicDetail(videoId, {
+          comment_count: null,
+          comment_count_status: "disabled",
+          comments_disabled: true,
+          comment_count_source: "youtubejs_comments",
+        }),
+        observedAt: "2026-08-24T00:00:00.000Z",
+      });
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => {});
+      throw error;
+    } finally {
+      client.release();
+    }
+
+    const stored = (await pool.query(
+      `SELECT comment_count,comment_count_status,comments_disabled,comment_count_source
+       FROM crawler.contents WHERE content_key=$1`,
+      [contentKey],
+    )).rows[0];
+    assert.deepEqual(stored, {
+      comment_count: "0",
+      comment_count_status: "disabled",
+      comments_disabled: true,
+      comment_count_source: "youtubejs_comments",
+    });
+
+    const disabledRow = (await pool.query(
+      "SELECT * FROM crawler.contents WHERE content_key=$1",
+      [contentKey],
+    )).rows[0];
+    const reopenClient = await pool.connect();
+    try {
+      await reopenClient.query("BEGIN");
+      await applyIncrementalVideoDetail(reopenClient, {
+        row: disabledRow,
+        detail: completePublicDetail(videoId, {
+          comment_count: null,
+          comment_count_status: "unresolved",
+          comments_disabled: false,
+          comment_count_source: "youtubejs_comments",
+        }),
+        observedAt: "2026-08-24T01:00:00.000Z",
+      });
+      await reopenClient.query("COMMIT");
+    } catch (error) {
+      await reopenClient.query("ROLLBACK").catch(() => {});
+      throw error;
+    } finally {
+      reopenClient.release();
+    }
+
+    const afterIncompleteReopen = (await pool.query(
+      `SELECT comment_count,comment_count_status,comments_disabled,comment_count_source
+       FROM crawler.contents WHERE content_key=$1`,
+      [contentKey],
+    )).rows[0];
+    assert.deepEqual(afterIncompleteReopen, stored);
+  } finally {
+    await pool.query("DELETE FROM crawler.channels WHERE channel_id=$1", [channelId]).catch(() => {});
+    await pool.end();
+  }
+});
+
 test("incremental Video commits Current and aggregate events atomically", {
   skip: !integrationUrl,
 }, async () => {
@@ -392,18 +495,20 @@ test("incremental Video commits Current and aggregate events atomically", {
           view_count: videoId === "old-video" ? 100 : 10,
           view_count_text: videoId === "old-video" ? "100" : "10",
           duration_seconds: 90,
-          comment_count: 2,
-          comment_count_status: "exact",
+          comment_count: videoId === "new-video" ? null : 2,
+          comment_count_status: videoId === "new-video" ? "disabled" : "exact",
           comment_count_source: "youtubejs_comments",
-          comments_disabled: null,
-          comments_first_page: {
-            version: 1,
-            collected_at: "2026-07-20T12:00:00.000Z",
-            sort: "TOP_COMMENTS",
-            total_count: 2,
-            returned_count: 1,
-            comments: [{ comment_id: `comment-${videoId}`, text: `Comment ${videoId}` }],
-          },
+          comments_disabled: videoId === "new-video" ? true : null,
+          comments_first_page: videoId === "new-video"
+            ? null
+            : {
+                version: 1,
+                collected_at: "2026-07-20T12:00:00.000Z",
+                sort: "TOP_COMMENTS",
+                total_count: 2,
+                returned_count: 1,
+                comments: [{ comment_id: `comment-${videoId}`, text: `Comment ${videoId}` }],
+              },
           description: videoId === "old-video" ? "" : null,
           description_observed: videoId === "old-video",
           description_source: videoId === "old-video" ? "youtubejs_player" : null,
@@ -504,7 +609,8 @@ test("incremental Video commits Current and aggregate events atomically", {
     assert.equal(cursor.rows[0].source_cursor.matched_anchor_id, "known-anchor");
 
     const contents = await pool.query(
-      `SELECT source_content_id,published_at,view_count,comments_disabled,comments_first_page,video_change_probability,
+      `SELECT source_content_id,published_at,view_count,comment_count,comment_count_status,
+              comments_disabled,comments_first_page,video_change_probability,
               description,description_status,hashtags,keywords,
               publication_item_hash
        FROM crawler.contents WHERE channel_id=$1 ORDER BY source_content_id`,
@@ -538,11 +644,17 @@ test("incremental Video commits Current and aggregate events atomically", {
       Number(contents.rows.find((row) => row.source_content_id === "old-video").video_change_probability),
       1,
     );
-    assert.equal(contents.rows.find((row) => row.source_content_id === "new-video").comments_disabled, null);
-    assert.equal(
-      contents.rows.find((row) => row.source_content_id === "new-video")
-        .comments_first_page?.comments?.[0]?.comment_id,
-      "comment-new-video",
+    assert.deepEqual(
+      (({ comment_count, comment_count_status, comments_disabled }) => ({
+        comment_count,
+        comment_count_status,
+        comments_disabled,
+      }))(contents.rows.find((row) => row.source_content_id === "new-video")),
+      {
+        comment_count: "0",
+        comment_count_status: "disabled",
+        comments_disabled: true,
+      },
     );
     assert.equal(
       contents.rows.find((row) => row.source_content_id === "old-video")

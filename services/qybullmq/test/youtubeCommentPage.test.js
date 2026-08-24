@@ -187,9 +187,14 @@ test("youtubeCommentsDisabled recognizes an explicit disabled surface", () => {
 });
 
 test("classifyYoutubeCommentPage keeps closed, empty, and parse-failed pages distinct", () => {
-  assert.equal(classifyYoutubeCommentPage(emptyYoutubeCommentPage({ totalCount: 0 }), {
+  assert.deepEqual(classifyYoutubeCommentPage(emptyYoutubeCommentPage({ totalCount: 0 }), {
     disabled: true,
-  }).comment_count_status, "disabled");
+  }), {
+    comments_disabled: true,
+    comment_count: 0,
+    comment_count_status: "disabled",
+    comment_count_source: "youtubejs_comments",
+  });
   assert.equal(classifyYoutubeCommentPage(normalizeYoutubeCommentPage(commentPageFixture({
     countText: "0 Comments",
     comments: [],

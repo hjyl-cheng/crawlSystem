@@ -1385,7 +1385,11 @@ CREATE TABLE IF NOT EXISTS crawler.contents (
   raw_json JSONB NOT NULL DEFAULT '{}'::jsonb,
   first_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   last_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  last_enriched_at TIMESTAMPTZ
+  last_enriched_at TIMESTAMPTZ,
+  CONSTRAINT contents_comment_state_shape CHECK (
+    (comments_disabled IS TRUE AND comment_count=0 AND comment_count_status='disabled')
+    OR (comments_disabled IS DISTINCT FROM TRUE AND comment_count_status<>'disabled')
+  )
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS ux_crawler_contents_channel_source
@@ -2512,7 +2516,7 @@ SET
   like_count_status=COALESCE(merged.like_count_status,survivor.like_count_status),
   like_count_source=COALESCE(merged.like_count_source,survivor.like_count_source),
   comment_count=CASE
-    WHEN merged.comments_disabled=true THEN NULL
+    WHEN merged.comments_disabled=true THEN 0
     ELSE COALESCE(merged.comment_count,survivor.comment_count)
   END,
   comment_count_status=COALESCE(merged.comment_count_status,survivor.comment_count_status),
@@ -3522,3 +3526,22 @@ CREATE TRIGGER trg_publication_finalized_profiles_writer_version
 BEFORE INSERT OR UPDATE OR DELETE ON crawler.finalized_profiles
 FOR EACH ROW EXECUTE FUNCTION publication.guard_source_writer_version();
 -- publication-capture-schema:end
+
+-- Keep this compatibility constraint last: pre-existing disabled/null rows are repaired
+-- separately, and earlier schema maintenance statements may still touch those rows.
+DO $contents_comment_state_shape$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_constraint
+    WHERE conrelid='crawler.contents'::regclass
+      AND conname='contents_comment_state_shape'
+  ) THEN
+    ALTER TABLE crawler.contents
+    ADD CONSTRAINT contents_comment_state_shape CHECK (
+      (comments_disabled IS TRUE AND comment_count=0 AND comment_count_status='disabled')
+      OR (comments_disabled IS DISTINCT FROM TRUE AND comment_count_status<>'disabled')
+    ) NOT VALID;
+  END IF;
+END
+$contents_comment_state_shape$;

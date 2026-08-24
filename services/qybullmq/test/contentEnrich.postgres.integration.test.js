@@ -151,7 +151,7 @@ function queueFixture({ failedAdds = 0 } = {}) {
   };
 }
 
-function publicDetail(videoId) {
+function publicDetail(videoId, overrides = {}) {
   return {
     id: videoId,
     title: `Enriched ${videoId}`,
@@ -174,6 +174,7 @@ function publicDetail(videoId) {
       is_upcoming: false,
       is_live_now: false,
     },
+    ...overrides,
   };
 }
 
@@ -685,7 +686,12 @@ test("Content Enrich PostgreSQL lifecycle is fenced, recoverable, and idempotent
     });
     const successExecutor = new ContentEnrichExecutor({
       repository: publishingRepository,
-      fetchDetail: async (videoId) => publicDetail(videoId),
+      fetchDetail: async (videoId) => publicDetail(videoId, {
+        comment_count: null,
+        comment_count_status: "disabled",
+        comments_disabled: true,
+        comment_count_source: "youtubejs_comments",
+      }),
       now: () => now,
       leaseDurationMs: 60_000,
     });
@@ -694,7 +700,9 @@ test("Content Enrich PostgreSQL lifecycle is fenced, recoverable, and idempotent
     assert.equal(successResult.done, 1);
     const enriched = (await pool.query(
       `SELECT task.status,task.attempts,task.dispatch_generation,
-              content.title,content.last_enriched_at,content.publication_item_hash
+              content.title,content.last_enriched_at,content.publication_item_hash,
+              content.comment_count,content.comment_count_status,
+              content.comments_disabled,content.comment_count_source
        FROM crawler.content_enrich_tasks task
        JOIN crawler.contents content USING (content_key)
        WHERE task.channel_id=$1`,
@@ -705,6 +713,10 @@ test("Content Enrich PostgreSQL lifecycle is fenced, recoverable, and idempotent
     assert.equal(enriched.dispatch_generation, "2");
     assert.equal(enriched.title, "Enriched video-c");
     assert.equal(enriched.last_enriched_at.toISOString(), now.toISOString());
+    assert.equal(enriched.comment_count, "0");
+    assert.equal(enriched.comment_count_status, "disabled");
+    assert.equal(enriched.comments_disabled, true);
+    assert.equal(enriched.comment_count_source, "youtubejs_comments");
     assert.match(enriched.publication_item_hash, /^sha256:[0-9a-f]{64}$/);
     const published = await pool.query(
       `SELECT current.readiness_status,current.data_sequence,

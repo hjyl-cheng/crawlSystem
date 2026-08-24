@@ -731,7 +731,7 @@ test("normalizeYoutubeJsVideoInfo keeps missing comments unresolved", () => {
   });
   assert.equal(disabled.comments_disabled, true);
   assert.equal(disabled.comment_count_status, "disabled");
-  assert.equal(disabled.comment_count, null);
+  assert.equal(disabled.comment_count, 0);
 });
 
 test("normalizeYoutubeJsVideoInfo keeps a stored first comment page", () => {
@@ -805,7 +805,7 @@ test("an empty comments endpoint resolves an age-gated video as comments disable
   const detail = normalizeYoutubeJsVideoInfo(info, null, {
     commentsError: "Comments page did not have any content.",
   });
-  assert.equal(detail.comment_count, null);
+  assert.equal(detail.comment_count, 0);
   assert.equal(detail.comments_disabled, true);
   assert.equal(detail.comment_count_status, "disabled");
   assert.equal(detail.comments_status_source, "youtubejs_comments_age_gate_empty");

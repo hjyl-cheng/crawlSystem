@@ -42,6 +42,7 @@ test("Projection schema adds controlled batches, cutover audit, and Search remov
   assert.match(schema, /accepted_contract_versions SET DEFAULT ARRAY\[1,2\]/);
   assert.match(schema, /business-publication-projection-v2/);
   assert.match(schema, /business-publication-projection-v3/);
+  assert.match(schema, /business-publication-projection-v4/);
   assert.match(schema, /projection_snapshot_time_repair/);
   assert.match(schema, /channel_snapshot_metric_time_shape/);
   assert.match(schema, /WITH RECURSIVE snapshot_chain/);
@@ -58,6 +59,7 @@ test("Channel Observation time repair recognizes both Projection adapter generat
   );
   assert.match(repair, /business-publication-projection-v2/);
   assert.match(repair, /business-publication-projection-v3/);
+  assert.match(repair, /business-publication-projection-v4/);
 });
 
 test("Creator Search incremental schema keeps current state, exact changes, and guarded lifecycle", async () => {

@@ -257,7 +257,8 @@ BUG-1 修复后：
 
 ### 6.1 最终结论
 
-**305 条异常数据真实存在，但“disabled 放错桶”这个代码根因不成立。**
+**2026-08-24 更新：产品契约已明确，评论关闭必须发布为数值 `0`，并由
+`comments_disabled=true` 保留“关闭”语义。原先的 `disabled + NULL` 结论已废止。**
 
 数据库证据：
 
@@ -270,37 +271,48 @@ BUG-1 修复后：
 | 最晚首次写入 | 2026-07-18 06:31 UTC |
 | 最晚被更新 | 2026-07-26 06:00 UTC |
 
-这批数据是集中产生的历史坏数据。
+这批数据是在旧契约下集中产生的历史数据；按当前契约均需要规范化。
 
-当前写入代码已经执行：
+当前所有视频详情入口必须执行：
 
 ```text
 comments_disabled=true
-  -> comment_count=NULL
+  -> comment_count=0
   -> comment_count_status='disabled'
 ```
 
-`disabled` 表示作者关闭评论，评论总数不可得，不表示评论数为 0。因此它应属于“无数值但已终态”的集合，而不是 resolved numeric 集合。
+这里的 `0` 是系统对外使用的权威业务值，不代表 YouTube 返回了一个原始评论总数。
+`comments_disabled=true` 负责把“作者关闭评论”和“评论已开启但当前确实为 0”区分开。
+Crawler 保留 `comment_count_status='disabled'`；Business Projection 将其投影为
+`comment_count=0`、`comment_count_status='exact'`，同时继续保留
+`comments_disabled=true`。
 
 ### 6.2 具体解决方案
 
-1. 不修改 `videoPublicationCurrent.js` 的 disabled 分桶；
-2. 编写一次性、可审计的数据修复脚本，只处理精确谓词：
-   `comment_count_status='disabled' AND comment_count IS NOT NULL`；
-3. 把 `comment_count` 设为 NULL，保留 `comments_disabled=true` 和已有来源；
-4. 刷新 `publication_item_hash`；
-5. 通过正式 Repair Revision 和 Publication Reconciler 更新业务 Current，不修改历史 Revision；
-6. 修复后增加数据库约束：
-   `comment_count_status='disabled' -> comment_count IS NULL AND comments_disabled=true`；
-7. 约束先 `NOT VALID` 上线，历史修复完再 `VALIDATE`，避免长时间锁表。
+1. YouTube.js、yt-dlp、YouTube Data API fallback 统一产生 `0/disabled/true`；
+2. Full Crawl、Migration、Query、Incremental First-Seen、Incremental Recent Sampling
+   和 Content Enrich 写入同一状态三元组；
+3. `videoPublicationCurrent.js` 只接受
+   `comment_count=0 AND comment_count_status='disabled' AND comments_disabled=true`；
+4. Business Projection v4 将 Crawler 的 `disabled` 映射为业务库的
+   `0/exact/true`，旧 v3 快照继续只读兼容；
+5. 使用 `npm run repair:disabled-comment-counts` 先只读 Plan，再用 Plan 输出的
+   精确行数、证据哈希和确认值 Apply；
+6. 修复事务同时刷新 `publication_item_hash`，随后通过正式 Repair Revision 和
+   Publication Reconciler 更新业务 Current，不修改历史 Revision；
+7. Crawler 约束为
+   `comments_disabled=true -> comment_count=0 AND comment_count_status='disabled'`；
+   运行时先以 `NOT VALID` 安装，历史修复后再 `VALIDATE`。
 
 ### 6.3 验收
 
-- 精确 305 条被修复；
-- 其他 comment 状态不变；
-- 305 条重新生成合法 item hash；
-- 当前 Writer 的 disabled 测试继续通过；
-- 新写入 disabled + count 非 NULL 在数据库层直接拒绝。
+- Plan 与 Apply 的数据库身份、频道数、内容数、目标行数和证据哈希完全一致；
+- 所有 `comments_disabled=true` 行均为 `comment_count=0` 且状态为 `disabled`；
+- 其他评论状态不变，受影响行重新生成合法 item hash；
+- 增量首次发现、存量刷新和 Content Enrich 的 PostgreSQL 回归均通过；
+- Publication Current 发布 `0/disabled/true`，Business Current 最终为
+  `0/exact/true`；
+- 新写入任何不一致组合均在数据库层直接拒绝。
 
 ## 7. BUG-4：unlisted 存得进但发不出
 
@@ -935,7 +947,7 @@ BUG-1 与 BUG-8 可以并行开发，但上线应分别做小流量 canary，避
 
 1. 不得把 Uploads 中未明确为 short/live 的条目直接权威认定为 video；
 2. 不得在存在 retryable deferred 视频时强行推进增量游标；
-3. 不得把 comments disabled 当作 resolved numeric 0；
+3. 不得只把 comments disabled 写成数值 0 而丢失 `comments_disabled=true`；
 4. 不得只给发布白名单增加 unlisted，而不修改整个业务权限契约；
 5. 不得给缺失 `_source` 的历史数值伪造来源；
 6. 不得同时启动两个无协调接管过程的 Publisher/Relay；

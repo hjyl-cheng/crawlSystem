@@ -1286,7 +1286,7 @@ export function normalizeYoutubeJsVideoInfo(info, comments = null, {
     commentsError,
   });
   let commentCount = classified.comments_disabled === true
-    ? null
+    ? 0
     : (classified.comment_count ?? commentHint);
   let commentsDisabled = classified.comments_disabled;
   let commentStatus = classified.comments_disabled === true
@@ -1299,6 +1299,7 @@ export function normalizeYoutubeJsVideoInfo(info, comments = null, {
     : commentHint != null ? "youtubejs_next" : null;
   if (commentsDisabled == null && isEmptyAgeGateCommentsResponse(info, commentsError)) {
     commentsDisabled = true;
+    commentCount = 0;
     commentStatus = "disabled";
     commentsSource = "youtubejs_comments_age_gate_empty";
   } else if (commentsDisabled == null && commentCount != null) {

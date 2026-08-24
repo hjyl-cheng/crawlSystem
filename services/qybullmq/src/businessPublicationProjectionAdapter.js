@@ -1,6 +1,6 @@
 import { observationFactsHash } from "./crawlObservationStore.js";
 
-export const BUSINESS_PROJECTION_ADAPTER_VERSION = "business-publication-projection-v3";
+export const BUSINESS_PROJECTION_ADAPTER_VERSION = "business-publication-projection-v4";
 export const BUSINESS_PROJECTION_METRIC_VERSION = "publication-current-metric-v1";
 
 const CONTENT_KIND = Object.freeze({
@@ -360,9 +360,23 @@ function linksFromPrevious(rows, channelId, snapshotId) {
 }
 
 function countValue(payload, key, statusKey, observedAtKey) {
+  const sourceStatus = optionalText(payload[statusKey]);
   const value = nonnegativeInteger(payload[key], `content.${key}`, { nullable: true });
+  if (key === "comment_count" && sourceStatus === "disabled") {
+    if (value != null && value !== 0) {
+      fail(
+        "projection_payload_invalid",
+        "disabled Comments require comment_count=0, comment_count_status=disabled, and comments_disabled=true",
+      );
+    }
+    return {
+      value: 0,
+      status: "exact",
+      observedAt: timestamp(payload[observedAtKey], `content.${observedAtKey}`),
+    };
+  }
   if (value == null) return { value: null, status: "unavailable", observedAt: null };
-  const sourceStatus = text(payload[statusKey], `content.${statusKey}`);
+  if (!sourceStatus) text(payload[statusKey], `content.${statusKey}`);
   let status;
   if (key === "view_count") {
     status = new Set(["exact", "estimated", "recovered"]).has(sourceStatus)
@@ -371,7 +385,9 @@ function countValue(payload, key, statusKey, observedAtKey) {
   } else {
     status = sourceStatus === "stale"
       ? "stale"
-      : (sourceStatus === "exact" || sourceStatus.startsWith("zero_"))
+      : (sourceStatus === "exact"
+          || sourceStatus.startsWith("zero_")
+          || (key === "comment_count" && sourceStatus === "disabled"))
         ? "exact"
         : "unavailable";
   }
@@ -396,12 +412,24 @@ function contentFromCurrent(row, channelId, snapshotId, index) {
   const publishedDate = date(payload.published_date, "content.published_date", { nullable: true });
   const view = countValue(payload, "view_count", "view_count_status", "view_count_observed_at");
   const like = countValue(payload, "like_count", "like_count_status", "like_count_observed_at");
+  const commentsDisabled = optionalBoolean(
+    payload.comments_disabled,
+    "content.comments_disabled",
+  );
   const comment = countValue(
     payload,
     "comment_count",
     "comment_count_status",
     "comment_count_observed_at",
   );
+  const sourceCommentStatus = text(payload.comment_count_status, "content.comment_count_status");
+  if ((sourceCommentStatus === "disabled") !== (commentsDisabled === true)
+      || (commentsDisabled === true && comment.value !== 0)) {
+    fail(
+      "projection_payload_invalid",
+      "disabled Comments require comment_count=0, comment_count_status=disabled, and comments_disabled=true",
+    );
+  }
   const duration = nonnegativeInteger(
     payload.duration_seconds,
     "content.duration_seconds",
@@ -472,7 +500,7 @@ function contentFromCurrent(row, channelId, snapshotId, index) {
       comment_count_observed_at: comment.observedAt,
       source_url: optionalText(payload.url),
       channel_id: channelId,
-      comments_disabled: optionalBoolean(payload.comments_disabled, "content.comments_disabled"),
+      comments_disabled: commentsDisabled,
       is_members_only: Boolean(payload.is_members_only),
       access_status: payload.access_status === "private"
         ? "unavailable"

@@ -136,6 +136,31 @@ test("Full Crawl persists numeric Video Current and retains trusted facts on wea
     assert.deepEqual(retained, first);
 
     await upsert(contentId, {
+      comments_disabled: true,
+      comment_count: null,
+      comment_count_source: "youtubejs_comments",
+      extractor_version: "disabled-comments-retry",
+    });
+    const disabledComments = (await pool.query(
+      `SELECT comment_count,comment_count_status,comments_disabled,comment_count_source,
+              publication_item_hash
+       FROM crawler.contents WHERE content_key=$1`,
+      [contentKey],
+    )).rows[0];
+    assert.deepEqual({
+      comment_count: disabledComments.comment_count,
+      comment_count_status: disabledComments.comment_count_status,
+      comments_disabled: disabledComments.comments_disabled,
+      comment_count_source: disabledComments.comment_count_source,
+    }, {
+      comment_count: "0",
+      comment_count_status: "disabled",
+      comments_disabled: true,
+      comment_count_source: "youtubejs_comments",
+    });
+    assert.notEqual(disabledComments.publication_item_hash, first.publication_item_hash);
+
+    await upsert(contentId, {
       view_count_text: "2.5K views",
       view_count_status: "exact",
       view_count_source: "youtube_uploads",

@@ -280,7 +280,7 @@ def comment_state_from_initial_data(
     if parsed_count is not None:
         return parsed_count, False, "exact", "yt_dlp_initial_data"
     if explicit_disabled:
-        return None, True, "disabled", "yt_dlp_initial_data"
+        return 0, True, "disabled", "yt_dlp_initial_data"
     if has_comment_surface:
         return 0, False, "zero_from_surface", "yt_dlp_initial_data"
     return None, None, "unresolved", None

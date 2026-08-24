@@ -172,8 +172,8 @@ export function buildVideoPublicationItem(rowValue, { channelId } = {}) {
     observedAtRequired: true,
   });
   const comments = countCurrent(content, "comment_count", {
-    resolved: new Set(["exact", "zero_from_empty", "zero_from_surface", "zero_from_upcoming"]),
-    unresolved: new Set(["disabled", "unavailable", "unresolved"]),
+    resolved: new Set(["exact", "zero_from_empty", "zero_from_surface", "zero_from_upcoming", "disabled"]),
+    unresolved: new Set(["unavailable", "unresolved"]),
     observedAtRequired: true,
   });
   const descriptionStatus = text(content.description_status);
@@ -212,7 +212,8 @@ export function buildVideoPublicationItem(rowValue, { channelId } = {}) {
       });
     }
   }
-  if ((commentsDisabled === true) !== (comments.status === "disabled")) {
+  if ((commentsDisabled === true) !== (comments.status === "disabled")
+      || (comments.status === "disabled" && comments.value !== 0)) {
     issues.push({
       domain: "video",
       code: "video_item_comment_state_invalid",

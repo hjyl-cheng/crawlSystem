@@ -208,6 +208,11 @@ test("Video Item rejects missing metric provenance and inconsistent disabled Com
     comment_count_status: "disabled",
     comments_disabled: false,
   }), { channelId: CHANNEL_ID });
+  const invalidDisabledCount = buildVideoPublicationItem(videoRow("invalid-disabled-count", {
+    comment_count: 1,
+    comment_count_status: "disabled",
+    comments_disabled: true,
+  }), { channelId: CHANNEL_ID });
   const missingAccessSource = buildVideoPublicationItem(videoRow("missing-access-source", {
     access_status_source: null,
   }), { channelId: CHANNEL_ID });
@@ -228,9 +233,35 @@ test("Video Item rejects missing metric provenance and inconsistent disabled Com
     true,
   );
   assert.equal(
+    invalidDisabledCount.issues.some(
+      (item) => item.code === "video_item_comment_state_invalid",
+    ),
+    true,
+  );
+  assert.equal(
     invalidAccess.issues.some((item) => item.code === "video_item_access_state_invalid"),
     true,
   );
+});
+
+test("Video Item publishes disabled comments as an authoritative zero", () => {
+  const disabledComments = buildVideoPublicationItem(videoRow("comments-disabled", {
+    comment_count: 0,
+    comment_count_status: "disabled",
+    comment_count_source: "youtubejs_comments",
+    comments_disabled: true,
+  }), { channelId: CHANNEL_ID });
+
+  assert.equal(disabledComments.ready, true);
+  assert.deepEqual({
+    comment_count: disabledComments.payload.comment_count,
+    comment_count_status: disabledComments.payload.comment_count_status,
+    comments_disabled: disabledComments.payload.comments_disabled,
+  }, {
+    comment_count: 0,
+    comment_count_status: "disabled",
+    comments_disabled: true,
+  });
 });
 
 test("Video Current requires the deterministic Item hash to be persisted", () => {

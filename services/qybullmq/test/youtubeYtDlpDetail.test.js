@@ -23,3 +23,25 @@ test("yt-dlp detail conversion preserves its normalized first comment page", asy
   assert.deepEqual(detail.comments_first_page, page);
 });
 
+test("yt-dlp detail conversion canonicalizes disabled comments to zero", async () => {
+  const youtube = await import("../src/youtube.js");
+  const detail = youtube.detailFromYtDlpResult({
+    ok: true,
+    id: "video-id",
+    title: "Video",
+    comments_disabled: true,
+    comment_count: null,
+    comment_count_status: "disabled",
+    comments_status_source: "yt_dlp_initial_data",
+  }, "https://www.youtube.com/watch?v=video-id");
+
+  assert.deepEqual({
+    comments_disabled: detail.comments_disabled,
+    comment_count: detail.comment_count,
+    comment_count_status: detail.comment_count_status,
+  }, {
+    comments_disabled: true,
+    comment_count: 0,
+    comment_count_status: "disabled",
+  });
+});

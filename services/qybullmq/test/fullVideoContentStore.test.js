@@ -180,3 +180,44 @@ test("Full Video migration upsert persists the normalized first comment page", a
     /comments_first_page=COALESCE\(EXCLUDED\.comments_first_page,crawler\.contents\.comments_first_page\)/,
   );
 });
+
+test("Full Video storage persists disabled comments as an authoritative zero", async () => {
+  let insertSql = null;
+  let insertValues = null;
+  const client = {
+    async query(sql, values) {
+      if (sql.includes("INSERT INTO crawler.contents")) {
+        insertSql = sql;
+        insertValues = values;
+        return { rows: [{ content_key: "UCcomments:video:disabled" }] };
+      }
+      return { rows: [] };
+    },
+  };
+
+  await upsertFullVideoContent(client, {
+    candidate: {
+      channel_id: "UCcomments",
+      run_id: "run-comments-disabled",
+      content_type: "video",
+      type_source: "youtube_watch_canonical",
+      type_authoritative: true,
+      source_content_id: "disabled",
+      position: 1,
+      title: "Comments disabled",
+    },
+    state: {
+      detail: {
+        comments_disabled: true,
+        comment_count: null,
+        comment_count_source: "youtubejs_comments",
+      },
+      access: { access_status: "public" },
+    },
+  });
+
+  assert.equal(insertValues[26], 0);
+  assert.equal(insertValues[27], "disabled");
+  assert.equal(insertValues[28], true);
+  assert.match(insertSql, /WHEN EXCLUDED\.comments_disabled=true THEN 0/);
+});

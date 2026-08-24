@@ -186,6 +186,7 @@ function detailSource(detail) {
 function detailFacts(detail) {
   if (!detail) return null;
   const source = detailSource(detail);
+  const commentsDisabled = detail.comments_disabled === true;
   return {
     title: text(detail.title),
     thumbnail_url: text(detail.thumbnail_url),
@@ -198,11 +199,11 @@ function detailFacts(detail) {
     view_count_source: text(detail.view_count_source) ?? source,
     like_count: integer(detail.like_count),
     like_count_source: text(detail.like_count_source) ?? source,
-    comment_count: integer(detail.comment_count),
+    comment_count: commentsDisabled ? 0 : integer(detail.comment_count),
     comment_count_source: text(detail.comment_count_source ?? detail.comments_status_source) ?? source,
     comments_disabled: detail.comments_disabled == null
       ? null
-      : detail.comments_disabled === true,
+      : commentsDisabled,
     comments_first_page: detail.comments_first_page ?? null,
     duration_seconds: positiveInteger(detail.duration_seconds),
     duration_source: text(detail.duration_source) ?? source,
@@ -1190,16 +1191,27 @@ async function upsertFirstSeenContent(client, {
          like_count=COALESCE(EXCLUDED.like_count,crawler.contents.like_count),
          like_count_status=CASE WHEN EXCLUDED.like_count IS NOT NULL THEN 'exact' ELSE crawler.contents.like_count_status END,
          like_count_source=COALESCE(EXCLUDED.like_count_source,crawler.contents.like_count_source),
-         comment_count=CASE WHEN EXCLUDED.comments_disabled THEN NULL ELSE COALESCE(EXCLUDED.comment_count,crawler.contents.comment_count) END,
+         comment_count=CASE
+           WHEN EXCLUDED.comments_disabled THEN 0
+           ELSE COALESCE(EXCLUDED.comment_count,crawler.contents.comment_count) END,
          comment_count_status=CASE
-           WHEN EXCLUDED.comments_disabled THEN 'disabled'
-           WHEN EXCLUDED.comment_count IS NOT NULL THEN 'exact'
-           ELSE crawler.contents.comment_count_status END,
+           WHEN EXCLUDED.comments_disabled OR EXCLUDED.comment_count IS NOT NULL
+             THEN EXCLUDED.comment_count_status
+           WHEN crawler.contents.comments_disabled OR crawler.contents.comment_count IS NOT NULL
+             THEN crawler.contents.comment_count_status
+           ELSE EXCLUDED.comment_count_status END,
          comments_disabled=CASE
-           WHEN $41::boolean AND EXCLUDED.comments_disabled IS NOT NULL
+           WHEN EXCLUDED.comments_disabled OR EXCLUDED.comment_count IS NOT NULL
              THEN EXCLUDED.comments_disabled
-           ELSE crawler.contents.comments_disabled END,
-         comment_count_source=COALESCE(EXCLUDED.comment_count_source,crawler.contents.comment_count_source),
+           WHEN crawler.contents.comments_disabled OR crawler.contents.comment_count IS NOT NULL
+             THEN crawler.contents.comments_disabled
+           ELSE EXCLUDED.comments_disabled END,
+         comment_count_source=CASE
+           WHEN EXCLUDED.comments_disabled OR EXCLUDED.comment_count IS NOT NULL
+             THEN EXCLUDED.comment_count_source
+           WHEN crawler.contents.comments_disabled OR crawler.contents.comment_count IS NOT NULL
+             THEN crawler.contents.comment_count_source
+           ELSE EXCLUDED.comment_count_source END,
          comments_first_page=CASE
            WHEN COALESCE((crawler.contents.comments_first_page->>'returned_count')::integer,0)>0
              THEN crawler.contents.comments_first_page
@@ -1265,7 +1277,7 @@ async function upsertFirstSeenContent(client, {
       facts?.like_count ?? null,
       facts?.like_count == null ? "unresolved" : "exact",
       facts?.like_count == null ? null : facts.like_count_source,
-      facts?.comments_disabled ? null : facts?.comment_count ?? null,
+      facts?.comments_disabled ? 0 : facts?.comment_count ?? null,
       facts?.comments_disabled ? "disabled" : facts?.comment_count == null ? "unresolved" : "exact",
       facts?.comments_disabled ?? null,
       facts?.comments_disabled || facts?.comment_count != null ? facts.comment_count_source : null,
@@ -1763,7 +1775,7 @@ export async function applyIncrementalVideoDetail(client, {
     || (previousComment != null && facts.comment_count != null
       && previousComment !== facts.comment_count);
   const changeProbability = nextVideoChangeProbability(row, facts, changeAlpha);
-  const commentsObserved = facts.comments_disabled != null || facts.comment_count != null;
+  const commentsObserved = facts.comments_disabled === true || facts.comment_count != null;
   const isRecent = facts.published_at == null
     ? null
     : new Date(facts.published_at).getTime() >= new Date(observedAt).getTime() - (30 * 86400000);
@@ -1813,7 +1825,7 @@ export async function applyIncrementalVideoDetail(client, {
          like_count_status=CASE WHEN $4::bigint IS NULL THEN like_count_status ELSE 'exact' END,
          like_count_source=CASE WHEN $4::bigint IS NULL THEN like_count_source ELSE $26 END,
          comment_count=CASE
-           WHEN $35::boolean AND $6::boolean THEN NULL
+           WHEN $35::boolean AND $6::boolean THEN 0
            WHEN $5::bigint IS NOT NULL THEN $5 ELSE comment_count END,
          comment_count_status=CASE
            WHEN $35::boolean AND $6::boolean THEN 'disabled'

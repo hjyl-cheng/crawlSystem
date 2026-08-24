@@ -36,6 +36,7 @@
     "publication:recover-retraction-projections": "node scripts/recoverBusinessRetractionProjectionDeadLetters.mjs",
     "recover:stored-data-api-evidence": "node scripts/recoverStoredDataApiEvidence.mjs",
     "recover:migration-business-run-intent": "node scripts/recoverMigrationBusinessRunIntentFailures.mjs",
+    "repair:disabled-comment-counts": "node scripts/repairDisabledCommentCounts.mjs",
     "content-enrich:mode": "node scripts/manageContentEnrichMode.mjs",
     "publication:runtime-roles": "node scripts/managePublicationRuntimeRoles.mjs",
     "publication:fresh:bootstrap": "node scripts/bootstrapFreshPublication.mjs",

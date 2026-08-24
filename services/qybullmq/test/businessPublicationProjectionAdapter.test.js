@@ -269,6 +269,56 @@ test("Projection Adapter builds a deterministic complete business snapshot", () 
   assert.equal(first.snapshot.candidate_last_published_date, "2026-07-29");
 });
 
+test("Projection Adapter publishes disabled comments as an exact zero", () => {
+  const input = completeInput();
+  input.current.contents[0].payload_json = contentPayload({
+    comment_count: 0,
+    comment_count_status: "disabled",
+    comments_disabled: true,
+  });
+
+  const result = buildBusinessPublicationProjection(input);
+
+  assert.deepEqual({
+    comment_count: result.contents[0].comment_count,
+    comment_count_status: result.contents[0].comment_count_status,
+    comments_disabled: result.contents[0].comments_disabled,
+  }, {
+    comment_count: 0,
+    comment_count_status: "exact",
+    comments_disabled: true,
+  });
+});
+
+test("Projection Adapter upgrades a legacy disabled null to an exact zero", () => {
+  const input = completeInput();
+  input.current.contents[0].payload_json = contentPayload({
+    comment_count: null,
+    comment_count_status: "disabled",
+    comments_disabled: true,
+  });
+
+  const result = buildBusinessPublicationProjection(input);
+
+  assert.equal(result.contents[0].comment_count, 0);
+  assert.equal(result.contents[0].comment_count_status, "exact");
+  assert.equal(result.contents[0].comments_disabled, true);
+});
+
+test("Projection Adapter rejects a nonzero disabled comment count", () => {
+  const input = completeInput();
+  input.current.contents[0].payload_json = contentPayload({
+    comment_count: 1,
+    comment_count_status: "disabled",
+    comments_disabled: true,
+  });
+
+  assert.throws(
+    () => buildBusinessPublicationProjection(input),
+    /disabled Comments require comment_count=0/,
+  );
+});
+
 test("Projection Adapter publishes a confirmed business email removal and carries it forward", () => {
   const availableInput = completeInput();
   availableInput.current.channel.payload_json = channelPayload({

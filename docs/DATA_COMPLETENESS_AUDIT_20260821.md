@@ -107,7 +107,7 @@ detail_failure_count = 0
 | 未知 | 没有 | 283 | 数量与正文都未解决 |
 | 未知 | 已有 | 29 | 正文成功，只缺总数 |
 
-参考量（**不计入缺失**）：`comments_disabled` 终态 5,588 个视频 / 3,595 频道，作者主动关闭评论，属永久终态。
+参考量（**不计入缺失**）：`comments_disabled` 终态 5,588 个视频 / 3,595 频道，作者主动关闭评论，属永久终态。按 2026-08-24 统一契约，Crawler 存为 `0/disabled/true`，Business 存为 `0/exact/true`。
 
 ---
 
@@ -255,7 +255,7 @@ outcome: scan.complete && unresolvedVideoIds.length === 0 ? "complete" : "partia
 
 | 字段 | 终态值 | 今日规模 | 理由 |
 |---|---|---:|---|
-| `comment_count` | `disabled` | 5,588 | 作者关闭评论，永远拿不到 |
+| `comment_count` | `disabled` | 5,588 | 作者关闭评论；业务值固定为 0，并保留 disabled 标志 |
 | `description` | `empty` | — | 作者确实未填写 |
 | `like_count` | `zero_from_empty` | — | 确认为 0 |
 | `comment_count` | `zero_from_surface` | — | 确认为 0 |

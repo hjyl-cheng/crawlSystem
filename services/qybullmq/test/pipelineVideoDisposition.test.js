@@ -84,6 +84,24 @@ test("the shared Full Crawl detail path stores a public authoritative Video", ()
   assert.equal(observed.candidate.result_json.classification.authoritative, true);
 });
 
+test("the shared Full Crawl detail path normalizes disabled comments to zero", () => {
+  const observed = runScenario("disabled_comments");
+  assert.equal(observed.error, null);
+  assert.equal(observed.candidate.disposition, "stored");
+  assert.deepEqual(
+    (({ comment_count, comment_count_status, comments_disabled }) => ({
+      comment_count,
+      comment_count_status,
+      comments_disabled,
+    }))(observed.candidate.result_json.detail),
+    {
+      comment_count: 0,
+      comment_count_status: "disabled",
+      comments_disabled: true,
+    },
+  );
+});
+
 test("the shared Full Crawl detail path preserves an existing Video when access changes", () => {
   const observed = runScenario("existing_private");
   assert.equal(observed.error, null);

@@ -484,7 +484,7 @@ function normalizeResolvedDetail(detail, { afterApi = false, access = null } = {
       : output.like_count_status === "zero_from_empty" ? "zero_from_empty" : "exact";
   }
   if (output.comments_disabled === true) {
-    output.comment_count = null;
+    output.comment_count = 0;
     output.comment_count_status = "disabled";
   } else if (output.comment_count != null) {
     output.comment_count_status = ["zero_from_surface", "zero_from_upcoming"].includes(output.comment_count_status)

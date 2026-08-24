@@ -135,7 +135,8 @@ async function repairSnapshots(client) {
            AND NOT (
              chain.raw_channel->>'adapter_version' IN (
                'business-publication-projection-v2',
-               'business-publication-projection-v3'
+               'business-publication-projection-v3',
+               'business-publication-projection-v4'
              )
              AND NULLIF(chain.raw_channel->>'source_observed_at','') IS NOT NULL
            )
@@ -151,7 +152,8 @@ async function repairSnapshots(client) {
              CASE
                WHEN chain.raw_channel->>'adapter_version' IN (
                  'business-publication-projection-v2',
-                 'business-publication-projection-v3'
+                 'business-publication-projection-v3',
+                 'business-publication-projection-v4'
                )
                  THEN NULLIF(chain.raw_channel->>'source_observed_at','')::timestamptz
              END,
@@ -169,7 +171,8 @@ async function repairSnapshots(client) {
             OR (
               chain.raw_channel->>'adapter_version' IN (
                 'business-publication-projection-v2',
-                'business-publication-projection-v3'
+                'business-publication-projection-v3',
+                'business-publication-projection-v4'
               )
               AND NULLIF(chain.raw_channel->>'source_observed_at','') IS NOT NULL
             )
