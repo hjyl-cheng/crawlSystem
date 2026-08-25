@@ -2547,6 +2547,115 @@ test("Video detail falls back to yt-dlp when YouTube.js returns incomplete facts
   assert.equal(result.ytdlp_client, "web");
 });
 
+test("Video detail verifies YouTube.js disabled comments and keeps yt-dlp visible comments", async () => {
+  const calls = [];
+  const result = await fetchIncrementalVideoDetail("comments-visible-in-fallback", {
+    fetchYoutubeJs: async () => {
+      calls.push("youtubejs");
+      return {
+        ...detail("comments-visible-in-fallback", 42),
+        comment_count: 0,
+        comment_count_status: "disabled",
+        comment_count_source: "youtubejs_comments",
+        comments_status_source: "youtubejs_comments",
+        comments_disabled: true,
+        comments_first_page: {
+          version: 1,
+          collected_at: "2026-08-25T00:00:00.000Z",
+          sort: "TOP_COMMENTS",
+          total_count: 0,
+          returned_count: 0,
+          comments: [],
+        },
+      };
+    },
+    fetchYtDlp: async () => {
+      calls.push("yt-dlp");
+      return {
+        ...detail("comments-visible-in-fallback", 42),
+        comment_count: 19,
+        comment_count_status: "exact",
+        comment_count_source: "yt_dlp",
+        comments_status_source: "yt_dlp",
+        comments_disabled: false,
+        comments_first_page: {
+          version: 1,
+          collected_at: "2026-08-25T00:00:01.000Z",
+          sort: "TOP_COMMENTS",
+          total_count: 19,
+          returned_count: 15,
+          comments: [{ comment_id: "visible-comment", text: "Visible comment" }],
+        },
+        comments_first_page_status: "collected",
+        comments_first_page_source: "yt_dlp_top_comments",
+        ytdlp_client: "web",
+      };
+    },
+  });
+
+  assert.deepEqual(calls, ["youtubejs", "yt-dlp"]);
+  assert.equal(result.comments_disabled, false);
+  assert.equal(result.comment_count, 19);
+  assert.equal(result.comment_count_status, "exact");
+  assert.equal(result.comment_count_source, "yt_dlp");
+  assert.equal(result.comments_status_source, "yt_dlp");
+  assert.equal(result.comments_first_page.returned_count, 15);
+  assert.equal(result.comments_first_page_source, "yt_dlp_top_comments");
+});
+
+test("Video detail does not let a yt-dlp disabled result erase visible YouTube.js comments", async () => {
+  const result = await fetchIncrementalVideoDetail("comments-visible-in-youtubejs", {
+    fetchYoutubeJs: async () => ({
+      ...detail("comments-visible-in-youtubejs", 42),
+      view_count: null,
+      view_count_text: null,
+      comment_count: 12,
+      comment_count_status: "exact",
+      comment_count_source: "youtubejs_comments",
+      comments_status_source: "youtubejs_comments",
+      comments_disabled: false,
+      comments_first_page: {
+        version: 1,
+        collected_at: "2026-08-25T00:00:00.000Z",
+        sort: "TOP_COMMENTS",
+        total_count: 12,
+        returned_count: 1,
+        comments: [{ comment_id: "youtubejs-comment", text: "Visible comment" }],
+      },
+      comments_first_page_status: "collected",
+      comments_first_page_source: "youtubejs_comments",
+    }),
+    fetchYtDlp: async () => ({
+      ...detail("comments-visible-in-youtubejs", 84),
+      comment_count: 0,
+      comment_count_status: "disabled",
+      comment_count_source: "yt_dlp",
+      comments_status_source: "yt_dlp",
+      comments_disabled: true,
+      comments_first_page: {
+        version: 1,
+        collected_at: "2026-08-25T00:00:01.000Z",
+        sort: "TOP_COMMENTS",
+        total_count: 0,
+        returned_count: 0,
+        comments: [],
+      },
+      comments_first_page_status: "disabled",
+      comments_first_page_source: "yt_dlp_top_comments",
+      ytdlp_client: "web",
+    }),
+  });
+
+  assert.equal(result.view_count, 84);
+  assert.equal(result.comments_disabled, false);
+  assert.equal(result.comment_count, 12);
+  assert.equal(result.comment_count_status, "exact");
+  assert.equal(result.comment_count_source, "youtubejs_comments");
+  assert.equal(result.comments_status_source, "youtubejs_comments");
+  assert.equal(result.comments_first_page.returned_count, 1);
+  assert.equal(result.comments_first_page_source, "youtubejs_comments");
+});
+
 test("Video detail fallback failure keeps the usable YouTube.js partial evidence", async () => {
   const fallbackFailure = new Error("yt-dlp parser failed");
 
@@ -2567,6 +2676,43 @@ test("Video detail fallback failure keeps the usable YouTube.js partial evidence
       assert(error instanceof AggregateError);
       assert.equal(error.errors.at(-1), fallbackFailure);
       assert.equal(error.partial_detail.title, "Partial title");
+      return true;
+    },
+  );
+});
+
+test("failed yt-dlp verification does not persist an unverified YouTube.js disabled result", async () => {
+  await assert.rejects(
+    fetchIncrementalVideoDetail("comments-verification-failure", {
+      fetchYoutubeJs: async () => ({
+        ...detail("comments-verification-failure", 42),
+        view_count: null,
+        view_count_text: null,
+        comment_count: 0,
+        comment_count_status: "disabled",
+        comment_count_source: "youtubejs_comments",
+        comments_status_source: "youtubejs_comments",
+        comments_disabled: true,
+        comments_first_page: {
+          version: 1,
+          collected_at: "2026-08-25T00:00:00.000Z",
+          sort: "TOP_COMMENTS",
+          total_count: 0,
+          returned_count: 0,
+          comments: [],
+        },
+      }),
+      fetchYtDlp: async () => {
+        throw new Error("yt-dlp verification failed");
+      },
+    }),
+    (error) => {
+      assert(error instanceof AggregateError);
+      assert.equal(error.partial_detail.title, "Title comments-verification-failure");
+      assert.equal(error.partial_detail.comment_count, null);
+      assert.equal(error.partial_detail.comment_count_status, "unresolved");
+      assert.equal(error.partial_detail.comments_disabled, null);
+      assert.equal(error.partial_detail.comments_first_page, null);
       return true;
     },
   );

@@ -50,6 +50,17 @@ const TERMINAL_CONTENT_ACCESS_STATUSES = new Set([
   "private",
   "unavailable",
 ]);
+const COMMENT_DETAIL_FIELDS = [
+  "comment_count",
+  "comment_count_status",
+  "comment_count_source",
+  "comments_disabled",
+  "comments_status_source",
+  "comments_first_page",
+  "comments_first_page_status",
+  "comments_first_page_source",
+];
+
 function integer(value) {
   if (value === null || value === undefined || value === "") return null;
   const number = Number(value);
@@ -83,6 +94,78 @@ function mergeDefined(base, patch) {
     if (value !== undefined && value !== null && value !== "") output[key] = value;
   }
   return output;
+}
+
+function incrementalCommentObservation(detail) {
+  const page = detail?.comments_first_page;
+  const count = integer(detail?.comment_count);
+  const totalCount = integer(page?.total_count);
+  const returnedCount = Math.max(
+    integer(page?.returned_count) ?? 0,
+    Array.isArray(page?.comments) ? page.comments.length : 0,
+  );
+  const hasVisibleComments = (count ?? 0) > 0
+    || (totalCount ?? 0) > 0
+    || returnedCount > 0;
+  const disabled = detail?.comments_disabled === true
+    || detail?.comment_count_status === "disabled";
+  const observed = hasVisibleComments
+    || disabled
+    || detail?.comments_disabled === false
+    || count != null
+    || ["zero_from_surface", "zero_from_upcoming", "zero_from_empty"]
+      .includes(detail?.comment_count_status);
+  return {
+    detail: detail ?? {},
+    count,
+    totalCount,
+    returnedCount,
+    hasVisibleComments,
+    disabled,
+    rank: hasVisibleComments ? 3 : disabled ? 2 : observed ? 1 : 0,
+  };
+}
+
+function applyIncrementalCommentObservation(output, observation) {
+  for (const field of COMMENT_DETAIL_FIELDS) {
+    if (Object.prototype.hasOwnProperty.call(observation.detail, field)) {
+      output[field] = observation.detail[field];
+    } else {
+      delete output[field];
+    }
+  }
+  if (observation.hasVisibleComments) {
+    output.comments_disabled = false;
+    if ((observation.count ?? 0) <= 0 && (observation.totalCount ?? 0) > 0) {
+      output.comment_count = observation.totalCount;
+    } else if ((observation.count ?? 0) <= 0 && observation.returnedCount > 0) {
+      output.comment_count = null;
+    }
+    if (output.comment_count_status === "disabled" || !output.comment_count_status) {
+      output.comment_count_status = output.comment_count == null ? "unresolved" : "exact";
+    }
+  } else if (observation.disabled) {
+    output.comment_count = 0;
+    output.comment_count_status = "disabled";
+    output.comments_disabled = true;
+  }
+}
+
+function withoutUnverifiedYoutubeJsDisabledComments(detail) {
+  if (detail?.comments_disabled !== true && detail?.comment_count_status !== "disabled") {
+    return detail;
+  }
+  return {
+    ...detail,
+    comment_count: null,
+    comment_count_status: "unresolved",
+    comment_count_source: null,
+    comments_disabled: null,
+    comments_status_source: null,
+    comments_first_page: null,
+    comments_first_page_status: "unresolved",
+    comments_first_page_source: null,
+  };
 }
 
 function mergeIncrementalVideoDetail(base, patch) {
@@ -120,23 +203,14 @@ function mergeIncrementalVideoDetail(base, patch) {
     output.published_at_source = previous.published_at_source;
   }
 
-  const nextHasCommentEvidence = next.comment_count != null
-    || next.comments_disabled === true
-    || ["zero_from_surface", "zero_from_upcoming"].includes(next.comment_count_status);
-  const previousHasCommentEvidence = previous.comment_count != null
-    || previous.comments_disabled === true;
-  if (previousHasCommentEvidence && !nextHasCommentEvidence) {
-    output.comment_count = previous.comment_count;
-    output.comment_count_status = previous.comment_count_status;
-    output.comments_disabled = previous.comments_disabled;
-    output.comments_status_source = previous.comments_status_source;
-    output.comment_count_source = previous.comment_count_source;
+  const previousComment = incrementalCommentObservation(previous);
+  const nextComment = incrementalCommentObservation(next);
+  const selectedComment = nextComment.rank >= previousComment.rank
+    ? nextComment
+    : previousComment;
+  if (selectedComment.rank > 0) {
+    applyIncrementalCommentObservation(output, selectedComment);
   }
-  const previousCommentRows = Number(previous.comments_first_page?.returned_count ?? 0);
-  const nextCommentRows = Number(next.comments_first_page?.returned_count ?? 0);
-  if (previousCommentRows > 0) output.comments_first_page = previous.comments_first_page;
-  else if (nextCommentRows > 0) output.comments_first_page = next.comments_first_page;
-  else if (previous.comments_first_page) output.comments_first_page = previous.comments_first_page;
 
   const descriptionRank = { unresolved: 0, unavailable: 1, empty: 2, exact: 3 };
   const previousText = normalizeVideoTextMetadata(previous);
@@ -419,20 +493,29 @@ export async function fetchIncrementalVideoDetail(videoId, {
   throwIfAborted();
   const url = `https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}`;
   let youtubeJsDetail = null;
+  let youtubeJsDetailForMerge = null;
+  let youtubeJsDisabledCommentsNeedVerification = false;
   try {
     youtubeJsDetail = assertYoutubeContentObservation(await fetchYoutubeJs(videoId, { signal }), {
       videoId,
       source: "youtubejs_player",
     });
     throwIfAborted();
+    youtubeJsDisabledCommentsNeedVerification = youtubeJsDetail.comments_disabled === true
+      || youtubeJsDetail.comment_count_status === "disabled";
+    youtubeJsDetailForMerge = youtubeJsDisabledCommentsNeedVerification
+      ? withoutUnverifiedYoutubeJsDisabledComments(youtubeJsDetail)
+      : youtubeJsDetail;
     const classification = resolveYoutubeContentType({ videoId, detail: youtubeJsDetail });
     if (
       TERMINAL_CONTENT_ACCESS_STATUSES.has(detailAccess(youtubeJsDetail))
-      ||
-      isUpcomingLiveDetail(youtubeJsDetail)
+      || isUpcomingLiveDetail(youtubeJsDetail)
       || (
-        classification?.authoritative === true
-        && hasCompletePublicVideoSurface(youtubeJsDetail)
+        !youtubeJsDisabledCommentsNeedVerification
+        && (
+          classification?.authoritative === true
+          && hasCompletePublicVideoSurface(youtubeJsDetail)
+        )
       )
     ) {
       return youtubeJsDetail;
@@ -462,15 +545,20 @@ export async function fetchIncrementalVideoDetail(videoId, {
       source: "yt_dlp_detail",
     });
     throwIfAborted();
-    return mergeIncrementalVideoDetail(youtubeJsDetail, ytDlpDetail);
+    return mergeIncrementalVideoDetail(youtubeJsDetailForMerge, ytDlpDetail);
   } catch (ytDlpError) {
     throwIfAborted();
     if (isYoutubeCollectionFailureError(ytDlpError)) throw ytDlpError;
     const error = new AggregateError(
-      [new Error("YouTube.js detail was incomplete"), ytDlpError],
+      [
+        new Error(youtubeJsDisabledCommentsNeedVerification
+          ? "YouTube.js disabled comments require yt-dlp verification"
+          : "YouTube.js detail was incomplete"),
+        ytDlpError,
+      ],
       `incremental Video detail failed for ${videoId}: YouTube.js was incomplete and yt-dlp failed`,
     );
-    error.partial_detail = youtubeJsDetail;
+    error.partial_detail = youtubeJsDetailForMerge;
     throw error;
   }
 }
