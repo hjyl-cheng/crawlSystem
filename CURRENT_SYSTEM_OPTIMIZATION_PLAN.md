@@ -281,16 +281,22 @@ Schema 兼容、停止新写和历史清理必须分成独立发布，不能在�
 - 拒绝和冲突记录保留完整故障证据。
 - 新正常 Inbox 行不再产生 envelope TOAST 数据。
 
-## 6. 优化三：建立当前系统容量基线
+## 6. 优化三：分阶段建立当前系统容量基线
 
 完成前两项后，让当前系统自然运行 3～5 个完整抓取轮次，再重新测量。
+
+第一阶段先保存每轮的只读时间点快照，提供可复核的原始计数和物理尺寸；第一阶段工具
+不自动比较前后两份报告，也不宣称已经得出增长、频率或膨胀趋势。第二阶段必须在
+`stats_reset` 未变化的前提下比较相邻轮次快照，并结合 PostgreSQL/WAL 监控完成下列
+每轮增量和趋势分析。
 
 每轮至少记录：
 
 - Creator、视频、Revision 和 Snapshot 新增行数。
 - 各主要表的 heap、TOAST、索引增量。
 - `content_snapshots` 每视频版本数分布及 p50/p95/p99。
-- `raw_item`、`raw_channel` 的逻辑字节和物理 TOAST 字节。
+- `raw_item`、`raw_channel` 的逻辑/值存储字节，以及所属 relation 的物理 TOAST 字节；
+  不把 relation 物理空间错误归因给单个列。
 - `creator_search_changes` 和 releases 的增长速度。
 - `pg_stat_user_indexes.idx_scan`、`idx_tup_read`、`idx_tup_fetch` 的绝对值和每轮增量。
 - `pg_stat_database.stats_reset`，避免把统计重置后的 0 次扫描误判为长期未使用。
@@ -375,17 +381,48 @@ npm run publication:creator-search-storage -- --rollback
 npm run publication:creator-search-storage -- --rollback --apply
 ```
 
+正式环境统一通过 `business-creator-search-storage-admin` 手工 Compose 服务运行。该服务只
+挂载 `business_admin_database_url` secret，并注入
+`BUSINESS_ADMIN_DATABASE_URL_FILE`；默认命令不含 `--apply`：
+
+```text
+./scripts/compose.sh production \
+  --profile manual-business-creator-search-storage-admin run --rm \
+  -e PUBLICATION_OPERATOR='<operator>' \
+  -e PUBLICATION_ACTION_REASON='<reviewed reason>' \
+  business-creator-search-storage-admin
+```
+
+Apply 必须在同一命令额外传入计划输出的
+`CONFIRM_BUSINESS_CREATOR_SEARCH_STORAGE`，并用命令覆盖显式追加 `--apply`。Rollback 还
+必须显式传入 `BUSINESS_CREATOR_SEARCH_ROLLBACK_WATERMARK` 和 `--rollback`。正式运行以
+stdout 作为审计输出并在容器外归档，不依赖一次性只读容器内的文件。
+
+```text
+./scripts/compose.sh production \
+  --profile manual-business-creator-search-storage-admin run --rm \
+  -e PUBLICATION_OPERATOR='<same operator as plan>' \
+  -e PUBLICATION_ACTION_REASON='<same reason as plan>' \
+  -e CONFIRM_BUSINESS_CREATOR_SEARCH_STORAGE='<exact plan value>' \
+  business-creator-search-storage-admin \
+  node scripts/manageBusinessCreatorSearchStorage.mjs --apply
+```
+
 默认和 `--rollback` 均只生成只读计划。写操作必须显式传入 `--apply`，并要求
 `CONFIRM_BUSINESS_CREATOR_SEARCH_STORAGE` 与计划输出的确认串完全一致。确认串绑定：
 
 - Business 数据库名和预期 Channel 数。
 - 操作类型、操作人和原因。
 - 当前 active watermark、Live/Legacy 行数、parity 和存储模式。
-- rollback target 及其 Legacy 行数（回滚时）。
+- rollback target、按变更链重建的预期行数、保留 Legacy 行数及逐行 parity（回滚时）。
 
 Apply 会在 `SERIALIZABLE` 事务中获取 Creator Search 发布 advisory lock，重新读取全部
 状态，阻断在途 Projection、模式漂移、watermark 漂移、行数漂移和 parity 差异，然后才
 调用数据库已有的 guarded cutover/rollback 函数。
+
+Apply 使用 `--output` 时，会在任何数据库访问前以独占方式预留文件；已存在或不可写的
+路径会提前阻断。数据库动作提交后若最终文件写入仍失败，命令会将成功结果回退到
+stdout 并输出“动作已提交”的告警，不会用失败退出码伪装成数据库切换失败。
 
 该命令只能证明数据库内条件。KOL Backend/API 不在本仓库中，因此其真实 SQL、
 Legacy/Live 查询结果和查询计划仍必须按 §4.2 在上线前独立审计；不得仅凭命令输出
@@ -404,7 +441,7 @@ Legacy/Live 查询结果和查询计划仍必须按 §4.2 在上线前独立审�
 本次没有实现或执行历史 envelope 清理。旧正常行继续保留 object，不影响新旧版本滚动
 发布；历史清理必须等观察期和回滚窗口结束后再单独设计、预览和执行。
 
-### 10.3 容量基线
+### 10.3 第一阶段容量快照（非趋势报告）
 
 命令：
 
@@ -416,12 +453,20 @@ npm run publication:storage-baseline -- --output <new-file.json>
 该命令没有 apply 模式，在单个 `REPEATABLE READ READ ONLY` 快照中记录：
 
 - 数据库身份、Channel 数、数据库字节、WAL LSN 和 `stats_reset`。
-- public/publication/result 下各表 heap、TOAST、索引、总字节和 vacuum/analyze 状态。
+- public/publication/result 下各表 heap、主表索引、总字节，以及 TOAST heap/index/total
+  的真实 relation 级物理字节。
+- 各表累计 insert/update/delete/HOT update、vacuum/autovacuum/analyze/autoanalyze 计数
+  及最近运行时间。
 - 每个索引的字节、`idx_scan`、`idx_tup_read`、`idx_tup_fetch`、唯一/主键属性和定义。
 - Creator Search 模式、Live/Legacy/Change/Release 行数和累计变化数。
 - Channel、Content identity、Revision、Snapshot、Current 和 Projection Outbox 的精确行数。
-- Content Snapshot 每视频版本 p50/p95/p99/max，以及 raw Item/Channel 逻辑和存储字节。
+- Content Snapshot 每视频版本 p50/p95/p99/max，以及 raw Item/Channel 逻辑和值存储字节。
 - Projection Outbox 各状态行数与最大 attempts，以及 Projector batch 耗时分位数。
 
-应在每个完整抓取轮次后保存一份新文件，以 `stats_reset` 为共同起点计算增量；报告本身
-不会给出“删除索引”的结论。
+`raw_item`/`raw_channel` 的值存储字节不能等同于某一列独占的 TOAST 物理空间；PostgreSQL
+只提供 relation 级 TOAST 物理尺寸，本报告将两类指标分开输出。
+
+第一阶段报告明确不计算每轮 WAL 增量、retry/dead-letter 增量、autovacuum 频率或膨胀
+趋势。应在每个完整抓取轮次后保存一份新文件，以相同 `stats_reset` 的相邻报告和外部
+WAL/磁盘监控完成第二阶段差分。统计被重置时必须重新建立基线；报告本身也不会给出
+“删除索引”的结论。

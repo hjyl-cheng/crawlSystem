@@ -37,11 +37,21 @@ function fakePool() {
           schema_name: "publication",
           relation_name: "inbox",
           heap_bytes: "4096",
-          toast_bytes: "8192",
+          toast_heap_bytes: "6144",
+          toast_index_bytes: "2048",
+          toast_total_bytes: "8192",
           index_bytes: "2048",
           total_bytes: "14336",
           estimated_live_rows: "615",
           estimated_dead_rows: "2",
+          tuples_inserted: "620",
+          tuples_updated: "5",
+          tuples_deleted: "0",
+          tuples_hot_updated: "2",
+          vacuum_count: "0",
+          autovacuum_count: "3",
+          analyze_count: "0",
+          autoanalyze_count: "3",
           last_vacuum: null,
           last_autovacuum: "2026-08-25T01:00:00.000Z",
           last_analyze: null,
@@ -143,8 +153,17 @@ test("Business storage baseline runs one read-only snapshot and preserves index 
   const fixture = fakePool();
   const reporter = new BusinessStorageBaselineReporter({ pool: fixture.pool, config });
   const report = await reporter.capture();
+  assert.deepEqual(report.measurement, {
+    kind: "point_in_time_snapshot",
+    computes_inter_round_deltas: false,
+    toast_scope: "physical_relation_level",
+  });
   assert.equal(report.database.database_name, "business_test");
   assert.equal(report.database.stats_reset, "2026-08-25T00:00:00.000Z");
+  assert.equal(report.relations[0].toast_heap_bytes, 6144);
+  assert.equal(report.relations[0].toast_index_bytes, 2048);
+  assert.equal(report.relations[0].toast_total_bytes, 8192);
+  assert.equal(report.relations[0].autovacuum_count, 3);
   assert.deepEqual(report.indexes[0], {
     schema_name: "publication",
     relation_name: "inbox",

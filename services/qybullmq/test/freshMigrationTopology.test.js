@@ -142,6 +142,20 @@ test("Publication runtime roles require an explicit dual-database plan and apply
   assert.doesNotMatch(administrator, /--apply/);
 });
 
+test("Creator Search storage administration uses the standard Business admin secret", async () => {
+  const compose = await readFile(new URL("../../../deploy/compose.yml", import.meta.url), "utf8");
+  const administrator = serviceBlock(compose, "business-creator-search-storage-admin");
+  assert.match(administrator, /profiles: \[manual-business-creator-search-storage-admin\]/);
+  assert.match(administrator, /manageBusinessCreatorSearchStorage\.mjs/);
+  assert.match(
+    administrator,
+    /BUSINESS_ADMIN_DATABASE_URL_FILE: \/run\/secrets\/business_admin_database_url/,
+  );
+  assert.match(administrator, /- business_admin_database_url/);
+  assert.doesNotMatch(administrator, /BUSINESS_DATABASE_URL(?:_FILE)?:/);
+  assert.doesNotMatch(administrator, /--apply/);
+});
+
 test("fresh Publication routing is bootstrapped only through an explicit dual-database plan and apply", async () => {
   const [compose, environment] = await Promise.all([
     readFile(new URL("../../../deploy/compose.yml", import.meta.url), "utf8"),

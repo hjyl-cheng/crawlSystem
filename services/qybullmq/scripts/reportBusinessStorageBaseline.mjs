@@ -14,7 +14,8 @@ function usage() {
   return `Usage:
   node scripts/reportBusinessStorageBaseline.mjs [--output <path>]
 
-Captures a repeatable, read-only Business database capacity baseline. Output
+Captures a repeatable, read-only first-stage point-in-time Business database
+capacity snapshot. It does not calculate inter-round deltas or trends. Output
 files are created exclusively and are never overwritten. There is no write mode.
 
 Required environment:

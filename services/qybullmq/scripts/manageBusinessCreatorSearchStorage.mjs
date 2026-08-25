@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { writeFile } from "node:fs/promises";
+import { open, unlink, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
 import {
@@ -20,7 +20,7 @@ a read-only rollback plan. No database writes occur unless --apply is supplied
 and the exact confirmation emitted by the corresponding plan is provided.
 
 Required environment:
-  BUSINESS_DATABASE_URL or BUSINESS_DATABASE_URL_FILE
+  BUSINESS_ADMIN_DATABASE_URL or BUSINESS_ADMIN_DATABASE_URL_FILE
   EXPECTED_BUSINESS_DATABASE
   EXPECTED_BUSINESS_CHANNEL_COUNT
   PUBLICATION_OPERATOR
@@ -59,26 +59,63 @@ export function businessCreatorSearchStorageCommand(argv = process.argv.slice(2)
   return command;
 }
 
-async function emit(value, output) {
+async function emit(value, output, stdout = process.stdout) {
   const rendered = `${JSON.stringify(value, null, 2)}\n`;
   if (output) await writeFile(output, rendered, { encoding: "utf8", flag: "wx" });
-  else process.stdout.write(rendered);
+  else stdout.write(rendered);
 }
 
-async function main({ environment = process.env, argv = process.argv.slice(2) } = {}) {
-  const command = businessCreatorSearchStorageCommand(argv);
-  if (command.help) {
-    process.stdout.write(usage());
+async function emitCommitted(value, outputHandle, {
+  stdout = process.stdout,
+  stderr = process.stderr,
+} = {}) {
+  const rendered = `${JSON.stringify(value, null, 2)}\n`;
+  if (!outputHandle) {
+    stdout.write(rendered);
     return;
   }
-  const config = businessCreatorSearchStorageConfig(environment);
-  const pool = new Pool({
+  try {
+    await outputHandle.writeFile(rendered, { encoding: "utf8" });
+    await outputHandle.sync();
+  } catch (error) {
+    stderr.write(
+      `WARNING: Creator Search storage action committed, but its output file could not be finalized: ${error?.message ?? error}\n`,
+    );
+    stdout.write(rendered);
+  }
+}
+
+function postgresPool(config) {
+  return new Pool({
     connectionString: config.databaseUrl,
     application_name: "business-creator-search-storage-admin",
     max: 1,
     options: "-c timezone=UTC",
   });
+}
+
+export async function runBusinessCreatorSearchStorage({
+  environment = process.env,
+  argv = process.argv.slice(2),
+  createPool = postgresPool,
+  openOutput = open,
+  stdout = process.stdout,
+  stderr = process.stderr,
+} = {}) {
+  const command = businessCreatorSearchStorageCommand(argv);
+  if (command.help) {
+    stdout.write(usage());
+    return;
+  }
+  const config = businessCreatorSearchStorageConfig(environment);
+  let outputHandle = null;
+  let pool = null;
+  let actionCommitted = false;
   try {
+    if (command.apply && command.output) {
+      outputHandle = await openOutput(command.output, "wx");
+    }
+    pool = createPool(config);
     const administrator = new BusinessCreatorSearchStorageAdministrator({ pool, config });
     const plan = command.rollback
       ? await administrator.inspectRollbackReadOnly()
@@ -95,7 +132,7 @@ async function main({ environment = process.env, argv = process.argv.slice(2) } 
         required_confirmation_environment: "CONFIRM_BUSINESS_CREATOR_SEARCH_STORAGE",
         required_confirmation: confirmation,
         state: plan.state,
-      }, command.output);
+      }, command.output, stdout);
       return;
     }
     if (!plan.ready) {
@@ -112,25 +149,36 @@ async function main({ environment = process.env, argv = process.argv.slice(2) } 
         expectedActiveWatermark: plan.state.active_watermark,
         expectedCurrentLiveCount: plan.state.live_count,
         targetWatermark: plan.state.rollback_target_watermark,
-        expectedLiveCount: plan.state.rollback_target_count,
+        expectedLiveCount: plan.state.rollback_target_expected_count,
       })
       : await administrator.apply({
         expectedWatermark: plan.state.active_watermark,
         expectedLiveCount: plan.state.live_count,
       });
-    await emit({
+    actionCommitted = true;
+    await emitCommitted({
       ok: true,
       mode: command.rollback ? "rollback_apply" : "apply",
       writes_performed: true,
       result,
-    }, command.output);
+    }, outputHandle, { stdout, stderr });
   } finally {
-    await pool.end().catch(() => {});
+    await pool?.end?.().catch(() => {});
+    if (outputHandle) {
+      await outputHandle.close().catch((error) => {
+        if (actionCommitted) {
+          stderr.write(
+            `WARNING: Creator Search storage action committed, but its output file could not be closed cleanly: ${error?.message ?? error}\n`,
+          );
+        }
+      });
+      if (!actionCommitted) await unlink(command.output).catch(() => {});
+    }
   }
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  main().catch((error) => {
+  runBusinessCreatorSearchStorage().catch((error) => {
     process.stderr.write(`${error?.stack ?? error}\n`);
     process.exitCode = 1;
   });

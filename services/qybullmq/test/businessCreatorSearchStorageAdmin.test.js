@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import {
   businessCreatorSearchStorageCommand,
+  runBusinessCreatorSearchStorage,
 } from "../scripts/manageBusinessCreatorSearchStorage.mjs";
 import {
   BusinessCreatorSearchStorageAdministrator,
@@ -11,7 +15,7 @@ import {
 
 function environment(overrides = {}) {
   return {
-    BUSINESS_DATABASE_URL: "postgres://business-admin@business/business_test",
+    BUSINESS_ADMIN_DATABASE_URL: "postgres://business-admin@business/business_test",
     EXPECTED_BUSINESS_DATABASE: "business_test",
     EXPECTED_BUSINESS_CHANNEL_COUNT: "197",
     PUBLICATION_OPERATOR: "storage-test",
@@ -52,6 +56,8 @@ function fakePool(initialState, {
         return { rows: [rollbackTarget ?? {
           rollback_target_exists: true,
           rollback_target_count: 197,
+          rollback_target_expected_count: 197,
+          rollback_target_parity_diffs: 0,
           rollback_target_reachable: true,
           rollback_chain_errors: 0,
         }] };
@@ -116,6 +122,62 @@ test("Creator Search storage command keeps plan, apply, and rollback explicit", 
   );
 });
 
+test("Creator Search storage apply reserves its output before database access", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "creator-search-storage-output-"));
+  const output = join(directory, "apply-result.json");
+  await writeFile(output, "existing audit record\n");
+  let poolCreated = false;
+  try {
+    await assert.rejects(
+      runBusinessCreatorSearchStorage({
+        argv: ["--apply", "--output", output],
+        environment: environment({
+          BUSINESS_DATABASE_URL: "",
+        }),
+        createPool() {
+          poolCreated = true;
+          throw new Error("database access must not begin");
+        },
+      }),
+      (error) => error?.code === "EEXIST",
+    );
+    assert.equal(poolCreated, false);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("Creator Search storage apply remains successful after a committed output failure", async () => {
+  const inspected = state();
+  const baseEnvironment = environment();
+  const config = businessCreatorSearchStorageConfig(baseEnvironment);
+  const fixture = fakePool(inspected);
+  let stdout = "";
+  let stderr = "";
+  await runBusinessCreatorSearchStorage({
+    argv: ["--apply", "--output", "apply-result.json"],
+    environment: {
+      ...baseEnvironment,
+      CONFIRM_BUSINESS_CREATOR_SEARCH_STORAGE: businessCreatorSearchStorageConfirmation(
+        config,
+        inspected,
+        "activate",
+      ),
+    },
+    createPool: () => fixture.pool,
+    openOutput: async () => ({
+      async writeFile() { throw new Error("simulated audit disk failure"); },
+      async sync() {},
+      async close() {},
+    }),
+    stdout: { write(value) { stdout += value; } },
+    stderr: { write(value) { stderr += value; } },
+  });
+  assert.ok(fixture.calls.some(({ sql }) => sql === "COMMIT"));
+  assert.equal(JSON.parse(stdout).result.outcome, "applied");
+  assert.match(stderr, /action committed.*output file could not be finalized/i);
+});
+
 test("Creator Search storage config requires an exact database and reviewable actor", () => {
   assert.deepEqual(businessCreatorSearchStorageConfig(environment()), {
     databaseUrl: "postgres://business-admin@business/business_test",
@@ -132,6 +194,13 @@ test("Creator Search storage config requires an exact database and reviewable ac
   assert.throws(
     () => businessCreatorSearchStorageConfig(environment({ PUBLICATION_OPERATOR: "" })),
     /PUBLICATION_OPERATOR/,
+  );
+  assert.throws(
+    () => businessCreatorSearchStorageConfig(environment({
+      BUSINESS_ADMIN_DATABASE_URL: "",
+      BUSINESS_DATABASE_URL: "postgres://runtime-writer@business/business_test",
+    })),
+    /BUSINESS_ADMIN_DATABASE_URL/,
   );
 });
 
@@ -227,6 +296,34 @@ test("Creator Search storage rollback plan verifies the retained change chain", 
   assert.ok(!fixture.calls.some(({ sql }) => (
     /SELECT public\.rollback_creator_search_incremental_storage_v1/.test(sql)
   )));
+});
+
+test("Creator Search storage rollback plan rejects an incomplete Legacy target snapshot", async () => {
+  const config = businessCreatorSearchStorageConfig(environment({
+    BUSINESS_CREATOR_SEARCH_ROLLBACK_WATERMARK: "publication_projection_incremental",
+  }));
+  const fixture = fakePool(state({
+    write_mode: "incremental",
+    read_mode: "live",
+  }), {
+    rollbackTarget: {
+      rollback_target_exists: true,
+      rollback_target_count: 2,
+      rollback_target_expected_count: 197,
+      rollback_target_parity_diffs: 195,
+      rollback_target_reachable: true,
+      rollback_chain_errors: 0,
+    },
+  });
+  const administrator = new BusinessCreatorSearchStorageAdministrator({
+    pool: fixture.pool,
+    config,
+  });
+  const plan = await administrator.inspectRollbackReadOnly();
+  assert.equal(plan.ready, false);
+  assert.deepEqual(plan.blockers, [
+    "rollback target Legacy snapshot has 2/197 rows and 195 parity differences",
+  ]);
 });
 
 test("Creator Search storage rollback locks, rechecks, and calls the guarded function", async () => {

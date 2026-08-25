@@ -53,12 +53,26 @@ const RELATIONS_SQL = `
          relation.relname AS relation_name,
          pg_relation_size(relation.oid)::bigint AS heap_bytes,
          CASE WHEN relation.reltoastrelid=0 THEN 0
+              ELSE pg_relation_size(relation.reltoastrelid) END::bigint
+           AS toast_heap_bytes,
+         CASE WHEN relation.reltoastrelid=0 THEN 0
+              ELSE pg_indexes_size(relation.reltoastrelid) END::bigint
+           AS toast_index_bytes,
+         CASE WHEN relation.reltoastrelid=0 THEN 0
               ELSE pg_total_relation_size(relation.reltoastrelid) END::bigint
-           AS toast_bytes,
+           AS toast_total_bytes,
          pg_indexes_size(relation.oid)::bigint AS index_bytes,
          pg_total_relation_size(relation.oid)::bigint AS total_bytes,
          COALESCE(stats.n_live_tup,0)::bigint AS estimated_live_rows,
          COALESCE(stats.n_dead_tup,0)::bigint AS estimated_dead_rows,
+         COALESCE(stats.n_tup_ins,0)::bigint AS tuples_inserted,
+         COALESCE(stats.n_tup_upd,0)::bigint AS tuples_updated,
+         COALESCE(stats.n_tup_del,0)::bigint AS tuples_deleted,
+         COALESCE(stats.n_tup_hot_upd,0)::bigint AS tuples_hot_updated,
+         COALESCE(stats.vacuum_count,0)::bigint AS vacuum_count,
+         COALESCE(stats.autovacuum_count,0)::bigint AS autovacuum_count,
+         COALESCE(stats.analyze_count,0)::bigint AS analyze_count,
+         COALESCE(stats.autoanalyze_count,0)::bigint AS autoanalyze_count,
          stats.last_vacuum,stats.last_autovacuum,
          stats.last_analyze,stats.last_autoanalyze
   FROM pg_class relation
@@ -236,11 +250,21 @@ function normalizeRelation(row) {
   return {
     ...row,
     heap_bytes: number(row.heap_bytes, "relation heap size"),
-    toast_bytes: number(row.toast_bytes, "relation TOAST size"),
+    toast_heap_bytes: number(row.toast_heap_bytes, "relation TOAST heap size"),
+    toast_index_bytes: number(row.toast_index_bytes, "relation TOAST index size"),
+    toast_total_bytes: number(row.toast_total_bytes, "relation TOAST total size"),
     index_bytes: number(row.index_bytes, "relation index size"),
     total_bytes: number(row.total_bytes, "relation total size"),
     estimated_live_rows: number(row.estimated_live_rows, "estimated live rows"),
     estimated_dead_rows: number(row.estimated_dead_rows, "estimated dead rows"),
+    tuples_inserted: number(row.tuples_inserted, "inserted tuple count"),
+    tuples_updated: number(row.tuples_updated, "updated tuple count"),
+    tuples_deleted: number(row.tuples_deleted, "deleted tuple count"),
+    tuples_hot_updated: number(row.tuples_hot_updated, "HOT-updated tuple count"),
+    vacuum_count: number(row.vacuum_count, "vacuum count"),
+    autovacuum_count: number(row.autovacuum_count, "autovacuum count"),
+    analyze_count: number(row.analyze_count, "analyze count"),
+    autoanalyze_count: number(row.autoanalyze_count, "autoanalyze count"),
     last_vacuum: timestamp(row.last_vacuum),
     last_autovacuum: timestamp(row.last_autovacuum),
     last_analyze: timestamp(row.last_analyze),
@@ -338,6 +362,11 @@ export class BusinessStorageBaselineReporter {
         report_format: "business-storage-baseline-v1",
         captured_at: new Date().toISOString(),
         transaction_snapshot: "repeatable_read_read_only",
+        measurement: {
+          kind: "point_in_time_snapshot",
+          computes_inter_round_deltas: false,
+          toast_scope: "physical_relation_level",
+        },
         database,
         relations,
         indexes,

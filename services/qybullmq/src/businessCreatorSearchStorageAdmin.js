@@ -23,7 +23,7 @@ function explicitCount(environment, name) {
 
 export function businessCreatorSearchStorageConfig(environment = process.env) {
   return {
-    databaseUrl: environmentValue("BUSINESS_DATABASE_URL", { environment }),
+    databaseUrl: environmentValue("BUSINESS_ADMIN_DATABASE_URL", { environment }),
     expectedDatabase: requiredText(
       environment.EXPECTED_BUSINESS_DATABASE,
       "EXPECTED_BUSINESS_DATABASE",
@@ -57,7 +57,7 @@ export function businessCreatorSearchStorageConfirmation(config, state, action) 
     ? requiredText(state.rollback_target_watermark, "rollback target watermark")
     : requiredText(state.active_watermark, "active watermark");
   const rowCount = action === "rollback"
-    ? Number(state.rollback_target_count)
+    ? Number(state.rollback_target_expected_count)
     : Number(state.live_count);
   if (!Number.isSafeInteger(rowCount) || rowCount < 0) {
     throw new TypeError("Creator Search storage row count is invalid");
@@ -78,6 +78,12 @@ export function businessCreatorSearchStorageConfirmation(config, state, action) 
     rollback_target_count: state.rollback_target_count == null
       ? null
       : Number(state.rollback_target_count),
+    rollback_target_expected_count: state.rollback_target_expected_count == null
+      ? null
+      : Number(state.rollback_target_expected_count),
+    rollback_target_parity_diffs: state.rollback_target_parity_diffs == null
+      ? null
+      : Number(state.rollback_target_parity_diffs),
   })}`;
 }
 
@@ -152,11 +158,47 @@ const INSPECT_ROLLBACK_TARGET_SQL = `
            (SELECT count(*)::int FROM publication.creator_search_changes change
             WHERE change.watermark=chain.watermark) AS actual_change_count
     FROM release_chain chain
+  ), rollback_changes AS (
+    SELECT chain.depth,change.channel_id,change.before_document
+    FROM release_chain chain
+    JOIN publication.creator_search_changes change
+      ON change.watermark=chain.watermark
+    WHERE chain.watermark<>$1
+  ), target_overrides AS (
+    SELECT DISTINCT ON (channel_id) channel_id,before_document
+    FROM rollback_changes
+    ORDER BY channel_id,depth DESC
+  ), expected_target AS (
+    SELECT live.channel_id,to_jsonb(live)-'watermark' AS document
+    FROM public.creator_search_live live
+    LEFT JOIN target_overrides target_change USING(channel_id)
+    WHERE target_change.channel_id IS NULL
+    UNION ALL
+    SELECT channel_id,before_document-'watermark' AS document
+    FROM target_overrides
+    WHERE before_document IS NOT NULL
+  ), target_legacy AS (
+    SELECT search.channel_id,to_jsonb(search)-'watermark' AS document
+    FROM public.creator_search_current search
+    WHERE search.watermark=$1
+  ), target_parity AS (
+    SELECT expected.channel_id AS expected_channel_id,
+           legacy.channel_id AS legacy_channel_id,
+           expected.document AS expected_document,
+           legacy.document AS legacy_document
+    FROM expected_target expected
+    FULL JOIN target_legacy legacy USING(channel_id)
   )
   SELECT EXISTS(SELECT 1 FROM public.creator_search_releases WHERE watermark=$1)
            AS rollback_target_exists,
          (SELECT count(*)::int FROM public.creator_search_current WHERE watermark=$1)
            AS rollback_target_count,
+         (SELECT count(*)::int FROM expected_target)
+           AS rollback_target_expected_count,
+         (SELECT count(*)::int FROM target_parity
+          WHERE expected_channel_id IS NULL OR legacy_channel_id IS NULL
+             OR expected_document IS DISTINCT FROM legacy_document)
+           AS rollback_target_parity_diffs,
          EXISTS(SELECT 1 FROM checked WHERE watermark=$1) AS rollback_target_reachable,
          (SELECT count(*)::int FROM checked
           WHERE watermark<>$1 AND (
@@ -338,6 +380,14 @@ export class BusinessCreatorSearchStorageAdministrator {
           targetState.rollback_target_count,
           "rollback target count",
         ),
+        rollback_target_expected_count: integer(
+          targetState.rollback_target_expected_count,
+          "rollback target expected count",
+        ),
+        rollback_target_parity_diffs: integer(
+          targetState.rollback_target_parity_diffs,
+          "rollback target parity count",
+        ),
         rollback_target_exists: targetState.rollback_target_exists === true,
         rollback_target_reachable: targetState.rollback_target_reachable === true,
         rollback_chain_errors: integer(
@@ -354,6 +404,19 @@ export class BusinessCreatorSearchStorageAdministrator {
       if (!combined.rollback_target_reachable) blockers.push("rollback target is not reachable from active release");
       if (combined.rollback_chain_errors !== 0) {
         blockers.push(`${combined.rollback_chain_errors} rollback releases have incomplete changes`);
+      }
+      if (
+        combined.rollback_target_exists
+          && combined.rollback_target_reachable
+          && combined.rollback_chain_errors === 0
+          && (
+            combined.rollback_target_count !== combined.rollback_target_expected_count
+            || combined.rollback_target_parity_diffs !== 0
+          )
+      ) {
+        blockers.push(
+          `rollback target Legacy snapshot has ${combined.rollback_target_count}/${combined.rollback_target_expected_count} rows and ${combined.rollback_target_parity_diffs} parity differences`,
+        );
       }
       if (state.in_flight_projection_count !== 0) {
         blockers.push(`${state.in_flight_projection_count} Projection Outbox rows are in flight`);
