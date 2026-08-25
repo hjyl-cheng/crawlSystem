@@ -88,7 +88,7 @@ CREATE TABLE IF NOT EXISTS publication.inbox (
   data_sequence BIGINT NOT NULL CHECK (data_sequence > 0),
   payload_hash TEXT NOT NULL CHECK (payload_hash ~ '^sha256:[0-9a-f]{64}$'),
   envelope_hash TEXT NOT NULL CHECK (envelope_hash ~ '^sha256:[0-9a-f]{64}$'),
-  received_envelope JSONB NOT NULL,
+  received_envelope JSONB,
   receipt_id UUID NOT NULL UNIQUE,
   receive_status TEXT NOT NULL
     CHECK (receive_status IN (
@@ -107,6 +107,31 @@ CREATE TABLE IF NOT EXISTS publication.inbox (
     OR (receive_status NOT IN ('rejected', 'conflict'))
   )
 );
+
+ALTER TABLE publication.inbox
+ALTER COLUMN received_envelope DROP NOT NULL;
+
+DO $publication_inbox_pointer_schema$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid='publication.inbox'::regclass
+      AND conname='chk_business_publication_inbox_envelope_evidence'
+  ) THEN
+    ALTER TABLE publication.inbox
+    ADD CONSTRAINT chk_business_publication_inbox_envelope_evidence CHECK (
+      CASE
+        WHEN receive_status IN ('rejected', 'conflict') THEN
+          received_envelope IS NOT NULL
+          AND jsonb_typeof(received_envelope)='object'
+        ELSE
+          received_envelope IS NULL
+          OR jsonb_typeof(received_envelope)='object'
+      END
+    );
+  END IF;
+END
+$publication_inbox_pointer_schema$;
 
 CREATE INDEX IF NOT EXISTS idx_business_publication_inbox_route
 ON publication.inbox (publication_stream_id,channel_id,domain,data_sequence);

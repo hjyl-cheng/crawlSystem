@@ -9,6 +9,11 @@ import { observationFactsHash } from "./crawlObservationStore.js";
 import { normalizePublicationShard } from "./publicationTransport.js";
 
 const INGRESS_PATH = "/internal/publications/v1/shards";
+const REVISION_BACKED_INBOX_STATUSES = new Set([
+  "accepted",
+  "waiting_gap",
+  "waiting_ownership",
+]);
 
 function iso(value) {
   const parsed = new Date(value);
@@ -124,7 +129,7 @@ async function insertInbox(client, envelope, envelopeHash, {
       envelope.data_sequence,
       envelope.payload_hash,
       envelopeHash,
-      JSON.stringify(envelope),
+      REVISION_BACKED_INBOX_STATUSES.has(receiveStatus) ? null : JSON.stringify(envelope),
       randomUUID(),
       receiveStatus,
       errorCode,
@@ -283,7 +288,7 @@ async function newEnvelopeReceipt(client, envelope, envelopeHash) {
     errorCode,
     errorMessage,
   });
-  if (["accepted", "waiting_gap", "waiting_ownership"].includes(receiveStatus)) {
+  if (REVISION_BACKED_INBOX_STATUSES.has(receiveStatus)) {
     await insertRevision(client, envelope, envelopeHash, receiveStatus);
   } else {
     await quarantine(client, envelope, errorCode, {
