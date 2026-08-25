@@ -44,6 +44,8 @@ is_unlisted = true
   不再代表一定是 Public。
 - 增量合并把访问状态、来源、availability、privacy 和 `is_unlisted` 作为一组证据选择；
   Unlisted 与 Public 冲突时保留 Unlisted。
+- 迁移详情使用 yt-dlp 补字段时采用相同的整组选择规则，不让后续 Public 覆盖 YouTube.js
+  已明确识别的 Unlisted。
 - Business Publication 的业务规则已改为：Unlisted 正常进入 Current 和业务快照；Private
   与 Unavailable 继续排除；Unknown 与 Login Required 继续视为未证实。
 - 新 Revision 不再生成 `source_unlisted` 撤回；历史记录仍可读取，避免破坏恢复兼容性。
@@ -52,7 +54,8 @@ is_unlisted = true
 ### 回归覆盖
 
 - yt-dlp 的 `availability=unlisted` 与 `playability_status=OK` 最终仍为 Unlisted。
-- YouTube.js=Unlisted、yt-dlp patch=Public 时，最终状态和来源整组保留 Unlisted。
+- 增量与迁移真实入口都覆盖 YouTube.js=Unlisted、yt-dlp patch=Public；最终状态和来源整组
+  保留 Unlisted，同时仍采用 yt-dlp 补齐的非访问字段。
 - 增量首次发现将 Unlisted 按 Unlisted 写入 Crawler。
 - Publication Current、Business Contract、Projection Adapter、Projection Schema、Reconciler
   和 Dead-letter Recovery 都允许 Unlisted 正常分发。

@@ -6,6 +6,10 @@ const YOUTUBEJS_COMMENT_SCENARIOS = new Set([
   "youtubejs_disabled_ytdlp_visible",
   "youtubejs_visible_ytdlp_disabled",
 ]);
+const YOUTUBEJS_DETAIL_SCENARIOS = new Set([
+  ...YOUTUBEJS_COMMENT_SCENARIOS,
+  "youtubejs_unlisted_ytdlp_public",
+]);
 
 function result(rows = [], rowCount = rows.length) {
   return { rows, rowCount };
@@ -248,7 +252,7 @@ export async function fetchVideoYtDlpDetail(videoId) {
       "stored_public",
       "disabled_comments",
       "disposition_write_retry",
-      ...YOUTUBEJS_COMMENT_SCENARIOS,
+      ...YOUTUBEJS_DETAIL_SCENARIOS,
     ].includes(state().scenario);
   const commentsVisible = state().scenario === "youtubejs_disabled_ytdlp_visible";
   const ytDlpDisabledConflict = state().scenario === "youtubejs_visible_ytdlp_disabled";
@@ -357,11 +361,12 @@ export async function fetchVideoDataApiDetails(videoIds) {
 export async function fetchVideoCommentThreadsDataApi() { return null; }
 export function parseChannelHeader() { return {}; }
 export function youtubeJsChannelEnabled() { return false; }
-export function youtubeJsDetailEnabled() { return YOUTUBEJS_COMMENT_SCENARIOS.has(state().scenario); }
+export function youtubeJsDetailEnabled() { return YOUTUBEJS_DETAIL_SCENARIOS.has(state().scenario); }
 export async function openYoutubeJsChannel() { return null; }
 export async function fetchYoutubeJsVideoDetail(videoId) {
   state().youtubeJsDetailAttempts += 1;
-  const visible = state().scenario === "youtubejs_visible_ytdlp_disabled";
+  const unlistedConflict = state().scenario === "youtubejs_unlisted_ytdlp_public";
+  const visible = state().scenario === "youtubejs_visible_ytdlp_disabled" || unlistedConflict;
   return {
     id: videoId,
     title: "YouTube.js detail",
@@ -401,8 +406,15 @@ export async function fetchYoutubeJsVideoDetail(videoId) {
     comments_first_page_source: "youtubejs_comments",
     is_live: false,
     live_status: "not_live",
-    access_status: "public",
-    availability: "public",
+    access_status: unlistedConflict ? "unlisted" : "public",
+    availability: unlistedConflict ? "unlisted" : "public",
+    ...(unlistedConflict
+      ? {
+          is_unlisted: true,
+          playability_status: "OK",
+          source: "youtubejs_get_info",
+        }
+      : {}),
     extractor_version: "youtubei.js@test",
     content_type_signals: {
       source: "youtubei_player",

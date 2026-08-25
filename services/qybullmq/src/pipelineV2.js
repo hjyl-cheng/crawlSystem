@@ -169,6 +169,13 @@ const COMMENT_DETAIL_FIELDS = [
   "comments_first_page_status",
   "comments_first_page_source",
 ];
+const ACCESS_DETAIL_FIELDS = [
+  "access_status",
+  "access_status_source",
+  "availability",
+  "privacy_status",
+  "is_unlisted",
+];
 const queues = createQueues();
 const incrementalAgentResultStore = new IncrementalAgentResultStore({
   withTransaction,
@@ -290,6 +297,23 @@ function applyMigrationCommentObservation(output, observation) {
   }
 }
 
+function applyMigrationAccessObservation(output, detail) {
+  for (const field of ACCESS_DETAIL_FIELDS) {
+    if (Object.prototype.hasOwnProperty.call(detail, field)) {
+      output[field] = detail[field];
+    } else {
+      delete output[field];
+    }
+  }
+  const access = accessFromDetail(detail);
+  if (access.access_status_source) {
+    output.access_status_source = access.access_status_source;
+  } else {
+    delete output.access_status_source;
+  }
+  if (access.access_status === "unlisted") output.is_unlisted = true;
+}
+
 function youtubeJsDisabledCommentsNeedVerification(detail) {
   return detail?.comments_disabled === true || detail?.comment_count_status === "disabled";
 }
@@ -333,11 +357,18 @@ function mergeDetail(base, patch) {
   const previousAccess = String(previous.access_status ?? "").trim().toLowerCase();
   const nextAccess = String(next.access_status ?? "").trim().toLowerCase();
   if (previousAccess && previousAccess !== "unknown" && (!nextAccess || nextAccess === "unknown")) {
-    output.access_status = previous.access_status;
-    output.availability = previous.availability;
+    applyMigrationAccessObservation(output, previous);
     output.playability_kind = previous.playability_kind;
     output.playability_reason_code = previous.playability_reason_code;
     output.playability_retry_mode = previous.playability_retry_mode;
+  } else if (
+    (previousAccess === "unlisted" && nextAccess === "public")
+    || (previousAccess === "public" && nextAccess === "unlisted")
+  ) {
+    applyMigrationAccessObservation(
+      output,
+      previousAccess === "unlisted" ? previous : next,
+    );
   }
   const precisionRank = { unknown: 0, date_only: 1, second: 2 };
   const previousPrecision = previous.published_at_precision ?? "unknown";
@@ -529,6 +560,7 @@ async function saveFetchedRaw({ fetched, objectType, entityType, entityId, sourc
 
 function accessFromDetail(detail, fallback = "unknown") {
   const privacyStatus = String(detail?.privacy_status ?? "").toLowerCase();
+  const explicitSource = text(detail?.access_status_source);
   const extractorSource = String(detail?.source ?? "").startsWith("youtubejs")
     ? "youtubejs_playability"
     : "yt_dlp_availability";
@@ -544,7 +576,7 @@ function accessFromDetail(detail, fallback = "unknown") {
     access_status: accessStatus,
     access_status_source: accessStatus === "unknown"
       ? null
-      : privacySource ?? unlistedSource ?? extractorSource,
+      : privacySource ?? explicitSource ?? unlistedSource ?? extractorSource,
   };
 }
 

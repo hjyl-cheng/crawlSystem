@@ -137,6 +137,27 @@ test("migration does not let a yt-dlp disabled result erase visible YouTube.js c
   assert.equal(detail.comments_first_page_source, "youtubejs_comments");
 });
 
+test("migration preserves explicit YouTube.js unlisted access while yt-dlp fills missing detail", () => {
+  const observed = runScenario("youtubejs_unlisted_ytdlp_public");
+  const detail = observed.candidate.result_json.detail;
+
+  assert.equal(observed.error, null);
+  assert.equal(observed.youtubejs_detail_attempts, 1);
+  assert.equal(observed.ytdlp_detail_attempts, 1);
+  assert.deepEqual(observed.candidate.result_json.youtubejs_fallback_reasons, ["description"]);
+  assert.equal(detail.description, "Complete enough for storage except type");
+  assert.equal(detail.access_status, "unlisted");
+  assert.equal(detail.access_status_source, "youtubejs_microformat");
+  assert.equal(detail.availability, "unlisted");
+  assert.equal(detail.is_unlisted, true);
+  assert.equal(observed.candidate.result_json.access.access_status, "unlisted");
+  assert.equal(
+    observed.candidate.result_json.access.access_status_source,
+    "youtubejs_microformat",
+  );
+  assert.equal(observed.candidate.disposition, "stored");
+});
+
 test("the shared Full Crawl detail path preserves an existing Video when access changes", () => {
   const observed = runScenario("existing_private");
   assert.equal(observed.error, null);
