@@ -9,6 +9,7 @@ function result(rows = [], rowCount = rows.length) {
 function candidateSummary() {
   const candidate = state().candidate;
   const terminal = ["done", "unavailable"].includes(candidate.detail_status) ? 1 : 0;
+  const scopeReason = candidate.result_json?.scope?.reason;
   return {
     total: 1,
     terminal,
@@ -16,9 +17,10 @@ function candidateSummary() {
     failed: candidate.detail_status === "failed" ? 1 : 0,
     undisposed: terminal === 1 && candidate.disposition == null ? 1 : 0,
     partial: candidate.missing_fields.length > 0 && terminal === 1 ? 1 : 0,
-    excluded: 0,
-    age_excluded: 0,
-    upcoming_excluded: 0,
+    excluded: candidate.result_json?.scope?.status === "excluded" ? 1 : 0,
+    age_excluded: ["older_than_max_age", "after_chronological_age_cutoff"].includes(scopeReason) ? 1 : 0,
+    upcoming_excluded: scopeReason === "upcoming_live" ? 1 : 0,
+    live_in_progress_excluded: scopeReason === "live_in_progress" ? 1 : 0,
   };
 }
 
@@ -34,7 +36,13 @@ export async function query(sqlValue, params = []) {
     } }]);
   }
   if (sql.includes("setting_key = 'youtube_api'")) {
-    return result([{ value_json: { fallback_mode: "disabled" } }]);
+    return result([{ value_json: {
+      fallback_mode: "disabled",
+      api_keys: state().scenario === "data_api_live" ? ["test-key"] : [],
+    } }]);
+  }
+  if (sql.includes("INSERT INTO crawler.youtube_api_daily_usage")) {
+    return result([{ usage_date: "2026-08-25", request_count: 1, requested_video_count: 1 }]);
   }
   if (sql.includes("SELECT * FROM crawler.youtube_api_tasks")) {
     return result(state().tasks.map((task) => ({ ...task })));
@@ -176,7 +184,7 @@ export async function query(sqlValue, params = []) {
   }
   if (sql.includes("UPDATE crawler.youtube_api_tasks")) return result([], 0);
   if (sql.includes("INSERT INTO crawler.contents") && sql.includes("RETURNING content_key")) {
-    return result([{ content_key: `UCsharedDisposition:video:${state().candidate.source_content_id}` }]);
+    return result([{ content_key: params[0] }]);
   }
   if (sql.includes("UPDATE crawler.contents") && sql.includes("RETURNING content_key,content_type")) {
     return result([{
@@ -232,28 +240,35 @@ export async function fetchVideoYtDlpDetail(videoId) {
   const authoritativeType = privateAccess
     || ["stored_public", "disabled_comments", "disposition_write_retry"].includes(state().scenario);
   const commentsDisabled = state().scenario === "disabled_comments";
+  const liveInProgress = ["live_in_progress", "live_in_progress_flat"].includes(state().scenario);
+  const liveReplay = state().scenario === "live_replay";
   return {
     id: videoId,
     title: "Public detail without authoritative type",
     description: "Complete enough for storage except type",
     published_at: "2026-07-19T00:00:00.000Z",
     published_at_precision: "second",
-    duration_seconds: 90,
+    duration_seconds: liveInProgress ? null : liveReplay ? 3600 : 90,
     view_count: 100,
     view_count_text: "100",
     like_count: 3,
-    comment_count: commentsDisabled ? null : 0,
-    comment_count_status: commentsDisabled ? "disabled" : "exact",
+    comment_count: commentsDisabled || liveInProgress ? null : liveReplay ? 12 : 0,
+    comment_count_status: commentsDisabled ? "disabled" : liveInProgress ? "unresolved" : "exact",
     comments_disabled: commentsDisabled,
+    is_live: liveInProgress,
+    was_live: liveReplay,
+    live_status: liveInProgress ? "is_live" : liveReplay ? "was_live" : "not_live",
     access_status: privateAccess ? "private" : "public",
     availability: privateAccess ? "private" : "public",
     ytdlp_client: "web",
     extractor_version: "yt-dlp@test",
     content_type_signals: {
       source: "yt_dlp_player",
-      canonical_url: authoritativeType ? `https://www.youtube.com/watch?v=${videoId}` : null,
+      canonical_url: authoritativeType || liveReplay ? `https://www.youtube.com/watch?v=${videoId}` : null,
       is_shorts_eligible: authoritativeType ? false : null,
-      is_live_content: authoritativeType ? false : null,
+      is_live_content: liveInProgress || liveReplay ? true : authoritativeType ? false : null,
+      is_live: liveInProgress,
+      is_live_now: liveInProgress,
     },
   };
 }
@@ -262,7 +277,39 @@ export async function fetchChannelInitial() { return null; }
 export async function fetchChannelYtDlpMetadata() { return null; }
 export async function fetchChannelDataApiDetails() { return null; }
 export async function fetchChannelUploads() { return null; }
-export async function fetchVideoDataApiDetails() { return null; }
+export async function fetchVideoDataApiDetails(videoIds) {
+  state().youtubeRequestAttempts += 1;
+  if (state().scenario !== "data_api_live") return null;
+  const detail = {
+    id: videoIds[0],
+    title: "Running Live",
+    description: "Live now",
+    description_status: "exact",
+    published_at: "2026-07-19T00:00:00.000Z",
+    published_at_precision: "second",
+    view_count: 100,
+    view_count_text: "100",
+    like_count: 3,
+    comment_count: null,
+    comments_disabled: null,
+    privacy_status: "public",
+    access_status: "public",
+    is_live: true,
+    live_status: "is_live",
+    content_type_signals: {
+      source: "youtube_data_api_videos_list",
+      canonical_url: `https://www.youtube.com/watch?v=${videoIds[0]}`,
+      is_live_content: true,
+      is_live: true,
+      is_live_now: true,
+    },
+  };
+  return {
+    detailsById: new Map([[videoIds[0], detail]]),
+    raw: { items: [{ id: videoIds[0] }] },
+    returnedCount: 1,
+  };
+}
 export async function fetchVideoCommentThreadsDataApi() { return null; }
 export function parseChannelHeader() { return {}; }
 export function youtubeJsChannelEnabled() { return false; }

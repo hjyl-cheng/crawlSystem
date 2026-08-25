@@ -4,7 +4,10 @@ const outputPath = process.argv[2];
 const scenario = process.argv[3] ?? "deferred_type";
 const existingContent = scenario === "existing_private";
 const dataApiReplay = scenario === "data_api_replay";
+const dataApiLive = scenario === "data_api_live";
+const dataApiScenario = dataApiReplay || dataApiLive;
 const dispositionWriteRetry = scenario === "disposition_write_retry";
+const flatLiveInProgress = scenario === "live_in_progress_flat";
 const deferredDisposition = {
   version: "video-disposition-v1",
   kind: "deferred",
@@ -25,17 +28,23 @@ globalThis.__pipelineV2DispositionState = {
     title: "Uploads title",
     source_url: "https://www.youtube.com/watch?v=public-without-type",
     thumbnail_url: null,
-    content_type: existingContent || dataApiReplay ? "video" : null,
-    type_status: existingContent || dataApiReplay ? "resolved" : "unresolved",
-    type_source: existingContent || dataApiReplay ? "youtube_watch_canonical" : null,
+    content_type: flatLiveInProgress || dataApiLive
+      ? "live"
+      : existingContent || dataApiReplay ? "video" : null,
+    type_status: existingContent || dataApiScenario || flatLiveInProgress ? "resolved" : "unresolved",
+    type_source: flatLiveInProgress || dataApiLive
+      ? "youtube_uploads_live_flag"
+      : existingContent || dataApiReplay ? "youtube_watch_canonical" : null,
     detail_status: scenario === "undisposed_terminal"
       ? "done"
-      : dataApiReplay ? "api_pending" : "queued",
-    api_status: dataApiReplay ? "queued" : "not_needed",
-    missing_fields: dataApiReplay ? ["access_status"] : [],
+      : dataApiScenario ? "api_pending" : "queued",
+    api_status: dataApiScenario ? "queued" : "not_needed",
+    missing_fields: dataApiLive ? ["comment_count"] : dataApiReplay ? ["access_status"] : [],
     attempts: 0,
-    content_key: existingContent ? "UCsharedDisposition:video:public-without-type" : null,
-    disposition: dataApiReplay ? "deferred" : null,
+    content_key: dataApiLive
+      ? "UCsharedDisposition:live:public-without-type"
+      : existingContent ? "UCsharedDisposition:video:public-without-type" : null,
+    disposition: dataApiLive ? "stored" : dataApiReplay ? "deferred" : null,
     next_attempt_at: dataApiReplay ? deferredDisposition.next_attempt_at : null,
     result_json: {
       flat: {
@@ -50,6 +59,13 @@ globalThis.__pipelineV2DispositionState = {
               live_scheduled_at: "2026-07-21T12:00:00.000Z",
             }
           : {}),
+        ...(flatLiveInProgress
+          ? {
+              content_type: "live",
+              type_source: "youtube_uploads_live_flag",
+              live_status: "is_live",
+            }
+          : {}),
       },
       ...(scenario === "age_excluded"
         ? {
@@ -61,7 +77,7 @@ globalThis.__pipelineV2DispositionState = {
             },
           }
         : {}),
-      ...(dataApiReplay
+      ...(dataApiScenario
         ? {
             detail: {
               id: "public-without-type",
@@ -70,45 +86,76 @@ globalThis.__pipelineV2DispositionState = {
               description_status: "exact",
               published_at: "2026-07-19T00:00:00.000Z",
               published_at_precision: "second",
-              duration_seconds: 90,
+              duration_seconds: dataApiLive ? null : 90,
               view_count: 100,
               view_count_text: "100",
               like_count: 3,
-              comment_count: 0,
-              comments_disabled: false,
+              comment_count: dataApiLive ? null : 0,
+              comments_disabled: dataApiLive ? null : false,
+              is_live: dataApiLive,
+              live_status: dataApiLive ? "is_live" : "not_live",
               access_status: "unknown",
               content_type_signals: {
                 source: "yt_dlp_player",
                 canonical_url: "https://www.youtube.com/watch?v=public-without-type",
                 is_shorts_eligible: false,
-                is_live_content: false,
+                is_live_content: dataApiLive,
+                is_live: dataApiLive,
+                is_live_now: dataApiLive,
               },
             },
             classification: {
-              content_type: "video",
-              source: "youtube_watch_canonical",
+              content_type: dataApiLive ? "live" : "video",
+              source: dataApiLive ? "youtube_watch_live_content" : "youtube_watch_canonical",
               canonical_url: "https://www.youtube.com/watch?v=public-without-type",
               authoritative: true,
             },
             access: { access_status: "unknown", access_status_source: null },
-            disposition: deferredDisposition,
+            disposition: dataApiLive
+              ? {
+                  ...deferredDisposition,
+                  kind: "stored",
+                  reason_code: "content_stored",
+                  retry_class: null,
+                  retryable: false,
+                  next_attempt_at: null,
+                }
+              : deferredDisposition,
           }
         : {}),
     },
-    error_message: dataApiReplay ? "content access unknown before API fallback" : null,
+    error_message: dataApiReplay
+      ? "content access unknown before API fallback"
+      : null,
     crawl_started_at: "2026-07-20T00:00:00.000Z",
-    known_content_key: existingContent ? "UCsharedDisposition:video:public-without-type" : null,
-    known_content_type: existingContent ? "video" : null,
-    known_content_type_source: existingContent ? "youtube_watch_canonical" : null,
+    known_content_key: dataApiLive
+      ? "UCsharedDisposition:live:public-without-type"
+      : existingContent ? "UCsharedDisposition:video:public-without-type" : null,
+    known_content_type: dataApiLive ? "live" : existingContent ? "video" : null,
+    known_content_type_source: dataApiLive
+      ? "youtube_watch_live_content"
+      : existingContent ? "youtube_watch_canonical" : null,
   },
-  tasks: dataApiReplay
+  tasks: dataApiScenario
     ? [{
         task_id: 91,
         source_content_id: "public-without-type",
         candidate_ids: [501],
-        missing_fields: ["access_status"],
+        missing_fields: dataApiLive ? ["comment_count"] : ["access_status"],
         result_json: {
           privacy_status: "public",
+          ...(dataApiLive
+            ? {
+                is_live: true,
+                live_status: "is_live",
+                content_type_signals: {
+                  source: "youtube_data_api_videos_list",
+                  is_live_content: true,
+                  is_live: true,
+                  is_live_now: true,
+                },
+              }
+            : {}),
           source: "youtube_data_api_videos_list",
           api_verification: { videos_list: { returned: true } },
           stored_data_api_evidence_recovery: {
@@ -153,18 +200,22 @@ if (dispositionWriteRetry) {
   }
 } else {
   try {
-    value = dataApiReplay
+    value = dataApiScenario
       ? await processDataApiBatchV2({
-        id: "batch:stored-evidence",
+        id: dataApiReplay ? "batch:stored-evidence" : "batch:live-api",
         data: {
-          batch_id: "batch:stored-evidence",
+          batch_id: dataApiReplay ? "batch:stored-evidence" : "batch:live-api",
           task_ids: [91],
-          stored_evidence_replay: {
-            operation_id: "stored-data-api-public-access-replay-v1",
-            run_id: "run:shared-video-disposition",
-            expected_candidate_count: 1,
-            task_ids: [91],
-          },
+          ...(dataApiReplay
+            ? {
+                stored_evidence_replay: {
+                  operation_id: "stored-data-api-public-access-replay-v1",
+                  run_id: "run:shared-video-disposition",
+                  expected_candidate_count: 1,
+                  task_ids: [91],
+                },
+              }
+            : {}),
         },
         })
       : await processContentDetailBatchV2({

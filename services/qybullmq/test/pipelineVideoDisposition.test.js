@@ -138,6 +138,44 @@ test("the shared Full Crawl detail path records an upcoming Live exclusion", () 
   assert.notEqual(observed.candidate.result_json.classification?.authoritative, true);
 });
 
+test("the shared Full Crawl detail path excludes a Live in progress after detail detection", () => {
+  const observed = runScenario("live_in_progress");
+  assert.equal(observed.error, null);
+  assert.equal(observed.requests_after_retry, 1);
+  assert.equal(observed.candidate.disposition, "terminal_excluded");
+  assert.equal(observed.candidate.result_json.disposition.kind, "terminal_excluded");
+  assert.equal(observed.candidate.result_json.disposition.reason_code, "live_in_progress");
+  assert.equal(observed.candidate.detail_status, "done");
+  assert.equal(observed.candidate.api_status, "not_needed");
+  assert.deepEqual(observed.candidate.missing_fields, []);
+  assert.equal(observed.candidate.content_key, null);
+  assert.equal(observed.candidate.result_json.scope.reason, "live_in_progress");
+});
+
+test("the shared Full Crawl path accepts live_status as the only current-Live signal", () => {
+  const observed = runScenario("live_in_progress_flat");
+  assert.equal(observed.error, null);
+  assert.equal(observed.requests_after_retry, 0);
+  assert.equal(observed.candidate.disposition, "terminal_excluded");
+  assert.equal(observed.candidate.result_json.disposition.reason_code, "live_in_progress");
+  assert.equal(observed.candidate.api_status, "not_needed");
+  assert.equal(observed.candidate.content_key, null);
+});
+
+test("the shared Full Crawl detail path stores an ended Live replay", () => {
+  const observed = runScenario("live_replay");
+  assert.equal(observed.error, null);
+  assert.equal(observed.requests_after_retry, 1);
+  assert.equal(observed.candidate.disposition, "stored");
+  assert.equal(observed.candidate.result_json.disposition.reason_code, "content_stored");
+  assert.equal(observed.candidate.content_type, "live");
+  assert.equal(
+    observed.candidate.content_key,
+    "UCsharedDisposition:live:public-without-type",
+  );
+  assert.equal(observed.candidate.result_json.detail.live_status, "was_live");
+});
+
 test("the shared Full Crawl detail path records an age-window exclusion", () => {
   const observed = runScenario("age_excluded");
   assert.equal(observed.error, null);
@@ -219,4 +257,16 @@ test("Data API replay resolves a deferred candidate without losing its prior evi
     observed.candidate.result_json.recovery.deferred_evidence.detail.access_status,
     "unknown",
   );
+});
+
+test("Data API videos.list excludes a running Live instead of repairing comment fields", () => {
+  const observed = runScenario("data_api_live");
+  assert.equal(observed.error, null);
+  assert.equal(observed.value.request_attempts, 1);
+  assert.equal(observed.candidate.disposition, "terminal_excluded");
+  assert.equal(observed.candidate.result_json.disposition.reason_code, "live_in_progress");
+  assert.equal(observed.candidate.detail_status, "done");
+  assert.equal(observed.candidate.api_status, "not_needed");
+  assert.deepEqual(observed.candidate.missing_fields, []);
+  assert.equal(observed.candidate.content_key, null);
 });

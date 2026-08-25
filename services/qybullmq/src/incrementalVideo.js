@@ -11,8 +11,8 @@ import {
 import { recordCrawlerObservation } from "./crawlObservationStore.js";
 import {
   hasCompletePublicVideoSurface,
-  isLiveInProgress,
   isUpcomingLiveDetail,
+  unfinishedLiveReason,
   videoAccessStatus,
 } from "./detailPolicy.js";
 import {
@@ -959,9 +959,11 @@ function resolveFirstSeenContent({ entry, capture, observedAt, discoveryDeferred
     classification,
     access: { access_status: facts?.access_status ?? "unknown" },
   });
-  const terminalReason = entry.is_upcoming === true || isUpcomingLiveDetail(detail)
-    ? "upcoming_live"
-    : entry.is_live === true || isLiveInProgress(detail) ? "live_in_progress" : null;
+  const terminalReason = unfinishedLiveReason({
+    ...detail,
+    is_upcoming: entry.is_upcoming === true || detail?.is_upcoming === true,
+    is_live: entry.is_live === true || detail?.is_live === true,
+  });
   const disposition = resolveVideoDisposition({
     storageAction,
     classification,

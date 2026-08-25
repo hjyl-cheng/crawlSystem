@@ -51,7 +51,22 @@ export function isUpcomingLiveDetail(detail) {
 
 export function isLiveInProgress(detail) {
   const liveStatus = String(detail?.live_status ?? "").trim().toLowerCase();
-  return detail?.is_live === true || ["is_live", "live"].includes(liveStatus);
+  const currentSignal = detail?.is_live === true || liveStatus === "is_live";
+  const replaySignal = detail?.was_live === true || ["was_live", "post_live"].includes(liveStatus);
+  return currentSignal && !replaySignal;
+}
+
+export function isLiveReplay(detail) {
+  const liveStatus = String(detail?.live_status ?? "").trim().toLowerCase();
+  const currentSignal = detail?.is_live === true || liveStatus === "is_live";
+  const replaySignal = detail?.was_live === true || ["was_live", "post_live"].includes(liveStatus);
+  return replaySignal && !currentSignal;
+}
+
+export function unfinishedLiveReason(detail) {
+  if (isUpcomingLiveDetail(detail)) return "upcoming_live";
+  if (isLiveInProgress(detail)) return "live_in_progress";
+  return null;
 }
 
 export function videoAccessStatus(detail, fallback = "unknown") {

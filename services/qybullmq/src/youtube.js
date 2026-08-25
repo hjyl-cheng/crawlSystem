@@ -2009,6 +2009,18 @@ export function detailFromDataApiItem(item, url = null) {
   const hasCommentCount = Object.prototype.hasOwnProperty.call(statistics, "commentCount");
   const liveStreamingDetails = item.liveStreamingDetails ?? {};
   const liveBroadcastContent = String(snippet.liveBroadcastContent ?? "none");
+  const isLiveNow = liveBroadcastContent === "live";
+  const wasLive = Boolean(liveStreamingDetails.actualEndTime);
+  const hasUnresolvedStartedLive = !isLiveNow && !wasLive
+    && Boolean(liveStreamingDetails.actualStartTime);
+  const isUpcoming = liveBroadcastContent === "upcoming"
+    || (!isLiveNow && !wasLive && Boolean(liveStreamingDetails.scheduledStartTime)
+      && !liveStreamingDetails.actualStartTime);
+  const liveStatus = wasLive
+    ? "was_live"
+    : isLiveNow
+      ? "is_live"
+      : isUpcoming ? "upcoming" : hasUnresolvedStartedLive ? null : "not_live";
   const result = mergeDefined({}, {
     title: snippet.title,
     url,
@@ -2031,15 +2043,10 @@ export function detailFromDataApiItem(item, url = null) {
     published_at: isoToTimestamp(snippet.publishedAt),
     published_at_precision: snippet.publishedAt ? "second" : "unknown",
     published_at_source: snippet.publishedAt ? "youtube_data_api_snippet" : null,
-    live_status: liveStreamingDetails.actualEndTime
-      ? "was_live"
-      : liveStreamingDetails.actualStartTime
-        ? "is_live"
-        : liveStreamingDetails.scheduledStartTime || liveBroadcastContent === "upcoming"
-          ? "upcoming"
-          : liveBroadcastContent === "live"
-            ? "is_live"
-            : "not_live",
+    live_status: liveStatus,
+    is_live: isLiveNow,
+    was_live: wasLive ? true : hasUnresolvedStartedLive ? null : false,
+    is_upcoming: isUpcoming,
     privacy_status: item.status?.privacyStatus ?? null,
     embeddable: item.status?.embeddable ?? null,
     live_scheduled_at: isoToTimestamp(liveStreamingDetails.scheduledStartTime),

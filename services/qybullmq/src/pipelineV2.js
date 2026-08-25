@@ -83,11 +83,11 @@ import {
   hasResolvedDuration,
   isLiveInProgress,
   isTransientYoutubeError,
-  isUpcomingLiveDetail,
   isYoutubeIpBlockedError,
   isYoutubeNetworkRetryableError,
   missingLikeIsZero,
   positiveDurationSeconds,
+  unfinishedLiveReason,
   unresolvedParserContractError,
   videoAccessStatus,
   youtubeJsDetailFallbackReasons,
@@ -538,6 +538,9 @@ function detailFromCandidate(row) {
   const flat = row?.result_json?.flat ?? {};
   const previousDetail = row?.result_json?.detail ?? {};
   const durationSeconds = positiveDurationSeconds(flat.duration_seconds);
+  const flatLiveStatus = String(flat.live_status ?? "").trim().toLowerCase();
+  const isUpcoming = flat.is_upcoming === true || ["is_upcoming", "upcoming"].includes(flatLiveStatus);
+  const isLive = flat.is_live === true || ["is_live", "live"].includes(flatLiveStatus);
   const flatDetail = mergeDefined({}, {
     title: flat.title ?? row.title,
     url: flat.url ?? row.source_url,
@@ -547,8 +550,9 @@ function detailFromCandidate(row) {
       ? null
       : `${Math.floor(durationSeconds / 60)}:${String(durationSeconds % 60).padStart(2, "0")}`,
     view_count_text: flat.view_count_text,
-    is_upcoming: flat.is_upcoming === true ? true : null,
-    live_status: flat.is_upcoming === true ? "is_upcoming" : null,
+    is_upcoming: isUpcoming ? true : null,
+    is_live: isLive ? true : null,
+    live_status: isUpcoming ? "is_upcoming" : isLive ? "is_live" : null,
     live_scheduled_at: flat.live_scheduled_at,
     source: "uploads_playlist",
   });
@@ -716,7 +720,8 @@ async function updateRunDetailStatus(runId) {
        )::int AS partial,
        count(*) FILTER (WHERE result_json->'scope'->>'status' = 'excluded')::int AS excluded,
        count(*) FILTER (WHERE result_json->'scope'->>'reason' IN ('older_than_max_age','after_chronological_age_cutoff'))::int AS age_excluded,
-       count(*) FILTER (WHERE result_json->'scope'->>'reason' = 'upcoming_live')::int AS upcoming_excluded
+       count(*) FILTER (WHERE result_json->'scope'->>'reason' = 'upcoming_live')::int AS upcoming_excluded,
+       count(*) FILTER (WHERE result_json->'scope'->>'reason' = 'live_in_progress')::int AS live_in_progress_excluded
      FROM crawler.content_candidates
      WHERE run_id=$1`,
     [runId],
@@ -744,11 +749,12 @@ async function updateRunDetailStatus(runId) {
            'excluded_count',$4::int,
            'age_excluded_count',$5::int,
            'upcoming_live_excluded_count',$6::int,
-           'undisposed_content_count',$7::int,
+           'live_in_progress_excluded_count',$7::int,
+           'undisposed_content_count',$8::int,
            'retained_content_count',GREATEST($3::int-$4::int,0)
          ),
          error_message=CASE
-           WHEN $7::int>0 THEN $8
+           WHEN $8::int>0 THEN $9
            WHEN $2='failed' THEN error_message
            ELSE NULL
          END,
@@ -761,6 +767,7 @@ async function updateRunDetailStatus(runId) {
       Number(summary.excluded ?? 0),
       Number(summary.age_excluded ?? 0),
       Number(summary.upcoming_excluded ?? 0),
+      Number(summary.live_in_progress_excluded ?? 0),
       undisposed,
       dispositionError?.message ?? null,
     ],
@@ -1922,8 +1929,13 @@ async function excludeCandidateByAge(row, detail, ageDays, maxAgeDays, source) {
   };
 }
 
-async function excludeUpcomingLiveCandidate(row, detail, source) {
-  const liveStatus = String(detail?.live_status ?? "is_upcoming").toLowerCase();
+async function excludeUnfinishedLiveCandidate(row, detail, source, reason = unfinishedLiveReason(detail)) {
+  if (!["upcoming_live", "live_in_progress"].includes(reason)) {
+    throw new Error(`unfinished Live exclusion requires a supported reason for ${row.source_content_id}`);
+  }
+  const liveStatus = String(
+    detail?.live_status ?? (reason === "upcoming_live" ? "is_upcoming" : "is_live"),
+  ).toLowerCase();
   const classification = resolveYoutubeContentType({
     videoId: row.source_content_id,
     upload: row.result_json?.flat ?? {
@@ -1934,14 +1946,14 @@ async function excludeUpcomingLiveCandidate(row, detail, source) {
     detail,
   });
   const confirmedClassification = classification?.authoritative === true ? classification : null;
-  const typeSource = confirmedClassification?.source ?? "youtube_detail_upcoming_live";
+  const typeSource = confirmedClassification?.source ?? `youtube_detail_${reason}`;
   const resultJson = {
     ...(row.result_json ?? {}),
     detail,
     classification: confirmedClassification ?? classification,
     scope: {
       status: "excluded",
-      reason: "upcoming_live",
+      reason,
       source,
       live_status: liveStatus,
       scheduled_at: detail?.live_scheduled_at ?? detail?.release_at ?? null,
@@ -1961,7 +1973,7 @@ async function excludeUpcomingLiveCandidate(row, detail, source) {
     classification,
     access: accessFromDetail(detail),
     detail,
-    terminalReason: "upcoming_live",
+    terminalReason: reason,
   });
   if (row.content_key) {
     await query("DELETE FROM crawler.contents WHERE content_key=$1", [row.content_key]);
@@ -1973,7 +1985,8 @@ async function excludeUpcomingLiveCandidate(row, detail, source) {
     api_missing: [],
     error: null,
     excluded: true,
-    upcoming: true,
+    upcoming: reason === "upcoming_live",
+    live_in_progress: reason === "live_in_progress",
   };
 }
 
@@ -1987,7 +2000,7 @@ function terminalDispositionReasonFromCandidate(row) {
   if (["older_than_max_age", "after_chronological_age_cutoff"].includes(scopeReason)) {
     return "outside_content_window";
   }
-  if (scopeReason === "upcoming_live") return "upcoming_live";
+  if (["upcoming_live", "live_in_progress"].includes(scopeReason)) return scopeReason;
   return null;
 }
 
@@ -2056,7 +2069,7 @@ function shouldPrefetchYoutubeJsDetail(row, settings) {
   if (isUndisposedTerminalCandidate(row)) return false;
   if (!youtubeJsDetailEnabled()) return false;
   const detail = detailFromCandidate(row);
-  if (isUpcomingLiveDetail(detail)) return false;
+  if (unfinishedLiveReason(detail)) return false;
   const ageDays = detailAgeDays(detail, row.crawl_started_at ?? Date.now());
   return !(settings.contentMaxAgeDays > 0 && ageDays != null && ageDays > settings.contentMaxAgeDays);
 }
@@ -2091,8 +2104,9 @@ async function processOneCandidate(row, settings, { youtubeJsDetail = null } = {
   let classification = null;
   let typeError = null;
 
-  if (isUpcomingLiveDetail(detail)) {
-    return excludeUpcomingLiveCandidate(row, detail, "channel_tab");
+  const channelTabLiveReason = unfinishedLiveReason(detail);
+  if (channelTabLiveReason) {
+    return excludeUnfinishedLiveCandidate(row, detail, "channel_tab", channelTabLiveReason);
   }
 
   const crawlReferenceAt = row.crawl_started_at ?? Date.now();
@@ -2123,6 +2137,11 @@ async function processOneCandidate(row, settings, { youtubeJsDetail = null } = {
     youtubeJsFallback = ["youtubejs_disabled"];
   }
 
+  const youtubeJsLiveReason = unfinishedLiveReason(detail);
+  if (youtubeJsLiveReason) {
+    return excludeUnfinishedLiveCandidate(row, detail, "youtubejs_detail", youtubeJsLiveReason);
+  }
+
   if (youtubeJsFallback.length > 0) {
     try {
       detail = mergeDetail(detail, await fetchVideoYtDlpDetail(row.source_content_id, row.source_url, { language }));
@@ -2140,6 +2159,11 @@ async function processOneCandidate(row, settings, { youtubeJsDetail = null } = {
     }
   }
 
+  const youtubeDetailLiveReason = unfinishedLiveReason(detail);
+  if (youtubeDetailLiveReason) {
+    return excludeUnfinishedLiveCandidate(row, detail, "youtube_detail", youtubeDetailLiveReason);
+  }
+
   if (commentFirstPageNeedsResolution(detail) && !youtubeJsDetailEnabled()) {
     try {
       detail = mergeDetail(detail, await fetchYoutubeJsCommentFirstPage(
@@ -2152,10 +2176,6 @@ async function processOneCandidate(row, settings, { youtubeJsDetail = null } = {
       youtubeJsCommentError = error;
       commentAttemptSources.push("youtubejs_comments_error");
     }
-  }
-
-  if (isUpcomingLiveDetail(detail)) {
-    return excludeUpcomingLiveCandidate(row, detail, "youtube_detail");
   }
 
   const resolvedAgeDays = detailAgeDays(detail, crawlReferenceAt);
@@ -3092,7 +3112,7 @@ export async function processDataApiBatchV2(job) {
   for (const task of taskRows.rows) {
     const apiDetail = apiResult.detailsById.get(task.source_content_id) ?? {};
     let commentApiResult = null;
-    if (youtubeApiTaskNeedsCommentThreads(task)) {
+    if (youtubeApiTaskNeedsCommentThreads(task) && !unfinishedLiveReason(apiDetail)) {
       const commentFetch = await fetchCommentThreadsForApiTask(task, settings, {
         preferredKeyIndex: keyIndex,
         totalCount: integer(apiDetail.comment_count),
@@ -3183,6 +3203,17 @@ export async function processDataApiBatchV2(job) {
             }
           : null,
       };
+      const apiLiveReason = unfinishedLiveReason(normalized.detail);
+      if (apiLiveReason) {
+        await excludeUnfinishedLiveCandidate(
+          candidate,
+          normalized.detail,
+          "youtube_data_api",
+          apiLiveReason,
+        );
+        affectedRuns.set(candidate.run_id, candidate.channel_id);
+        continue;
+      }
       if (storageAction.kind === "update_access") {
         const stored = await updateExistingContentAccessFromCandidate(candidate, normalized);
         const terminalMissing = terminalApiMissingFields(
@@ -3264,11 +3295,6 @@ export async function processDataApiBatchV2(job) {
           normalized.access,
         );
         terminalMissing.forEach((field) => taskMissing.add(field));
-        if (isUpcomingLiveDetail(normalized.detail)) {
-          await excludeUpcomingLiveCandidate(candidate, normalized.detail, "youtube_data_api");
-          affectedRuns.set(candidate.run_id, candidate.channel_id);
-          continue;
-        }
         const apiAgeDays = detailAgeDays(
           normalized.detail,
           candidate.crawl_started_at ?? Date.now(),

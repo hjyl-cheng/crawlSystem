@@ -12,7 +12,7 @@ test("a successful Content detail retry clears the stale Channel Run error", asy
   assert.ok(update, "updateRunDetailStatus SQL was not found");
   assert.match(
     update,
-    /error_message=CASE[\s\S]*?WHEN \$7::int>0 THEN \$8[\s\S]*?WHEN \$2='failed' THEN error_message[\s\S]*?ELSE NULL[\s\S]*?END/,
+    /error_message=CASE[\s\S]*?WHEN \$8::int>0 THEN \$9[\s\S]*?WHEN \$2='failed' THEN error_message[\s\S]*?ELSE NULL[\s\S]*?END/,
   );
 });
 

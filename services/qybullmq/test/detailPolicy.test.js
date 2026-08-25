@@ -9,12 +9,14 @@ import {
   hasResolvedDuration,
   isUpcomingLiveDetail,
   isLiveInProgress,
+  isLiveReplay,
   isTerminalYoutubeError,
   isTransientYoutubeError,
   isYoutubeIpBlockedError,
   isYoutubeNetworkRetryableError,
   missingLikeIsZero,
   positiveDurationSeconds,
+  unfinishedLiveReason,
   unresolvedParserContractError,
   videoAccessStatus,
   youtubeErrorText,
@@ -92,8 +94,26 @@ test("isUpcomingLiveDetail only identifies scheduled broadcasts", () => {
 test("a currently running live has no applicable final duration", () => {
   assert.equal(isLiveInProgress({ live_status: "is_live" }), true);
   assert.equal(isLiveInProgress({ is_live: true }), true);
+  assert.equal(isLiveInProgress({ is_live: true, was_live: true }), false);
+  assert.equal(isLiveInProgress({ live_status: "is_live", was_live: true }), false);
   assert.equal(isLiveInProgress({ live_status: "was_live" }), false);
   assert.equal(isLiveInProgress({ live_status: "is_upcoming" }), false);
+});
+
+test("a replay needs one positive replay signal and no current-live conflict", () => {
+  assert.equal(isLiveReplay({ live_status: "was_live" }), true);
+  assert.equal(isLiveReplay({ live_status: "post_live" }), true);
+  assert.equal(isLiveReplay({ was_live: true }), true);
+  assert.equal(isLiveReplay({ was_live: true, is_live: true }), false);
+  assert.equal(isLiveReplay({ is_live: false }), false);
+  assert.equal(isLiveReplay({ was_live: false }), false);
+});
+
+test("unfinished Live policy gives Full and Incremental one terminal reason", () => {
+  assert.equal(unfinishedLiveReason({ is_upcoming: true }), "upcoming_live");
+  assert.equal(unfinishedLiveReason({ live_status: "is_live" }), "live_in_progress");
+  assert.equal(unfinishedLiveReason({ live_status: "was_live" }), null);
+  assert.equal(unfinishedLiveReason({ live_status: "not_live" }), null);
 });
 
 test("isTransientYoutubeError recognizes proxy and rate-limit failures", () => {
