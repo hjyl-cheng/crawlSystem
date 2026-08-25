@@ -636,9 +636,26 @@ function policyRemovalCandidate(rawCandidate, previous, contentIds) {
   }
   const previousPayload = object(previous.payload_json);
   const previousItems = Array.isArray(previousPayload.items) ? previousPayload.items : [];
+  const keptItems = previousItems
+    .filter((item) => !removalIds.has(text(item?.content_id)))
+    .map((item, index) => ({ ...item, position: index + 1 }));
+  const removedCount = previousItems.length - keptItems.length;
+  const previousProof = object(previousPayload.window_proof);
+  const previousQualifiedCount = Number(previousProof.qualified_count);
+  const previousExcludedCount = Number(previousProof.excluded_count);
   const payload = {
     ...previousPayload,
-    items: previousItems.filter((item) => !removalIds.has(text(item?.content_id))),
+    window_proof: {
+      ...previousProof,
+      qualified_count: Number.isSafeInteger(previousQualifiedCount)
+        ? Math.max(keptItems.length, previousQualifiedCount - removedCount)
+        : keptItems.length,
+      selected_count: keptItems.length,
+      excluded_count: Number.isSafeInteger(previousExcludedCount)
+        ? previousExcludedCount + removedCount
+        : removedCount,
+    },
+    items: keptItems,
   };
   return {
     ready: true,

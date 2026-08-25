@@ -41,6 +41,9 @@ function videoResultValue(payload) {
     contentIds.add(contentId);
     return { position, content_id: contentId, item_hash: itemHash };
   });
+  if (items.some((item, index) => item.position !== index + 1)) {
+    throw new TypeError("video payload item positions must be contiguous from 1");
+  }
   return {
     channel_id: text(payload.channel_id, "video payload channel_id"),
     policy_version: text(windowPolicy.policy_version, "video payload policy_version"),

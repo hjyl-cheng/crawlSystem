@@ -587,7 +587,10 @@ export async function applyActiveLiveContentRepair(client, {
     const revision = reconciliation.revisions[0];
     assert.equal(revision.revision_type, "repair");
     assert.equal(revision.operation, "apply_window_delta");
-    assert.deepEqual(revision.payload.upserts, [], `unexpected Video upserts for ${channelId}`);
+    assert.ok(
+      revision.payload.upserts.every((item) => !contentIds.includes(item.content_id)),
+      `removed active-Live Content reappeared in Video upserts for ${channelId}`,
+    );
     assert.deepEqual(revision.payload.window_exits, [], `unexpected Window Exits for ${channelId}`);
     assert.deepEqual(
       [...revision.payload.retractions].sort((left, right) => (

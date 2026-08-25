@@ -136,11 +136,16 @@ test("a recovery Video Bootstrap passes the unchanged strict Business Contract",
     occurredAt: "2026-08-03T04:00:00.000Z",
     evidenceHash: `sha256:${"b".repeat(64)}`,
     deadRevisionIds: ["55555555-5555-4555-8555-555555555555"],
+    historicalRetractions: [{ content_id: "unknown-video", reason: "policy_removed" }],
   });
 
   assert.equal(recovery.envelope.revision_type, "bootstrap");
   assert.equal(recovery.envelope.data_sequence, 1);
   assert.deepEqual(recovery.removed_content_ids, ["unknown-video"]);
+  assert.deepEqual(
+    recovery.envelope.source.dead_letter_recovery.historical_retractions,
+    [{ content_id: "unknown-video", reason: "policy_removed" }],
+  );
   assert.doesNotThrow(() => validateBusinessPublicationEnvelope(recovery.envelope));
 });
 
@@ -181,4 +186,32 @@ test("only supported Video contract upgrades are auto-recoverable", () => {
     members_only_item_count: 1,
     non_publishable_item_count: 1,
   }), { recoverable: false, reason: "unsupported_dead_letter" });
+});
+
+test("only an explicitly targeted active Video position quarantine is recoverable", () => {
+  const activationQuarantine = {
+    domain: "video",
+    status: "delivered",
+    receipt_status: "accepted",
+    explicit_target: true,
+    business_receive_status: "accepted",
+    business_validation_status: "quarantined",
+    business_activation_status: "quarantined",
+    quarantine_status: "open",
+    quarantine_issue_code: "video_current_invalid",
+    quarantine_message: "Active Video positions must be contiguous from 1",
+  };
+
+  assert.deepEqual(classifyRecoverablePublicationDeadLetter(activationQuarantine), {
+    recoverable: true,
+    reason: "video_position_gap_activation_quarantine",
+  });
+  assert.deepEqual(classifyRecoverablePublicationDeadLetter({
+    ...activationQuarantine,
+    explicit_target: false,
+  }), { recoverable: false, reason: "unsupported_publication_failure" });
+  assert.deepEqual(classifyRecoverablePublicationDeadLetter({
+    ...activationQuarantine,
+    quarantine_message: "Video Current cannot be canonicalized: unrelated corruption",
+  }), { recoverable: false, reason: "unsupported_publication_failure" });
 });

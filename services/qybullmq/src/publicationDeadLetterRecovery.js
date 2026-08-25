@@ -12,6 +12,7 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-
 const RECOVERY_MODE = "dead_letter_recovery_cutover";
 const SOURCE_ADMIN_LOCK = 781137243;
 const BUSINESS_ADMIN_LOCK = 781137244;
+const ACTIVE_VIDEO_POSITION_ERROR = "Active Video positions must be contiguous from 1";
 const VIDEO_RETRACTION_REASONS = new Set([
   "source_deleted",
   "source_unlisted",
@@ -94,6 +95,27 @@ function sortedUnique(values) {
   return [...new Set((values ?? []).map((value) => text(value)))].sort();
 }
 
+function normalizedHistoricalRetractions(values = []) {
+  if (!Array.isArray(values)) throw new TypeError("historicalRetractions must be an array");
+  const byContentId = new Map();
+  for (const value of values) {
+    const item = object(value, "historical Retraction");
+    const contentId = text(item.content_id, "historical Retraction content_id");
+    const reason = text(item.reason, "historical Retraction reason");
+    if (!VIDEO_RETRACTION_REASONS.has(reason)) {
+      throw new TypeError(`unsupported historical Retraction reason: ${reason}`);
+    }
+    const previous = byContentId.get(contentId);
+    if (previous && previous !== reason) {
+      throw new TypeError(`historical Retraction reason conflicts for ${contentId}`);
+    }
+    byContentId.set(contentId, reason);
+  }
+  return [...byContentId.entries()]
+    .map(([content_id, reason]) => ({ content_id, reason }))
+    .sort((left, right) => left.content_id.localeCompare(right.content_id));
+}
+
 function publishableVideoItem(item) {
   return (item?.access_status === "public" && item?.is_members_only === false)
     || (item?.access_status === "members_only" && item?.is_members_only === true);
@@ -113,13 +135,27 @@ export function classifyRecoverablePublicationDeadLetter(row = {}) {
     && message.includes("retractions.reason is not allowed by Contract V1")
     && Number(row.retraction_reason_count ?? 0) > 0
     && Number(row.unsupported_retraction_reason_count ?? 0) === 0;
+  const positionGapRecovery = row.domain === "video"
+    && row.status === "delivered"
+    && row.receipt_status === "accepted"
+    && row.explicit_target === true
+    && row.business_receive_status === "accepted"
+    && row.business_validation_status === "quarantined"
+    && row.business_activation_status === "quarantined"
+    && row.quarantine_status === "open"
+    && row.quarantine_issue_code === "video_current_invalid"
+    && row.quarantine_message === ACTIVE_VIDEO_POSITION_ERROR;
   const reason = membersOnlyUpgrade
     ? "video_members_only_contract_upgrade"
     : retractionUpgrade
       ? "video_retraction_contract_upgrade"
-      : "unsupported_dead_letter";
+      : positionGapRecovery
+        ? "video_position_gap_activation_quarantine"
+        : row.status === "dead_letter"
+          ? "unsupported_dead_letter"
+          : "unsupported_publication_failure";
   return {
-    recoverable: membersOnlyUpgrade || retractionUpgrade,
+    recoverable: membersOnlyUpgrade || retractionUpgrade || positionGapRecovery,
     reason,
   };
 }
@@ -213,6 +249,7 @@ export function buildPublicationRecoveryBootstrap({
   occurredAt: occurredAtValue,
   evidenceHash: evidenceHashValue,
   deadRevisionIds = [],
+  historicalRetractions = [],
 }) {
   const current = normalizedCurrent(currentValue);
   const channelId = text(channelIdValue, "channelId");
@@ -221,10 +258,25 @@ export function buildPublicationRecoveryBootstrap({
   const revisionId = id(revisionIdValue, "revisionId");
   const occurredAt = timestamp(occurredAtValue, "occurredAt");
   const evidenceHash = hash(evidenceHashValue, "evidenceHash");
+  const normalizedRetractions = normalizedHistoricalRetractions(historicalRetractions);
+  if (current.domain !== "video" && normalizedRetractions.length > 0) {
+    throw new TypeError("historical Retractions may only be attached to Video recovery");
+  }
   if (text(current.payload_json.channel_id, "Current payload channel_id") !== channelId) {
     throw new TypeError("Publication Current channel_id does not match recovery Channel");
   }
   const snapshot = recoverySnapshot(current);
+  const snapshotContentIds = new Set(
+    current.domain === "video"
+      ? snapshot.payload.items.map((item) => text(item.content_id, "Video Content ID"))
+      : [],
+  );
+  const retainedRetractions = normalizedRetractions.filter((item) => (
+    snapshotContentIds.has(item.content_id)
+  ));
+  if (retainedRetractions.length > 0) {
+    throw new TypeError("historical Retraction targets remain in the recovery Video snapshot");
+  }
   const payload = current.domain === "video"
     ? { ...snapshot.payload, result_hash: snapshot.result_hash }
     : snapshot.payload;
@@ -239,6 +291,7 @@ export function buildPublicationRecoveryBootstrap({
       old_result_hash: current.result_hash,
       dead_revision_ids: sortedUnique(deadRevisionIds).map((value) => id(value, "deadRevisionId")),
       removed_content_ids: snapshot.removed_content_ids,
+      historical_retractions: normalizedRetractions,
     },
   };
   const envelope = {
@@ -266,6 +319,7 @@ export function buildPublicationRecoveryBootstrap({
     current_source_refs: source,
     complete_observed_at: current.complete_observed_at,
     removed_content_ids: snapshot.removed_content_ids,
+    historical_retractions: normalizedRetractions,
   };
 }
 
@@ -301,6 +355,10 @@ function normalizedDeadLetter(row) {
   const retractionReasons = sortedUnique(retractions.map((item) => (
     text(item?.reason, "Video Retraction reason")
   )));
+  const historicalRetractions = retractions.map((item) => ({
+    content_id: text(item?.content_id, "Video Retraction content_id"),
+    reason: text(item?.reason, "Video Retraction reason"),
+  })).sort((left, right) => left.content_id.localeCompare(right.content_id));
   const receipt = row.receipt_json && typeof row.receipt_json === "object"
     ? row.receipt_json
     : {};
@@ -330,6 +388,7 @@ function normalizedDeadLetter(row) {
     unsupported_retraction_reason_count: retractionReasons.filter((reason) => (
       !VIDEO_RETRACTION_REASONS.has(reason)
     )).length,
+    historical_retractions: historicalRetractions,
   };
   return { ...output, ...classifyRecoverablePublicationDeadLetter(output) };
 }
@@ -349,7 +408,11 @@ async function sourceDeadLetters(client, destination, revisionIds = []) {
             revision.payload_hash,revision.result_hash,revision.payload_json
      FROM publication.outbox AS outbox
      JOIN publication.revision AS revision USING(revision_id)
-     WHERE outbox.destination=$1 AND outbox.status='dead_letter'
+     WHERE outbox.destination=$1
+       AND (
+         outbox.status='dead_letter'
+         OR (cardinality($3::uuid[])>0 AND outbox.status='delivered')
+       )
        AND (cardinality($3::uuid[])=0 OR outbox.revision_id=ANY($3::uuid[]))
        AND NOT EXISTS (
          SELECT 1
@@ -370,6 +433,80 @@ async function sourceDeadLetters(client, destination, revisionIds = []) {
     [destination, RECOVERY_MODE, targets],
   );
   return result.rows.map(normalizedDeadLetter);
+}
+
+async function businessQuarantines(client, revisionIds) {
+  if (revisionIds.length === 0) return [];
+  const result = await client.query(
+    `/* publication-dead-letter-recovery:business-quarantines */
+     SELECT quarantine.quarantine_id::text,quarantine.revision_id::text,
+            quarantine.issue_code,quarantine.issue_hash,quarantine.details_json,
+            quarantine.status,inbox.channel_id,inbox.domain,inbox.receive_status,
+            revision.validation_status,revision.activation_status
+     FROM publication.quarantine AS quarantine
+     JOIN publication.inbox AS inbox USING(revision_id)
+     LEFT JOIN publication.revision AS revision USING(revision_id)
+     WHERE quarantine.revision_id=ANY($1::uuid[])
+     ORDER BY quarantine.revision_id,quarantine.issue_code,quarantine.issue_hash`,
+    [revisionIds],
+  );
+  return result.rows.map((row) => ({
+    quarantine_id: id(row.quarantine_id, "Business quarantine_id"),
+    revision_id: id(row.revision_id, "Business quarantine revision_id"),
+    issue_code: text(row.issue_code, "Business quarantine issue_code"),
+    issue_hash: hash(row.issue_hash, "Business quarantine issue_hash"),
+    details_json: object(row.details_json, "Business quarantine details_json"),
+    status: text(row.status, "Business quarantine status"),
+    channel_id: text(row.channel_id, "Business quarantine channel_id"),
+    domain: text(row.domain, "Business quarantine domain"),
+    receive_status: text(row.receive_status, "Business Inbox receive_status"),
+    validation_status: optionalText(row.validation_status),
+    activation_status: optionalText(row.activation_status),
+  }));
+}
+
+function recoveryQuarantineForFailure(failure, quarantines) {
+  const rows = quarantines.filter((row) => (
+    row.revision_id === failure.revision_id
+    && row.status === "open"
+    && (
+      (failure.status === "dead_letter" && row.issue_code === failure.error_code)
+      || (failure.status === "delivered"
+        && row.issue_code === "video_current_invalid"
+        && row.details_json.message === ACTIVE_VIDEO_POSITION_ERROR)
+    )
+  ));
+  return rows.length === 1 ? rows[0] : null;
+}
+
+function attachBusinessQuarantine(failure, quarantines, explicitTargets) {
+  const quarantine = recoveryQuarantineForFailure(failure, quarantines);
+  const candidate = {
+    ...failure,
+    explicit_target: explicitTargets.has(failure.revision_id),
+    business_receive_status: quarantine?.receive_status ?? null,
+    business_validation_status: quarantine?.validation_status ?? null,
+    business_activation_status: quarantine?.activation_status ?? null,
+    quarantine_status: quarantine?.status ?? null,
+    quarantine_issue_code: quarantine?.issue_code ?? null,
+    quarantine_message: optionalText(quarantine?.details_json?.message),
+    business_quarantine: quarantine ? {
+      quarantine_id: quarantine.quarantine_id,
+      revision_id: quarantine.revision_id,
+      issue_code: quarantine.issue_code,
+      issue_hash: quarantine.issue_hash,
+      message: optionalText(quarantine.details_json.message),
+    } : null,
+  };
+  const classification = classifyRecoverablePublicationDeadLetter(candidate);
+  if (classification.recoverable && !candidate.business_quarantine) {
+    return {
+      ...candidate,
+      recoverable: false,
+      reason: "missing_business_quarantine_evidence",
+    };
+  }
+  return { ...candidate, ...classification };
 }
 
 async function sourceChannelSnapshot(client, destination, channelId) {
@@ -571,13 +708,24 @@ export async function planPublicationDeadLetterRecovery({
 }) {
   const generatedAt = timestamp(now(), "generatedAt");
   const targets = normalizedRevisionIds(revisionIds);
-  const [sourceInspection, businessDatabase] = await Promise.all([
-    repeatableRead(crawlerPool, async (client) => ({
-      database_name: await databaseName(client),
-      dead_letters: await sourceDeadLetters(client, destination, targets),
-    })),
-    repeatableRead(businessPool, databaseName),
-  ]);
+  const rawSourceInspection = await repeatableRead(crawlerPool, async (client) => ({
+    database_name: await databaseName(client),
+    dead_letters: await sourceDeadLetters(client, destination, targets),
+  }));
+  const businessInspection = await repeatableRead(businessPool, async (client) => ({
+    database_name: await databaseName(client),
+    quarantines: await businessQuarantines(
+      client,
+      rawSourceInspection.dead_letters.map((item) => item.revision_id),
+    ),
+  }));
+  const explicitTargets = new Set(targets);
+  const sourceInspection = {
+    ...rawSourceInspection,
+    dead_letters: rawSourceInspection.dead_letters.map((item) => (
+      attachBusinessQuarantine(item, businessInspection.quarantines, explicitTargets)
+    )),
+  };
   if (targets.length > 0) {
     const observed = sourceInspection.dead_letters.map((item) => item.revision_id).sort();
     if (!isDeepStrictEqual(observed, targets)) {
@@ -602,6 +750,9 @@ export async function planPublicationDeadLetterRecovery({
     ]);
     const deadLetters = recoverable.filter((item) => item.channel_id === channelId);
     assertPlanChannel({ channelId, deadLetters, source, business });
+    const historicalRetractions = normalizedHistoricalRetractions(
+      deadLetters.flatMap((item) => item.historical_retractions),
+    );
     const revisionIds = Object.fromEntries(DOMAINS.map((domain) => [domain, uuid()]));
     const preview = Object.fromEntries(source.currents.map((current) => {
       const snapshot = recoverySnapshot(current);
@@ -609,6 +760,7 @@ export async function planPublicationDeadLetterRecovery({
         revision_id: revisionIds[current.domain],
         result_hash: snapshot.result_hash,
         removed_content_ids: snapshot.removed_content_ids,
+        historical_retractions: current.domain === "video" ? historicalRetractions : [],
       }];
     }));
     const sourceEvidence = sourceSnapshotEvidence(source);
@@ -628,6 +780,8 @@ export async function planPublicationDeadLetterRecovery({
         non_publishable_access_states: item.non_publishable_access_states,
         retraction_reason_count: item.retraction_reason_count,
         retraction_reasons: item.retraction_reasons,
+        historical_retractions: item.historical_retractions,
+        business_quarantine: item.business_quarantine,
       })),
       previous_source: sourceEvidence,
       previous_business: businessEvidence,
@@ -645,7 +799,7 @@ export async function planPublicationDeadLetterRecovery({
     destination,
     databases: {
       crawler: sourceInspection.database_name,
-      business: businessDatabase,
+      business: businessInspection.database_name,
     },
     recovery_stream: {
       publication_stream_id: newStreamId,
@@ -865,11 +1019,18 @@ async function prepareSourceChannel(client, evidence, channel, actor, reason) {
     occurredAt: evidence.generated_at,
     evidenceHash: evidence.evidence_hash,
     deadRevisionIds,
+    historicalRetractions: current.domain === "video"
+      ? channel.bootstrap_preview.video.historical_retractions
+      : [],
   }));
   for (const bootstrap of bootstraps) {
     const expected = channel.bootstrap_preview[bootstrap.envelope.domain];
     if (bootstrap.envelope.result_hash !== expected.result_hash
-        || !isDeepStrictEqual(bootstrap.removed_content_ids, expected.removed_content_ids)) {
+        || !isDeepStrictEqual(bootstrap.removed_content_ids, expected.removed_content_ids)
+        || !isDeepStrictEqual(
+          bootstrap.historical_retractions,
+          expected.historical_retractions ?? [],
+        )) {
       fail("Recovery Bootstrap no longer matches the approved preview", {
         channel_id: channel.channel_id,
         domain: bootstrap.envelope.domain,
@@ -1270,32 +1431,60 @@ async function resolveBusinessQuarantines(client, evidence, channel, actor) {
     `SELECT pg_advisory_xact_lock(hashtextextended($1,$2))`,
     [channel.channel_id, BUSINESS_ADMIN_LOCK],
   );
-  const revisionIds = channel.dead_letters.map((item) => item.revision_id).sort();
+  const references = channel.dead_letters.map((item) => {
+    const stored = item.business_quarantine;
+    if (!stored) {
+      return {
+        quarantine_id: null,
+        revision_id: id(item.revision_id, "dead-letter revision_id"),
+        issue_code: "payload_contract_invalid",
+        issue_hash: null,
+      };
+    }
+    return {
+      quarantine_id: id(stored.quarantine_id, "Business quarantine_id"),
+      revision_id: id(stored.revision_id, "Business quarantine revision_id"),
+      issue_code: text(stored.issue_code, "Business quarantine issue_code"),
+      issue_hash: hash(stored.issue_hash, "Business quarantine issue_hash"),
+    };
+  }).sort((left, right) => left.revision_id.localeCompare(right.revision_id));
+  const revisionIds = references.map((item) => item.revision_id);
   const resolutionReason = `dead-letter recovery ${evidence.evidence_hash}`;
   const load = () => client.query(
-    `SELECT quarantine.revision_id::text,quarantine.status,quarantine.resolved_by,
+    `SELECT quarantine.quarantine_id::text,quarantine.revision_id::text,
+            quarantine.issue_code,quarantine.issue_hash,
+            quarantine.status,quarantine.resolved_by,
             quarantine.resolution_reason,inbox.channel_id,inbox.domain
      FROM publication.quarantine AS quarantine
      JOIN publication.inbox AS inbox USING(revision_id)
      WHERE quarantine.revision_id=ANY($1::uuid[])
-       AND quarantine.issue_code='payload_contract_invalid'
-     ORDER BY quarantine.revision_id
+     ORDER BY quarantine.revision_id,quarantine.issue_code,quarantine.issue_hash
      FOR UPDATE OF quarantine`,
     [revisionIds],
   );
   const before = await load();
-  const storedIds = before.rows.map((row) => String(row.revision_id)).sort();
-  if (!isDeepStrictEqual(storedIds, revisionIds)
-      || before.rows.some((row) => row.channel_id !== channel.channel_id || row.domain !== "video")) {
+  const matched = references.map((reference) => before.rows.filter((row) => (
+    String(row.revision_id) === reference.revision_id
+    && row.issue_code === reference.issue_code
+    && (reference.quarantine_id == null
+      || String(row.quarantine_id) === reference.quarantine_id)
+    && (reference.issue_hash == null || row.issue_hash === reference.issue_hash)
+  )));
+  if (matched.some((rows) => rows.length !== 1)
+      || matched.flat().some((row) => (
+        row.channel_id !== channel.channel_id || row.domain !== "video"
+      ))) {
     fail("Business Quarantine evidence differs from the approved dead letters", {
       channel_id: channel.channel_id,
     });
   }
-  const alreadyResolved = before.rows.every((row) => (
+  const targetRows = matched.flat();
+  const quarantineIds = targetRows.map((row) => String(row.quarantine_id));
+  const alreadyResolved = targetRows.every((row) => (
     row.status === "resolved" && row.resolution_reason === resolutionReason
   ));
   if (!alreadyResolved) {
-    if (before.rows.some((row) => row.status !== "open")) {
+    if (targetRows.some((row) => row.status !== "open")) {
       fail("Business Quarantine was resolved by different evidence", {
         channel_id: channel.channel_id,
       });
@@ -1304,13 +1493,19 @@ async function resolveBusinessQuarantines(client, evidence, channel, actor) {
       `/* publication-dead-letter-recovery:resolve-business-quarantine */
        UPDATE publication.quarantine
        SET status='resolved',resolved_at=now(),resolved_by=$2,resolution_reason=$3
-       WHERE revision_id=ANY($1::uuid[])
-         AND issue_code='payload_contract_invalid' AND status='open'`,
-      [revisionIds, actor, resolutionReason],
+       WHERE quarantine_id=ANY($1::uuid[]) AND status='open'`,
+      [quarantineIds, actor, resolutionReason],
     );
   }
   const after = await load();
-  if (after.rows.length !== revisionIds.length || after.rows.some((row) => (
+  const resolvedRows = references.map((reference) => after.rows.find((row) => (
+    String(row.revision_id) === reference.revision_id
+    && row.issue_code === reference.issue_code
+    && (reference.quarantine_id == null
+      || String(row.quarantine_id) === reference.quarantine_id)
+    && (reference.issue_hash == null || row.issue_hash === reference.issue_hash)
+  )));
+  if (resolvedRows.some((row) => !row || (
     row.status !== "resolved"
     || !optionalText(row.resolved_by)
     || row.resolution_reason !== resolutionReason
@@ -1322,7 +1517,7 @@ async function resolveBusinessQuarantines(client, evidence, channel, actor) {
   return {
     channel_id: channel.channel_id,
     status: alreadyResolved ? "already_resolved" : "resolved",
-    quarantine_count: after.rows.length,
+    quarantine_count: resolvedRows.length,
   };
 }
 

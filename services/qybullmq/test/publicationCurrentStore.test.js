@@ -233,6 +233,20 @@ test("Ready Current rejects diagnostics and a result hash that does not match th
   );
 });
 
+test("Video Result Hash rejects non-contiguous Current positions", () => {
+  const current = readyCurrent("video", "contiguous");
+  current.payload.items.push({
+    position: 3,
+    content_id: "video-position-gap",
+    item_hash: `sha256:${"b".repeat(64)}`,
+  });
+
+  assert.throws(
+    () => publicationResultHash("video", current.payload),
+    /positions must be contiguous from 1/,
+  );
+});
+
 test("Current Seed Store requires an already-open transaction", async () => {
   const client = {
     calls: [],

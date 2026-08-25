@@ -341,6 +341,101 @@ async function insertHistoricalContractDeadLetter(crawlerPool, businessPool, env
   assert.equal(source.rows.length, 1);
 }
 
+function legacyVideoResultHash(payload) {
+  return observationFactsHash({
+    channel_id: payload.channel_id,
+    policy_version: payload.window_policy.policy_version,
+    max_age_days: Number(payload.window_policy.max_age_days),
+    max_items: Number(payload.window_policy.max_items),
+    items: payload.items.map((item) => ({
+      position: Number(item.position),
+      content_id: item.content_id,
+      item_hash: item.item_hash,
+    })),
+  });
+}
+
+function activeLiveRepairEnvelope({
+  streamId,
+  channelId,
+  previousResultHash,
+  currentPayload,
+  contentId,
+}) {
+  const resultHash = legacyVideoResultHash(currentPayload);
+  const payload = {
+    channel_id: channelId,
+    window_policy: currentPayload.window_policy,
+    window_proof: currentPayload.window_proof,
+    upserts: [],
+    window_exits: [],
+    retractions: [{ content_id: contentId, reason: "policy_removed" }],
+    result_hash: resultHash,
+  };
+  return publicationEnvelopeFromRow({
+    revision_id: randomUUID(),
+    publication_stream_id: streamId,
+    revision_type: "repair",
+    channel_id: channelId,
+    domain: "video",
+    data_sequence: 2,
+    previous_data_sequence: 1,
+    operation: "apply_window_delta",
+    contract_version: 1,
+    policy_version: "video-window-v1",
+    occurred_at: "2026-08-03T04:30:00.000Z",
+    source_refs: { active_live_content_repair: { version: "integration-test" } },
+    previous_result_hash: previousResultHash,
+    result_hash: resultHash,
+    payload_hash: observationFactsHash(payload),
+    payload_json: payload,
+  });
+}
+
+async function insertSourceRepair(crawlerPool, envelope, currentPayload) {
+  await crawlerPool.query(
+    `INSERT INTO publication.revision (
+       revision_id,publication_stream_id,channel_id,domain,data_sequence,
+       previous_data_sequence,revision_type,operation,contract_version,policy_version,
+       occurred_at,source_refs,previous_result_hash,result_hash,payload_hash,payload_json
+     ) VALUES ($1,$2,$3,'video',2,1,'repair','apply_window_delta',1,$4,$5,$6::jsonb,$7,$8,$9,$10::jsonb)`,
+    [
+      envelope.revision_id,
+      envelope.publication_stream_id,
+      envelope.channel_id,
+      envelope.policy_version,
+      envelope.occurred_at,
+      JSON.stringify(envelope.source),
+      envelope.previous_result_hash,
+      envelope.result_hash,
+      envelope.payload_hash,
+      JSON.stringify(envelope.payload),
+    ],
+  );
+  await crawlerPool.query(
+    `UPDATE publication.domain_current
+     SET payload_json=$4::jsonb,result_hash=$5,source_refs=$6::jsonb,
+         complete_observed_at=$7::timestamptz,data_sequence=2,current_revision_id=$8::uuid,
+         updated_at=now()
+     WHERE publication_stream_id=$1::uuid AND channel_id=$2 AND domain='video'
+       AND data_sequence=1 AND current_revision_id=$3::uuid`,
+    [
+      envelope.publication_stream_id,
+      envelope.channel_id,
+      currentPayload.previous_revision_id,
+      JSON.stringify(currentPayload.payload),
+      envelope.result_hash,
+      JSON.stringify(envelope.source),
+      envelope.occurred_at,
+      envelope.revision_id,
+    ],
+  );
+  await crawlerPool.query(
+    "INSERT INTO publication.outbox (destination,revision_id,status) VALUES ('business',$1,'pending')",
+    [envelope.revision_id],
+  );
+}
+
 function sourceOutboxStore(pool) {
   return new PostgresPublicationOutboxStore({
     query: pool.query.bind(pool),
@@ -648,6 +743,237 @@ test("dead-letter recovery creates a clean Stream Bootstrap and atomically cuts 
       }),
       /no recoverable Publication dead letters were found/,
     );
+  } finally {
+    await Promise.all([crawlerPool.end(), businessPool.end()]);
+  }
+});
+
+test("explicit activation-quarantine recovery renumbers survivors and preserves policy removal", {
+  skip: !crawlerUrl || !businessUrl,
+}, async () => {
+  const crawlerPool = new Pool({ connectionString: crawlerUrl, max: 8 });
+  const businessPool = new Pool({ connectionString: businessUrl, max: 8 });
+  const suffix = randomUUID().replaceAll("-", "");
+  const oldStreamId = randomUUID();
+  const channelId = `UCpositiongap${suffix}`;
+  const activeLiveContentId = "active-live";
+  try {
+    await applySchemas(crawlerPool, businessPool);
+    await crawlerPool.query(
+      `INSERT INTO crawler.channels (channel_id,channel_url,title,status,agent_status)
+       VALUES ($1,$2,'Position gap fixture','active','done')`,
+      [channelId, `https://www.youtube.com/channel/${channelId}`],
+    );
+    const sourceIdentity = { database: "recovery-source", stream_role: "primary" };
+    await crawlerPool.query(
+      `INSERT INTO publication.stream (
+         publication_stream_id,source_deployment_key,source_identity_json,
+         minimum_writer_version,capture_enabled_at,created_by,created_reason,
+         status_changed_by,status_reason
+       ) VALUES ($1,$2,$3::jsonb,'publication-writer-v1','2026-08-01T00:00:00Z',
+                 'integration-test','fixture','integration-test','fixture')`,
+      [oldStreamId, `position-gap-old-${suffix}`, JSON.stringify(sourceIdentity)],
+    );
+    const sourceOwnership = { onboarding_mode: "legacy_tracked_adoption", fixture: true };
+    await crawlerPool.query(
+      `INSERT INTO publication.channel_stream_state (
+         publication_stream_id,channel_id,onboarding_mode,seed_status,ownership_reference,
+         seed_completed_at,state_changed_by,state_reason
+       ) VALUES ($1,$2,'bootstrap','complete',$3::jsonb,now(),'integration-test','fixture')`,
+      [oldStreamId, channelId, JSON.stringify(sourceOwnership)],
+    );
+    await crawlerPool.query(
+      `INSERT INTO publication.channel_delivery_state (
+         destination,publication_stream_id,channel_id,mode,source_ownership_reference,
+         online_at,state_changed_by,state_reason
+       ) VALUES ('business',$1,$2,'online',$3::jsonb,now(),'integration-test','fixture')`,
+      [oldStreamId, channelId, JSON.stringify(sourceOwnership)],
+    );
+
+    const channelCurrent = channelPayload(channelId);
+    const baselineVideo = videoCurrentPayload(channelId);
+    baselineVideo.window_proof = {
+      ...baselineVideo.window_proof,
+      catalog_candidate_count: 3,
+      qualified_count: 3,
+      selected_count: 3,
+      latest_scan_items: 3,
+    };
+    baselineVideo.items = [
+      videoItem(channelId, "before-video", 1, "public", false),
+      videoItem(channelId, activeLiveContentId, 2, "public", false),
+      videoItem(channelId, "after-video", 3, "public", false),
+    ];
+    const agentCurrent = agentPayload(channelId);
+    const oldEnvelopes = [
+      bootstrapEnvelope(oldStreamId, channelId, "channel", channelCurrent),
+      bootstrapEnvelope(oldStreamId, channelId, "video", baselineVideo),
+      bootstrapEnvelope(oldStreamId, channelId, "agent", agentCurrent),
+    ];
+    await insertSourceBootstrap(crawlerPool, oldEnvelopes[0], channelCurrent);
+    await insertSourceBootstrap(crawlerPool, oldEnvelopes[1], baselineVideo);
+    await insertSourceBootstrap(crawlerPool, oldEnvelopes[2], agentCurrent);
+
+    await businessPool.query(
+      `INSERT INTO publication.stream (
+         publication_stream_id,source_deployment_key,source_identity_json,
+         registered_by,registered_reason,status_changed_by,status_reason
+       ) VALUES ($1,$2,$3::jsonb,'integration-test','fixture','integration-test','fixture')`,
+      [oldStreamId, `position-gap-old-${suffix}`, JSON.stringify(sourceIdentity)],
+    );
+    await businessPool.query(
+      `INSERT INTO publication.channel_ownership (
+         channel_id,active_publication_stream_id,status,ownership_reference,
+         projection_mode,state_changed_by,state_reason
+       ) VALUES ($1,$2,'active',$3::jsonb,'online','integration-test','fixture')`,
+      [channelId, oldStreamId, JSON.stringify(sourceOwnership)],
+    );
+
+    const businessStore = new PostgresBusinessPublicationStore(businessPool);
+    const publisher = new PublicationPublisher({
+      store: sourceOutboxStore(crawlerPool),
+      ingress: businessStore,
+      destination: "business",
+      leaseOwner: `position-gap-publisher-${suffix}`,
+      batchSize: 100,
+      logger: { info() {}, error() {} },
+    });
+    const activator = new PostgresBusinessPublicationActivator(businessPool, {
+      actor: "integration-test",
+      reason: "activation quarantine recovery integration",
+    });
+    assert.equal((await publisher.runOnce()).delivered, 3);
+    assert.equal((await activator.activateReady(channelId)).status, "activated");
+    await businessPool.query(
+      `UPDATE publication.projection_outbox
+       SET status='delivered',delivered_at=now(),updated_at=now()
+       WHERE channel_id=$1 AND status='pending'`,
+      [channelId],
+    );
+
+    const badCurrent = {
+      ...baselineVideo,
+      window_proof: {
+        ...baselineVideo.window_proof,
+        qualified_count: 2,
+        selected_count: 2,
+        excluded_count: 1,
+      },
+      items: [baselineVideo.items[0], baselineVideo.items[2]],
+    };
+    const repair = activeLiveRepairEnvelope({
+      streamId: oldStreamId,
+      channelId,
+      previousResultHash: oldEnvelopes[1].result_hash,
+      currentPayload: badCurrent,
+      contentId: activeLiveContentId,
+    });
+    await insertSourceRepair(crawlerPool, repair, {
+      previous_revision_id: oldEnvelopes[1].revision_id,
+      payload: badCurrent,
+    });
+    assert.equal((await publisher.runOnce()).delivered, 1);
+    assert.equal((await activator.activateReady(channelId)).status, "waiting_gap");
+
+    const quarantined = await businessPool.query(
+      `SELECT inbox.receive_status,revision.validation_status,revision.activation_status,
+              quarantine.issue_code,quarantine.status,quarantine.details_json->>'message' AS message
+       FROM publication.inbox AS inbox
+       JOIN publication.revision AS revision USING(revision_id)
+       JOIN publication.quarantine AS quarantine USING(revision_id)
+       WHERE inbox.revision_id=$1::uuid`,
+      [repair.revision_id],
+    );
+    assert.deepEqual(quarantined.rows, [{
+      receive_status: "accepted",
+      validation_status: "quarantined",
+      activation_status: "quarantined",
+      issue_code: "video_current_invalid",
+      status: "open",
+      message: "Active Video positions must be contiguous from 1",
+    }]);
+
+    const evidence = await planPublicationDeadLetterRecovery({
+      crawlerPool,
+      businessPool,
+      destination: "business",
+      revisionIds: [repair.revision_id],
+      now: () => new Date("2026-08-03T05:00:00.000Z"),
+    });
+    assert.equal(evidence.summary.channel_count, 1);
+    assert.equal(evidence.summary.dead_letter_count, 1);
+    assert.equal(
+      evidence.channels[0].dead_letters[0].failure_kind,
+      "video_position_gap_activation_quarantine",
+    );
+    assert.equal(
+      evidence.channels[0].dead_letters[0].business_quarantine.issue_code,
+      "video_current_invalid",
+    );
+    assert.deepEqual(
+      evidence.channels[0].bootstrap_preview.video.historical_retractions,
+      [{ content_id: activeLiveContentId, reason: "policy_removed" }],
+    );
+
+    const administrator = new PublicationDeadLetterRecoveryAdministrator({
+      crawlerPool,
+      businessPool,
+      activator,
+      evidence,
+      actor: "integration-test",
+      reason: "recover accepted active-Live position quarantine",
+      deliveryTimeoutMs: 5000,
+      projectionTimeoutMs: 5000,
+      pollMs: 50,
+      afterSourcePrepared: async () => {
+        const delivered = await publisher.runOnce();
+        assert.equal(delivered.delivered, 3);
+        assert.equal(delivered.dead_lettered, 0);
+      },
+      afterBusinessActivated: async ({ activations }) => {
+        const projected = await businessPool.query(
+          `UPDATE publication.projection_outbox
+           SET status='delivered',delivered_at=now(),updated_at=now()
+           WHERE activation_id=ANY($1::uuid[]) AND status='pending'
+           RETURNING activation_id`,
+          [activations],
+        );
+        assert.equal(projected.rows.length, activations.length);
+      },
+    });
+    const result = await administrator.apply();
+    assert.deepEqual(result.summary, {
+      recovered_channels: 1,
+      resolved_dead_letters: 1,
+      unresolved_dead_letters: 0,
+    });
+
+    const final = await businessPool.query(
+      `SELECT
+         (SELECT status FROM publication.quarantine WHERE revision_id=$1::uuid) AS quarantine_status,
+         (SELECT count(*)::int FROM result.content_current
+          WHERE channel_id=$2 AND content_id=$3 AND window_status='active') AS active_target,
+         (SELECT count(*)::int FROM result.content_current
+          WHERE channel_id=$2 AND content_id=$3 AND window_status='retracted'
+            AND state_reason='policy_removed') AS retracted_target,
+         (SELECT array_agg(position ORDER BY position) FROM result.content_current
+          WHERE channel_id=$2 AND window_status='active') AS active_positions,
+         (SELECT count(*)::int FROM publication.consumer_cursor
+          WHERE channel_id=$2 AND publication_stream_id=$4::uuid) AS recovery_cursors`,
+      [
+        repair.revision_id,
+        channelId,
+        activeLiveContentId,
+        evidence.recovery_stream.publication_stream_id,
+      ],
+    );
+    assert.deepEqual(final.rows[0], {
+      quarantine_status: "resolved",
+      active_target: 0,
+      retracted_target: 1,
+      active_positions: [1, 2],
+      recovery_cursors: 3,
+    });
   } finally {
     await Promise.all([crawlerPool.end(), businessPool.end()]);
   }

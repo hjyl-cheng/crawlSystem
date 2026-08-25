@@ -1166,13 +1166,14 @@ test("Reconciler emits a contiguous Video Repair Revision for an approved policy
   const contentId = "active-live";
   const fixture = completePublicationOperationalFixture(CHANNEL_ID, { observedAt: OBSERVED_AT });
   const videoSource = fixture.sources.find((source) => source.observation_kind === "video");
-  const row = withVideoItemHash(videoRow(contentId, {
+  const rows = ["before", contentId, "after"].map((id, index) => withVideoItemHash(videoRow(id, {
+    position: index + 1,
     last_observation_id: videoSource.complete_observation.observation_id,
     playlist_last_seen_at: OBSERVED_AT,
     player_last_observed_at: OBSERVED_AT,
-  }));
+  })));
   const baseline = buildVideoReadiness({
-    rows: [row],
+    rows,
     source: videoSource,
     channelId: CHANNEL_ID,
     asOf: AS_OF,
@@ -1200,6 +1201,14 @@ test("Reconciler emits a contiguous Video Repair Revision for an approved policy
     revisionType: "repair",
     policyRemovalContentIds: [contentId],
   });
+  const expectedItems = previous.payload_json.items
+    .filter((item) => item.content_id !== contentId)
+    .map((item, index) => ({ content_id: item.content_id, position: index + 1 }));
+  const expectedUpserts = expectedItems.filter((item) => (
+    previous.payload_json.items.find((previousItem) => (
+      previousItem.content_id === item.content_id
+    )).position !== item.position
+  ));
 
   assert.equal(result.status, "revised");
   assert.equal(result.revisions.length, 1);
@@ -1211,12 +1220,26 @@ test("Reconciler emits a contiguous Video Repair Revision for an approved policy
     based_on_revision_id: REVISION_ID,
     based_on_result_hash: previous.result_hash,
   });
-  assert.deepEqual(result.revisions[0].payload.upserts, []);
   assert.deepEqual(result.revisions[0].payload.window_exits, []);
   assert.deepEqual(result.revisions[0].payload.retractions, [{
     content_id: contentId,
     reason: "policy_removed",
   }]);
+  assert.deepEqual(
+    client.currents.get("video").payload_json.items.map((item) => ({
+      content_id: item.content_id,
+      position: item.position,
+    })),
+    expectedItems,
+  );
+  assert.deepEqual(result.revisions[0].payload.upserts.map((item) => ({
+    content_id: item.content_id,
+    position: item.position,
+  })), expectedUpserts);
+  assert.equal(
+    client.currents.get("video").payload_json.window_proof.selected_count,
+    expectedItems.length,
+  );
   assert.deepEqual(client.outbox, [{
     destination: "business",
     revision_id: result.revisions[0].revision_id,

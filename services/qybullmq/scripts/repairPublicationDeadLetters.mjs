@@ -19,8 +19,9 @@ function usage() {
   npm run publication:repair-dead-letters -- --apply [--output <path>]
 
 Without --apply, this command performs a read-only two-database audit and creates a
-new recovery Stream plan for the explicitly listed dead-letter Revisions. The output
-file is created exclusively and never overwritten.
+new recovery Stream plan for explicitly listed dead-letter Revisions or supported
+Business activation quarantines. The output file is created exclusively and never
+overwritten.
 
 Required environment:
   CRAWLER_DATABASE_URL (DATABASE_URL is accepted for the QY runtime container)

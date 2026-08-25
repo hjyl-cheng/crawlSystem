@@ -6,6 +6,13 @@ import { publicationResultHash } from "./publicationResultHash.js";
 const DOMAINS = Object.freeze(["channel", "video", "agent"]);
 const DEAD_LETTER_RECOVERY_ONBOARDING_MODE = "dead_letter_recovery_cutover";
 const HASH = /^sha256:[0-9a-f]{64}$/;
+const VIDEO_RETRACTION_REASONS = new Set([
+  "source_deleted",
+  "source_unlisted",
+  "source_private",
+  "source_unavailable",
+  "policy_removed",
+]);
 
 export class BusinessPublicationActivationConflict extends Error {
   constructor(code, message, { revisionId = null } = {}) {
@@ -320,14 +327,47 @@ function removeVideoItem(records, action, revision, status) {
   });
 }
 
-function applyVideoRevision(state, revision) {
+function recoveryBootstrapRetractions(revision, recoveryCutover) {
+  if (!recoveryCutover || revision.revision_type !== "bootstrap") return new Map();
+  const recovery = revision.source_json?.dead_letter_recovery;
+  if (!recovery || recovery.recovery_version !== "publication-dead-letter-recovery-v1") {
+    return new Map();
+  }
+  const values = recovery.historical_retractions ?? [];
+  if (!Array.isArray(values)) {
+    throw activationConflict(
+      "recovery_evidence_invalid",
+      "Recovery Bootstrap historical_retractions must be an array",
+      revision,
+    );
+  }
+  const output = new Map();
+  for (const value of values) {
+    const item = object(value, "Recovery Bootstrap historical Retraction");
+    const contentId = text(item.content_id, "Recovery Bootstrap Retraction content_id");
+    const reason = text(item.reason, "Recovery Bootstrap Retraction reason");
+    if (!VIDEO_RETRACTION_REASONS.has(reason) || output.has(contentId)) {
+      throw activationConflict(
+        "recovery_evidence_invalid",
+        "Recovery Bootstrap contains an invalid historical Retraction",
+        revision,
+      );
+    }
+    output.set(contentId, reason);
+  }
+  return output;
+}
+
+function applyVideoRevision(state, revision, { recoveryCutover = false } = {}) {
   const payload = revision.payload_json;
   if (revision.revision_type === "bootstrap") {
+    const historicalRetractions = recoveryBootstrapRetractions(revision, recoveryCutover);
     for (const record of state.records.values()) {
       if (record.status === "active") {
+        const historicalReason = historicalRetractions.get(record.contentId) ?? null;
         record.position = null;
-        record.status = "window_exit";
-        record.reason = "bootstrap_replaced";
+        record.status = historicalReason ? "retracted" : "window_exit";
+        record.reason = historicalReason ?? "bootstrap_replaced";
         record.sequence = revision.data_sequence;
         record.revisionId = revision.revision_id;
         record.touched = true;
@@ -390,7 +430,9 @@ async function loadVideoState(client, channelId, revisions) {
   };
 }
 
-async function simulateDomain(client, channelId, domain, revisions) {
+async function simulateDomain(client, channelId, domain, revisions, {
+  recoveryCutover = false,
+} = {}) {
   let state = null;
   if (domain === "video") state = await loadVideoState(client, channelId, revisions);
   const applied = [];
@@ -398,7 +440,9 @@ async function simulateDomain(client, channelId, domain, revisions) {
   for (const revision of revisions) {
     try {
       if (domain === "channel") state = channelState(revision);
-      else if (domain === "video") state = applyVideoRevision(state, revision);
+      else if (domain === "video") {
+        state = applyVideoRevision(state, revision, { recoveryCutover });
+      }
       else state = agentState(revision);
       applied.push(revision);
     } catch (failure) {
@@ -783,7 +827,7 @@ export class PostgresBusinessPublicationActivator {
          SELECT revision_id,publication_stream_id,channel_id,domain,data_sequence,
                 previous_data_sequence,revision_type,operation,contract_version,
                 policy_version,previous_result_hash,result_hash,payload_hash,
-                payload_json,activation_status
+                payload_json,source_json,activation_status
          FROM publication.revision
          WHERE publication_stream_id=$1::uuid AND channel_id=$2
            AND validation_status='valid'
@@ -851,7 +895,9 @@ export class PostgresBusinessPublicationActivator {
         if (coreBootstrap && domain === "agent") continue;
         const ready = selections.get(domain).ready;
         if (ready.length === 0) continue;
-        const simulation = await simulateDomain(client, channelId, domain, ready);
+        const simulation = await simulateDomain(client, channelId, domain, ready, {
+          recoveryCutover,
+        });
         simulations.set(domain, simulation);
         if (simulation.error) {
           const failed = ready[simulation.applied.length];
@@ -886,6 +932,7 @@ export class PostgresBusinessPublicationActivator {
           channelId,
           "agent",
           selections.get("agent").ready,
+          { recoveryCutover },
         );
         simulations.set("agent", agentSimulation);
         if (agentSimulation.error) {
