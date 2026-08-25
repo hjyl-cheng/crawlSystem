@@ -2718,7 +2718,7 @@ test("failed yt-dlp verification does not persist an unverified YouTube.js disab
   );
 });
 
-test("an incomplete unlisted detail still uses yt-dlp to complete its public surface", async () => {
+test("an incomplete unlisted detail is not downgraded by a public yt-dlp patch", async () => {
   const calls = [];
   const result = await fetchIncrementalVideoDetail("unlisted-partial", {
     fetchYoutubeJs: async () => {
@@ -2728,6 +2728,8 @@ test("an incomplete unlisted detail still uses yt-dlp to complete its public sur
         title: "Unlisted title",
         access_status: "unlisted",
         access_status_source: "youtubejs_microformat",
+        availability: "unlisted",
+        is_unlisted: true,
         published_at: "2026-07-19T00:00:00.000Z",
         published_at_precision: "second",
         content_type_signals: {
@@ -2742,7 +2744,9 @@ test("an incomplete unlisted detail still uses yt-dlp to complete its public sur
       calls.push("yt-dlp");
       return {
         ...detail("unlisted-partial", 91),
-        access_status: "unknown",
+        access_status: "public",
+        access_status_source: "yt_dlp_playability",
+        availability: "public",
         ytdlp_client: "web",
       };
     },
@@ -2750,6 +2754,8 @@ test("an incomplete unlisted detail still uses yt-dlp to complete its public sur
 
   assert.deepEqual(calls, ["youtubejs", "yt-dlp"]);
   assert.equal(result.access_status, "unlisted");
+  assert.equal(result.access_status_source, "youtubejs_microformat");
+  assert.equal(result.availability, "unlisted");
   assert.equal(result.view_count, 91);
   assert.equal(result.duration_seconds, 90);
 });

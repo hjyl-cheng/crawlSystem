@@ -6,6 +6,7 @@ import { publicationResultHash } from "./publicationResultHash.js";
 const DOMAINS = Object.freeze(["channel", "video", "agent"]);
 const DEAD_LETTER_RECOVERY_ONBOARDING_MODE = "dead_letter_recovery_cutover";
 const HASH = /^sha256:[0-9a-f]{64}$/;
+// Stored pre-ADR revisions may still contain this historical retraction reason.
 const VIDEO_RETRACTION_REASONS = new Set([
   "source_deleted",
   "source_unlisted",

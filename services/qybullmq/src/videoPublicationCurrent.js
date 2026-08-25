@@ -12,10 +12,9 @@ import {
 } from "./publicationUrl.js";
 
 const ALLOWED_CONTENT_TYPES = new Set(["video", "short", "live"]);
-const PUBLISHABLE_ACCESS_STATUSES = new Set(["public", "members_only"]);
+const PUBLISHABLE_ACCESS_STATUSES = new Set(["public", "unlisted", "members_only"]);
 const UNPROVEN_ACCESS_STATUSES = new Set(["unknown", "login_required"]);
 const ACCESS_RETRACTION_REASONS = new Map([
-  ["unlisted", "source_unlisted"],
   ["private", "source_private"],
   ["unavailable", "source_unavailable"],
 ]);
@@ -199,7 +198,7 @@ export function buildVideoPublicationItem(rowValue, { channelId } = {}) {
     ["like_count", likes.valid],
     ["comment_count", comments.valid],
     ["description", descriptionValid],
-    ["access_status", ["public", "members_only", "private", "unavailable", "login_required", "unknown"].includes(accessStatus)
+    ["access_status", ["public", "unlisted", "members_only", "private", "unavailable", "login_required", "unknown"].includes(accessStatus)
       && (accessStatus === "unknown" || Boolean(accessSource))],
   ];
   for (const [field, complete] of checks) {

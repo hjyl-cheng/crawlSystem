@@ -40,7 +40,7 @@ DROP CONSTRAINT IF EXISTS content_snapshots_access_shape;
 
 ALTER TABLE public.content_snapshots
 ADD CONSTRAINT content_snapshots_access_shape CHECK (
-  access_status IN ('public','login_required','members_only','unavailable','unknown')
+  access_status IN ('public','unlisted','login_required','members_only','unavailable','unknown')
   AND (access_status_source IS NULL OR btrim(access_status_source)<>'')
   AND (source_position IS NULL OR source_position>0)
   AND (

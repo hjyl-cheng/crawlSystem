@@ -89,9 +89,9 @@ function videoCurrent() {
       window_proof: {
         complete: true,
         terminal_condition: "qualified_item_limit",
-        catalog_candidate_count: 3,
-        qualified_count: 3,
-        selected_count: 3,
+        catalog_candidate_count: 4,
+        qualified_count: 4,
+        selected_count: 4,
         excluded_count: 0,
         latest_scan_items: 3,
         latest_scan_pages: 1,
@@ -100,14 +100,15 @@ function videoCurrent() {
       },
       items: [
         videoItem("public-video", 1),
-        videoItem("unknown-video", 2, "unknown"),
-        videoItem("members-video", 3, "members_only", true),
+        videoItem("unlisted-video", 2, "unlisted"),
+        videoItem("unknown-video", 3, "unknown"),
+        videoItem("members-video", 4, "members_only", true),
       ],
     },
   };
 }
 
-test("Video dead-letter recovery keeps public and members-only Content", () => {
+test("Video dead-letter recovery keeps public, unlisted, and members-only Content", () => {
   const snapshot = buildVideoRecoverySnapshot(videoCurrent());
 
   assert.deepEqual(snapshot.removed_content_ids, ["unknown-video"]);
@@ -118,15 +119,16 @@ test("Video dead-letter recovery keeps public and members-only Content", () => {
     item.is_members_only,
   ]), [
     ["public-video", 1, "public", false],
-    ["members-video", 2, "members_only", true],
+    ["unlisted-video", 2, "unlisted", false],
+    ["members-video", 3, "members_only", true],
   ]);
-  assert.equal(snapshot.payload.window_proof.selected_count, 2);
-  assert.equal(snapshot.payload.window_proof.qualified_count, 2);
+  assert.equal(snapshot.payload.window_proof.selected_count, 3);
+  assert.equal(snapshot.payload.window_proof.qualified_count, 3);
   assert.equal(snapshot.payload.window_proof.excluded_count, 1);
   assert.match(snapshot.result_hash, /^sha256:[0-9a-f]{64}$/);
 });
 
-test("a recovery Video Bootstrap passes the unchanged strict Business Contract", () => {
+test("a recovery Video Bootstrap passes the current strict Business Contract", () => {
   const recovery = buildPublicationRecoveryBootstrap({
     current: videoCurrent(),
     channelId: CHANNEL_ID,

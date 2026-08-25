@@ -497,7 +497,7 @@ function videoRetractionReason(candidate, item, policyRemovalContentIds) {
   const exclusion = Array.isArray(candidate.exclusions)
     ? candidate.exclusions.find((value) => text(value?.content_id) === contentId)
     : null;
-  const reasons = new Set(["source_unlisted", "source_private", "source_unavailable"]);
+  const reasons = new Set(["source_private", "source_unavailable"]);
   return reasons.has(exclusion?.reason_code) ? exclusion.reason_code : null;
 }
 

@@ -297,7 +297,7 @@ test("Business Contract accepts sparse canonical positions in Video Delta upsert
   assert.equal(validateBusinessPublicationEnvelope(envelope), envelope);
 });
 
-test("Business Contract rejects a non-public Video upsert even with a valid Item hash", () => {
+test("Business Contract accepts an unlisted Video upsert with a valid Item hash", () => {
   const channelId = "UCbusinessunlisted";
   const resultHash = `sha256:${"d".repeat(64)}`;
   const item = { ...videoItem(channelId, 1), access_status: "unlisted" };
@@ -355,13 +355,25 @@ test("Business Contract rejects a non-public Video upsert even with a valid Item
     payload_json: payload,
   });
 
+  assert.equal(validateBusinessPublicationEnvelope(envelope), envelope);
+});
+
+test("Business Contract still rejects a private Video upsert", () => {
+  const channelId = "UCbusinessprivate";
+  const item = rehashVideoItem({
+    ...videoItem(channelId, 1),
+    access_status: "private",
+  });
+
   assert.throws(
-    () => validateBusinessPublicationEnvelope(envelope),
+    () => validateBusinessPublicationEnvelope(videoDeltaEnvelope(channelId, {
+      upserts: [item],
+    })),
     (error) => error.code === "payload_contract_invalid" && /public/.test(error.message),
   );
 });
 
-test("Business Contract accepts an explicit source_unlisted Video Retraction", () => {
+test("Business Contract rejects a source_unlisted Video Retraction", () => {
   const channelId = "UCbusinessretraction";
   const resultHash = `sha256:${"e".repeat(64)}`;
   const payload = {
@@ -410,7 +422,10 @@ test("Business Contract accepts an explicit source_unlisted Video Retraction", (
     payload_json: payload,
   });
 
-  assert.equal(validateBusinessPublicationEnvelope(envelope), envelope);
+  assert.throws(
+    () => validateBusinessPublicationEnvelope(envelope),
+    (error) => error.code === "payload_contract_invalid" && /reason/.test(error.message),
+  );
 });
 
 test("Business Contract accepts coherent members-only Video upserts", () => {

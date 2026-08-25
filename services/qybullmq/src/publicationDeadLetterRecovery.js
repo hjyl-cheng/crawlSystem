@@ -18,6 +18,7 @@ const VIDEO_WINDOW_TERMINATION_UNPROVEN = Object.freeze({
   domain: "video",
   code: "video_window_termination_unproven",
 });
+// Recovery must remain able to read retractions written before Unlisted became publishable.
 const VIDEO_RETRACTION_REASONS = new Set([
   "source_deleted",
   "source_unlisted",
@@ -122,7 +123,8 @@ function normalizedHistoricalRetractions(values = []) {
 }
 
 function publishableVideoItem(item) {
-  return (item?.access_status === "public" && item?.is_members_only === false)
+  return (["public", "unlisted"].includes(item?.access_status)
+      && item?.is_members_only === false)
     || (item?.access_status === "members_only" && item?.is_members_only === true);
 }
 

@@ -52,6 +52,32 @@ test("Projection schema adds controlled batches, cutover audit, and Search remov
   assert.match(schema, /normalize_creator_search_channel_observation_times/);
 });
 
+test("Runtime and fresh Business schemas allow unlisted Content snapshots", async () => {
+  const [runtime, bootstrap] = await Promise.all([
+    readFile(
+      new URL("../src/businessPublicationProjectionSchema.sql", import.meta.url),
+      "utf8",
+    ),
+    readFile(
+      new URL("../../../database/bootstrap/business.sql", import.meta.url),
+      "utf8",
+    ),
+  ]);
+
+  assert.match(
+    runtime,
+    /access_status IN \('public','unlisted','login_required','members_only','unavailable','unknown'\)/,
+  );
+  assert.match(
+    bootstrap,
+    /CONSTRAINT content_snapshots_access_shape CHECK \(\(\(access_status = ANY \(ARRAY\['public'::text, 'unlisted'::text,/,
+  );
+  assert.match(
+    bootstrap,
+    /CONSTRAINT raw_contents_v4_shape CHECK \([\s\S]*?access_status = ANY \(ARRAY\['public'::text, 'unlisted'::text,/,
+  );
+});
+
 test("Channel Observation time repair recognizes both Projection adapter generations", async () => {
   const repair = await readFile(
     new URL("../scripts/repairBusinessPublicationChannelObservationTimes.mjs", import.meta.url),

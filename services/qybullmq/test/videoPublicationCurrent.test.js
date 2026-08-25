@@ -295,23 +295,45 @@ test("Video Current requires the deterministic Item hash to be persisted", () =>
   assert.equal(mismatch.issues.some((item) => item.code === "video_item_hash_mismatch"), true);
 });
 
-test("Video Current keeps unlisted Content out of the business window", () => {
+test("Video Current publishes unlisted Content into the business window", () => {
+  const row = withItemHash(videoRow("unlisted-video", {
+    access_status: "unlisted",
+    access_status_source: "youtubejs_microformat",
+  }));
   const current = buildVideoPublicationCurrent({
-    rows: [videoRow("unlisted-video", {
-      access_status: "unlisted",
-      access_status_source: "youtubejs_microformat",
-    })],
+    rows: [row],
     source: source(),
     channelId: CHANNEL_ID,
     asOf: AS_OF,
   });
 
   assert.equal(current.ready, true);
+  assert.equal(current.items[0].payload.access_status, "unlisted");
+  assert.deepEqual(current.exclusions, []);
+});
+
+test("Video Current still excludes private and unavailable Content", () => {
+  const current = buildVideoPublicationCurrent({
+    rows: [
+      videoRow("private-video", {
+        access_status: "private",
+        access_status_source: "youtubejs_playability",
+      }),
+      videoRow("unavailable-video", {
+        access_status: "unavailable",
+        access_status_source: "youtubejs_playability",
+      }),
+    ],
+    source: source(),
+    channelId: CHANNEL_ID,
+    asOf: AS_OF,
+  });
+
   assert.deepEqual(current.items, []);
-  assert.deepEqual(current.exclusions, [{
-    content_id: "unlisted-video",
-    reason_code: "source_unlisted",
-  }]);
+  assert.deepEqual(current.exclusions, [
+    { content_id: "private-video", reason_code: "source_private" },
+    { content_id: "unavailable-video", reason_code: "source_unavailable" },
+  ]);
 });
 
 test("Video Window accepts only a qualified limit, crossed age boundary, or confirmed list end", () => {

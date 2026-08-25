@@ -45,3 +45,22 @@ test("yt-dlp detail conversion canonicalizes disabled comments to zero", async (
     comment_count_status: "disabled",
   });
 });
+
+test("yt-dlp detail conversion preserves unlisted privacy when the video is playable", async () => {
+  const youtube = await import("../src/youtube.js");
+  const detail = youtube.detailFromYtDlpResult({
+    ok: true,
+    id: "unlisted-video",
+    title: "Unlisted Video",
+    availability: "unlisted",
+    playability_status: "OK",
+  }, "https://www.youtube.com/watch?v=unlisted-video");
+
+  assert.deepEqual({
+    access_status: detail.access_status,
+    availability: detail.availability,
+  }, {
+    access_status: "unlisted",
+    availability: "unlisted",
+  });
+});

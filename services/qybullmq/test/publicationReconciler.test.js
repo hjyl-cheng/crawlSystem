@@ -1068,11 +1068,14 @@ test("Video Delta records only proven Window Exits", () => {
   assert.deepEqual(delta.payload.retractions, []);
 });
 
-test("Video Delta explicitly retracts a previously public Item that becomes unlisted", () => {
+test("Video Delta does not retract unlisted Content while private remains retractable", () => {
   const itemHash = `sha256:${"5".repeat(64)}`;
   const current = {
     payload_json: {
-      items: [{ content_id: "now-unlisted", position: 1, item_hash: itemHash }],
+      items: [
+        { content_id: "now-unlisted", position: 1, item_hash: itemHash },
+        { content_id: "now-private", position: 2, item_hash: itemHash },
+      ],
     },
   };
   const candidate = {
@@ -1083,18 +1086,25 @@ test("Video Delta explicitly retracts a previously public Item that becomes unli
       window_proof: { complete: true },
       items: [],
     },
-    exclusions: [{ content_id: "now-unlisted", reason_code: "source_unlisted" }],
+    exclusions: [
+      { content_id: "now-unlisted", reason_code: "source_unlisted" },
+      { content_id: "now-private", reason_code: "source_private" },
+    ],
   };
 
   const delta = buildVideoRevisionDelta(current, candidate);
 
-  assert.equal(delta.ready, true);
+  assert.equal(delta.ready, false);
   assert.deepEqual(delta.payload.window_exits, []);
   assert.deepEqual(delta.payload.retractions, [{
-    content_id: "now-unlisted",
-    reason: "source_unlisted",
+    content_id: "now-private",
+    reason: "source_private",
   }]);
-  assert.deepEqual(delta.issues, []);
+  assert.deepEqual(delta.issues, [{
+    domain: "video",
+    code: "video_window_exit_reason_unproven",
+    content_id: "now-unlisted",
+  }]);
 });
 
 test("Video Repair explicitly retracts an approved policy removal", () => {

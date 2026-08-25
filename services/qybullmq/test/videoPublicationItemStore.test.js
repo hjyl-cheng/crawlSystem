@@ -79,3 +79,29 @@ test("Item Hash Store is a no-op for an empty key set", async () => {
   assert.equal(result.requested_count, 0);
   assert.equal(result.changed_count, 0);
 });
+
+test("Item Hash Store creates a publishable hash for existing unlisted Content", async () => {
+  let updates = null;
+  const unlisted = row("unlisted", {
+    access_status: "unlisted",
+    access_status_source: "youtubejs_microformat",
+  });
+  const client = {
+    async query(sql, params) {
+      if (sql.includes("SELECT to_jsonb(content)")) {
+        return { rows: [{ row: unlisted }] };
+      }
+      if (sql.includes("jsonb_to_recordset")) {
+        updates = JSON.parse(params[0]);
+        return { rowCount: 1, rows: [] };
+      }
+      throw new Error(`unexpected query: ${sql}`);
+    },
+  };
+
+  const result = await refreshVideoPublicationItemHashes(client, [unlisted.content_key]);
+
+  assert.equal(result.ready_count, 1);
+  assert.equal(result.incomplete_count, 0);
+  assert.match(updates[0].publication_item_hash, /^sha256:[0-9a-f]{64}$/);
+});

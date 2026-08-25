@@ -157,7 +157,6 @@ const VIDEO_EXIT_KEYS = new Set(["content_id", "reason"]);
 const VIDEO_EXIT_REASONS = new Set(["aged_out", "outside_limit"]);
 const VIDEO_RETRACTION_REASONS = new Set([
   "source_deleted",
-  "source_unlisted",
   "source_private",
   "source_unavailable",
   "policy_removed",
@@ -353,10 +352,11 @@ function validateVideoItems(items, field, { contiguous = false } = {}) {
     }
     contentIds.add(contentId);
     positions.add(position);
-    const publishableAccess = (item.access_status === "public" && item.is_members_only === false)
+    const publishableAccess = (["public", "unlisted"].includes(item.access_status)
+        && item.is_members_only === false)
       || (item.access_status === "members_only" && item.is_members_only === true);
     if (!publishableAccess) {
-      fail("payload_contract_invalid", `${field} may contain only public or members-only Content`);
+      fail("payload_contract_invalid", `${field} may contain only public, unlisted, or members-only Content`);
     }
     if (hash(item.item_hash, `${field}.item_hash`) !== videoItemHash(item)) {
       fail("payload_contract_invalid", `${field}.item_hash does not match the Item Payload`);

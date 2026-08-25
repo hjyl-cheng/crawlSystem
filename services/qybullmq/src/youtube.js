@@ -11,7 +11,7 @@ import {
   recordChannelExecutionFailure,
   recordChannelExecutionRequest,
 } from "./channelExecutionContext.js";
-import { youtubeErrorText } from "./detailPolicy.js";
+import { videoAccessStatus, youtubeErrorText } from "./detailPolicy.js";
 import {
   findSubscriberCountText,
   looksLikeSubscriberCountText,
@@ -1709,6 +1709,12 @@ async function fetchVideoInnertubeDetail(videoId, ytConfig, url, { language = DE
 
 export function detailFromYtDlpResult(parsed, url = null) {
   if (!parsed?.ok) return {};
+  const parsedAvailability = typeof parsed.availability === "string"
+    ? parsed.availability.trim().toLowerCase() || null
+    : null;
+  const parsedAccessStatus = parsedAvailability
+    ? videoAccessStatus({ availability: parsedAvailability })
+    : "unknown";
   const result = mergeDefined({}, {
     title: parsed.title,
     url: parsed.webpage_url ?? url,
@@ -1734,7 +1740,7 @@ export function detailFromYtDlpResult(parsed, url = null) {
     published_at_source: parsed.published_at_source,
     ytdlp_client: parsed.client,
     extractor_version: parsed.extractor_version ?? "v2",
-    availability: parsed.availability,
+    availability: parsedAvailability,
     playability_status: parsed.playability_status,
     playability_reason: parsed.playability_reason,
     live_status: parsed.live_status,
@@ -1759,8 +1765,11 @@ export function detailFromYtDlpResult(parsed, url = null) {
     result.playability_kind = playability.kind;
     result.playability_reason_code = playability.reason_code;
     result.playability_retry_mode = playability.retry_mode;
-    result.access_status = playability.access_status;
-    if (playability.availability != null) result.availability = playability.availability;
+    result.access_status = parsedAccessStatus === "unknown"
+      ? playability.access_status
+      : parsedAccessStatus;
+    if (parsedAvailability != null) result.availability = parsedAvailability;
+    else if (playability.availability != null) result.availability = playability.availability;
     else if (playability.kind !== "content") delete result.availability;
   }
   if (typeof parsed.description === "string") {

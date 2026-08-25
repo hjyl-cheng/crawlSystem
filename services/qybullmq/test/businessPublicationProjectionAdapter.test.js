@@ -269,6 +269,19 @@ test("Projection Adapter builds a deterministic complete business snapshot", () 
   assert.equal(first.snapshot.candidate_last_published_date, "2026-07-29");
 });
 
+test("Projection Adapter preserves unlisted access in the business snapshot", () => {
+  const input = completeInput();
+  input.current.contents[0].payload_json = contentPayload({
+    access_status: "unlisted",
+    access_status_source: "youtubejs_microformat",
+  });
+
+  const result = buildBusinessPublicationProjection(input);
+
+  assert.equal(result.contents[0].access_status, "unlisted");
+  assert.equal(result.contents[0].access_status_source, "youtubejs_microformat");
+});
+
 test("Projection Adapter publishes disabled comments as an exact zero", () => {
   const input = completeInput();
   input.current.contents[0].payload_json = contentPayload({

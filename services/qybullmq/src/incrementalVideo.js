@@ -60,6 +60,13 @@ const COMMENT_DETAIL_FIELDS = [
   "comments_first_page_status",
   "comments_first_page_source",
 ];
+const ACCESS_DETAIL_FIELDS = [
+  "access_status",
+  "access_status_source",
+  "availability",
+  "privacy_status",
+  "is_unlisted",
+];
 
 function integer(value) {
   if (value === null || value === undefined || value === "") return null;
@@ -151,6 +158,19 @@ function applyIncrementalCommentObservation(output, observation) {
   }
 }
 
+function applyIncrementalAccessObservation(output, detail) {
+  for (const field of ACCESS_DETAIL_FIELDS) {
+    if (Object.prototype.hasOwnProperty.call(detail, field)) {
+      output[field] = detail[field];
+    } else {
+      delete output[field];
+    }
+  }
+  if (String(detail?.access_status ?? "").trim().toLowerCase() === "unlisted") {
+    output.is_unlisted = true;
+  }
+}
+
 function withoutUnverifiedYoutubeJsDisabledComments(detail) {
   if (detail?.comments_disabled !== true && detail?.comment_count_status !== "disabled") {
     return detail;
@@ -183,12 +203,18 @@ function mergeIncrementalVideoDetail(base, patch) {
   const previousAccess = String(previous.access_status ?? "").trim().toLowerCase();
   const nextAccess = String(next.access_status ?? "").trim().toLowerCase();
   if (previousAccess && previousAccess !== "unknown" && (!nextAccess || nextAccess === "unknown")) {
-    output.access_status = previous.access_status;
-    output.access_status_source = previous.access_status_source;
-    output.availability = previous.availability;
+    applyIncrementalAccessObservation(output, previous);
     output.playability_kind = previous.playability_kind;
     output.playability_reason_code = previous.playability_reason_code;
     output.playability_retry_mode = previous.playability_retry_mode;
+  } else if (
+    (previousAccess === "unlisted" && nextAccess === "public")
+    || (previousAccess === "public" && nextAccess === "unlisted")
+  ) {
+    applyIncrementalAccessObservation(
+      output,
+      previousAccess === "unlisted" ? previous : next,
+    );
   }
 
   const precisionRank = { unknown: 0, date_only: 1, second: 2 };
