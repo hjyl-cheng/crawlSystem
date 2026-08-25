@@ -13,6 +13,11 @@ const RECOVERY_MODE = "dead_letter_recovery_cutover";
 const SOURCE_ADMIN_LOCK = 781137243;
 const BUSINESS_ADMIN_LOCK = 781137244;
 const ACTIVE_VIDEO_POSITION_ERROR = "Active Video positions must be contiguous from 1";
+const ACTIVE_LIVE_POSITION_GAP_NORMALIZATION = "active_live_position_gap_v1";
+const VIDEO_WINDOW_TERMINATION_UNPROVEN = Object.freeze({
+  domain: "video",
+  code: "video_window_termination_unproven",
+});
 const VIDEO_RETRACTION_REASONS = new Set([
   "source_deleted",
   "source_unlisted",
@@ -160,18 +165,28 @@ export function classifyRecoverablePublicationDeadLetter(row = {}) {
   };
 }
 
-function normalizedCurrent(currentValue, expectedDomain = null) {
+function normalizedCurrent(currentValue, expectedDomain = null, { requireReady = true } = {}) {
   const current = object(currentValue, "Publication Current");
   const domain = text(current.domain, "Publication Current domain");
   if (!DOMAINS.includes(domain) || (expectedDomain && domain !== expectedDomain)) {
     throw new TypeError(`unsupported Publication Current domain: ${domain}`);
   }
-  if (current.readiness_status !== "ready") {
+  const readinessStatus = text(current.readiness_status, `${domain} readiness_status`);
+  if (!new Set(["ready", "not_ready"]).has(readinessStatus)) {
+    throw new TypeError(`unsupported ${domain} Publication Current readiness_status`);
+  }
+  const readinessReasons = current.readiness_reasons ?? [];
+  if (!Array.isArray(readinessReasons)) {
+    throw new TypeError(`${domain} Publication Current readiness_reasons must be an array`);
+  }
+  if (requireReady && readinessStatus !== "ready") {
     throw new TypeError(`${domain} Publication Current must be ready`);
   }
   return {
     ...current,
     domain,
+    readiness_status: readinessStatus,
+    readiness_reasons: readinessReasons,
     contract_version: integer(current.contract_version, `${domain} contract_version`, 1),
     policy_version: text(current.policy_version, `${domain} policy_version`),
     data_sequence: integer(current.data_sequence, `${domain} data_sequence`, 1),
@@ -183,6 +198,113 @@ function normalizedCurrent(currentValue, expectedDomain = null) {
     ),
     source_refs: object(current.source_refs, `${domain} source_refs`),
     payload_json: object(current.payload_json, `${domain} payload_json`),
+  };
+}
+
+function positionGapFailureKind(deadLetter) {
+  return optionalText(deadLetter?.failure_kind) ?? optionalText(deadLetter?.reason);
+}
+
+function normalizeRecoverablePositionGapCurrent(currentValue, deadLetters = []) {
+  const current = normalizedCurrent(currentValue, null, { requireReady: false });
+  if (current.readiness_status === "ready" || current.domain !== "video") return current;
+  const matching = deadLetters.filter((deadLetter) => (
+    positionGapFailureKind(deadLetter) === "video_position_gap_activation_quarantine"
+    && id(deadLetter.revision_id, "position-gap revision_id") === current.current_revision_id
+    && integer(deadLetter.data_sequence, "position-gap data_sequence", 1) === current.data_sequence
+    && hash(deadLetter.result_hash, "position-gap result_hash") === current.result_hash
+    && deadLetter.revision_type === "repair"
+  ));
+  if (matching.length !== 1
+      || !isDeepStrictEqual(current.readiness_reasons, [VIDEO_WINDOW_TERMINATION_UNPROVEN])) {
+    return current;
+  }
+
+  const historicalRetractions = normalizedHistoricalRetractions(
+    matching[0].historical_retractions,
+  );
+  if (historicalRetractions.length === 0
+      || historicalRetractions.some((item) => item.reason !== "policy_removed")) {
+    return current;
+  }
+  const payload = current.payload_json;
+  const items = Array.isArray(payload.items) ? payload.items : null;
+  if (!items || items.length === 0 || items.some((item) => !publishableVideoItem(item))) {
+    return current;
+  }
+  const proof = object(payload.window_proof, "position-gap Video window_proof");
+  const policy = object(payload.window_policy, "position-gap Video window_policy");
+  const maxItems = integer(policy.max_items, "position-gap Video max_items", 1);
+  const selectedCount = integer(proof.selected_count, "position-gap Video selected_count");
+  const qualifiedCount = integer(proof.qualified_count, "position-gap Video qualified_count");
+  const excludedCount = integer(proof.excluded_count, "position-gap Video excluded_count");
+  const detailFailureCount = integer(
+    proof.latest_scan_detail_failure_count,
+    "position-gap Video detail failure count",
+  );
+  const positions = items.map((item) => integer(
+    item.position,
+    "position-gap Video item position",
+    1,
+  ));
+  const positionSet = new Set(positions);
+  const contentIds = new Set(items.map((item) => text(
+    item.content_id,
+    "position-gap Video content_id",
+  )));
+  const removedIds = new Set(historicalRetractions.map((item) => item.content_id));
+  const missingPositions = Array.from(
+    { length: selectedCount },
+    (_value, index) => index + 1,
+  ).filter((position) => !positionSet.has(position));
+  const alreadyContiguous = positions.every((position, index) => position === index + 1);
+  const exactLegacyGap = proof.complete === true
+    && proof.terminal_condition === "qualified_item_limit"
+    && selectedCount === maxItems
+    && qualifiedCount === maxItems
+    && items.length + historicalRetractions.length === selectedCount
+    && positionSet.size === items.length
+    && contentIds.size === items.length
+    && positions.every((position) => position <= selectedCount)
+    && positions.every((position, index) => index === 0 || position > positions[index - 1])
+    && missingPositions.length === historicalRetractions.length
+    && proof.latest_scan_stop_reason === "qualified_item_limit"
+    && detailFailureCount === 0
+    && !alreadyContiguous
+    && [...removedIds].every((contentId) => !contentIds.has(contentId));
+  if (!exactLegacyGap) return current;
+
+  const normalizedPayload = {
+    ...payload,
+    window_proof: {
+      ...proof,
+      qualified_count: items.length,
+      selected_count: items.length,
+      excluded_count: excludedCount + historicalRetractions.length,
+    },
+    items: items.map((item, index) => ({ ...item, position: index + 1 })),
+  };
+  const normalizedResultHash = publicationResultHash("video", normalizedPayload);
+  const recoveryNormalization = {
+    kind: ACTIVE_LIVE_POSITION_GAP_NORMALIZATION,
+    source_readiness_status: current.readiness_status,
+    source_readiness_reasons: current.readiness_reasons,
+    source_result_hash: current.result_hash,
+    source_payload_hash: observationFactsHash(current.payload_json),
+    normalized_result_hash: normalizedResultHash,
+    historical_retractions: historicalRetractions,
+  };
+  return {
+    ...current,
+    readiness_status: "ready",
+    readiness_reasons: [],
+    payload_json: normalizedPayload,
+    result_hash: normalizedResultHash,
+    source_refs: {
+      ...current.source_refs,
+      dead_letter_recovery_normalization: recoveryNormalization,
+    },
+    recovery_normalization: recoveryNormalization,
   };
 }
 
@@ -509,7 +631,7 @@ function attachBusinessQuarantine(failure, quarantines, explicitTargets) {
   return { ...candidate, ...classification };
 }
 
-async function sourceChannelSnapshot(client, destination, channelId) {
+async function sourceChannelSnapshot(client, destination, channelId, { deadLetters = [] } = {}) {
   const owners = await client.query(
     `/* publication-dead-letter-recovery:source-owner */
      SELECT state.publication_stream_id,state.status,state.onboarding_mode,state.seed_status,
@@ -574,7 +696,9 @@ async function sourceChannelSnapshot(client, destination, channelId) {
         ? null
         : timestamp(delivery.rows[0].sealed_at, "delivery sealed_at"),
     } : null,
-    currents: currents.rows.map((row) => normalizedCurrent(row)),
+    currents: currents.rows.map((row) => (
+      normalizeRecoverablePositionGapCurrent(row, deadLetters)
+    )),
   };
 }
 
@@ -621,15 +745,19 @@ async function businessChannelSnapshot(client, channelId) {
   };
 }
 
-function currentVector(currents) {
+function currentVector(currents, { includeRecoveryNormalization = false } = {}) {
   return Object.fromEntries(DOMAINS.map((domain) => {
     const row = currents.find((current) => current.domain === domain);
-    return [domain, row ? {
+    const value = row ? {
       sequence: row.data_sequence,
       revision_id: row.current_revision_id,
-      result_hash: row.result_hash,
+      result_hash: row.recovery_normalization?.source_result_hash ?? row.result_hash,
       complete_observed_at: row.complete_observed_at,
-    } : null];
+    } : null;
+    if (value && includeRecoveryNormalization && row.recovery_normalization) {
+      value.recovery_normalization = row.recovery_normalization;
+    }
+    return [domain, value];
   }));
 }
 
@@ -637,7 +765,7 @@ function sourceSnapshotEvidence(snapshot) {
   return {
     owner: snapshot.owner,
     delivery: snapshot.delivery,
-    current_vector: currentVector(snapshot.currents),
+    current_vector: currentVector(snapshot.currents, { includeRecoveryNormalization: true }),
   };
 }
 
@@ -744,11 +872,16 @@ export async function planPublicationDeadLetterRecovery({
   const channelIds = sortedUnique(recoverable.map((item) => item.channel_id));
   const channels = [];
   for (const channelId of channelIds) {
+    const deadLetters = recoverable.filter((item) => item.channel_id === channelId);
     const [source, business] = await Promise.all([
-      repeatableRead(crawlerPool, (client) => sourceChannelSnapshot(client, destination, channelId)),
+      repeatableRead(crawlerPool, (client) => sourceChannelSnapshot(
+        client,
+        destination,
+        channelId,
+        { deadLetters },
+      )),
       repeatableRead(businessPool, (client) => businessChannelSnapshot(client, channelId)),
     ]);
-    const deadLetters = recoverable.filter((item) => item.channel_id === channelId);
     assertPlanChannel({ channelId, deadLetters, source, business });
     const historicalRetractions = normalizedHistoricalRetractions(
       deadLetters.flatMap((item) => item.historical_retractions),
@@ -1005,7 +1138,12 @@ async function prepareSourceChannel(client, evidence, channel, actor, reason) {
     verifyStoredRecoverySourceState(existing, reference, channel.channel_id);
     return { channel_id: channel.channel_id, status: "already_prepared" };
   }
-  const snapshot = await sourceChannelSnapshot(client, evidence.destination, channel.channel_id);
+  const snapshot = await sourceChannelSnapshot(
+    client,
+    evidence.destination,
+    channel.channel_id,
+    { deadLetters: channel.dead_letters },
+  );
   assertInitialSourceSnapshot(channel, snapshot);
   const oldStreamId = channel.old_publication_stream_id;
   const newStreamId = evidence.recovery_stream.publication_stream_id;

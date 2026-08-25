@@ -416,6 +416,7 @@ async function insertSourceRepair(crawlerPool, envelope, currentPayload) {
     `UPDATE publication.domain_current
      SET payload_json=$4::jsonb,result_hash=$5,source_refs=$6::jsonb,
          complete_observed_at=$7::timestamptz,data_sequence=2,current_revision_id=$8::uuid,
+         readiness_status=$9,readiness_reasons=$10::jsonb,
          updated_at=now()
      WHERE publication_stream_id=$1::uuid AND channel_id=$2 AND domain='video'
        AND data_sequence=1 AND current_revision_id=$3::uuid`,
@@ -428,6 +429,8 @@ async function insertSourceRepair(crawlerPool, envelope, currentPayload) {
       JSON.stringify(envelope.source),
       envelope.occurred_at,
       envelope.revision_id,
+      currentPayload.readiness_status ?? "ready",
+      JSON.stringify(currentPayload.readiness_reasons ?? []),
     ],
   );
   await crawlerPool.query(
@@ -794,16 +797,20 @@ test("explicit activation-quarantine recovery renumbers survivors and preserves 
     const baselineVideo = videoCurrentPayload(channelId);
     baselineVideo.window_proof = {
       ...baselineVideo.window_proof,
-      catalog_candidate_count: 3,
-      qualified_count: 3,
-      selected_count: 3,
-      latest_scan_items: 3,
+      terminal_condition: "qualified_item_limit",
+      catalog_candidate_count: 30,
+      qualified_count: 30,
+      selected_count: 30,
+      latest_scan_items: 30,
+      latest_scan_stop_reason: "qualified_item_limit",
     };
-    baselineVideo.items = [
-      videoItem(channelId, "before-video", 1, "public", false),
-      videoItem(channelId, activeLiveContentId, 2, "public", false),
-      videoItem(channelId, "after-video", 3, "public", false),
-    ];
+    baselineVideo.items = Array.from({ length: 30 }, (_value, index) => videoItem(
+      channelId,
+      index === 1 ? activeLiveContentId : `video-${String(index + 1).padStart(2, "0")}`,
+      index + 1,
+      "public",
+      false,
+    ));
     const agentCurrent = agentPayload(channelId);
     const oldEnvelopes = [
       bootstrapEnvelope(oldStreamId, channelId, "channel", channelCurrent),
@@ -853,13 +860,7 @@ test("explicit activation-quarantine recovery renumbers survivors and preserves 
 
     const badCurrent = {
       ...baselineVideo,
-      window_proof: {
-        ...baselineVideo.window_proof,
-        qualified_count: 2,
-        selected_count: 2,
-        excluded_count: 1,
-      },
-      items: [baselineVideo.items[0], baselineVideo.items[2]],
+      items: baselineVideo.items.filter((item) => item.content_id !== activeLiveContentId),
     };
     const repair = activeLiveRepairEnvelope({
       streamId: oldStreamId,
@@ -871,6 +872,11 @@ test("explicit activation-quarantine recovery renumbers survivors and preserves 
     await insertSourceRepair(crawlerPool, repair, {
       previous_revision_id: oldEnvelopes[1].revision_id,
       payload: badCurrent,
+      readiness_status: "not_ready",
+      readiness_reasons: [{
+        domain: "video",
+        code: "video_window_termination_unproven",
+      }],
     });
     assert.equal((await publisher.runOnce()).delivered, 1);
     assert.equal((await activator.activateReady(channelId)).status, "waiting_gap");
@@ -892,6 +898,54 @@ test("explicit activation-quarantine recovery renumbers survivors and preserves 
       status: "open",
       message: "Active Video positions must be contiguous from 1",
     }]);
+
+    await crawlerPool.query(
+      `UPDATE publication.domain_current
+       SET readiness_reasons=readiness_reasons ||
+             '[{"domain":"video","code":"unrelated_incomplete_state"}]'::jsonb
+       WHERE publication_stream_id=$1::uuid AND channel_id=$2 AND domain='video'`,
+      [oldStreamId, channelId],
+    );
+    await assert.rejects(
+      planPublicationDeadLetterRecovery({
+        crawlerPool,
+        businessPool,
+        destination: "business",
+        revisionIds: [repair.revision_id],
+      }),
+      /Recovery Channel requires three ready Source Currents/,
+    );
+    await crawlerPool.query(
+      `UPDATE publication.domain_current
+       SET readiness_reasons=$3::jsonb
+       WHERE publication_stream_id=$1::uuid AND channel_id=$2 AND domain='video'`,
+      [
+        oldStreamId,
+        channelId,
+        JSON.stringify([{ domain: "video", code: "video_window_termination_unproven" }]),
+      ],
+    );
+    await crawlerPool.query(
+      `UPDATE publication.domain_current
+       SET payload_json=jsonb_set(payload_json,'{window_proof,selected_count}','29'::jsonb)
+       WHERE publication_stream_id=$1::uuid AND channel_id=$2 AND domain='video'`,
+      [oldStreamId, channelId],
+    );
+    await assert.rejects(
+      planPublicationDeadLetterRecovery({
+        crawlerPool,
+        businessPool,
+        destination: "business",
+        revisionIds: [repair.revision_id],
+      }),
+      /Recovery Channel requires three ready Source Currents/,
+    );
+    await crawlerPool.query(
+      `UPDATE publication.domain_current
+       SET payload_json=$3::jsonb
+       WHERE publication_stream_id=$1::uuid AND channel_id=$2 AND domain='video'`,
+      [oldStreamId, channelId, JSON.stringify(badCurrent)],
+    );
 
     const evidence = await planPublicationDeadLetterRecovery({
       crawlerPool,
@@ -971,7 +1025,7 @@ test("explicit activation-quarantine recovery renumbers survivors and preserves 
       quarantine_status: "resolved",
       active_target: 0,
       retracted_target: 1,
-      active_positions: [1, 2],
+      active_positions: Array.from({ length: 29 }, (_value, index) => index + 1),
       recovery_cursors: 3,
     });
   } finally {
