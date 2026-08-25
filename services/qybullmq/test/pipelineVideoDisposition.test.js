@@ -102,6 +102,41 @@ test("the shared Full Crawl detail path normalizes disabled comments to zero", (
   );
 });
 
+test("migration verifies a YouTube.js disabled result and keeps visible yt-dlp comments", () => {
+  const observed = runScenario("youtubejs_disabled_ytdlp_visible");
+  const detail = observed.candidate.result_json.detail;
+
+  assert.equal(observed.error, null);
+  assert.equal(observed.youtubejs_detail_attempts, 1);
+  assert.equal(observed.ytdlp_detail_attempts, 1);
+  assert.deepEqual(observed.candidate.result_json.youtubejs_fallback_reasons, [
+    "comments_disabled_verification",
+  ]);
+  assert.equal(detail.comments_disabled, false);
+  assert.equal(detail.comment_count, 19);
+  assert.equal(detail.comment_count_status, "exact");
+  assert.equal(detail.comment_count_source, "yt_dlp");
+  assert.equal(detail.comments_status_source, "yt_dlp");
+  assert.equal(detail.comments_first_page.returned_count, 15);
+  assert.equal(detail.comments_first_page_source, "yt_dlp_top_comments");
+});
+
+test("migration does not let a yt-dlp disabled result erase visible YouTube.js comments", () => {
+  const observed = runScenario("youtubejs_visible_ytdlp_disabled");
+  const detail = observed.candidate.result_json.detail;
+
+  assert.equal(observed.error, null);
+  assert.equal(observed.youtubejs_detail_attempts, 1);
+  assert.equal(observed.ytdlp_detail_attempts, 1);
+  assert.equal(detail.comments_disabled, false);
+  assert.equal(detail.comment_count, 12);
+  assert.equal(detail.comment_count_status, "exact");
+  assert.equal(detail.comment_count_source, "youtubejs_comments");
+  assert.equal(detail.comments_status_source, "youtubejs_comments");
+  assert.equal(detail.comments_first_page.returned_count, 1);
+  assert.equal(detail.comments_first_page_source, "youtubejs_comments");
+});
+
 test("the shared Full Crawl detail path preserves an existing Video when access changes", () => {
   const observed = runScenario("existing_private");
   assert.equal(observed.error, null);

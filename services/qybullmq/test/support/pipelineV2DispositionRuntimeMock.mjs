@@ -2,6 +2,11 @@ function state() {
   return globalThis.__pipelineV2DispositionState;
 }
 
+const YOUTUBEJS_COMMENT_SCENARIOS = new Set([
+  "youtubejs_disabled_ytdlp_visible",
+  "youtubejs_visible_ytdlp_disabled",
+]);
+
 function result(rows = [], rowCount = rows.length) {
   return { rows, rowCount };
 }
@@ -231,6 +236,7 @@ export async function putRawObject(input) {
 
 export async function fetchVideoYtDlpDetail(videoId) {
   state().youtubeRequestAttempts += 1;
+  state().ytDlpDetailAttempts += 1;
   if (state().scenario === "detail_failure") {
     const error = new Error(`Player timeout for ${videoId}`);
     error.code = "ETIMEDOUT";
@@ -238,8 +244,15 @@ export async function fetchVideoYtDlpDetail(videoId) {
   }
   const privateAccess = ["terminal_private", "existing_private"].includes(state().scenario);
   const authoritativeType = privateAccess
-    || ["stored_public", "disabled_comments", "disposition_write_retry"].includes(state().scenario);
-  const commentsDisabled = state().scenario === "disabled_comments";
+    || [
+      "stored_public",
+      "disabled_comments",
+      "disposition_write_retry",
+      ...YOUTUBEJS_COMMENT_SCENARIOS,
+    ].includes(state().scenario);
+  const commentsVisible = state().scenario === "youtubejs_disabled_ytdlp_visible";
+  const ytDlpDisabledConflict = state().scenario === "youtubejs_visible_ytdlp_disabled";
+  const commentsDisabled = state().scenario === "disabled_comments" || ytDlpDisabledConflict;
   const liveInProgress = ["live_in_progress", "live_in_progress_flat"].includes(state().scenario);
   const liveReplay = state().scenario === "live_replay";
   return {
@@ -252,9 +265,40 @@ export async function fetchVideoYtDlpDetail(videoId) {
     view_count: 100,
     view_count_text: "100",
     like_count: 3,
-    comment_count: commentsDisabled || liveInProgress ? null : liveReplay ? 12 : 0,
+    comment_count: commentsVisible
+      ? 19
+      : ytDlpDisabledConflict
+        ? 0
+        : commentsDisabled || liveInProgress
+          ? null
+          : liveReplay
+            ? 12
+            : 0,
     comment_count_status: commentsDisabled ? "disabled" : liveInProgress ? "unresolved" : "exact",
-    comments_disabled: commentsDisabled,
+    comment_count_source: commentsVisible || ytDlpDisabledConflict ? "yt_dlp" : null,
+    comments_status_source: commentsVisible || ytDlpDisabledConflict ? "yt_dlp" : null,
+    comments_disabled: commentsVisible ? false : commentsDisabled,
+    comments_first_page: commentsVisible
+      ? {
+          version: 1,
+          collected_at: "2026-08-25T00:00:01.000Z",
+          sort: "TOP_COMMENTS",
+          total_count: 19,
+          returned_count: 15,
+          comments: [{ comment_id: "yt-dlp-visible", text: "Visible yt-dlp comment" }],
+        }
+      : ytDlpDisabledConflict
+        ? {
+            version: 1,
+            collected_at: "2026-08-25T00:00:01.000Z",
+            sort: "TOP_COMMENTS",
+            total_count: 0,
+            returned_count: 0,
+            comments: [],
+          }
+        : null,
+    comments_first_page_status: commentsVisible ? "collected" : ytDlpDisabledConflict ? "disabled" : null,
+    comments_first_page_source: commentsVisible || ytDlpDisabledConflict ? "yt_dlp_top_comments" : null,
     is_live: liveInProgress,
     was_live: liveReplay,
     live_status: liveInProgress ? "is_live" : liveReplay ? "was_live" : "not_live",
@@ -313,7 +357,61 @@ export async function fetchVideoDataApiDetails(videoIds) {
 export async function fetchVideoCommentThreadsDataApi() { return null; }
 export function parseChannelHeader() { return {}; }
 export function youtubeJsChannelEnabled() { return false; }
-export function youtubeJsDetailEnabled() { return false; }
+export function youtubeJsDetailEnabled() { return YOUTUBEJS_COMMENT_SCENARIOS.has(state().scenario); }
 export async function openYoutubeJsChannel() { return null; }
-export async function fetchYoutubeJsVideoDetail() { return null; }
+export async function fetchYoutubeJsVideoDetail(videoId) {
+  state().youtubeJsDetailAttempts += 1;
+  const visible = state().scenario === "youtubejs_visible_ytdlp_disabled";
+  return {
+    id: videoId,
+    title: "YouTube.js detail",
+    description: visible ? null : "Complete YouTube.js description",
+    description_status: visible ? "unresolved" : "exact",
+    description_source: visible ? null : "youtubejs_player",
+    published_at: "2026-07-19T00:00:00.000Z",
+    published_at_precision: "second",
+    published_at_source: "youtubejs_player_microformat",
+    duration_seconds: 90,
+    view_count: 100,
+    view_count_text: "100",
+    like_count: 3,
+    comment_count: visible ? 12 : 0,
+    comment_count_status: visible ? "exact" : "disabled",
+    comment_count_source: "youtubejs_comments",
+    comments_status_source: "youtubejs_comments",
+    comments_disabled: visible ? false : true,
+    comments_first_page: visible
+      ? {
+          version: 1,
+          collected_at: "2026-08-25T00:00:00.000Z",
+          sort: "TOP_COMMENTS",
+          total_count: 12,
+          returned_count: 1,
+          comments: [{ comment_id: "youtubejs-visible", text: "Visible YouTube.js comment" }],
+        }
+      : {
+          version: 1,
+          collected_at: "2026-08-25T00:00:00.000Z",
+          sort: "TOP_COMMENTS",
+          total_count: 0,
+          returned_count: 0,
+          comments: [],
+        },
+    comments_first_page_status: visible ? "collected" : "disabled",
+    comments_first_page_source: "youtubejs_comments",
+    is_live: false,
+    live_status: "not_live",
+    access_status: "public",
+    availability: "public",
+    extractor_version: "youtubei.js@test",
+    content_type_signals: {
+      source: "youtubei_player",
+      canonical_url: `https://www.youtube.com/watch?v=${videoId}`,
+      is_shorts_eligible: false,
+      is_live_content: false,
+      is_live: false,
+      is_live_now: false,
+    },
+  };
+}
 export async function fetchYoutubeJsCommentFirstPage() { return {}; }

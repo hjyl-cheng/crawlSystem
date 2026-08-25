@@ -169,6 +169,8 @@ globalThis.__pipelineV2DispositionState = {
   queries: [],
   rawObjects: [],
   youtubeRequestAttempts: 0,
+  youtubeJsDetailAttempts: 0,
+  ytDlpDetailAttempts: 0,
   dispositionWriteAttempts: 0,
 };
 
@@ -238,6 +240,8 @@ await writeFile(outputPath, JSON.stringify({
   retry_error: retryError,
   requests_after_first: requestsAfterFirst,
   requests_after_retry: globalThis.__pipelineV2DispositionState.youtubeRequestAttempts,
+  youtubejs_detail_attempts: globalThis.__pipelineV2DispositionState.youtubeJsDetailAttempts,
+  ytdlp_detail_attempts: globalThis.__pipelineV2DispositionState.ytDlpDetailAttempts,
   disposition_write_attempts: globalThis.__pipelineV2DispositionState.dispositionWriteAttempts,
   candidate: globalThis.__pipelineV2DispositionState.candidate,
   queries: globalThis.__pipelineV2DispositionState.queries.map(({ sql }) => sql),

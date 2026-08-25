@@ -159,6 +159,16 @@ import {
   normalizeVideoTextMetadata,
 } from "./videoMetadata.js";
 
+const COMMENT_DETAIL_FIELDS = [
+  "comment_count",
+  "comment_count_status",
+  "comment_count_source",
+  "comments_disabled",
+  "comments_status_source",
+  "comments_first_page",
+  "comments_first_page_status",
+  "comments_first_page_source",
+];
 const queues = createQueues();
 const incrementalAgentResultStore = new IncrementalAgentResultStore({
   withTransaction,
@@ -222,6 +232,83 @@ function mergeDefined(base, patch) {
   return output;
 }
 
+function migrationCommentObservation(detail) {
+  const page = detail?.comments_first_page;
+  const countValue = integer(detail?.comment_count);
+  const totalValue = integer(page?.total_count);
+  const returnedValue = integer(page?.returned_count);
+  const count = countValue != null && countValue >= 0 ? countValue : null;
+  const totalCount = totalValue != null && totalValue >= 0 ? totalValue : null;
+  const returnedCount = Math.max(
+    returnedValue != null && returnedValue >= 0 ? returnedValue : 0,
+    Array.isArray(page?.comments) ? page.comments.length : 0,
+  );
+  const hasVisibleComments = (count ?? 0) > 0
+    || (totalCount ?? 0) > 0
+    || returnedCount > 0;
+  const disabled = detail?.comments_disabled === true
+    || detail?.comment_count_status === "disabled";
+  const observed = hasVisibleComments
+    || disabled
+    || detail?.comments_disabled === false
+    || count != null
+    || ["zero_from_surface", "zero_from_upcoming", "zero_from_empty"]
+      .includes(detail?.comment_count_status);
+  return {
+    detail: detail ?? {},
+    count,
+    totalCount,
+    returnedCount,
+    hasVisibleComments,
+    disabled,
+    rank: hasVisibleComments ? 3 : disabled ? 2 : observed ? 1 : 0,
+  };
+}
+
+function applyMigrationCommentObservation(output, observation) {
+  for (const field of COMMENT_DETAIL_FIELDS) {
+    if (Object.prototype.hasOwnProperty.call(observation.detail, field)) {
+      output[field] = observation.detail[field];
+    } else {
+      delete output[field];
+    }
+  }
+  if (observation.hasVisibleComments) {
+    output.comments_disabled = false;
+    if ((observation.count ?? 0) <= 0 && (observation.totalCount ?? 0) > 0) {
+      output.comment_count = observation.totalCount;
+    } else if ((observation.count ?? 0) <= 0 && observation.returnedCount > 0) {
+      output.comment_count = null;
+    }
+    if (output.comment_count_status === "disabled" || !output.comment_count_status) {
+      output.comment_count_status = output.comment_count == null ? "unresolved" : "exact";
+    }
+  } else if (observation.disabled) {
+    output.comment_count = 0;
+    output.comment_count_status = "disabled";
+    output.comments_disabled = true;
+  }
+}
+
+function youtubeJsDisabledCommentsNeedVerification(detail) {
+  return detail?.comments_disabled === true || detail?.comment_count_status === "disabled";
+}
+
+function withoutUnverifiedYoutubeJsDisabledComments(detail) {
+  if (!youtubeJsDisabledCommentsNeedVerification(detail)) return detail;
+  return {
+    ...detail,
+    comment_count: null,
+    comment_count_status: "unresolved",
+    comment_count_source: null,
+    comments_disabled: null,
+    comments_status_source: null,
+    comments_first_page: null,
+    comments_first_page_status: "unresolved",
+    comments_first_page_source: null,
+  };
+}
+
 function mergeChannelMetadata(base, patch) {
   const output = mergeDefined(base, patch);
   const baseDescription = text(base?.description);
@@ -264,22 +351,14 @@ function mergeDetail(base, patch) {
     output.published_at_source = previous.published_at_source;
   }
 
-  const nextHasCommentEvidence = next.comment_count != null
-    || next.comments_disabled === true
-    || ["zero_from_surface", "zero_from_upcoming"].includes(next.comment_count_status);
-  const previousHasCommentEvidence = previous.comment_count != null || previous.comments_disabled === true;
-  if (previousHasCommentEvidence && !nextHasCommentEvidence) {
-    output.comment_count = previous.comment_count;
-    output.comment_count_status = previous.comment_count_status;
-    output.comments_disabled = previous.comments_disabled;
-    output.comments_status_source = previous.comments_status_source;
-    output.comment_count_source = previous.comment_count_source;
+  const previousComment = migrationCommentObservation(previous);
+  const nextComment = migrationCommentObservation(next);
+  const selectedComment = nextComment.rank >= previousComment.rank
+    ? nextComment
+    : previousComment;
+  if (selectedComment.rank > 0) {
+    applyMigrationCommentObservation(output, selectedComment);
   }
-  const previousCommentRows = Number(previous.comments_first_page?.returned_count ?? 0);
-  const nextCommentRows = Number(next.comments_first_page?.returned_count ?? 0);
-  if (previousCommentRows > 0) output.comments_first_page = previous.comments_first_page;
-  else if (nextCommentRows > 0) output.comments_first_page = next.comments_first_page;
-  else if (previous.comments_first_page) output.comments_first_page = previous.comments_first_page;
 
   const descriptionRank = { unresolved: 0, unavailable: 1, empty: 2, exact: 3 };
   const previousText = normalizeVideoTextMetadata(previous);
@@ -2099,6 +2178,7 @@ async function processOneCandidate(row, settings, { youtubeJsDetail = null } = {
   let youtubeJsDetailError = null;
   let youtubeJsCommentError = null;
   let youtubeJsFallback = [];
+  let verifyYoutubeJsDisabledComments = false;
   const commentAttemptSources = [];
   let detailExtractor = "yt_dlp";
   let classification = null;
@@ -2120,7 +2200,15 @@ async function processOneCandidate(row, settings, { youtubeJsDetail = null } = {
       ? await captureYoutubeJsDetail(row.source_content_id)
       : await youtubeJsDetail;
     if (!youtubeJsResult?.error && youtubeJsResult?.detail) {
-      detail = mergeDetail(detail, youtubeJsResult.detail);
+      const youtubeJsObservation = youtubeJsResult.detail;
+      verifyYoutubeJsDisabledComments =
+        youtubeJsDisabledCommentsNeedVerification(youtubeJsObservation);
+      detail = mergeDetail(
+        detail,
+        verifyYoutubeJsDisabledComments
+          ? withoutUnverifiedYoutubeJsDisabledComments(youtubeJsObservation)
+          : youtubeJsObservation,
+      );
       detailExtractor = "youtubejs";
     } else {
       youtubeJsDetailError = youtubeJsResult?.error ?? new Error("YouTube.js detail prefetch returned no result");
@@ -2132,6 +2220,10 @@ async function processOneCandidate(row, settings, { youtubeJsDetail = null } = {
         settings.publishedAtRequiredPrecision,
         row.source_content_id,
       );
+      if (verifyYoutubeJsDisabledComments) {
+        youtubeJsFallback.push("comments_disabled_verification");
+      }
+      youtubeJsFallback = [...new Set(youtubeJsFallback)];
     }
   } else {
     youtubeJsFallback = ["youtubejs_disabled"];
