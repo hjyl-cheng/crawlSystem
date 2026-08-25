@@ -107,6 +107,7 @@ function databaseFixture({
     sql: [],
     outbox: [],
     observationSummaries: [],
+    extractorVersions: [],
     cursorKind: null,
     cursorUpdates: [],
     cursorAnchors: ["known-anchor", "old-video"],
@@ -461,6 +462,7 @@ function databaseFixture({
       }
       if (sql.includes("INSERT INTO crawler.crawl_observations")) {
         state.observationSummaries.push(JSON.parse(params[14]));
+        state.extractorVersions.push(JSON.parse(params[17]));
         return { rowCount: 1, rows: [] };
       }
       return { rowCount: 1, rows: [] };
@@ -2482,16 +2484,128 @@ test("Video detail falls back to yt-dlp when YouTube.js returns incomplete facts
   const result = await fetchIncrementalVideoDetail("partial-video", {
     fetchYoutubeJs: async () => {
       calls.push("youtubejs");
-      return { id: "partial-video", published_at: "2026-07-19T00:00:00.000Z" };
+      return {
+        id: "partial-video",
+        title: "YouTube.js title",
+        description: "Long description collected by YouTube.js",
+        description_status: "exact",
+        description_source: "youtubejs_player",
+        published_at: "2026-07-19T12:34:56.000Z",
+        published_at_precision: "second",
+        published_at_source: "youtubejs_microformat",
+        comment_count: 2,
+        comment_count_status: "exact",
+        comment_count_source: "youtubejs_comments",
+        comments_first_page: {
+          returned_count: 1,
+          comments: [{ comment_id: "comment-partial-video", text: "Useful comment" }],
+        },
+        access_status: "public",
+        access_status_source: "youtubejs_playability",
+        content_type_signals: {
+          source: "youtubei_player",
+          canonical_url: "https://www.youtube.com/watch?v=partial-video",
+          is_shorts_eligible: false,
+          is_live_content: false,
+        },
+      };
     },
     fetchYtDlp: async () => {
       calls.push("yt-dlp");
-      return detail("partial-video", 84);
+      return {
+        ...detail("partial-video", 84),
+        title: null,
+        description: null,
+        description_status: "unresolved",
+        description_source: null,
+        published_at: "2026-07-19T00:00:00.000Z",
+        published_at_precision: "date_only",
+        published_at_source: "yt_dlp_upload_date",
+        comment_count: null,
+        comment_count_status: "unresolved",
+        comment_count_source: null,
+        comments_first_page: null,
+        access_status: "unknown",
+        access_status_source: null,
+        ytdlp_client: "web",
+        extractor_version: "yt-dlp@test",
+      };
     },
   });
 
   assert.deepEqual(calls, ["youtubejs", "yt-dlp"]);
   assert.equal(result.view_count, 84);
+  assert.equal(result.duration_seconds, 90);
+  assert.equal(result.title, "YouTube.js title");
+  assert.equal(result.description, "Long description collected by YouTube.js");
+  assert.equal(result.published_at, "2026-07-19T12:34:56.000Z");
+  assert.equal(result.published_at_precision, "second");
+  assert.equal(result.comment_count, 2);
+  assert.equal(result.comments_first_page.returned_count, 1);
+  assert.equal(result.access_status, "public");
+  assert.equal(result.content_type_signals.source, "youtubei_player");
+  assert.equal(result.ytdlp_client, "web");
+});
+
+test("Video detail fallback failure keeps the usable YouTube.js partial evidence", async () => {
+  const fallbackFailure = new Error("yt-dlp parser failed");
+
+  await assert.rejects(
+    fetchIncrementalVideoDetail("partial-fallback-failure", {
+      fetchYoutubeJs: async () => ({
+        id: "partial-fallback-failure",
+        title: "Partial title",
+        published_at: "2026-07-19T00:00:00.000Z",
+        published_at_precision: "second",
+        access_status: "public",
+      }),
+      fetchYtDlp: async () => {
+        throw fallbackFailure;
+      },
+    }),
+    (error) => {
+      assert(error instanceof AggregateError);
+      assert.equal(error.errors.at(-1), fallbackFailure);
+      assert.equal(error.partial_detail.title, "Partial title");
+      return true;
+    },
+  );
+});
+
+test("an incomplete unlisted detail still uses yt-dlp to complete its public surface", async () => {
+  const calls = [];
+  const result = await fetchIncrementalVideoDetail("unlisted-partial", {
+    fetchYoutubeJs: async () => {
+      calls.push("youtubejs");
+      return {
+        id: "unlisted-partial",
+        title: "Unlisted title",
+        access_status: "unlisted",
+        access_status_source: "youtubejs_microformat",
+        published_at: "2026-07-19T00:00:00.000Z",
+        published_at_precision: "second",
+        content_type_signals: {
+          source: "youtubei_player",
+          canonical_url: "https://www.youtube.com/watch?v=unlisted-partial",
+          is_shorts_eligible: false,
+          is_live_content: false,
+        },
+      };
+    },
+    fetchYtDlp: async () => {
+      calls.push("yt-dlp");
+      return {
+        ...detail("unlisted-partial", 91),
+        access_status: "unknown",
+        ytdlp_client: "web",
+      };
+    },
+  });
+
+  assert.deepEqual(calls, ["youtubejs", "yt-dlp"]);
+  assert.equal(result.access_status, "unlisted");
+  assert.equal(result.view_count, 91);
+  assert.equal(result.duration_seconds, 90);
 });
 
 test("Video detail propagates cancellation and does not start a fallback after abort", async () => {
@@ -2518,6 +2632,202 @@ test("Video detail propagates cancellation and does not start a fallback after a
 
   assert.equal(forwardedSignal, controller.signal);
   assert.equal(fallbackCalls, 0);
+});
+
+test("Video discovery falls back to the migration yt-dlp Uploads collector without losing anchor safety", async () => {
+  const fixture = databaseFixture();
+  const youtubeJsFailure = new Error("YouTube.js playlist request failed");
+  const fallbackCalls = [];
+
+  const result = await executeIncrementalVideo({
+    plan: plan(),
+    runId: "incremental:uploads-fallback",
+    startedAt: "2026-07-20T00:00:00.000Z",
+    query: fixture.query,
+    withTransaction: fixture.withTransaction,
+    getChannelSnapshot: async () => {
+      throw youtubeJsFailure;
+    },
+    fetchUploads: async (channelId, limit) => {
+      fallbackCalls.push({ channelId, limit });
+      return {
+        channel_id: channelId,
+        playlist_id: "UUvideo",
+        entries: [
+          {
+            video_id: "fallback-new-video",
+            position: 1,
+            title: "Fallback new video",
+            url: "https://www.youtube.com/watch?v=fallback-new-video",
+            thumbnail_url: "https://img.example/fallback-new-video.jpg",
+            duration_seconds: 90,
+            view_count_text: "84",
+            published_at: "2026-07-19T12:00:00.000Z",
+            published_at_precision: "second",
+            content_type: "video",
+            is_live: false,
+            is_upcoming: false,
+          },
+          {
+            video_id: "known-anchor",
+            position: 2,
+            title: "Known anchor",
+            url: "https://www.youtube.com/watch?v=known-anchor",
+            published_at: "2026-07-10T00:00:00.000Z",
+            published_at_precision: "second",
+            content_type: "video",
+            is_live: false,
+            is_upcoming: false,
+          },
+        ],
+        activity_parse_gap_count: 0,
+        scan: {
+          pages: null,
+          inspected_count: 2,
+          parse_gap_count: 0,
+          selected_count: 2,
+          stop_reason: "max_items",
+          terminal_reason: "max_items",
+          complete: false,
+        },
+        raw: { engine: "yt-dlp@test" },
+      };
+    },
+    fetchDetail: async (videoId) => detail(videoId, 84),
+  });
+
+  assert.equal(result.outcome, "complete");
+  assert.equal(result.first_seen_count, 1);
+  assert.deepEqual(fallbackCalls, [{ channelId: "UCvideo", limit: 50 }]);
+  assert.deepEqual(fixture.state.extractorVersions[0], {
+    youtubejs: null,
+    yt_dlp: "yt-dlp@test",
+  });
+  assert.deepEqual(fixture.state.cursorUpdates[0].anchorVideoIds.slice(0, 2), [
+    "fallback-new-video",
+    "known-anchor",
+  ]);
+  assert.deepEqual(JSON.parse(fixture.state.cursorUpdates[0].sourceCursor), {
+    playlist_id: "UUvideo",
+    matched_anchor_id: "known-anchor",
+    crossed_anchor_ids: [],
+    terminal_reason: "anchor_matched",
+  });
+  assert.equal(
+    fixture.state.outbox[0].payload.discovery.payload.stop_reason,
+    "anchor_matched",
+  );
+});
+
+test("Video discovery also falls back when YouTube.js reports a pagination error", async () => {
+  const fixture = databaseFixture();
+  const paginationError = new Error("YouTube.js continuation failed");
+  let fallbackCalls = 0;
+
+  const result = await executeIncrementalVideo({
+    plan: plan(),
+    runId: "incremental:uploads-pagination-fallback",
+    startedAt: "2026-07-20T00:00:00.000Z",
+    query: fixture.query,
+    withTransaction: fixture.withTransaction,
+    getChannelSnapshot: async () => ({
+      async scanUploads() {
+        return {
+          playlist_id: "UUvideo",
+          entries: [{ id: "partial-page-video", position: 1 }],
+          pages: 1,
+          item_count: 1,
+          parse_gap_count: 0,
+          anchor_matched: false,
+          matched_anchor_id: null,
+          stop_reason: "pagination_error",
+          terminal_reason: "pagination_error",
+          complete: false,
+          error: paginationError,
+          raw: { engine: "youtubei.js@test" },
+        };
+      },
+    }),
+    fetchUploads: async (channelId) => {
+      fallbackCalls += 1;
+      return {
+        channel_id: channelId,
+        playlist_id: "UUvideo",
+        entries: [{
+          video_id: "known-anchor",
+          position: 1,
+          title: "Known anchor",
+          published_at: "2026-07-10T00:00:00.000Z",
+          content_type: "video",
+        }],
+        activity_parse_gap_count: 0,
+        scan: {
+          parse_gap_count: 0,
+          stop_reason: "max_items",
+          terminal_reason: "max_items",
+          complete: false,
+        },
+        raw: { engine: "yt-dlp@test" },
+      };
+    },
+    fetchDetail: async (videoId) => detail(videoId, 100),
+  });
+
+  assert.equal(result.outcome, "complete");
+  assert.equal(fallbackCalls, 1);
+  assert.equal(
+    JSON.parse(fixture.state.cursorUpdates[0].sourceCursor).matched_anchor_id,
+    "known-anchor",
+  );
+});
+
+test("yt-dlp Uploads fallback stays Partial when its bounded result does not reach an anchor", async () => {
+  const fixture = databaseFixture();
+  let detailCalls = 0;
+
+  const result = await executeIncrementalVideo({
+    plan: plan(),
+    runId: "incremental:uploads-fallback-no-anchor",
+    startedAt: "2026-07-20T00:00:00.000Z",
+    query: fixture.query,
+    withTransaction: fixture.withTransaction,
+    getChannelSnapshot: async () => {
+      throw new Error("YouTube.js playlist request failed");
+    },
+    fetchUploads: async (channelId) => ({
+      channel_id: channelId,
+      playlist_id: "UUvideo",
+      entries: [{
+        video_id: "fallback-without-anchor",
+        position: 1,
+        title: "Fallback without anchor",
+        published_at: "2026-07-19T00:00:00.000Z",
+        content_type: "video",
+      }],
+      activity_parse_gap_count: 0,
+      scan: {
+        parse_gap_count: 0,
+        stop_reason: "max_items",
+        terminal_reason: "max_items",
+        complete: false,
+      },
+      raw: { engine: "yt-dlp@test" },
+    }),
+    fetchDetail: async (videoId) => {
+      detailCalls += 1;
+      return detail(videoId, 84);
+    },
+  });
+
+  assert.equal(result.outcome, "partial");
+  assert.equal(result.first_seen_count, 0);
+  assert.equal(detailCalls, 0);
+  assert.equal(fixture.state.cursorUpdates[0].anchorVideoIds, null);
+  assert.equal(fixture.state.cursorUpdates[0].sourceCursor, null);
+  assert.equal(
+    fixture.state.outbox[0].payload.discovery.payload.stop_reason,
+    "max_items",
+  );
 });
 
 test("Video discovery does not persist an upcoming live before it starts", async () => {

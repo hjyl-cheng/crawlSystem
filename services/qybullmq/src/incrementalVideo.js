@@ -1,5 +1,8 @@
 import { createHash } from "node:crypto";
-import { currentChannelExecution } from "./channelExecutionContext.js";
+import {
+  currentChannelExecution,
+  currentChannelExecutionAbortSignal,
+} from "./channelExecutionContext.js";
 import {
   CONTENT_ENRICH_CLOCK_MODE,
   loadContentEnrichMode,
@@ -20,10 +23,11 @@ import {
   orderedDiscoveryAnchors,
   planRecentVideoSampling,
 } from "./incrementalVideoPlanner.js";
-import { fetchVideoYtDlpDetail } from "./youtube.js";
+import { fetchChannelUploads, fetchVideoYtDlpDetail } from "./youtube.js";
 import { fetchYoutubeJsVideoDetail } from "./youtubeJs.js";
 import { resolveYoutubeContentType } from "./youtubeContentType.js";
 import { fullVideoStorageAction } from "./fullVideoContentStore.js";
+import { normalizeVideoTextMetadata } from "./videoMetadata.js";
 import {
   resolveVideoDisposition,
   videoAccessRecheckAt,
@@ -41,8 +45,7 @@ import { refreshVideoPublicationItemHashes } from "./videoPublicationItemStore.j
 const GAP_ABANDONMENT_STOP_REASON = "gap_abandoned_latest_30";
 const GAP_ABANDONMENT_POLICY_VERSION = "latest-30-on-catchup-limit-v1";
 const GAP_ABANDONMENT_ITEM_LIMIT = 30;
-const EXPLICIT_CONTENT_ACCESS_STATUSES = new Set([
-  "unlisted",
+const TERMINAL_CONTENT_ACCESS_STATUSES = new Set([
   "members_only",
   "private",
   "unavailable",
@@ -72,6 +75,185 @@ function text(value) {
 function stringList(value) {
   if (!Array.isArray(value)) return [];
   return [...new Set(value.map(text).filter(Boolean))];
+}
+
+function mergeDefined(base, patch) {
+  const output = { ...(base ?? {}) };
+  for (const [key, value] of Object.entries(patch ?? {})) {
+    if (value !== undefined && value !== null && value !== "") output[key] = value;
+  }
+  return output;
+}
+
+function mergeIncrementalVideoDetail(base, patch) {
+  const previous = base ?? {};
+  const next = patch ?? {};
+  const output = mergeDefined(previous, next);
+  const previousSignals = previous.content_type_signals;
+  const nextSignals = next.content_type_signals;
+  if (previousSignals && typeof previousSignals === "object") {
+    output.content_type_signals = nextSignals && typeof nextSignals === "object"
+      ? mergeDefined(previousSignals, nextSignals)
+      : previousSignals;
+  }
+
+  const previousAccess = String(previous.access_status ?? "").trim().toLowerCase();
+  const nextAccess = String(next.access_status ?? "").trim().toLowerCase();
+  if (previousAccess && previousAccess !== "unknown" && (!nextAccess || nextAccess === "unknown")) {
+    output.access_status = previous.access_status;
+    output.access_status_source = previous.access_status_source;
+    output.availability = previous.availability;
+    output.playability_kind = previous.playability_kind;
+    output.playability_reason_code = previous.playability_reason_code;
+    output.playability_retry_mode = previous.playability_retry_mode;
+  }
+
+  const precisionRank = { unknown: 0, date_only: 1, second: 2 };
+  const previousPrecision = previous.published_at_precision ?? "unknown";
+  const nextPrecision = next.published_at_precision ?? "unknown";
+  const nextHasUsablePublishedAt = Boolean(next.published_at)
+    && (precisionRank[nextPrecision] ?? 0) >= (precisionRank[previousPrecision] ?? 0);
+  if (previous.published_at && !nextHasUsablePublishedAt) {
+    output.published_at = previous.published_at;
+    output.published_text = previous.published_text;
+    output.published_at_precision = previousPrecision;
+    output.published_at_source = previous.published_at_source;
+  }
+
+  const nextHasCommentEvidence = next.comment_count != null
+    || next.comments_disabled === true
+    || ["zero_from_surface", "zero_from_upcoming"].includes(next.comment_count_status);
+  const previousHasCommentEvidence = previous.comment_count != null
+    || previous.comments_disabled === true;
+  if (previousHasCommentEvidence && !nextHasCommentEvidence) {
+    output.comment_count = previous.comment_count;
+    output.comment_count_status = previous.comment_count_status;
+    output.comments_disabled = previous.comments_disabled;
+    output.comments_status_source = previous.comments_status_source;
+    output.comment_count_source = previous.comment_count_source;
+  }
+  const previousCommentRows = Number(previous.comments_first_page?.returned_count ?? 0);
+  const nextCommentRows = Number(next.comments_first_page?.returned_count ?? 0);
+  if (previousCommentRows > 0) output.comments_first_page = previous.comments_first_page;
+  else if (nextCommentRows > 0) output.comments_first_page = next.comments_first_page;
+  else if (previous.comments_first_page) output.comments_first_page = previous.comments_first_page;
+
+  const descriptionRank = { unresolved: 0, unavailable: 1, empty: 2, exact: 3 };
+  const previousText = normalizeVideoTextMetadata(previous);
+  const nextText = normalizeVideoTextMetadata(next);
+  const previousDescriptionRank = descriptionRank[previousText.description_status] ?? 0;
+  const nextDescriptionRank = descriptionRank[nextText.description_status] ?? 0;
+  const previousDescriptionIsBetter = previousDescriptionRank > nextDescriptionRank
+    || (
+      previousDescriptionRank === nextDescriptionRank
+      && previousDescriptionRank === descriptionRank.exact
+      && String(previousText.description ?? "").length > String(nextText.description ?? "").length
+    );
+  if (previousDescriptionIsBetter) {
+    output.description = previousText.description;
+    output.description_status = previousText.description_status;
+    output.description_source = previousText.description_source;
+  } else {
+    output.description = nextText.description;
+    output.description_status = nextText.description_status;
+    output.description_source = nextText.description_source;
+  }
+  if (nextText.keywords_observed) {
+    output.keywords = nextText.keywords;
+    output.keywords_observed = true;
+  } else {
+    output.keywords = previousText.keywords;
+    output.keywords_observed = previousText.keywords_observed;
+  }
+  output.hashtags_observed = typeof output.title === "string"
+    && ["exact", "empty"].includes(output.description_status);
+  return normalizeVideoTextMetadata(output);
+}
+
+function incrementalUploadEntry(entry, index) {
+  const id = text(entry?.video_id ?? entry?.id);
+  if (!id) return null;
+  const publishedAt = text(entry?.published_at);
+  const publishedDay = publishedAt && /^\d{4}-\d{2}-\d{2}/.test(publishedAt)
+    ? publishedAt.slice(0, 10)
+    : null;
+  return {
+    id,
+    title: text(entry?.title),
+    url: text(entry?.url ?? entry?.source_url)
+      ?? `https://www.youtube.com/watch?v=${encodeURIComponent(id)}`,
+    thumbnail_url: text(entry?.thumbnail_url),
+    duration: positiveInteger(entry?.duration_seconds ?? entry?.duration),
+    view_count: integer(entry?.view_count ?? entry?.view_count_text),
+    published_text: text(entry?.published_text),
+    published_day: publishedDay,
+    position: positiveInteger(entry?.position) ?? index + 1,
+    content_type: ["video", "short", "live"].includes(entry?.content_type)
+      ? entry.content_type
+      : null,
+    type_source: text(entry?.type_source),
+    is_live: entry?.is_live === true,
+    is_upcoming: entry?.is_upcoming === true,
+    upcoming_at: text(entry?.live_scheduled_at ?? entry?.upcoming_at),
+    live_status: text(entry?.live_status),
+  };
+}
+
+function incrementalScanFromMigrationUploads(uploads, anchors, primaryError) {
+  const entries = (Array.isArray(uploads?.entries) ? uploads.entries : [])
+    .map(incrementalUploadEntry)
+    .filter(Boolean);
+  const orderedAnchors = [];
+  const seenAnchors = new Set();
+  for (const anchor of anchors) {
+    const id = text(anchor?.id ?? anchor?.video_id);
+    if (!id || seenAnchors.has(id)) continue;
+    seenAnchors.add(id);
+    orderedAnchors.push(id);
+  }
+  const anchorIndexes = new Map(orderedAnchors.map((id, index) => [id, index]));
+  const matchedEntryIndex = entries.findIndex((entry) => anchorIndexes.has(entry.id));
+  const selectedEntries = matchedEntryIndex >= 0
+    ? entries.slice(0, matchedEntryIndex + 1)
+    : entries;
+  const matchedAnchorId = matchedEntryIndex >= 0 ? entries[matchedEntryIndex].id : null;
+  const matchedAnchorIndex = matchedAnchorId == null ? null : anchorIndexes.get(matchedAnchorId);
+  const parseGapValue = uploads?.scan?.parse_gap_count ?? uploads?.activity_parse_gap_count;
+  const parseGapCount = integer(parseGapValue);
+  const sourceTerminalReason = text(uploads?.scan?.terminal_reason) ?? "max_items";
+  const terminalReason = matchedAnchorId
+    ? "anchor_matched"
+    : sourceTerminalReason;
+  const hasTerminalCoverage = matchedAnchorId != null || sourceTerminalReason === "list_end";
+  const emptyEvidenceComplete = selectedEntries.length > 0
+    || uploads?.activity_evidence_complete === true;
+  const complete = parseGapCount === 0 && hasTerminalCoverage && emptyEvidenceComplete;
+  return {
+    channel_id: text(uploads?.channel_id),
+    playlist_id: text(uploads?.playlist_id),
+    entries: selectedEntries,
+    pages: Number(uploads?.scan?.pages ?? 0),
+    first_page_item_count: selectedEntries.length,
+    catch_up_item_count: 0,
+    item_count: selectedEntries.length,
+    parse_gap_count: parseGapCount ?? 0,
+    anchor_matched: matchedAnchorId != null,
+    matched_anchor_id: matchedAnchorId,
+    crossed_anchor_ids: matchedAnchorIndex == null
+      ? []
+      : orderedAnchors.slice(0, matchedAnchorIndex),
+    active_anchor_id: matchedAnchorId ?? orderedAnchors[0] ?? null,
+    stop_reason: parseGapCount === 0 ? terminalReason : "parse_gap",
+    terminal_reason: terminalReason,
+    complete,
+    raw: {
+      ...(uploads?.raw && typeof uploads.raw === "object" ? uploads.raw : {}),
+      incremental_fallback: {
+        source: "yt_dlp_uploads",
+        youtubejs_error: String(primaryError?.message ?? primaryError),
+      },
+    },
+  };
 }
 
 function mergedDiscoveryAnchorIds(entries, anchors, limit = 20) {
@@ -245,13 +427,12 @@ export async function fetchIncrementalVideoDetail(videoId, {
     throwIfAborted();
     const classification = resolveYoutubeContentType({ videoId, detail: youtubeJsDetail });
     if (
-      EXPLICIT_CONTENT_ACCESS_STATUSES.has(detailAccess(youtubeJsDetail))
+      TERMINAL_CONTENT_ACCESS_STATUSES.has(detailAccess(youtubeJsDetail))
       ||
       isUpcomingLiveDetail(youtubeJsDetail)
       || (
         classification?.authoritative === true
-        && detailViewCount(youtubeJsDetail) != null
-        && publishedAt(youtubeJsDetail) != null
+        && hasCompletePublicVideoSurface(youtubeJsDetail)
       )
     ) {
       return youtubeJsDetail;
@@ -276,19 +457,21 @@ export async function fetchIncrementalVideoDetail(videoId, {
   }
   throwIfAborted();
   try {
-    const detail = assertYoutubeContentObservation(await fetchYtDlp(videoId, url, { signal }), {
+    const ytDlpDetail = assertYoutubeContentObservation(await fetchYtDlp(videoId, url, { signal }), {
       videoId,
       source: "yt_dlp_detail",
     });
     throwIfAborted();
-    return detail;
+    return mergeIncrementalVideoDetail(youtubeJsDetail, ytDlpDetail);
   } catch (ytDlpError) {
     throwIfAborted();
     if (isYoutubeCollectionFailureError(ytDlpError)) throw ytDlpError;
-    throw new AggregateError(
+    const error = new AggregateError(
       [new Error("YouTube.js detail was incomplete"), ytDlpError],
       `incremental Video detail failed for ${videoId}: YouTube.js was incomplete and yt-dlp failed`,
     );
+    error.partial_detail = youtubeJsDetail;
+    throw error;
   }
 }
 
@@ -329,7 +512,7 @@ async function captureDetails(entries, fetchDetail, limit) {
       output.set(entry.id, { detail: await fetchDetail(entry.id), error: null });
     } catch (error) {
       if (shouldReportProxyFailure({ error })) throw error;
-      output.set(entry.id, { detail: null, error });
+      output.set(entry.id, { detail: error?.partial_detail ?? null, error });
     }
   }
   return output;
@@ -2237,7 +2420,12 @@ async function recordVideoCycle({
         startedAt,
         finishedAt: observedAt,
         crawlerVersion,
-        extractorVersions: { youtubejs: scan.raw?.engine ?? "youtubei.js@17.2.0" },
+        extractorVersions: scan.raw?.incremental_fallback
+          ? {
+              youtubejs: null,
+              yt_dlp: scan.raw?.engine ?? "yt_dlp_uploads",
+            }
+          : { youtubejs: scan.raw?.engine ?? "youtubei.js@17.2.0" },
         command: {
           planner_config_version: plan.planner_config_version,
           anchors,
@@ -2245,6 +2433,9 @@ async function recordVideoCycle({
             pages: scan.pages,
             stop_reason: scan.stop_reason,
             entries: commandEntries,
+            ...(scan.raw?.incremental_fallback ? {
+              fallback: scan.raw.incremental_fallback,
+            } : {}),
             ...(scan.gap_abandonment ? { gap_abandonment: scan.gap_abandonment } : {}),
           },
           sampling: {
@@ -2469,6 +2660,7 @@ export async function executeIncrementalVideo({
   withTransaction,
   startedAt,
   fetchDetail = null,
+  fetchUploads = fetchChannelUploads,
   crawlerVersion = String(process.env.CRAWLER_VERSION || "qy-v16"),
   now = () => new Date(),
 }) {
@@ -2482,12 +2674,51 @@ export async function executeIncrementalVideo({
   const executionAttemptId = currentChannelExecution()?.attempt_id
     ?? `job-attempt:${plan.job_id}`;
   const anchors = await loadDiscoveryAnchors(query, plan.channel_id);
-  const snapshot = await getChannelSnapshot();
-  const rawScan = await snapshot.scanUploads({
-    anchors,
-    maxPages: config.discoveryMaxPages,
-    catchUpMaxItems: config.discoveryCatchUpMaxItems,
-  });
+  const signal = currentChannelExecutionAbortSignal();
+  const throwIfAborted = () => {
+    if (!signal?.aborted) return;
+    throw signal.reason instanceof Error
+      ? signal.reason
+      : new Error("incremental Video discovery was aborted");
+  };
+  let rawScan;
+  let youtubeJsScanError = null;
+  try {
+    const snapshot = await getChannelSnapshot();
+    rawScan = await snapshot.scanUploads({
+      anchors,
+      maxPages: config.discoveryMaxPages,
+      catchUpMaxItems: config.discoveryCatchUpMaxItems,
+    });
+  } catch (youtubeJsError) {
+    youtubeJsScanError = youtubeJsError;
+  }
+  if (!youtubeJsScanError && rawScan?.stop_reason === "pagination_error") {
+    youtubeJsScanError = rawScan.error instanceof Error
+      ? rawScan.error
+      : new Error(`YouTube.js Uploads pagination failed for ${plan.channel_id}`);
+  }
+  if (youtubeJsScanError) {
+    throwIfAborted();
+    const fallbackLimit = Math.min(
+      100,
+      Math.max(30, positiveInteger(config.discoveryCatchUpMaxItems) ?? 50),
+    );
+    try {
+      const uploads = await fetchUploads(plan.channel_id, fallbackLimit, {
+        language: process.env.YOUTUBE_LANGUAGE,
+        signal,
+      });
+      throwIfAborted();
+      rawScan = incrementalScanFromMigrationUploads(uploads, anchors, youtubeJsScanError);
+    } catch (ytDlpError) {
+      throwIfAborted();
+      throw new AggregateError(
+        [youtubeJsScanError, ytDlpError],
+        `incremental Video Uploads scan failed for ${plan.channel_id}: YouTube.js and yt-dlp both failed`,
+      );
+    }
+  }
   const scan = applyCatchupGapAbandonment(rawScan, anchors, {
     catchUpMaxItems: config.discoveryCatchUpMaxItems,
   });
