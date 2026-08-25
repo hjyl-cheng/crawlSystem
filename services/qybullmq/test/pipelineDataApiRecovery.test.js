@@ -29,7 +29,7 @@ test("official zero-thread evidence resolves a positive surface comment count", 
   const commentsPage = confirmedNoVisibleThreadsPage({
     totalCount: 23,
     checkedAt: "2026-08-18T06:00:00.000Z",
-    retryAt: "2026-08-25T06:00:00.000Z",
+    retryAt: "2099-08-25T06:00:00.000Z",
     sources: ["yt_dlp_top_comments", "youtubejs_comments", "youtube_data_api_comment_threads"],
   });
   const detail = {
