@@ -328,6 +328,14 @@ function fakeClient({
       if (sql.includes("publication-readiness:contents")) {
         return { rows: contents.map((content) => ({ row: content })) };
       }
+      if (sql.includes("publication-reconciler:policy-removal-source")) {
+        const requested = new Set(params[1] ?? []);
+        return {
+          rows: contents
+            .filter((content) => requested.has(content.source_content_id))
+            .map((content) => ({ source_content_id: content.source_content_id })),
+        };
+      }
       if (sql.includes("publication-readiness:agents")) return { rows: [] };
       if (sql.includes("publication-reconciler:lock-deliveries")) return { rows: deliveries };
       if (sql.includes("publication-reconciler:insert-revision")) {
@@ -1087,6 +1095,208 @@ test("Video Delta explicitly retracts a previously public Item that becomes unli
     reason: "source_unlisted",
   }]);
   assert.deepEqual(delta.issues, []);
+});
+
+test("Video Repair explicitly retracts an approved policy removal", () => {
+  const itemHash = `sha256:${"7".repeat(64)}`;
+  const current = {
+    payload_json: {
+      items: [{ content_id: "active-live", position: 1, item_hash: itemHash }],
+    },
+  };
+  const candidate = {
+    result_hash: `sha256:${"8".repeat(64)}`,
+    payload: {
+      channel_id: CHANNEL_ID,
+      window_policy: { cutoff_at: "2026-04-28T02:00:00.000Z", max_items: 30 },
+      window_proof: { complete: true },
+      items: [],
+    },
+    exclusions: [],
+  };
+
+  const delta = buildVideoRevisionDelta(current, candidate, {
+    policyRemovalContentIds: ["active-live"],
+  });
+
+  assert.equal(delta.ready, true);
+  assert.deepEqual(delta.payload.window_exits, []);
+  assert.deepEqual(delta.payload.retractions, [{
+    content_id: "active-live",
+    reason: "policy_removed",
+  }]);
+  assert.deepEqual(delta.issues, []);
+});
+
+test("Video Repair rejects policy removals that are absent from Current or remain in source", () => {
+  const itemHash = `sha256:${"9".repeat(64)}`;
+  const current = {
+    payload_json: {
+      items: [{ content_id: "still-present", position: 1, item_hash: itemHash }],
+    },
+  };
+  const candidate = {
+    result_hash: `sha256:${"0".repeat(64)}`,
+    payload: {
+      channel_id: CHANNEL_ID,
+      window_policy: { cutoff_at: "2026-04-28T02:00:00.000Z", max_items: 30 },
+      window_proof: { complete: true },
+      items: [{ content_id: "still-present", position: 1, item_hash: itemHash }],
+    },
+    exclusions: [],
+  };
+
+  const delta = buildVideoRevisionDelta(current, candidate, {
+    policyRemovalContentIds: ["not-in-current", "still-present"],
+  });
+
+  assert.equal(delta.ready, false);
+  assert.deepEqual(delta.issues, [{
+    domain: "video",
+    code: "video_policy_removal_not_in_current",
+    content_id: "not-in-current",
+  }, {
+    domain: "video",
+    code: "video_policy_removal_still_in_source",
+    content_id: "still-present",
+  }]);
+});
+
+test("Reconciler emits a contiguous Video Repair Revision for an approved policy removal", async () => {
+  const contentId = "active-live";
+  const fixture = completePublicationOperationalFixture(CHANNEL_ID, { observedAt: OBSERVED_AT });
+  const videoSource = fixture.sources.find((source) => source.observation_kind === "video");
+  const row = withVideoItemHash(videoRow(contentId, {
+    last_observation_id: videoSource.complete_observation.observation_id,
+    playlist_last_seen_at: OBSERVED_AT,
+    player_last_observed_at: OBSERVED_AT,
+  }));
+  const baseline = buildVideoReadiness({
+    rows: [row],
+    source: videoSource,
+    channelId: CHANNEL_ID,
+    asOf: AS_OF,
+  });
+  assert.equal(baseline.ready, true);
+  const previous = {
+    ...normalizePublicationCurrentCandidate(CHANNEL_ID, "video", baseline),
+    data_sequence: "1",
+    current_revision_id: REVISION_ID,
+  };
+  const repairSource = structuredClone(videoSource);
+  repairSource.cursor.source_cursor = {};
+  repairSource.complete_observation.result_summary_json.discovery.stop_reason = null;
+  const client = fakeClient({
+    existing: [previous],
+    sources: [repairSource],
+    contents: [],
+    deliveries: [{ destination: "business", mode: "online" }],
+  });
+
+  const result = await reconcilePublication(client, {
+    channelId: CHANNEL_ID,
+    domains: ["video"],
+    asOf: AS_OF,
+    revisionType: "repair",
+    policyRemovalContentIds: [contentId],
+  });
+
+  assert.equal(result.status, "revised");
+  assert.equal(result.revisions.length, 1);
+  assert.equal(result.revisions[0].revision_type, "repair");
+  assert.equal(result.revisions[0].data_sequence, 2);
+  assert.deepEqual(result.revisions[0].source.publication_repair, {
+    kind: "policy_removal",
+    content_ids: [contentId],
+    based_on_revision_id: REVISION_ID,
+    based_on_result_hash: previous.result_hash,
+  });
+  assert.deepEqual(result.revisions[0].payload.upserts, []);
+  assert.deepEqual(result.revisions[0].payload.window_exits, []);
+  assert.deepEqual(result.revisions[0].payload.retractions, [{
+    content_id: contentId,
+    reason: "policy_removed",
+  }]);
+  assert.deepEqual(client.outbox, [{
+    destination: "business",
+    revision_id: result.revisions[0].revision_id,
+    status: "pending",
+  }]);
+});
+
+test("Reconciler refuses an approved policy removal while Content remains in source", async () => {
+  const contentId = "active-live-still-stored";
+  const fixture = completePublicationOperationalFixture(CHANNEL_ID, { observedAt: OBSERVED_AT });
+  const videoSource = fixture.sources.find((source) => source.observation_kind === "video");
+  const row = withVideoItemHash(videoRow(contentId, {
+    last_observation_id: videoSource.complete_observation.observation_id,
+    playlist_last_seen_at: OBSERVED_AT,
+    player_last_observed_at: OBSERVED_AT,
+  }));
+  const baseline = buildVideoReadiness({
+    rows: [row],
+    source: videoSource,
+    channelId: CHANNEL_ID,
+    asOf: AS_OF,
+  });
+  const previous = {
+    ...normalizePublicationCurrentCandidate(CHANNEL_ID, "video", baseline),
+    data_sequence: "1",
+    current_revision_id: REVISION_ID,
+  };
+  const client = fakeClient({
+    existing: [previous],
+    sources: [videoSource],
+    contents: [row],
+  });
+
+  const result = await reconcilePublication(client, {
+    channelId: CHANNEL_ID,
+    domains: ["video"],
+    asOf: AS_OF,
+    revisionType: "repair",
+    policyRemovalContentIds: [contentId],
+  });
+
+  assert.equal(result.status, "not_ready");
+  assert.deepEqual(result.domains[0].readiness_reasons, [{
+    domain: "video",
+    code: "video_policy_removal_still_in_source",
+    content_id: contentId,
+  }]);
+  assert.equal(result.revisions.length, 0);
+});
+
+test("Reconciler rejects policy removals outside an explicit Video Repair", async () => {
+  await assert.rejects(
+    reconcilePublication(fakeClient(), {
+      channelId: CHANNEL_ID,
+      domains: ["video"],
+      asOf: AS_OF,
+      policyRemovalContentIds: ["active-live"],
+    }),
+    /require a Video Repair reconciliation/,
+  );
+  await assert.rejects(
+    reconcilePublication(fakeClient(), {
+      channelId: CHANNEL_ID,
+      domains: ["channel"],
+      asOf: AS_OF,
+      revisionType: "repair",
+      policyRemovalContentIds: ["active-live"],
+    }),
+    /require a Video Repair reconciliation/,
+  );
+  await assert.rejects(
+    reconcilePublication(fakeClient(), {
+      channelId: CHANNEL_ID,
+      domains: ["video"],
+      asOf: AS_OF,
+      revisionType: "repair",
+      policyRemovalContentIds: ["active-live", "active-live"],
+    }),
+    /unique non-empty values/,
+  );
 });
 
 test("a full Video Window does not by itself prove why old Content disappeared", () => {

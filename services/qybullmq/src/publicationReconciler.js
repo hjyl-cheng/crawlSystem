@@ -108,6 +108,21 @@ function normalizePreservationBaselines(value, channelId, domains) {
   ]));
 }
 
+function normalizePolicyRemovalContentIds(value, domains, revisionType) {
+  if (value == null) return [];
+  if (!Array.isArray(value)) {
+    throw new TypeError("policyRemovalContentIds must be an array");
+  }
+  const normalized = [...new Set(value.map(text).filter(Boolean))].sort();
+  if (normalized.length !== value.length) {
+    throw new TypeError("policyRemovalContentIds must contain unique non-empty values");
+  }
+  if (normalized.length > 0 && (revisionType !== "repair" || !domains.includes("video"))) {
+    throw new TypeError("policyRemovalContentIds require a Video Repair reconciliation");
+  }
+  return normalized;
+}
+
 function normalizeInput(input) {
   const channelId = text(input?.channelId);
   if (!channelId) throw new TypeError("channelId is required");
@@ -129,6 +144,11 @@ function normalizeInput(input) {
     domains,
     asOf: timestamp(input.asOf, "asOf"),
     revisionType,
+    policyRemovalContentIds: normalizePolicyRemovalContentIds(
+      input?.policyRemovalContentIds,
+      domains,
+      revisionType,
+    ),
     preservationBaselines: normalizePreservationBaselines(
       input?.preservationBaselines,
       channelId,
@@ -176,7 +196,9 @@ function sourceMap(sourceRows) {
   ]));
 }
 
-async function loadCandidates(client, channelId, domains, asOf, existing = new Map()) {
+async function loadCandidates(client, channelId, domains, asOf, existing = new Map(), {
+  policyRemovalContentIds = [],
+} = {}) {
   const filter = [channelId];
   const sourceResult = await client.query(SOURCES_SQL, [filter]);
   const sources = sourceMap(rows(sourceResult, "Publication source"));
@@ -194,13 +216,32 @@ async function loadCandidates(client, channelId, domains, asOf, existing = new M
 
   if (domains.includes("video")) {
     const contentResult = await client.query(CONTENTS_SQL, [filter, asOf]);
-    candidates.set("video", buildVideoReadiness({
-      rows: rows(contentResult, "Publication Video").map((wrapper) => object(wrapper.row ?? wrapper)),
-      source: sources.get(`${channelId}\u0000video`),
-      channelId,
-      asOf,
-      previousCurrent: existing.get("video") ?? null,
-    }));
+    const contentRows = rows(contentResult, "Publication Video")
+      .map((wrapper) => object(wrapper.row ?? wrapper));
+    const policyRemovalSource = policyRemovalContentIds.length === 0 ? [] : rows(
+      await client.query(
+        `/* publication-reconciler:policy-removal-source */
+         SELECT source_content_id
+         FROM crawler.contents
+         WHERE channel_id=$1 AND source_content_id=ANY($2::text[])
+         ORDER BY source_content_id`,
+        [channelId, policyRemovalContentIds],
+      ),
+      "Publication policy removal source",
+    );
+    candidates.set("video", {
+      ...buildVideoReadiness({
+        rows: contentRows,
+        source: sources.get(`${channelId}\u0000video`),
+        channelId,
+        asOf,
+        previousCurrent: existing.get("video") ?? null,
+      }),
+      source_content_ids: [...new Set([
+        ...contentRows.map((row) => text(row.source_content_id)),
+        ...policyRemovalSource.map((row) => text(row.source_content_id)),
+      ].filter(Boolean))],
+    });
   }
 
   if (domains.includes("agent")) {
@@ -450,8 +491,9 @@ function videoExitReason(candidate, item) {
   return null;
 }
 
-function videoRetractionReason(candidate, item) {
+function videoRetractionReason(candidate, item, policyRemovalContentIds) {
   const contentId = text(item.content_id);
+  if (policyRemovalContentIds.has(contentId)) return "policy_removed";
   const exclusion = Array.isArray(candidate.exclusions)
     ? candidate.exclusions.find((value) => text(value?.content_id) === contentId)
     : null;
@@ -459,11 +501,14 @@ function videoRetractionReason(candidate, item) {
   return reasons.has(exclusion?.reason_code) ? exclusion.reason_code : null;
 }
 
-export function buildVideoRevisionDelta(current, candidate) {
+export function buildVideoRevisionDelta(current, candidate, {
+  policyRemovalContentIds = [],
+} = {}) {
   const previousItems = oldVideoItems(current);
   const nextItems = Array.isArray(candidate.payload?.items) ? candidate.payload.items.map(object) : [];
   const previousById = new Map(previousItems.map((item) => [text(item.content_id), item]));
   const nextById = new Map(nextItems.map((item) => [text(item.content_id), item]));
+  const policyRemovals = new Set(policyRemovalContentIds.map(text).filter(Boolean));
   const upserts = nextItems.filter((item) => {
     const previous = previousById.get(text(item.content_id));
     return !previous
@@ -473,10 +518,25 @@ export function buildVideoRevisionDelta(current, candidate) {
   const windowExits = [];
   const retractions = [];
   const issues = [];
+  for (const contentId of policyRemovals) {
+    if (!previousById.has(contentId)) {
+      issues.push({
+        domain: "video",
+        code: "video_policy_removal_not_in_current",
+        content_id: contentId,
+      });
+    } else if (nextById.has(contentId)) {
+      issues.push({
+        domain: "video",
+        code: "video_policy_removal_still_in_source",
+        content_id: contentId,
+      });
+    }
+  }
   for (const item of previousItems) {
     const contentId = text(item.content_id);
     if (nextById.has(contentId)) continue;
-    const retractionReason = videoRetractionReason(candidate, item);
+    const retractionReason = videoRetractionReason(candidate, item, policyRemovals);
     if (retractionReason) {
       retractions.push({ content_id: contentId, reason: retractionReason });
       continue;
@@ -507,7 +567,14 @@ export function buildVideoRevisionDelta(current, candidate) {
   };
 }
 
-function revisionShape(domain, current, candidate, onboardingMode, revisionType) {
+function revisionShape(
+  domain,
+  current,
+  candidate,
+  onboardingMode,
+  revisionType,
+  policyRemovalContentIds = [],
+) {
   const sequence = currentSequence(current);
   const hasTrustedCurrent = hasRevisionBase(current);
   if (!hasTrustedCurrent && onboardingMode === "bootstrap") {
@@ -524,7 +591,7 @@ function revisionShape(domain, current, candidate, onboardingMode, revisionType)
   }
   if (!hasTrustedCurrent) return null;
   if (domain === "video") {
-    const delta = buildVideoRevisionDelta(current, candidate);
+    const delta = buildVideoRevisionDelta(current, candidate, { policyRemovalContentIds });
     if (!delta.ready) return { notReadyIssues: delta.issues };
     return {
       revisionType,
@@ -542,6 +609,55 @@ function revisionShape(domain, current, candidate, onboardingMode, revisionType)
     previousDataSequence: sequence,
     previousResultHash: current.result_hash,
     payload: candidate.payload,
+  };
+}
+
+function policyRemovalCandidate(rawCandidate, previous, contentIds) {
+  if (!hasRevisionBase(previous) || contentIds.length === 0) return rawCandidate;
+  const removalIds = new Set(contentIds);
+  const sourceIds = new Set(
+    Array.isArray(rawCandidate.source_content_ids) ? rawCandidate.source_content_ids : [],
+  );
+  const stillInSource = contentIds.filter((contentId) => sourceIds.has(contentId));
+  if (stillInSource.length > 0) {
+    return {
+      ...rawCandidate,
+      ready: false,
+      result_hash: null,
+      issues: [
+        ...(Array.isArray(rawCandidate.issues) ? rawCandidate.issues : []),
+        ...stillInSource.map((contentId) => ({
+          domain: "video",
+          code: "video_policy_removal_still_in_source",
+          content_id: contentId,
+        })),
+      ],
+    };
+  }
+  const previousPayload = object(previous.payload_json);
+  const previousItems = Array.isArray(previousPayload.items) ? previousPayload.items : [];
+  const payload = {
+    ...previousPayload,
+    items: previousItems.filter((item) => !removalIds.has(text(item?.content_id))),
+  };
+  return {
+    ready: true,
+    contract_version: previous.contract_version,
+    policy_version: previous.policy_version,
+    result_hash: publicationResultHash("video", payload),
+    payload,
+    exclusions: [],
+    source_refs: {
+      ...object(previous.source_refs),
+      publication_repair: {
+        kind: "policy_removal",
+        content_ids: [...contentIds],
+        based_on_revision_id: previous.current_revision_id,
+        based_on_result_hash: previous.result_hash,
+      },
+    },
+    complete_observed_at: previous.complete_observed_at,
+    issues: [],
   };
 }
 
@@ -886,12 +1002,15 @@ export async function reconcilePublication(clientValue, input) {
     domains,
     asOf,
     revisionType,
+    policyRemovalContentIds,
     preservationBaselines,
   } = normalizeInput(input);
   const context = await lockPublicationContext(client, channelId, domains);
   if (context.result) return context.result;
   const { publicationStreamId, state, existing } = context;
-  const rawCandidates = await loadCandidates(client, channelId, domains, asOf, existing);
+  const rawCandidates = await loadCandidates(client, channelId, domains, asOf, existing, {
+    policyRemovalContentIds,
+  });
   const deliveries = await lockPublicationDeliveries(client, publicationStreamId, channelId);
 
   const domainResults = [];
@@ -904,7 +1023,9 @@ export async function reconcilePublication(clientValue, input) {
     assertRequestedPreservationMatches(storedPreservation, requestedPreservation, channelId);
     const effectiveCandidate = domain === "channel"
       ? carryForwardChannelCandidate(rawCandidate, previous, requestedPreservation)
-      : rawCandidate;
+      : domain === "video" && policyRemovalContentIds.length > 0
+        ? policyRemovalCandidate(rawCandidate, previous, policyRemovalContentIds)
+        : rawCandidate;
     const carriedFields = carriedForwardFields(effectiveCandidate);
     let candidate = normalizePublicationCurrentCandidate(channelId, domain, effectiveCandidate);
 
@@ -1026,6 +1147,7 @@ export async function reconcilePublication(clientValue, input) {
       effectiveCandidate,
       state.onboarding_mode,
       revisionType,
+      domain === "video" ? policyRemovalContentIds : [],
     );
     if (shape?.notReadyIssues) {
       candidate = {
