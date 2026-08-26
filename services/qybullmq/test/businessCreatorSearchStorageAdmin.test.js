@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -182,6 +182,51 @@ test("Creator Search storage apply remains successful after a committed output f
   assert.match(stderr, /action committed.*output file could not be finalized/i);
 });
 
+test("Creator Search storage command preserves a committed result after session lock cleanup fails", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "creator-search-storage-cleanup-"));
+  const output = join(directory, "apply-result.json");
+  const inspected = state();
+  const baseEnvironment = environment();
+  const config = businessCreatorSearchStorageConfig(baseEnvironment);
+  const fixture = fakePool(inspected, { unlockResult: false });
+  let stdout = "";
+  let stderr = "";
+  try {
+    await runBusinessCreatorSearchStorage({
+      argv: ["--apply", "--output", output],
+      environment: {
+        ...baseEnvironment,
+        CONFIRM_BUSINESS_CREATOR_SEARCH_STORAGE: businessCreatorSearchStorageConfirmation(
+          config,
+          inspected,
+          "activate",
+        ),
+      },
+      createPool: () => fixture.pool,
+      stdout: { write(value) { stdout += value; } },
+      stderr: { write(value) { stderr += value; } },
+    });
+    const audit = JSON.parse(await readFile(output, "utf8"));
+    assert.equal(audit.ok, true);
+    assert.equal(audit.writes_performed, true);
+    assert.equal(audit.result.outcome, "applied");
+    assert.deepEqual(audit.warnings, [{
+      code: "session_lock_cleanup",
+      message: "Creator Search publish session lock was not released",
+      connection_destroyed: true,
+    }]);
+    assert.equal(stdout, "");
+    assert.match(
+      stderr,
+      /WARNING \[session_lock_cleanup\]: Creator Search storage action committed; .*; connection destroyed/i,
+    );
+    const release = fixture.calls.filter(({ sql }) => sql === "RELEASE").at(-1);
+    assert.ok(release.parameters[0] instanceof Error);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("Creator Search storage config requires an exact database and reviewable actor", () => {
   assert.deepEqual(businessCreatorSearchStorageConfig(environment()), {
     databaseUrl: "postgres://business-admin@business/business_test",
@@ -323,7 +368,7 @@ test("Creator Search storage apply rejects stale or unsafe state before calling 
   assert.ok(!fixture.calls.some(({ sql }) => /SELECT public\.activate_creator_search_incremental_v1/.test(sql)));
 });
 
-test("Creator Search storage destroys a connection that cannot release its session lock", async () => {
+test("Creator Search storage returns a committed result and destroys a connection after unlock failure", async () => {
   const config = businessCreatorSearchStorageConfig(environment());
   const inspected = state();
   const fixture = fakePool(inspected, { unlockResult: false });
@@ -331,13 +376,16 @@ test("Creator Search storage destroys a connection that cannot release its sessi
     pool: fixture.pool,
     config,
   });
-  await assert.rejects(
-    administrator.apply({
-      expectedWatermark: inspected.active_watermark,
-      expectedLiveCount: inspected.live_count,
-    }),
-    /session lock was not released/,
-  );
+  const result = await administrator.apply({
+    expectedWatermark: inspected.active_watermark,
+    expectedLiveCount: inspected.live_count,
+  });
+  assert.equal(result.outcome, "applied");
+  assert.deepEqual(result.session_lock_cleanup, {
+    code: "session_lock_cleanup",
+    message: "Creator Search publish session lock was not released",
+    connection_destroyed: true,
+  });
   const release = fixture.calls.find(({ sql }) => sql === "RELEASE");
   assert.ok(release.parameters[0] instanceof Error);
 });
@@ -435,6 +483,40 @@ test("Creator Search storage rollback locks, rechecks, and calls the guarded fun
   const unlockIndex = fixture.calls.findIndex(({ sql }) => /pg_advisory_unlock/.test(sql));
   assert.ok(lockIndex >= 0 && lockIndex < beginIndex);
   assert.ok(unlockIndex > commitIndex);
+});
+
+test("Creator Search storage rollback preserves its committed result after unlock failure", async () => {
+  const config = businessCreatorSearchStorageConfig(environment());
+  const inspected = state({
+    write_mode: "incremental",
+    read_mode: "live",
+  });
+  const fixture = fakePool(inspected, { unlockResult: false });
+  const administrator = new BusinessCreatorSearchStorageAdministrator({
+    pool: fixture.pool,
+    config,
+  });
+  const result = await administrator.rollback({
+    expectedActiveWatermark: inspected.active_watermark,
+    expectedCurrentLiveCount: inspected.live_count,
+    targetWatermark: "publication_projection_baseline",
+    expectedTarget: {
+      rollback_target_exists: true,
+      rollback_target_reachable: true,
+      rollback_target_count: 197,
+      rollback_target_expected_count: 197,
+      rollback_target_parity_diffs: 0,
+      rollback_chain_errors: 0,
+    },
+  });
+  assert.equal(result.outcome, "rolled_back");
+  assert.deepEqual(result.session_lock_cleanup, {
+    code: "session_lock_cleanup",
+    message: "Creator Search publish session lock was not released",
+    connection_destroyed: true,
+  });
+  const release = fixture.calls.find(({ sql }) => sql === "RELEASE");
+  assert.ok(release.parameters[0] instanceof Error);
 });
 
 test("Creator Search storage rollback rejects target drift after taking the publish lock", async () => {

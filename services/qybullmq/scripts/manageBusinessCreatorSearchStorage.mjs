@@ -144,7 +144,7 @@ export async function runBusinessCreatorSearchStorage({
         "CONFIRM_BUSINESS_CREATOR_SEARCH_STORAGE must exactly equal the value emitted by the plan command",
       );
     }
-    const result = command.rollback
+    const actionResult = command.rollback
       ? await administrator.rollback({
         expectedActiveWatermark: plan.state.active_watermark,
         expectedCurrentLiveCount: plan.state.live_count,
@@ -162,11 +162,22 @@ export async function runBusinessCreatorSearchStorage({
         expectedWatermark: plan.state.active_watermark,
         expectedLiveCount: plan.state.live_count,
       });
+    const {
+      session_lock_cleanup: sessionLockCleanup,
+      ...result
+    } = actionResult;
+    const warnings = sessionLockCleanup ? [sessionLockCleanup] : [];
     actionCommitted = true;
+    for (const warning of warnings) {
+      stderr.write(
+        `WARNING [${warning.code}]: Creator Search storage action committed; ${warning.message}; connection destroyed\n`,
+      );
+    }
     await emitCommitted({
       ok: true,
       mode: command.rollback ? "rollback_apply" : "apply",
       writes_performed: true,
+      warnings,
       result,
     }, outputHandle, { stdout, stderr });
   } finally {

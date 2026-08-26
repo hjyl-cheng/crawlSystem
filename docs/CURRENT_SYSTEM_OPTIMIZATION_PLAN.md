@@ -455,8 +455,10 @@ parity 差异，然后才调用数据库已有的 guarded cutover/rollback 函�
 在锁内重新按变更链构建目标态，并逐项比对确认串批准的目标存在性、可达性、Legacy/预期
 行数、parity 和 change-chain 完整性；任一项漂移都在调用回滚函数前终止事务。提交或回滚
 后在 `finally` 中释放 session lock；解锁失败时销毁该池连接，禁止把仍可能持锁的连接放回
-池中。该管理命令必须直连或使用保持 session 的连接方式，不得经过 transaction-mode
-PgBouncer。
+池中。`COMMIT` 是结果边界：提交前的错误仍使命令失败；提交后的 session lock 清理错误不
+得覆盖已提交结果。后者必须返回 `writes_performed=true`，保留审计文件，并同时输出结构化
+`session_lock_cleanup` 警告和 stderr 告警，避免操作员误判后重跑。该管理命令必须直连或
+使用保持 session 的连接方式，不得经过 transaction-mode PgBouncer。
 
 Apply 使用 `--output` 时，会在任何数据库访问前以独占方式预留文件；已存在或不可写的
 路径会提前阻断。数据库动作提交后若最终文件写入仍失败，命令会将成功结果回退到

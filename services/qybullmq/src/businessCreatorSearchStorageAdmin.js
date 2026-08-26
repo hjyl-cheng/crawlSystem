@@ -378,8 +378,10 @@ function assertExpected(state, expectedWatermark, expectedLiveCount) {
 async function withSearchPublishSessionLock(pool, operation) {
   const client = await pool.connect();
   let lockHeld = false;
+  let operationResult;
   let operationError = null;
   let releaseError = null;
+  let cleanupWarning = null;
   try {
     await client.query("SET lock_timeout='10s'");
     try {
@@ -395,10 +397,9 @@ async function withSearchPublishSessionLock(pool, operation) {
         throw error;
       }
     }
-    return await operation(client);
+    operationResult = await operation(client);
   } catch (error) {
     operationError = error;
-    throw error;
   } finally {
     if (lockHeld) {
       try {
@@ -411,11 +412,22 @@ async function withSearchPublishSessionLock(pool, operation) {
         }
       } catch (error) {
         releaseError ??= error;
+        if (!operationError) {
+          cleanupWarning = {
+            code: "session_lock_cleanup",
+            message: String(error?.message ?? error),
+            connection_destroyed: true,
+          };
+        }
       }
     }
     client.release(releaseError ?? undefined);
-    if (!operationError && releaseError) throw releaseError;
   }
+  if (operationError) throw operationError;
+  if (cleanupWarning) {
+    return { ...operationResult, session_lock_cleanup: cleanupWarning };
+  }
+  return operationResult;
 }
 
 export class BusinessCreatorSearchStorageAdministrator {
