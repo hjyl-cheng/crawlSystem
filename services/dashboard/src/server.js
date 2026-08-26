@@ -28,20 +28,16 @@ import {
 } from "./publicationComparison.js";
 import {
   MIGRATION_FINALIZED_SQL,
+  MIGRATION_WORK_STATUSES,
 } from "./migrationCompletion.js";
 import {
   assertCrawlerDashboardIdentity,
   assertMigrationSourceIdentity,
-  loadMigrationSourceCount,
-  loadMigrationSourcePage,
-  migrationCandidateMatches,
-  migrationFiltersIncludeUnstarted,
-  mergeMigrationCandidates,
-  migrationReadModelStatsFromSummary,
-  migrationSourceCandidateFromIntent,
+  mergeMigrationCandidate,
 } from "./migrationTopology.js";
 import { loadChannelCurrentContent } from "./channelCurrentContent.js";
 import { loadLatestContentEnrichOperational } from "./contentEnrichOperational.js";
+import { loadMigrationChannelInventory } from "./migrationInventory.js";
 
 const { Pool } = pg;
 
@@ -92,6 +88,16 @@ const agentModelOptions = [
   ["qwen-max", "qwen-max"],
   ["qwen-plus", "qwen-plus"],
 ];
+const migrationCandidateStatusLabels = Object.freeze({
+  discovered: "待迁移",
+  queued: "待迁移",
+  validating: "验证中",
+  finishing: "待收尾",
+  accepted: "已通过",
+  rejected: "已拒绝",
+  existing: "已存在",
+  failed: "失败",
+});
 
 const queueNames = [
   "youtube-query-quality",
@@ -1533,258 +1539,35 @@ async function channelSummaryRows({
   return rows.rows;
 }
 
-const migrationTargetStateCte = `target_state AS (
-  SELECT intent.migration_intent_id,intent.source_candidate_id,
-         intent.source_snapshot,intent.target_candidate_id,intent.channel_id,
-         candidate.status AS target_candidate_status,
-         channel.status AS target_channel_status,
-         channel.registry_promotion_candidate_id,
-         channel.reject_reason AS target_reject_reason,
-         COALESCE(channel.agent_status,'pending') AS agent_status,
-         channel.latest_run_id,
-         COALESCE(finalized.status,'pending') AS final_status,
-         COALESCE(finalized.quality_json,'{}'::jsonb) AS quality_json,
-         run.status AS run_status,run.detail_status AS run_detail_status,
-         CASE
-           WHEN candidate.status='accepted'
-            AND channel.status='active'
-            AND channel.registry_promotion_candidate_id=candidate.candidate_id
-            AND COALESCE(finalized.status,'pending') NOT IN ('ready_auto','ready_partial')
-           THEN 'finishing'
-           ELSE COALESCE(candidate.status,'discovered')
-         END AS candidate_status,
-         (
-           candidate.status='accepted'
-           AND channel.status IN ('active','dormant')
-           AND channel.registry_promotion_candidate_id=candidate.candidate_id
-           AND COALESCE(finalized.status,'pending') IN ('ready_auto','ready_partial')
-         ) AS migration_done,
-         CASE
-           WHEN (intent.source_snapshot->>'priority') ~ '^-?[0-9]+$'
-           THEN (intent.source_snapshot->>'priority')::int
-           ELSE 100
-         END AS source_priority,
-         GREATEST(intent.updated_at,COALESCE(candidate.updated_at,intent.updated_at),
-                  COALESCE(channel.updated_at,intent.updated_at)) AS updated_at
-  FROM crawler.migration_channel_intents intent
-  LEFT JOIN crawler.channel_candidates candidate
-    ON candidate.candidate_id=intent.target_candidate_id
-  LEFT JOIN crawler.channels channel ON channel.channel_id=intent.channel_id
-  LEFT JOIN crawler.channel_runs run ON run.run_id=channel.latest_run_id
-  LEFT JOIN crawler.finalized_profiles finalized ON finalized.channel_id=intent.channel_id
-  WHERE intent.source_id=$1
-)`;
-const migrationWorkStatusesSql = "('discovered','queued','validating','failed','finishing')";
-
-function migrationTargetSearchClause(args, search) {
-  const normalized = String(search || "").trim();
-  if (!normalized) return "TRUE";
-  args.push(`%${normalized}%`);
-  return `(state.channel_id ILIKE $${args.length}
-    OR state.source_snapshot->>'channel_url' ILIKE $${args.length}
-    OR state.source_snapshot->>'handle' ILIKE $${args.length}
-    OR state.source_snapshot->>'title' ILIKE $${args.length})`;
-}
-
-function migrationTargetFilterClause(args, { channelStatus, agentStatus, finalStatus }) {
-  const where = [];
-  if (channelStatus === "all") {
-    where.push(`state.candidate_status IN ${migrationWorkStatusesSql}`);
-  } else {
-    args.push(channelStatus);
-    where.push(`state.candidate_status=$${args.length}`);
-  }
-  if (agentStatus) {
-    args.push(agentStatus);
-    where.push(`state.agent_status=$${args.length}`);
-  }
-  if (finalStatus) {
-    args.push(finalStatus);
-    where.push(`state.final_status=$${args.length}`);
-  }
-  return where.length > 0 ? where.join(" AND ") : "TRUE";
-}
-
-async function migrationTargetSummary(filters) {
-  const args = [migrationSourceId];
-  const searchSql = migrationTargetSearchClause(args, filters.search);
-  const filterSql = migrationTargetFilterClause(args, filters);
-  const result = await db(`WITH ${migrationTargetStateCte}, searched_state AS (
-      SELECT state.* FROM target_state state WHERE ${searchSql}
-    )
-    SELECT
-      count(*)::int AS started,
-      count(*) FILTER (WHERE state.candidate_status='discovered')::int AS discovered,
-      count(*) FILTER (WHERE state.candidate_status='queued')::int AS queued,
-      count(*) FILTER (WHERE state.candidate_status='validating')::int AS validating,
-      count(*) FILTER (WHERE state.candidate_status='finishing')::int AS finishing,
-      count(*) FILTER (WHERE state.candidate_status='failed')::int AS failed,
-      count(*) FILTER (WHERE state.migration_done)::int AS migration_done,
-      count(*) FILTER (
-        WHERE state.final_status IN ('ready_auto','ready_partial')
-      )::int AS final_done,
-      count(*) FILTER (WHERE ${filterSql})::int AS filtered
-    FROM searched_state state`, args);
-  return result.rows[0] || {};
-}
-
-async function migrationTargetRowsForSources(sourceRows) {
-  if (sourceRows.length === 0) return [];
-  const sourceCandidateIds = sourceRows.map((row) => String(row.candidate_id));
-  const channelIds = sourceRows.map((row) => row.channel_id);
-  const result = await db(`
-    SELECT intent.migration_intent_id,intent.source_candidate_id::text,
-           intent.target_candidate_id,intent.channel_id,
-           candidate.status AS target_candidate_status,
-           channel.status AS target_channel_status,
-           channel.registry_promotion_candidate_id,
-           channel.reject_reason AS target_reject_reason,
-           channel.agent_status,channel.latest_run_id,
-           COALESCE(finalized.status,'pending') AS final_status,
-           COALESCE(finalized.quality_json,'{}'::jsonb) AS quality_json,
-           run.status AS run_status,run.detail_status AS run_detail_status,
-           (SELECT count(*) FROM crawler.contents content
-            WHERE content.channel_id=intent.channel_id
-              AND content.run_id=channel.latest_run_id)::bigint AS content_count,
-           (SELECT count(*) FROM crawler.contents content
-            WHERE content.channel_id=intent.channel_id
-              AND content.run_id=channel.latest_run_id
-              AND content.content_type='video')::bigint AS video_count,
-           (SELECT count(*) FROM crawler.contents content
-            WHERE content.channel_id=intent.channel_id
-              AND content.run_id=channel.latest_run_id
-              AND content.content_type='short')::bigint AS short_count,
-           (SELECT count(*) FROM crawler.contents content
-            WHERE content.channel_id=intent.channel_id
-              AND content.run_id=channel.latest_run_id
-              AND content.content_type='live')::bigint AS live_count,
-           GREATEST(intent.updated_at,COALESCE(candidate.updated_at,intent.updated_at),
-                    COALESCE(channel.updated_at,intent.updated_at)) AS updated_at
-    FROM crawler.migration_channel_intents intent
-    LEFT JOIN crawler.channel_candidates candidate
-      ON candidate.candidate_id=intent.target_candidate_id
-    LEFT JOIN crawler.channels channel ON channel.channel_id=intent.channel_id
-    LEFT JOIN crawler.channel_runs run ON run.run_id=channel.latest_run_id
-    LEFT JOIN crawler.finalized_profiles finalized ON finalized.channel_id=intent.channel_id
-    WHERE intent.source_id=$1
-      AND (intent.source_candidate_id=ANY($2::bigint[])
-           OR intent.channel_id=ANY($3::text[]))
-  `, [migrationSourceId, sourceCandidateIds, channelIds]);
-  return result.rows;
-}
-
-async function migrationTargetPage(filters) {
-  const args = [migrationSourceId];
-  const searchSql = migrationTargetSearchClause(args, filters.search);
-  const filterSql = migrationTargetFilterClause(args, filters);
-  args.push(filters.limit, filters.offset);
-  const limitParameter = args.length - 1;
-  const offsetParameter = args.length;
-  const result = await db(`WITH ${migrationTargetStateCte}, target_page AS (
-      SELECT state.*
-      FROM target_state state
-      WHERE ${searchSql} AND ${filterSql}
-      ORDER BY state.source_priority DESC,state.source_candidate_id
-      LIMIT $${limitParameter}::int OFFSET $${offsetParameter}::int
-    )
-    SELECT page.*,
-           (SELECT count(*) FROM crawler.contents content
-            WHERE content.channel_id=page.channel_id
-              AND content.run_id=page.latest_run_id)::bigint AS content_count,
-           (SELECT count(*) FROM crawler.contents content
-            WHERE content.channel_id=page.channel_id
-              AND content.run_id=page.latest_run_id
-              AND content.content_type='video')::bigint AS video_count,
-           (SELECT count(*) FROM crawler.contents content
-            WHERE content.channel_id=page.channel_id
-              AND content.run_id=page.latest_run_id
-              AND content.content_type='short')::bigint AS short_count,
-           (SELECT count(*) FROM crawler.contents content
-            WHERE content.channel_id=page.channel_id
-              AND content.run_id=page.latest_run_id
-              AND content.content_type='live')::bigint AS live_count
-    FROM target_page page
-    ORDER BY page.source_priority DESC,page.source_candidate_id`, args);
-  const targetRows = result.rows;
-  const sourceRows = targetRows.map(migrationSourceCandidateFromIntent);
-  return mergeMigrationCandidates(sourceRows, targetRows);
-}
-
-async function migrationSourceFilteredPage(filters, sourceTotal) {
-  const channels = [];
-  let matched = 0;
-  let sourceOffset = 0;
-  while (sourceOffset < sourceTotal && channels.length < filters.limit) {
-    const sourceRows = await loadMigrationSourcePage({
-      read: migrationRead,
-      search: filters.search,
-      limit: 500,
-      offset: sourceOffset,
-    });
-    if (sourceRows.length === 0) break;
-    const targetRows = await migrationTargetRowsForSources(sourceRows);
-    for (const channel of mergeMigrationCandidates(sourceRows, targetRows)) {
-      if (!migrationCandidateMatches(channel, filters)) continue;
-      if (matched >= filters.offset) channels.push(channel);
-      matched += 1;
-      if (channels.length >= filters.limit) break;
-    }
-    sourceOffset += sourceRows.length;
-  }
-  return channels;
-}
-
 async function migrationChannelListData(req) {
-  const limit = intValue(req.query.limit, 500, 1, 500);
+  const limit = intValue(req.query.limit, 50, 1, 50);
   const offset = intValue(req.query.offset, 0, 0, 1_000_000);
   const search = String(req.query.q || "").trim();
   const requestedCandidateStatus = String(req.query.channel_status || "all").trim();
-  const candidateStatuses = new Set(["all", "discovered", "queued", "validating", "failed", "finishing"]);
+  const candidateStatuses = new Set(["all", ...MIGRATION_WORK_STATUSES]);
   const channelStatus = candidateStatuses.has(requestedCandidateStatus) ? requestedCandidateStatus : "all";
   const agentStatus = String(req.query.agent_status || "").trim();
   const finalStatus = String(req.query.final_status || "").trim();
   const filters = { limit, offset, search, channelStatus, agentStatus, finalStatus };
-  if (!migrationPool) {
+  if (!migrationSourceId) {
     return { configured: false, available: false, channels: [], total: 0, stats: { total: 0 }, filters };
   }
 
   try {
-    const [sourceTotal, targetSummary] = await Promise.all([
-      loadMigrationSourceCount({ read: migrationRead, search }),
-      migrationTargetSummary(filters),
-    ]);
-    const includesUnstarted = migrationFiltersIncludeUnstarted(filters);
-    const total = (includesUnstarted
-      ? Math.max(0, sourceTotal - Number(targetSummary.started || 0))
-      : 0) + Number(targetSummary.filtered || 0);
-    let channels = [];
-    if (offset < total) {
-      const unfiltered = channelStatus === "all" && !agentStatus && !finalStatus;
-      if (unfiltered && Number(targetSummary.started || 0) === 0) {
-        const sourceRows = await loadMigrationSourcePage({
-          read: migrationRead,
-          search,
-          limit,
-          offset,
-        });
-        const targetRows = await migrationTargetRowsForSources(sourceRows);
-        channels = mergeMigrationCandidates(sourceRows, targetRows);
-      } else if (includesUnstarted) {
-        channels = await migrationSourceFilteredPage(filters, sourceTotal);
-      } else {
-        channels = await migrationTargetPage(filters);
-      }
-    }
+    const inventory = await loadMigrationChannelInventory({
+      read: db,
+      sourceId: migrationSourceId,
+      expectedSourceDatabase: expectedMigrationDatabase,
+      expectedSourceDatabaseOid: expectedMigrationDatabaseOid,
+      filters,
+    });
     return {
       configured: true,
       available: true,
-      channels,
-      total,
-      stats: migrationReadModelStatsFromSummary(sourceTotal, targetSummary),
-      filters,
+      ...inventory,
     };
   } catch (error) {
-    console.error("migration channel database read failed", error?.message || String(error));
+    console.error("migration channel inventory read failed", error?.message || String(error));
     return {
       configured: true,
       available: false,
@@ -1792,7 +1575,9 @@ async function migrationChannelListData(req) {
       total: 0,
       stats: { total: 0 },
       filters,
-      error: "迁移数据库当前不可用",
+      error: error?.code === "migration_inventory_not_ready"
+        ? "迁移频道索引尚未就绪"
+        : "迁移频道列表当前不可用",
     };
   }
 }
@@ -3503,18 +3288,8 @@ ${autoRefresh}`,
 }
 
 function migrationCandidateSummary(channel) {
-  const labels = {
-    discovered: "待迁移",
-    queued: "待迁移",
-    validating: "验证中",
-    finishing: "待收尾",
-    accepted: "已通过",
-    rejected: "已拒绝",
-    existing: "已存在",
-    failed: "失败",
-  };
   const status = String(channel?.status || "discovered");
-  return `<span class="pill ${statusClass(status)}">${h(labels[status] || status)}</span><div class="note mono">${h(status)}</div>`;
+  return `<span class="pill ${statusClass(status)}">${h(migrationCandidateStatusLabels[status] || status)}</span><div class="note mono">${h(status)}</div>`;
 }
 
 function channelIdentityCell(channel, { showAvatar = true } = {}) {
@@ -3656,11 +3431,10 @@ function migrationChannelListPage(migration) {
   const hasNext = filters.offset + migration.channels.length < Number(migration.total || 0);
   const candidateOptions = [
     ["all", "全部未迁移"],
-    ["discovered", "待迁移"],
-    ["queued", "已入队"],
-    ["validating", "验证中"],
-    ["failed", "失败"],
-    ["finishing", "待收尾"],
+    ...MIGRATION_WORK_STATUSES.map((status) => [
+      status,
+      status === "queued" ? "已入队" : migrationCandidateStatusLabels[status],
+    ]),
   ];
   const agentOptions = ["", "pending", "queued", "running", "done", "failed", "skipped"];
   const finalOptions = ["", "pending", "pending_detail", "pending_api", "pending_agent", "ready_auto", "ready_partial", "failed"];
@@ -3693,14 +3467,14 @@ function migrationChannelListPage(migration) {
       <div class="field"><label>频道状态</label><select name="channel_status">${candidateOptions.map(([value, label]) => `<option value="${h(value)}" ${filters.channelStatus === value ? "selected" : ""}>${h(label)}</option>`).join("")}</select></div>
       <div class="field"><label>Agent</label><select name="agent_status">${agentOptions.map((status) => `<option value="${h(status)}" ${filters.agentStatus === status ? "selected" : ""}>${status || "全部"}</option>`).join("")}</select></div>
       <div class="field"><label>Final</label><select name="final_status">${finalOptions.map((status) => `<option value="${h(status)}" ${filters.finalStatus === status ? "selected" : ""}>${status || "全部"}</option>`).join("")}</select></div>
-      <div class="field"><label>每页</label><input name="limit" type="number" min="1" max="500" value="${h(filters.limit)}"></div>
+      <div class="field"><label>每页</label><input name="limit" type="number" min="1" max="50" value="${h(filters.limit)}"></div>
       <input type="hidden" name="offset" value="0">
       <button class="btn" type="submit">筛选</button>
     </form>
   </div>
   <div class="table-scroll">
     <table>
-      <thead><tr><th>频道</th><th>订阅</th><th>内容</th><th>完整性</th><th>Agent</th><th>Final</th><th>更新时间（北京时间）</th><th>操作</th></tr></thead>
+      <thead><tr><th>频道</th><th>源库订阅</th><th>内容</th><th>完整性</th><th>Agent</th><th>Final</th><th>更新时间（北京时间）</th><th>操作</th></tr></thead>
       <tbody>
       ${channelTableRows(migration.channels, { detailBasePath: "/migration-channels", emptyText: "暂无未迁移频道。", showAvatar: false, migrationActions: true })}
       </tbody>

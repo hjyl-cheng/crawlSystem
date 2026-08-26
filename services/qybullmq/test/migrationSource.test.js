@@ -72,7 +72,7 @@ test("every Migration Source query runs after identity verification in one expli
 
   assert.deepEqual(result.rows, [{ value: "source-row" }]);
   assert.equal(statements[0], "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
-  assert.match(statements[1], /^SET LOCAL statement_timeout=/);
+  assert.equal(statements[1], "SET LOCAL statement_timeout=10000");
   assert.match(statements[2], /current_database\(\) AS database_name/);
   assert.equal(statements.at(-2), "COMMIT");
   assert.equal(statements.at(-1), "RELEASE");

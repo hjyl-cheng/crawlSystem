@@ -1,3 +1,8 @@
+import {
+  migrationIsWorkStatus,
+  migrationLifecycleState,
+} from "./migrationCompletion.js";
+
 function requiredText(value, name) {
   const normalized = String(value ?? "").trim();
   if (!normalized) throw new Error(`${name} is required`);
@@ -54,14 +59,6 @@ export function assertMigrationSourceIdentity(row, {
   return { database, databaseOid, user };
 }
 
-const FINAL_STATUSES = new Set(["ready_auto", "ready_partial"]);
-const MIGRATION_WORK_STATUSES = new Set([
-  "discovered",
-  "queued",
-  "validating",
-  "failed",
-  "finishing",
-]);
 const MIGRATION_SOURCE_PENDING_SQL = "('discovered','queued','validating','failed')";
 
 function boundedInteger(value, name, { min, max }) {
@@ -162,20 +159,13 @@ export function mergeMigrationCandidate(source, target) {
   const targetState = target || {};
   const targetCandidateStatus = String(targetState.target_candidate_status || "").trim();
   const finalStatus = String(targetState.final_status || "pending");
-  const promoted = targetState.target_candidate_id != null
-    && String(targetState.target_candidate_id)
-      === String(targetState.registry_promotion_candidate_id ?? "");
-  const migrationIncomplete = targetCandidateStatus === "accepted"
-    && targetState.target_channel_status === "active"
-    && promoted
-    && !FINAL_STATUSES.has(finalStatus);
-  const migrationDone = targetCandidateStatus === "accepted"
-    && ["active", "dormant"].includes(String(targetState.target_channel_status || ""))
-    && promoted
-    && FINAL_STATUSES.has(finalStatus);
-  const candidateStatus = migrationIncomplete
-    ? "finishing"
-    : targetCandidateStatus || "discovered";
+  const lifecycle = migrationLifecycleState({
+    candidateId: targetState.target_candidate_id,
+    candidateStatus: targetCandidateStatus,
+    channelStatus: targetState.target_channel_status,
+    promotionCandidateId: targetState.registry_promotion_candidate_id,
+    finalizedStatus: finalStatus,
+  });
   return {
     ...source,
     candidate_id: source.candidate_id,
@@ -187,10 +177,8 @@ export function mergeMigrationCandidate(source, target) {
     title: source.title || "",
     avatar_url: source.snapshot_json?.channel_header?.avatar_url || source.avatar_url || null,
     subscriber_count: source.search_subscriber_count ?? null,
-    candidate_status: candidateStatus,
-    status: migrationIncomplete
-      ? "finishing"
-      : targetState.target_channel_status || candidateStatus,
+    candidate_status: lifecycle.candidateStatus,
+    status: lifecycle.status,
     reject_reason: targetState.target_reject_reason ?? null,
     agent_status: targetState.agent_status || "pending",
     latest_run_id: targetState.latest_run_id ?? null,
@@ -199,9 +187,9 @@ export function mergeMigrationCandidate(source, target) {
     run_status: targetState.run_status ?? null,
     run_detail_status: targetState.run_detail_status ?? null,
     is_candidate_only: !targetState.target_channel_status,
-    migration_incomplete: migrationIncomplete,
+    migration_incomplete: lifecycle.migrationIncomplete,
     migration_started: Boolean(targetState.migration_intent_id),
-    migration_done: migrationDone,
+    migration_done: lifecycle.migrationDone,
     content_count: targetState.content_count ?? 0,
     video_count: targetState.video_count ?? 0,
     short_count: targetState.short_count ?? 0,
@@ -230,7 +218,7 @@ export function migrationCandidateMatches(row, {
   agentStatus = "",
   finalStatus = "",
 } = {}) {
-  return MIGRATION_WORK_STATUSES.has(String(row.candidate_status || ""))
+  return migrationIsWorkStatus(row.candidate_status)
     && (channelStatus === "all" || row.candidate_status === channelStatus)
     && (!agentStatus || row.agent_status === agentStatus)
     && (!finalStatus || row.final_status === finalStatus);
