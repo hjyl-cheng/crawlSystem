@@ -438,7 +438,15 @@ export async function scanYoutubeJsFeed(feed, {
       if (pages === 1) firstPageItemCount += 1;
       else catchUpItemCount += 1;
       const publishedDay = localizedPublishedUtcDay(entry.published_text, { locale, now });
-      entries.push({ ...entry, position: sourcePosition, published_day: publishedDay });
+      entries.push({
+        ...entry,
+        position: sourcePosition,
+        published_day: publishedDay,
+        published_at: publishedDay,
+        published_at_status: publishedDay ? "relative" : "unresolved",
+        published_at_precision: publishedDay ? "date_only" : "unknown",
+        published_at_source: publishedDay ? "youtube_uploads_relative_time" : null,
+      });
       const matchedAnchorIndex = anchorIndexes.get(entry.id);
       if (matchedAnchorIndex != null) {
         for (let index = 0; index < matchedAnchorIndex; index += 1) {
@@ -520,6 +528,7 @@ export async function collectYoutubeJsUploadBundle(client, channelId, limit = 30
       view_count_text: upload.view_count != null ? String(upload.view_count) : null,
       published_text: upload.published_text,
       published_at: publishedDay,
+      published_at_status: publishedDay ? "relative" : "unresolved",
       published_at_precision: publishedDay ? "date_only" : "unknown",
       published_at_source: publishedDay ? "youtube_uploads_relative_time" : null,
       position: index + 1,
@@ -1430,6 +1439,7 @@ export function normalizeYoutubeJsVideoInfo(info, comments = null, {
       : commentsPage,
     published_at: published.value,
     published_text: published.value?.slice(0, 10) ?? null,
+    published_at_status: published.value ? "exact" : "unresolved",
     published_at_precision: published.precision,
     published_at_source: published.value ? "youtubejs_player_microformat" : null,
     availability,

@@ -83,6 +83,7 @@ test("the shared Full Crawl detail path stores a public authoritative Video", ()
   );
   assert.equal(observed.candidate.result_json.access.access_status, "public");
   assert.equal(observed.candidate.result_json.classification.authoritative, true);
+  assert.equal(observed.value.details_requested_due_to_unresolved_count, 1);
 });
 
 test("the shared Full Crawl detail path normalizes disabled comments to zero", () => {
@@ -217,6 +218,7 @@ test("the shared Full Crawl path accepts live_status as the only current-Live si
   assert.equal(observed.candidate.result_json.disposition.reason_code, "live_in_progress");
   assert.equal(observed.candidate.api_status, "not_needed");
   assert.equal(observed.candidate.content_key, null);
+  assert.equal(observed.value.details_requested_due_to_unresolved_count, 0);
 });
 
 test("the shared Full Crawl detail path stores an ended Live replay", () => {
@@ -250,6 +252,23 @@ test("the shared Full Crawl detail path records an age-window exclusion", () => 
   assert.match(observed.candidate.next_attempt_at, /^\d{4}-\d{2}-\d{2}T/);
   assert.equal(observed.candidate.content_key, null);
   assert.equal(observed.candidate.result_json.scope.reason, "older_than_max_age");
+  assert.equal(observed.value.details_requested_due_to_unresolved_count, 0);
+});
+
+test("Candidate retry keeps an existing recent Detail over conflicting old flat evidence", () => {
+  const observed = runScenario("candidate_retry_publication_conflict");
+
+  assert.equal(observed.error, null);
+  assert.equal(observed.ytdlp_detail_attempts, 1);
+  assert.equal(observed.candidate.disposition, "stored");
+  assert.equal(
+    observed.candidate.result_json.detail.published_at,
+    "2026-07-19T00:00:00.000Z",
+  );
+  assert.equal(
+    observed.candidate.result_json.detail.published_text,
+    "Existing recent Detail text",
+  );
 });
 
 test("the shared Full Crawl detail path persists a deferred disposition before retrying a failure", () => {

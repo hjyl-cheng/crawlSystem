@@ -1496,6 +1496,10 @@ test("Video execution deduplicates Contents and samples current Uploads dates in
               content_type: "video",
               title: "Uploads dated",
               published_day: "2026-07-19",
+              published_at: "2026-07-19",
+              published_at_status: "relative",
+              published_at_precision: "date_only",
+              published_at_source: "youtube_uploads_relative_time",
             },
             { id: "known-anchor", position: 4, content_type: "video", title: "Known" },
           ],
@@ -2519,9 +2523,9 @@ test("Video detail falls back to yt-dlp when YouTube.js returns incomplete facts
         description: null,
         description_status: "unresolved",
         description_source: null,
-        published_at: "2026-07-19T00:00:00.000Z",
-        published_at_precision: "date_only",
-        published_at_source: "yt_dlp_upload_date",
+        published_at: "2026-07-18T23:00:00.000Z",
+        published_at_precision: "second",
+        published_at_source: "yt_dlp_timestamp",
         comment_count: null,
         comment_count_status: "unresolved",
         comment_count_source: null,
@@ -2541,6 +2545,14 @@ test("Video detail falls back to yt-dlp when YouTube.js returns incomplete facts
   assert.equal(result.description, "Long description collected by YouTube.js");
   assert.equal(result.published_at, "2026-07-19T12:34:56.000Z");
   assert.equal(result.published_at_precision, "second");
+  assert.equal(
+    result.publication_evidence_conflict?.reason_code,
+    "equal_quality_publication_conflict",
+  );
+  assert.equal(
+    result.publication_evidence_conflict?.resolution?.reason_code,
+    "equal_quality_conflict_current_retained",
+  );
   assert.equal(result.comment_count, 2);
   assert.equal(result.comments_first_page.returned_count, 1);
   assert.equal(result.access_status, "public");
@@ -3181,6 +3193,12 @@ test("Video discovery honors an upcoming state first revealed by Player detail",
 
 test("Video discovery does not persist a live broadcast while it is in progress", async () => {
   const fixture = databaseFixture();
+  for (const [index, row] of fixture.state.contents.entries()) {
+    row.published_at = `2026-01-0${index + 1}T00:00:00.000Z`;
+    row.published_at_status = "exact";
+    row.published_at_precision = "second";
+    row.published_at_source = "test_existing_detail";
+  }
   const fetched = [];
   const result = await executeIncrementalVideo({
     plan: plan(),
@@ -3239,6 +3257,88 @@ test("Video discovery does not persist a live broadcast while it is in progress"
     false,
   );
   assert.equal(fetched.includes("active-live"), false);
+  assert.equal(fixture.state.candidateRows[0].disposition, "terminal_excluded");
+  assert.equal(
+    fixture.state.candidateRows[0].result_json.disposition.reason_code,
+    "live_in_progress",
+  );
+  assert.equal(result.lifecycle_status, "active");
+  assert.equal(fixture.state.channelStatus, "active");
+  assert.equal(
+    fixture.state.outbox[0].payload.activity_evidence.uncertain_content_count,
+    1,
+  );
+});
+
+test("a throttled live Candidate still blocks Incremental dormancy from current Uploads", async () => {
+  const fixture = databaseFixture();
+  for (const [index, row] of fixture.state.contents.entries()) {
+    row.published_at = `2026-01-0${index + 1}T00:00:00.000Z`;
+    row.published_at_status = "exact";
+    row.published_at_precision = "second";
+    row.published_at_source = "test_existing_detail";
+  }
+  fixture.state.candidateRows.push({
+    candidate_id: "1",
+    run_id: "incremental:prior-live",
+    channel_id: "UCvideo",
+    source_content_id: "still-live",
+    disposition: "terminal_excluded",
+    next_attempt_at: "2026-07-21T00:00:00.000Z",
+    result_json: {
+      disposition: {
+        kind: "terminal_excluded",
+        reason_code: "live_in_progress",
+      },
+    },
+  });
+  const fetched = [];
+  const result = await executeIncrementalVideo({
+    plan: { ...plan(), job_id: "incremental__throttled_live" },
+    runId: "incremental:throttled-live",
+    startedAt: "2026-07-20T01:00:00.000Z",
+    query: fixture.query,
+    withTransaction: fixture.withTransaction,
+    getChannelSnapshot: async () => ({
+      async scanUploads() {
+        return {
+          playlist_id: "UUvideo",
+          entries: [
+            {
+              id: "still-live",
+              position: 1,
+              content_type: "live",
+              is_live: true,
+              title: "Still live",
+            },
+            { id: "known-anchor", position: 2, title: "Known" },
+          ],
+          pages: 1,
+          item_count: 2,
+          parse_gap_count: 0,
+          anchor_matched: true,
+          matched_anchor_id: "known-anchor",
+          stop_reason: "anchor_matched",
+          terminal_reason: "anchor_matched",
+          complete: true,
+          raw: { engine: "youtubei.js@test" },
+        };
+      },
+    }),
+    fetchDetail: async (videoId) => {
+      fetched.push(videoId);
+      return detail(videoId, 100);
+    },
+  });
+
+  assert.equal(fetched.includes("still-live"), false);
+  assert.equal(result.lifecycle_status, "active");
+  assert.equal(fixture.state.channelStatus, "active");
+  assert.equal(fixture.state.candidateRows.length, 1);
+  assert.equal(
+    fixture.state.outbox[0].payload.activity_evidence.uncertain_content_count,
+    1,
+  );
 });
 
 test("Video discovery stores an unlisted detail without treating it as public", async () => {

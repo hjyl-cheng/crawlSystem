@@ -6,16 +6,83 @@ import {
   DORMANT_WINDOW_DAYS,
   evaluateVideoActivity,
 } from "./channelDormancy.js";
+import {
+  classifyPublicationWindow,
+  normalizePublicationEvidence,
+  PUBLICATION_TIME_CLASSIFIER_VERSION,
+} from "./publicationTimeEvidence.js";
+
+export const INCREMENTAL_VIDEO_ACTIVITY_POLICY_VERSION = "incremental-video-activity-v2";
 
 function canonicalStatus(row) {
   if (row?.status === "rejected" && row?.reject_reason === DORMANT_REASON) return "dormant";
   return String(row?.status ?? "");
 }
 
+export function classifyStoredVideoActivity(rows, {
+  observedAt,
+  maxAgeDays = DORMANT_WINDOW_DAYS,
+} = {}) {
+  const relationCounts = {
+    inside: 0,
+    outside: 0,
+    after_as_of: 0,
+    cutoff_overlap: 0,
+    unresolved: 0,
+  };
+  const unresolvedByStatusCounts = {
+    relative: 0,
+    estimated: 0,
+    unavailable: 0,
+    unresolved: 0,
+  };
+  const seen = new Set();
+  let recent = 0;
+  let uncertain = 0;
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const identity = String(row?.source_content_id ?? "").trim();
+    if (identity && seen.has(identity)) continue;
+    if (identity) seen.add(identity);
+    const contentType = String(row?.content_type ?? "").trim();
+    if (!["video", "short", "live"].includes(contentType)) continue;
+    const unfinishedLive = contentType === "live"
+      && row?.live_ended_at == null
+      && row?.duration_seconds == null;
+    if (unfinishedLive) {
+      uncertain += 1;
+      relationCounts.unresolved += 1;
+      unresolvedByStatusCounts.unresolved += 1;
+      continue;
+    }
+    const publication = normalizePublicationEvidence(row);
+    const window = classifyPublicationWindow(publication, {
+      asOf: observedAt,
+      maxAgeDays,
+    });
+    relationCounts[window.relation] += 1;
+    if (window.relation === "inside") recent += 1;
+    else if (["after_as_of", "cutoff_overlap", "unresolved"].includes(window.relation)) {
+      uncertain += 1;
+      if (window.relation === "unresolved") {
+        unresolvedByStatusCounts[publication.published_at_status] += 1;
+      }
+    }
+  }
+  return {
+    recentPublishedContentCount: recent,
+    uncertainContentCount: uncertain,
+    relationCounts,
+    unresolvedByStatusCounts,
+    classifierVersion: PUBLICATION_TIME_CLASSIFIER_VERSION,
+    policyVersion: INCREMENTAL_VIDEO_ACTIVITY_POLICY_VERSION,
+  };
+}
+
 export async function applyVideoActivityLifecycle(client, {
   channelId,
   observedAt,
   discoveryComplete,
+  runActivityEvidence = [],
 }) {
   if (!client || typeof client.query !== "function") {
     throw new TypeError("an active PostgreSQL client is required");
@@ -37,27 +104,26 @@ export async function applyVideoActivityLifecycle(client, {
     throw new Error(`Channel lifecycle does not permit Video activity: ${channel.status}`);
   }
 
-  const referenceDay = observed.toISOString().slice(0, 10);
-  const recentRows = await client.query(
-    `SELECT count(DISTINCT source_content_id)::int AS recent_published_content_count
+  const evidenceRows = await client.query(
+    `SELECT source_content_id,content_type,live_ended_at,duration_seconds,
+            published_at,published_at_status,published_at_precision,published_at_source
      FROM crawler.contents
      WHERE channel_id=$1
-       AND (
-         content_type IN ('video','short')
-         OR (
-           content_type='live'
-           AND (live_ended_at IS NOT NULL OR duration_seconds IS NOT NULL)
-         )
-       )
-       AND published_at IS NOT NULL
-       AND (published_at AT TIME ZONE 'UTC')::date
-             BETWEEN ($2::date-($3::int-1)) AND $2::date`,
-    [channelId, referenceDay, DORMANT_WINDOW_DAYS],
+       AND content_type IN ('video','short','live')
+     ORDER BY source_content_id`,
+    [channelId],
   );
-  const recent = Number(recentRows.rows[0]?.recent_published_content_count ?? 0);
+  const evidence = classifyStoredVideoActivity([
+    ...(Array.isArray(runActivityEvidence) ? runActivityEvidence : []),
+    ...evidenceRows.rows,
+  ], {
+    observedAt: observed,
+  });
+  const recent = evidence.recentPublishedContentCount;
+  const uncertain = evidence.uncertainContentCount;
   const decision = evaluateVideoActivity({
     recentPublishedContentCount: recent,
-    uncertainContentCount: 0,
+    uncertainContentCount: uncertain,
     discoveryComplete,
   });
 
@@ -74,6 +140,11 @@ export async function applyVideoActivityLifecycle(client, {
       activity: null,
       lifecycle_status: currentStatus,
       recent_published_content_count: recent,
+      uncertain_content_count: uncertain,
+      classifier_version: evidence.classifierVersion,
+      policy_version: evidence.policyVersion,
+      relation_counts: evidence.relationCounts,
+      unresolved_by_status_counts: evidence.unresolvedByStatusCounts,
       conclusive: false,
     };
   }
@@ -91,6 +162,11 @@ export async function applyVideoActivityLifecycle(client, {
       activity: activeVideoActivity(recent),
       lifecycle_status: "active",
       recent_published_content_count: recent,
+      uncertain_content_count: uncertain,
+      classifier_version: evidence.classifierVersion,
+      policy_version: evidence.policyVersion,
+      relation_counts: evidence.relationCounts,
+      unresolved_by_status_counts: evidence.unresolvedByStatusCounts,
       conclusive: true,
       transitioned: currentStatus !== "active",
     };
@@ -127,6 +203,11 @@ export async function applyVideoActivityLifecycle(client, {
     activity: dormantVideoActivity(dormantState),
     lifecycle_status: "dormant",
     recent_published_content_count: 0,
+    uncertain_content_count: 0,
+    classifier_version: evidence.classifierVersion,
+    policy_version: evidence.policyVersion,
+    relation_counts: evidence.relationCounts,
+    unresolved_by_status_counts: evidence.unresolvedByStatusCounts,
     conclusive: true,
     transitioned: currentStatus !== "dormant",
     dormant_recheck_day: dormantState.dormant_recheck_day,

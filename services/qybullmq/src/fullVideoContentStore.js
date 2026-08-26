@@ -1,6 +1,20 @@
 import { positiveDurationSeconds } from "./detailPolicy.js";
 import { parseLocalizedCountDetails } from "./localizedCount.js";
+import {
+  publicationEvidenceFromFields,
+  publicationEvidenceCandidateWinsSql,
+  publicationEvidenceConflictPatchSql,
+} from "./publicationTimeEvidence.js";
 import { refreshVideoPublicationItemHashes } from "./videoPublicationItemStore.js";
+
+const CONTENT_UPSERT_PUBLICATION_WINS = publicationEvidenceCandidateWinsSql(
+  "crawler.contents",
+  "EXCLUDED",
+);
+const CONTENT_UPSERT_PUBLICATION_CONFLICT = publicationEvidenceConflictPatchSql(
+  "crawler.contents",
+  "EXCLUDED",
+);
 
 function text(value) {
   const output = String(value ?? "").trim();
@@ -154,6 +168,7 @@ export async function upsertFullVideoContent(client, {
     : `https://www.youtube.com/watch?v=${candidate.source_content_id}`;
   const views = normalizeFullVideoViewCount(detail, { locale });
   const commentsDisabled = detail.comments_disabled === true;
+  const publication = publicationEvidenceFromFields(detail);
 
   const stored = await client.query(
     `INSERT INTO crawler.contents (
@@ -234,30 +249,14 @@ export async function upsertFullVideoContent(client, {
                      ELSE crawler.contents.keywords
                    END,
                    published_text_raw=COALESCE(EXCLUDED.published_text_raw,crawler.contents.published_text_raw),
-                   published_at=CASE
-                     WHEN EXCLUDED.published_at IS NOT NULL
-                       AND EXCLUDED.published_at_precision='second' THEN EXCLUDED.published_at
-                     WHEN crawler.contents.published_at IS NULL THEN EXCLUDED.published_at
-                     ELSE crawler.contents.published_at
-                   END,
-                   published_at_status=CASE
-                     WHEN EXCLUDED.published_at IS NOT NULL
-                       AND EXCLUDED.published_at_precision='second' THEN EXCLUDED.published_at_status
-                     WHEN crawler.contents.published_at IS NOT NULL THEN crawler.contents.published_at_status
-                     ELSE EXCLUDED.published_at_status
-                   END,
-                   published_at_source=CASE
-                     WHEN EXCLUDED.published_at IS NOT NULL
-                       AND EXCLUDED.published_at_precision='second' THEN EXCLUDED.published_at_source
-                     WHEN crawler.contents.published_at IS NOT NULL THEN crawler.contents.published_at_source
-                     ELSE EXCLUDED.published_at_source
-                   END,
-                   published_at_precision=CASE
-                     WHEN EXCLUDED.published_at IS NOT NULL
-                       AND EXCLUDED.published_at_precision='second' THEN 'second'
-                     WHEN crawler.contents.published_at IS NOT NULL THEN crawler.contents.published_at_precision
-                     ELSE EXCLUDED.published_at_precision
-                   END,
+                   published_at=CASE WHEN ${CONTENT_UPSERT_PUBLICATION_WINS}
+                     THEN EXCLUDED.published_at ELSE crawler.contents.published_at END,
+                   published_at_status=CASE WHEN ${CONTENT_UPSERT_PUBLICATION_WINS}
+                     THEN EXCLUDED.published_at_status ELSE crawler.contents.published_at_status END,
+                   published_at_source=CASE WHEN ${CONTENT_UPSERT_PUBLICATION_WINS}
+                     THEN EXCLUDED.published_at_source ELSE crawler.contents.published_at_source END,
+                   published_at_precision=CASE WHEN ${CONTENT_UPSERT_PUBLICATION_WINS}
+                     THEN EXCLUDED.published_at_precision ELSE crawler.contents.published_at_precision END,
                    is_recent=true,
                    length_text=COALESCE(
                      NULLIF(NULLIF(EXCLUDED.length_text,'0:00'),'00:00'),
@@ -355,7 +354,8 @@ export async function upsertFullVideoContent(client, {
                    live_started_at=COALESCE(EXCLUDED.live_started_at,crawler.contents.live_started_at),
                    live_ended_at=COALESCE(EXCLUDED.live_ended_at,crawler.contents.live_ended_at),
                    extractor_version=COALESCE(EXCLUDED.extractor_version,crawler.contents.extractor_version),
-                   raw_json=crawler.contents.raw_json || EXCLUDED.raw_json,
+                   raw_json=crawler.contents.raw_json || EXCLUDED.raw_json
+                     || ${CONTENT_UPSERT_PUBLICATION_CONFLICT},
                    last_seen_at=now(),
                    last_enriched_at=now()
      RETURNING content_key`,
@@ -371,10 +371,10 @@ export async function upsertFullVideoContent(client, {
       url,
       detail.thumbnail_url ?? candidate.thumbnail_url,
       detail.published_text ?? null,
-      detail.published_at ?? null,
-      detail.published_at_status ?? "unresolved",
-      detail.published_at_source ?? detail.source ?? null,
-      detail.published_at_precision ?? "unknown",
+      publication.published_at,
+      publication.published_at_status,
+      publication.published_at_source,
+      publication.published_at_precision,
       detail.length_text ?? null,
       positiveDurationSeconds(detail.duration_seconds),
       detail.duration_status ?? "unresolved",

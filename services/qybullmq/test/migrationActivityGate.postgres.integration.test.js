@@ -77,6 +77,9 @@ test("migration activity SQL admits zero-content Channels as dormant", {
              'dispatch_batch_id',$4::text,
              'migration_activity_gate',jsonb_build_object(
                'required',true,'decision','pending','max_age_days',90
+             ),
+             'migration_activity_initial_evidence',jsonb_build_object(
+               'evidence_complete',true
              )
            )
          )`,
@@ -88,8 +91,8 @@ test("migration activity SQL admits zero-content Channels as dormant", {
         await pool.query(
           `INSERT INTO crawler.contents (
              content_key,channel_id,run_id,content_type,source_content_id,title,
-             published_at,published_at_status,published_at_precision,is_recent
-           ) VALUES ($1,$2,$3,'video',$4,$4,$5,'exact','second',true)`,
+             published_at,published_at_status,published_at_source,published_at_precision,is_recent
+           ) VALUES ($1,$2,$3,'video',$4,$4,$5,'exact','test_detail','second',true)`,
           [contentKey, channelId, runId, item.name, item.publishedAt],
         );
         await pool.query(

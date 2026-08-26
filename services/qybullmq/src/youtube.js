@@ -444,6 +444,7 @@ for client in ("web_safari", "android"):
             "timestamp": info.get("timestamp"),
             "upload_date": info.get("upload_date"),
             "published_at": published_at,
+            "published_at_status": "exact" if published_at else "unresolved",
             "published_text": published_at[:10] if published_at else None,
             "published_at_precision": published_precision,
             "published_at_source": "yt_dlp_timestamp" if published_precision == "second" else "yt_dlp_upload_date" if published_precision == "date_only" else None,
@@ -1608,6 +1609,7 @@ function detailFromPlayerResponse(player, url = null) {
     duration_source: details.lengthSeconds != null || microformat.lengthSeconds != null ? "youtubei_player" : null,
     published_text: dateTextFromIsoLike(publishedRaw),
     published_at: isoToTimestamp(publishedRaw),
+    published_at_status: publishedRaw ? "exact" : "unresolved",
     published_at_precision: publishedRaw && /T\d{2}:\d{2}/.test(String(publishedRaw)) ? "second" : publishedRaw ? "date_only" : "unknown",
     published_at_source: publishedRaw ? "youtubei_player_microformat" : null,
     playability_status: player.playabilityStatus?.status ?? null,
@@ -1786,6 +1788,8 @@ export function detailFromYtDlpResult(parsed, url = null) {
     duration_source: parsed.duration != null ? "yt_dlp" : null,
     published_text: dateTextFromIsoLike(parsed.published_text),
     published_at: isoToTimestamp(parsed.published_at ?? parsed.published_text),
+    published_at_status: parsed.published_at_status
+      ?? (parsed.published_at || parsed.published_text ? "exact" : "unresolved"),
     published_at_precision: parsed.published_at_precision,
     published_at_source: parsed.published_at_source,
     ytdlp_client: parsed.client,
@@ -1812,13 +1816,17 @@ export function detailFromYtDlpResult(parsed, url = null) {
     reason: parsed.playability_reason,
   });
   if (parsed.playability_status != null || parsed.playability_reason != null) {
+    const explicitAgeRestriction = playability.kind === "content"
+      && playability.reason_code === "age_restricted"
+      && parsedAccessStatus === "login_required";
     result.playability_kind = playability.kind;
     result.playability_reason_code = playability.reason_code;
     result.playability_retry_mode = playability.retry_mode;
-    result.access_status = parsedAccessStatus === "unknown"
+    result.access_status = parsedAccessStatus === "unknown" || explicitAgeRestriction
       ? playability.access_status
       : parsedAccessStatus;
-    if (parsedAvailability != null) result.availability = parsedAvailability;
+    if (explicitAgeRestriction) result.availability = playability.availability;
+    else if (parsedAvailability != null) result.availability = parsedAvailability;
     else if (playability.availability != null) result.availability = playability.availability;
     else if (playability.kind !== "content") delete result.availability;
   }
@@ -1829,6 +1837,42 @@ export function detailFromYtDlpResult(parsed, url = null) {
   result.keywords = normalizeVideoKeywords(parsed.tags);
   result.keywords_observed = true;
   return normalizeVideoTextMetadata(result);
+}
+
+export function channelUploadEntryFromYtDlpResult(entry, index = 0) {
+  const compactUploadDate = /^\d{8}$/.test(String(entry?.upload_date ?? ""))
+    ? `${String(entry.upload_date).slice(0, 4)}-${String(entry.upload_date).slice(4, 6)}-${String(entry.upload_date).slice(6, 8)}`
+    : null;
+  const timestampSeconds = Number(entry?.timestamp);
+  const timestampPublishedAt = Number.isFinite(timestampSeconds) && timestampSeconds > 0
+    ? new Date(timestampSeconds * 1000).toISOString()
+    : isoToTimestamp(entry?.timestamp);
+  const uploadDatePublishedAt = isoToTimestamp(compactUploadDate);
+  const publishedAt = timestampPublishedAt ?? uploadDatePublishedAt;
+  const liveStatus = String(entry?.live_status ?? "").trim().toLowerCase();
+  return {
+    video_id: String(entry?.id),
+    title: entry?.title ?? null,
+    url: `https://www.youtube.com/watch?v=${encodeURIComponent(entry?.id)}`,
+    source_url: entry?.url ?? null,
+    thumbnail_url: entry?.thumbnail_url ?? null,
+    duration_seconds: optionalPositiveInteger(entry?.duration),
+    view_count_text: entry?.view_count != null ? String(entry.view_count) : null,
+    published_text: dateTextFromIsoLike(publishedAt),
+    published_at: publishedAt,
+    published_at_status: publishedAt ? "exact" : "unresolved",
+    published_at_precision: timestampPublishedAt ? "second" : uploadDatePublishedAt ? "date_only" : "unknown",
+    published_at_source: timestampPublishedAt
+      ? "yt_dlp_flat_timestamp"
+      : uploadDatePublishedAt ? "yt_dlp_flat_upload_date" : null,
+    position: Number(entry?.position) || index + 1,
+    content_type: ["video", "short", "live"].includes(entry?.content_type) ? entry.content_type : null,
+    type_source: entry?.type_source ?? null,
+    type_membership: Array.isArray(entry?.type_membership) ? entry.type_membership : [],
+    is_live: entry?.is_live === true || liveStatus === "is_live",
+    is_upcoming: ["is_upcoming", "upcoming"].includes(liveStatus),
+    live_status: liveStatus || null,
+  };
 }
 
 export async function fetchChannelUploads(channelId, limit = 30, {
@@ -1881,38 +1925,7 @@ export async function fetchChannelUploads(channelId, limit = 30, {
     channel_id: cleanChannelId,
     playlist_id: parsed.playlist_id,
     playlist_url: parsed.playlist_url,
-    entries: parsed.entries.slice(0, cleanLimit).map((entry, index) => {
-      const compactUploadDate = /^\d{8}$/.test(String(entry.upload_date ?? ""))
-        ? `${String(entry.upload_date).slice(0, 4)}-${String(entry.upload_date).slice(4, 6)}-${String(entry.upload_date).slice(6, 8)}`
-        : null;
-      const timestampSeconds = Number(entry.timestamp);
-      const publishedAt = Number.isFinite(timestampSeconds) && timestampSeconds > 0
-        ? new Date(timestampSeconds * 1000).toISOString()
-        : isoToTimestamp(entry.timestamp ?? compactUploadDate);
-      const liveStatus = String(entry.live_status ?? "").trim().toLowerCase();
-      return {
-        video_id: String(entry.id),
-        title: entry.title ?? null,
-        url: `https://www.youtube.com/watch?v=${encodeURIComponent(entry.id)}`,
-        source_url: entry.url ?? null,
-        thumbnail_url: entry.thumbnail_url ?? null,
-        duration_seconds: optionalPositiveInteger(entry.duration),
-        view_count_text: entry.view_count != null ? String(entry.view_count) : null,
-        published_text: dateTextFromIsoLike(publishedAt),
-        published_at: publishedAt,
-        published_at_precision: entry.timestamp != null ? "second" : publishedAt ? "date_only" : "unknown",
-        published_at_source: entry.timestamp != null
-          ? "yt_dlp_flat_timestamp"
-          : publishedAt ? "yt_dlp_flat_upload_date" : null,
-        position: Number(entry.position) || index + 1,
-        content_type: ["video", "short", "live"].includes(entry.content_type) ? entry.content_type : null,
-        type_source: entry.type_source ?? null,
-        type_membership: Array.isArray(entry.type_membership) ? entry.type_membership : [],
-        is_live: entry.is_live === true || liveStatus === "is_live",
-        is_upcoming: ["is_upcoming", "upcoming"].includes(liveStatus),
-        live_status: liveStatus || null,
-      };
-    }),
+    entries: parsed.entries.slice(0, cleanLimit).map(channelUploadEntryFromYtDlpResult),
     tab_counts: parsed.tab_counts ?? {},
     uploads_missing: Boolean(parsed.uploads_missing),
     activity_evidence_complete: parseGapCount === 0
@@ -2121,6 +2134,7 @@ export function detailFromDataApiItem(item, url = null) {
     duration_source: contentDetails.duration ? "youtube_data_api_content_details" : null,
     published_text: dateTextFromIsoLike(snippet.publishedAt),
     published_at: isoToTimestamp(snippet.publishedAt),
+    published_at_status: snippet.publishedAt ? "exact" : "unresolved",
     published_at_precision: snippet.publishedAt ? "second" : "unknown",
     published_at_source: snippet.publishedAt ? "youtube_data_api_snippet" : null,
     live_status: liveStatus,

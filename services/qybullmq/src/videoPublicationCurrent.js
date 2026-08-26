@@ -5,6 +5,7 @@ import {
   VIDEO_WINDOW_POLICY_VERSION,
 } from "./publicationContract.js";
 import { buildPublicationSourceTrace } from "./publicationSourceTrace.js";
+import { classifyPublicationWindow } from "./publicationTimeEvidence.js";
 import { publicationResultHash } from "./publicationResultHash.js";
 import {
   normalizePublicationImageUrl,
@@ -398,29 +399,23 @@ function trustedAnchorContinuity({ rows, source, previousCurrent, channelId }) {
   return Boolean(firstSeenAt && firstSeenAt <= baselineObservedAt);
 }
 
-function publicationRange(row, asOfMs, asOfDay) {
+function publicationRange(row, asOfMs) {
   const published = timestamp(row.published_at);
-  const precision = text(row.published_at_precision);
-  if (!published
-      || row.published_at_status !== "exact"
-      || !["second", "date_only"].includes(precision)) {
+  const range = classifyPublicationWindow(row, {
+    asOf: asOfMs,
+    maxAgeDays: WINDOW_MAX_AGE_DAYS,
+  });
+  if (!published || range.relation === "unresolved") {
     return { trusted: false, afterAsOf: false, outsideWindow: false, sortTime: null };
   }
   const publishedMs = new Date(published).getTime();
-  const publishedDay = utcDay(published);
-  if (precision === "second") {
-    return {
-      trusted: true,
-      afterAsOf: publishedMs > asOfMs,
-      outsideWindow: publishedMs <= asOfMs - (WINDOW_MAX_AGE_DAYS * MILLISECONDS_PER_DAY),
-      sortTime: publishedMs,
-    };
-  }
   return {
     trusted: true,
-    afterAsOf: publishedDay > asOfDay,
-    outsideWindow: publishedDay <= asOfDay - WINDOW_MAX_AGE_DAYS,
-    sortTime: publishedDay * MILLISECONDS_PER_DAY,
+    afterAsOf: range.relation === "after_as_of",
+    outsideWindow: ["outside", "cutoff_overlap"].includes(range.relation),
+    sortTime: range.precision === "date_only"
+      ? utcDay(published) * MILLISECONDS_PER_DAY
+      : publishedMs,
   };
 }
 
@@ -430,7 +425,6 @@ export function evaluateVideoPublicationWindowCoverage({ rows, channelId, asOf }
   const asOfIso = timestamp(asOf);
   if (!asOfIso) throw new TypeError("asOf must be a valid timestamp");
   const asOfMs = new Date(asOfIso).getTime();
-  const asOfDay = utcDay(asOfIso);
   const seen = new Set();
   let qualifiedCount = 0;
   let excludedCount = 0;
@@ -439,7 +433,7 @@ export function evaluateVideoPublicationWindowCoverage({ rows, channelId, asOf }
     const row = object(raw);
     const contentId = text(row.source_content_id);
     const kind = text(row.content_type);
-    const range = publicationRange(row, asOfMs, asOfDay);
+    const range = publicationRange(row, asOfMs);
     if (contentId && seen.has(contentId)) {
       excludedCount += 1;
       continue;
@@ -507,7 +501,7 @@ export function buildVideoPublicationCurrent({
     const row = object(raw);
     const contentId = text(row.source_content_id);
     const kind = text(row.content_type);
-    const range = publicationRange(row, asOfMs, asOfDay);
+    const range = publicationRange(row, asOfMs);
     if (contentId && seen.has(contentId)) {
       exclusions.push({ content_id: contentId, reason_code: "duplicate_identity" });
       continue;
