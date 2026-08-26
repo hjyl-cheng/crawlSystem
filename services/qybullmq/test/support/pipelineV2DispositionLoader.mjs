@@ -10,6 +10,13 @@ const mockedSpecifiers = new Set([
 ]);
 
 export async function resolve(specifier, context, nextResolve) {
+  if (
+    process.env.QY_PIPELINE_DISPOSITION_SCENARIO === "detail_transport_cancelled"
+    && context.parentURL?.endsWith(pipelineUrlSuffix)
+    && specifier === "./youtubeJs.js"
+  ) {
+    return nextResolve(specifier, context);
+  }
   if (context.parentURL?.endsWith(pipelineUrlSuffix) && mockedSpecifiers.has(specifier)) {
     return { url: runtimeMockUrl, shortCircuit: true };
   }

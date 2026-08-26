@@ -2,12 +2,14 @@ import { spawn } from "node:child_process";
 import { ProxyAgent, fetch as undiciFetch } from "undici";
 import { persistentFetch } from "./httpClient.js";
 import { fetchWithFingerprint } from "./fingerprintFetch.js";
+import { combineAbortSignals, throwIfAborted } from "./abortSignal.js";
 import {
   currentManagedAbortSignal,
   currentProxyIdentity,
   runManagedProxyRequest,
 } from "./proxyIdentity.js";
 import {
+  currentChannelExecutionAbortSignal,
   recordChannelExecutionFailure,
   recordChannelExecutionRequest,
 } from "./channelExecutionContext.js";
@@ -800,7 +802,12 @@ function isUsableYoutubePage(text) {
     && /videoRenderer|channelRenderer|reelShelfRenderer|gridVideoRenderer|itemSectionRenderer|twoColumnSearchResultsRenderer|videoDetails|playerMicroformatRenderer/.test(body);
 }
 
-function runPythonJson(script, payload, { timeoutMs = 90000, maxBuffer = 20 * 1024 * 1024 } = {}) {
+function runPythonJson(script, payload, {
+  timeoutMs = 90000,
+  maxBuffer = 20 * 1024 * 1024,
+  signal = null,
+} = {}) {
+  throwIfAborted(signal);
   return new Promise((resolve, reject) => {
     const child = spawn("python3", ["-c", script], {
       stdio: ["pipe", "pipe", "pipe"],
@@ -811,42 +818,82 @@ function runPythonJson(script, payload, { timeoutMs = 90000, maxBuffer = 20 * 10
     });
     let stdout = "";
     let stderr = "";
-    const timer = setTimeout(() => {
-      child.kill("SIGKILL");
-      reject(new Error(`python helper timeout ${timeoutMs}ms`));
+    let settled = false;
+    let timer = null;
+    const cleanup = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+    };
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      callback(value);
+    };
+    const terminate = () => {
+      if (child.killed) return;
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        // The helper is already gone.
+      }
+    };
+    const onAbort = () => {
+      finish(reject, signal.reason);
+      terminate();
+    };
+    timer = setTimeout(() => {
+      const error = new Error(`python helper timeout ${timeoutMs}ms`);
+      finish(reject, error);
+      terminate();
     }, timeoutMs);
+    signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal?.aborted) {
+      onAbort();
+      return;
+    }
     child.stdout.on("data", (chunk) => {
       stdout += chunk.toString();
       if (stdout.length > maxBuffer) {
-        child.kill("SIGKILL");
-        reject(new Error("python helper stdout exceeded max buffer"));
+        finish(reject, new Error("python helper stdout exceeded max buffer"));
+        terminate();
       }
     });
     child.stderr.on("data", (chunk) => {
       stderr += chunk.toString();
       if (stderr.length > maxBuffer) {
-        child.kill("SIGKILL");
-        reject(new Error("python helper stderr exceeded max buffer"));
+        finish(reject, new Error("python helper stderr exceeded max buffer"));
+        terminate();
       }
     });
     child.on("error", (error) => {
-      clearTimeout(timer);
-      reject(error);
+      finish(reject, error);
     });
     child.on("close", (code) => {
-      clearTimeout(timer);
       if (code !== 0) {
-        reject(new Error(String(stderr || stdout || `python helper exited ${code}`).trim()));
+        finish(reject, new Error(String(stderr || stdout || `python helper exited ${code}`).trim()));
         return;
       }
       try {
-        resolve(JSON.parse(String(stdout || "{}")));
+        finish(resolve, JSON.parse(String(stdout || "{}")));
       } catch (error) {
-        reject(new Error(`python helper returned invalid JSON: ${error?.message || error}`));
+        finish(reject, new Error(`python helper returned invalid JSON: ${error?.message || error}`));
       }
     });
-    child.stdin.end(JSON.stringify(payload ?? {}));
+    try {
+      child.stdin.end(JSON.stringify(payload ?? {}));
+    } catch (error) {
+      finish(reject, error);
+    }
   });
+}
+
+function youtubeAdapterAbortSignal(signal) {
+  return combineAbortSignals(
+    signal,
+    currentManagedAbortSignal(),
+    currentChannelExecutionAbortSignal(),
+  );
 }
 
 function defaultHeaders(language = DEFAULT_LANGUAGE) {
@@ -1116,18 +1163,19 @@ export function findContinuationToken(root) {
 export async function youtubeFetch(url, init = {}) {
   const timeoutMs = Number(init.timeoutMs ?? DEFAULT_TIMEOUT_MS);
   const startedAt = Date.now();
+  const externalSignal = combineAbortSignals(init.signal, currentManagedAbortSignal());
+  throwIfAborted(externalSignal);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(new Error(`timeout ${timeoutMs}ms`)), timeoutMs);
   const requestDispatcher = dispatcher();
   try {
-    const signals = [init.signal, currentManagedAbortSignal(), controller.signal].filter(Boolean);
     const requestInit = {
       ...init,
       headers: {
         ...defaultHeaders(init.language || DEFAULT_LANGUAGE),
         ...(init.headers ?? {}),
       },
-      signal: signals.length === 1 ? signals[0] : AbortSignal.any(signals),
+      signal: combineAbortSignals(externalSignal, controller.signal),
     };
     const response = await runManagedProxyRequest(() => fetchWithFingerprint(
       "youtubejs_chrome",
@@ -1135,6 +1183,7 @@ export async function youtubeFetch(url, init = {}) {
       requestInit,
       () => undiciFetch(url, { ...requestInit, dispatcher: requestDispatcher }),
     ));
+    throwIfAborted(externalSignal);
     recordChannelExecutionRequest({
       engine: "youtube_http",
       client: "WEB",
@@ -1146,6 +1195,7 @@ export async function youtubeFetch(url, init = {}) {
     });
     return response;
   } catch (error) {
+    if (externalSignal?.aborted) throw externalSignal.reason;
     const annotated = annotateYoutubeFailure(error, {
       source: "youtube_fetch_transport",
       targetUrl: String(url),
@@ -1781,24 +1831,36 @@ export function detailFromYtDlpResult(parsed, url = null) {
   return normalizeVideoTextMetadata(result);
 }
 
-export async function fetchChannelUploads(channelId, limit = 30, { language = DEFAULT_LANGUAGE } = {}) {
+export async function fetchChannelUploads(channelId, limit = 30, {
+  language = DEFAULT_LANGUAGE,
+  signal = null,
+} = {}) {
+  const effectiveSignal = youtubeAdapterAbortSignal(signal);
+  throwIfAborted(effectiveSignal);
   const cleanChannelId = String(channelId ?? "").trim();
   if (!cleanChannelId) throw new Error("channel_id is required for uploads playlist");
   const cleanLimit = Math.max(1, Math.min(Number(limit) || 30, 100));
   let parsed;
   try {
-    parsed = await persistentChannelUploads(cleanChannelId, cleanLimit, { timeoutMs: 180000 });
+    parsed = await persistentChannelUploads(cleanChannelId, cleanLimit, {
+      timeoutMs: 180000,
+      signal: effectiveSignal,
+    });
+    throwIfAborted(effectiveSignal);
     if (!parsed) {
       parsed = await runPythonJson(
         YTDLP_UPLOADS_PY,
         { channel_id: cleanChannelId, limit: cleanLimit, language },
-        { timeoutMs: 180000, maxBuffer: 16 * 1024 * 1024 },
+        { timeoutMs: 180000, maxBuffer: 16 * 1024 * 1024, signal: effectiveSignal },
       );
+      throwIfAborted(effectiveSignal);
     }
   } catch (error) {
+    throwIfAborted(effectiveSignal);
     const targetUrl = `https://www.youtube.com/channel/${encodeURIComponent(cleanChannelId)}`;
     throw annotateYtDlpFailure(error, targetUrl, "yt_dlp_uploads");
   }
+  throwIfAborted(effectiveSignal);
   if (!parsed?.ok || !Array.isArray(parsed.entries)) {
     const targetUrl = `https://www.youtube.com/channel/${encodeURIComponent(cleanChannelId)}`;
     throw annotateYtDlpFailure(
@@ -1896,21 +1958,30 @@ function needsYtDlpFallback(detail, needsLengthText = true) {
     || detail?.comment_count == null;
 }
 
-export async function fetchVideoYtDlpDetail(videoId, _itemUrl = null, { language = DEFAULT_LANGUAGE } = {}) {
+export async function fetchVideoYtDlpDetail(videoId, _itemUrl = null, {
+  language = DEFAULT_LANGUAGE,
+  signal = null,
+} = {}) {
+  const effectiveSignal = youtubeAdapterAbortSignal(signal);
+  throwIfAborted(effectiveSignal);
   const url = `https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}`;
   let parsed;
   try {
-    parsed = await persistentVideoDetail(url, { timeoutMs: 90000 });
+    parsed = await persistentVideoDetail(url, { timeoutMs: 90000, signal: effectiveSignal });
+    throwIfAborted(effectiveSignal);
     if (!parsed) {
       parsed = await runPythonJson(
         YTDLP_QUICK_DETAIL_PY,
         { url, video_id: videoId, language },
-        { timeoutMs: 90000, maxBuffer: 12 * 1024 * 1024 },
+        { timeoutMs: 90000, maxBuffer: 12 * 1024 * 1024, signal: effectiveSignal },
       );
+      throwIfAborted(effectiveSignal);
     }
   } catch (error) {
+    throwIfAborted(effectiveSignal);
     throw annotateYtDlpFailure(error, url, "yt_dlp_detail");
   }
+  throwIfAborted(effectiveSignal);
   if (!parsed?.ok) {
     throw annotateYtDlpFailure(
       new Error(String(parsed?.error ?? "yt-dlp returned no detail")),
@@ -2283,14 +2354,24 @@ export async function fetchChannelDataApiDetails(channelIds, apiKey, { timeoutMs
   };
 }
 
-export async function fetchChannelYtDlpMetadata(channelUrl, { language = DEFAULT_LANGUAGE } = {}) {
-  let parsed = await persistentChannelMetadata(channelUrl, { timeoutMs: 90000 });
+export async function fetchChannelYtDlpMetadata(channelUrl, {
+  language = DEFAULT_LANGUAGE,
+  signal = null,
+} = {}) {
+  const effectiveSignal = youtubeAdapterAbortSignal(signal);
+  throwIfAborted(effectiveSignal);
+  let parsed = await persistentChannelMetadata(channelUrl, {
+    timeoutMs: 90000,
+    signal: effectiveSignal,
+  });
+  throwIfAborted(effectiveSignal);
   if (!parsed) {
     parsed = await runPythonJson(
       YTDLP_CHANNEL_METADATA_PY,
       { url: channelUrl, language },
-      { timeoutMs: 90000, maxBuffer: 12 * 1024 * 1024 },
+      { timeoutMs: 90000, maxBuffer: 12 * 1024 * 1024, signal: effectiveSignal },
     );
+    throwIfAborted(effectiveSignal);
   }
   if (!parsed?.ok) throw new Error(String(parsed?.error ?? "yt-dlp returned no channel metadata"));
   const followerCount = optionalInteger(parsed.channel_follower_count);

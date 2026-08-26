@@ -8,6 +8,7 @@ import {
   persistCommentFirstPage,
   shouldPersistCommentBackfill,
 } from "../src/commentFirstPageBackfill.js";
+import { runWithChannelExecution } from "../src/channelExecutionContext.js";
 
 const storedPage = {
   version: 1,
@@ -237,6 +238,30 @@ test("backfillOneCommentFirstPage keeps going when getInfo throws", async () => 
   assert.equal(result.reason, "comment_detail_error");
   assert.match(result.comments_error, /status/);
   assert.equal(persisted.length, 0);
+});
+
+test("backfillOneCommentFirstPage propagates channel cancellation instead of returning an error row", async () => {
+  const controller = new AbortController();
+  const reason = new Error("cancel comment backfill batch");
+  let forwardedSignal = null;
+
+  await assert.rejects(
+    runWithChannelExecution({ abort_signal: controller.signal }, () => (
+      backfillOneCommentFirstPage({
+        content_key: "UC1:video:cancelled",
+        channel_id: "UC1",
+        source_content_id: "cancelled",
+      }, {
+        fetchDetail: async (_videoId, { signal } = {}) => {
+          forwardedSignal = signal ?? null;
+          controller.abort(reason);
+          throw reason;
+        },
+      })
+    )),
+    (error) => error === reason,
+  );
+  assert.equal(forwardedSignal, controller.signal);
 });
 
 test("backfillOneCommentFirstPage rejects an empty page that conflicts with a stored positive count", async () => {

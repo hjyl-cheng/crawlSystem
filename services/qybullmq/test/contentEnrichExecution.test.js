@@ -558,7 +558,9 @@ test("heartbeat ownership loss aborts the current fetch and stops the rest of th
   const result = await execution;
 
   assert.deepEqual(fetches, ["lease-lost-first"]);
+  assert.equal(result.attempted, 1);
   assert.equal(result.done, 0);
+  assert.equal(result.skipped, 2);
   assert.equal(result.heartbeat.lease_lost, true);
   assert.equal(repository.rows.get("lease-lost-first").status, "leased");
   assert.equal(repository.rows.get("lease-lost-second").status, "leased");

@@ -10,6 +10,7 @@ function runScenario(scenario, { expectedStatus = 0 } = {}) {
   const harness = new URL("./support/pipelineV2DispositionHarness.mjs", import.meta.url);
   const env = { ...process.env };
   delete env.NODE_TEST_CONTEXT;
+  env.QY_PIPELINE_DISPOSITION_SCENARIO = scenario;
   const directory = mkdtempSync(join(tmpdir(), "qy-pipeline-disposition-"));
   const outputPath = join(directory, "result.json");
   try {
@@ -325,4 +326,25 @@ test("Data API videos.list excludes a running Live instead of repairing comment 
   assert.equal(observed.candidate.api_status, "not_needed");
   assert.deepEqual(observed.candidate.missing_fields, []);
   assert.equal(observed.candidate.content_key, null);
+});
+
+test("the shared detail pipeline propagates channel cancellation without yt-dlp fallback", () => {
+  const observed = runScenario("detail_cancelled", { expectedStatus: 1 });
+
+  assert.equal(observed.forwarded_detail_signal, true);
+  assert.equal(observed.cancellation_reason_preserved, true);
+  assert.equal(observed.youtubejs_detail_attempts, 1);
+  assert.equal(observed.ytdlp_detail_attempts, 0);
+  assert.equal(observed.candidate.result_json.detail, undefined);
+});
+
+test("the real detail pipeline aborts its YouTube.js transport well before the internal timeout", () => {
+  const observed = runScenario("detail_transport_cancelled", { expectedStatus: 1 });
+
+  assert.equal(observed.transport_aborted, true);
+  assert.equal(observed.cancellation_reason_preserved, true);
+  assert.equal(observed.cancellation_deadline_exceeded, false);
+  assert.equal(observed.cancellation_elapsed_ms < 250, true);
+  assert.equal(observed.ytdlp_detail_attempts, 0);
+  assert.equal(observed.candidate.result_json.detail, undefined);
 });

@@ -3,6 +3,8 @@ import {
   commentPageHasFirstPage,
   commentPageResolutionStatus,
 } from "./youtubeCommentPage.js";
+import { currentChannelExecutionAbortSignal } from "./channelExecutionContext.js";
+import { throwIfAborted } from "./abortSignal.js";
 import { fetchVideoYtDlpDetail } from "./youtube.js";
 
 export const COMMENT_FIRST_PAGE_BACKFILL_SOURCE = "comment_first_page_backfill_v1";
@@ -237,10 +239,14 @@ export async function backfillOneCommentFirstPage(target, {
 } = {}) {
   const videoId = text(target?.source_content_id);
   if (!videoId) throw new TypeError("target.source_content_id is required");
+  const signal = currentChannelExecutionAbortSignal();
+  throwIfAborted(signal);
   let detail;
   try {
-    detail = await fetchDetail(videoId);
+    detail = await fetchDetail(videoId, { signal });
+    throwIfAborted(signal);
   } catch (error) {
+    throwIfAborted(signal);
     return {
       content_key: target.content_key,
       channel_id: target.channel_id,
