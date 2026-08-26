@@ -522,6 +522,7 @@ scripts/compose.sh
 scripts/verify.sh
 services/qybullmq/src/databaseIdentity.js
 services/qybullmq/src/migrationInventorySchema.js
+services/qybullmq/src/migrationInventorySchema.sql
 services/qybullmq/src/migrationInventorySync.js
 services/qybullmq/src/migrationSource.js
 services/qybullmq/src/manualMigrationDispatch.js
