@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { businessPublicationIngressRuntimeConfig } from "../src/runBusinessPublicationIngress.js";
+import {
+  assertBusinessPublicationInboxPointerSchema,
+  businessPublicationIngressRuntimeConfig,
+} from "../src/runBusinessPublicationIngress.js";
 
 function environment(overrides = {}) {
   return {
@@ -51,5 +54,25 @@ test("Business Ingress runtime validates all settings before opening PostgreSQL"
       BUSINESS_PUBLICATION_TLS_KEY: "private-key",
     })).tls,
     { cert: "certificate", key: "private-key" },
+  );
+});
+
+test("Business Ingress refuses to start before the pointer-compatible Inbox schema", () => {
+  assert.deepEqual(assertBusinessPublicationInboxPointerSchema({
+    database_name: "newcrawler_business",
+    inbox_ready: true,
+    revision_ready: true,
+    inbox_envelope_nullable: true,
+    inbox_envelope_evidence_constraint: true,
+  }, "newcrawler_business"), { database: "newcrawler_business" });
+  assert.throws(
+    () => assertBusinessPublicationInboxPointerSchema({
+      database_name: "newcrawler_business",
+      inbox_ready: true,
+      revision_ready: true,
+      inbox_envelope_nullable: false,
+      inbox_envelope_evidence_constraint: false,
+    }, "newcrawler_business"),
+    /pointer-compatible Inbox schema/,
   );
 });

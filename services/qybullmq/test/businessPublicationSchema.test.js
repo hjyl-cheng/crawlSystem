@@ -14,6 +14,12 @@ test("Business Publication schema is isolated from legacy public and raw_crawler
   assert.doesNotMatch(schema, /(?:INSERT|UPDATE|DELETE)\s+(?:INTO|FROM)?\s*public\./i);
   assert.doesNotMatch(schema, /raw_crawler\./i);
   assert.match(schema, /Business Publication Revision Envelope is immutable/);
+  assert.match(schema, /ALTER COLUMN received_envelope DROP NOT NULL/);
+  assert.match(schema, /chk_business_publication_inbox_envelope_evidence/);
+  assert.match(
+    schema,
+    /receive_status IN \('rejected',\s*'conflict'\)[\s\S]*received_envelope IS NOT NULL/,
+  );
 });
 
 test("Business Publication schema apply requires database and row-count confirmation", () => {

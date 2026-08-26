@@ -259,6 +259,15 @@ test("Business Ingress persists idempotency, conflicts, gaps, and whole-Shard at
     assert.equal(repeated.receipts[0].status, "duplicate");
     assert.equal(repeated.receipts[0].receipt_id, first.receipts[0].receipt_id);
     assert.equal(repeated.receipts[0].persisted_at, first.receipts[0].persisted_at);
+    const acceptedStorage = await pool.query(
+      `SELECT inbox.received_envelope,revision.payload_json
+       FROM publication.inbox AS inbox
+       JOIN publication.revision AS revision USING(revision_id)
+       WHERE inbox.revision_id=$1`,
+      [accepted.revision_id],
+    );
+    assert.equal(acceptedStorage.rows[0].received_envelope, null);
+    assert.deepEqual(acceptedStorage.rows[0].payload_json, accepted.payload);
 
     const changed = channelEnvelope({
       streamId,
@@ -290,6 +299,10 @@ test("Business Ingress persists idempotency, conflicts, gaps, and whole-Shard at
     const waiting = await store.acceptShard(buildPublicationShard([gap]));
     assert.equal(waiting.receipts[0].status, "waiting_gap");
     assert.equal(waiting.receipts[0].error_code, "waiting_sequence_gap");
+    assert.equal((await pool.query(
+      "SELECT received_envelope FROM publication.inbox WHERE revision_id=$1",
+      [gap.revision_id],
+    )).rows[0].received_envelope, null);
 
     const unknown = channelEnvelope({
       streamId: randomUUID(),
@@ -298,6 +311,10 @@ test("Business Ingress persists idempotency, conflicts, gaps, and whole-Shard at
     const rejected = await store.acceptShard(buildPublicationShard([unknown]));
     assert.equal(rejected.receipts[0].status, "rejected");
     assert.equal(rejected.receipts[0].error_code, "unknown_publication_stream");
+    assert.deepEqual((await pool.query(
+      "SELECT received_envelope FROM publication.inbox WHERE revision_id=$1",
+      [unknown.revision_id],
+    )).rows[0].received_envelope, unknown);
 
     const automaticChannelId = `UCbusinessautomatic${suffix}`;
     const automatic = channelEnvelope({
@@ -419,7 +436,7 @@ test("Business Ingress persists idempotency, conflicts, gaps, and whole-Shard at
     await assert.rejects(
       pool.query(
         `UPDATE publication.inbox
-         SET received_envelope=received_envelope || '{"tampered":true}'::jsonb
+         SET received_envelope='{"tampered":true}'::jsonb
          WHERE revision_id=$1`,
         [accepted.revision_id],
       ),

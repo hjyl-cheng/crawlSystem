@@ -60,6 +60,21 @@ export function businessPublicationIngressRuntimeConfig(environment = process.en
   };
 }
 
+export function assertBusinessPublicationInboxPointerSchema(state, expectedDatabase) {
+  if (
+    state?.database_name !== expectedDatabase
+      || state?.inbox_ready !== true
+      || state?.revision_ready !== true
+      || state?.inbox_envelope_nullable !== true
+      || state?.inbox_envelope_evidence_constraint !== true
+  ) {
+    throw new Error(
+      `refusing to start without the pointer-compatible Inbox schema: ${state?.database_name || "unknown"}`,
+    );
+  }
+  return { database: state.database_name };
+}
+
 function listen(server, host, port) {
   return new Promise((resolve, reject) => {
     server.once("error", reject);
@@ -82,12 +97,22 @@ async function main() {
     const preflight = await pool.query(
       `SELECT current_database() AS database_name,
               to_regclass('publication.inbox') IS NOT NULL AS inbox_ready,
-              to_regclass('publication.revision') IS NOT NULL AS revision_ready`,
+              to_regclass('publication.revision') IS NOT NULL AS revision_ready,
+              EXISTS (
+                SELECT 1 FROM pg_attribute
+                WHERE attrelid=to_regclass('publication.inbox')
+                  AND attname='received_envelope'
+                  AND NOT attisdropped AND NOT attnotnull
+              ) AS inbox_envelope_nullable,
+              EXISTS (
+                SELECT 1 FROM pg_constraint
+                WHERE conrelid=to_regclass('publication.inbox')
+                  AND conname='chk_business_publication_inbox_envelope_evidence'
+                  AND convalidated
+              ) AS inbox_envelope_evidence_constraint`,
     );
     const state = preflight.rows[0] ?? {};
-    if (state.database_name !== config.expectedDatabase || !state.inbox_ready || !state.revision_ready) {
-      throw new Error(`refusing to start on unexpected or unmigrated Business database: ${state.database_name}`);
-    }
+    assertBusinessPublicationInboxPointerSchema(state, config.expectedDatabase);
     const store = new PostgresBusinessPublicationStore(pool);
     const app = createBusinessPublicationIngressApp({
       store,

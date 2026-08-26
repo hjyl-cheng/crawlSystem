@@ -5080,7 +5080,7 @@ CREATE TABLE publication.inbox (
     data_sequence bigint NOT NULL,
     payload_hash text NOT NULL,
     envelope_hash text NOT NULL,
-    received_envelope jsonb NOT NULL,
+    received_envelope jsonb,
     receipt_id uuid NOT NULL,
     receive_status text NOT NULL,
     error_code text,
@@ -5097,7 +5097,14 @@ CREATE TABLE publication.inbox (
     CONSTRAINT inbox_payload_hash_check CHECK ((payload_hash ~ '^sha256:[0-9a-f]{64}$'::text)),
     CONSTRAINT inbox_receive_count_check CHECK ((receive_count > 0)),
     CONSTRAINT inbox_receive_status_check CHECK ((receive_status = ANY (ARRAY['accepted'::text, 'waiting_gap'::text, 'waiting_ownership'::text, 'rejected'::text, 'conflict'::text]))),
-    CONSTRAINT inbox_received_envelope_check CHECK ((jsonb_typeof(received_envelope) = 'object'::text))
+    CONSTRAINT inbox_received_envelope_check CHECK ((jsonb_typeof(received_envelope) = 'object'::text)),
+    CONSTRAINT chk_business_publication_inbox_envelope_evidence CHECK (
+      CASE
+        WHEN (receive_status = ANY (ARRAY['rejected'::text, 'conflict'::text]))
+          THEN ((received_envelope IS NOT NULL) AND (jsonb_typeof(received_envelope) = 'object'::text))
+        ELSE ((received_envelope IS NULL) OR (jsonb_typeof(received_envelope) = 'object'::text))
+      END
+    )
 );
 
 
