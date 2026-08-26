@@ -274,6 +274,7 @@ export class ChannelExecutionRuntime {
         ytdlpRelease = await this.releaseYtDlp({
           cancelled: ytdlpReleaseStartedCancelled,
           reason: error,
+          signal: abortSignal,
         });
       } catch (caught) {
         cleanupError = cleanupError || caught;
@@ -284,7 +285,7 @@ export class ChannelExecutionRuntime {
         if (ytdlpCancellationApplied || !attemptCancelled()) return;
         ytdlpCancellationApplied = true;
         try {
-          await this.releaseYtDlp({ cancelled: true, reason: error });
+          await this.releaseYtDlp({ cancelled: true, reason: error, signal: abortSignal });
         } catch (caught) {
           cleanupError = cleanupError || caught;
         }

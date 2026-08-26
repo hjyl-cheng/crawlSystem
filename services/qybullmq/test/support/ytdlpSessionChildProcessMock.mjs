@@ -8,6 +8,7 @@ class FakeChild extends EventEmitter {
     this.state = state;
     this.pid = nextPid += 1;
     this.killed = false;
+    this.closed = false;
     this.stdout = new EventEmitter();
     this.stderr = new EventEmitter();
     this.stdin = {
@@ -34,9 +35,26 @@ class FakeChild extends EventEmitter {
     const request = JSON.parse(String(line));
     this.state.commands.push(request.command);
     callback?.(null);
-    if (request.command === "video_detail" && this.state.scenario === "cancel_active_request") {
+    if (
+      request.command === "video_detail"
+      && ["cancel_active_request", "cancel_active_request_delayed_close"].includes(this.state.scenario)
+    ) {
       this.state.cancelRequest();
-      this.kill("SIGKILL");
+      return true;
+    }
+    if (request.command === "video_detail" && this.state.scenario === "timeout_then_recover") {
+      if (this.pid === this.state.spawnedPids[0]) return true;
+    }
+    if (request.command === "release" && this.state.scenario === "cancel_during_release") {
+      this.state.cancelRelease();
+      setTimeout(() => {
+        if (this.killed) return;
+        this.stdout.emit("data", `${JSON.stringify({
+          request_id: request.request_id,
+          ok: true,
+          result: { cookie_state: { cookies: [] }, pid: this.pid },
+        })}\n`);
+      }, 50);
       return true;
     }
     if (request.command === "configure" && this.state.scenario === "cancel_during_configure") {
@@ -66,7 +84,20 @@ class FakeChild extends EventEmitter {
     this.killed = true;
     this.stdin.writable = false;
     this.state.killedPids.push(this.pid);
-    setImmediate(() => this.emit("close", null, signal));
+    const close = () => {
+      if (this.closed) return;
+      this.closed = true;
+      this.state.closedPids.push(this.pid);
+      this.emit("close", null, signal);
+    };
+    if (
+      this.state.scenario === "cancel_active_request_delayed_close"
+      && this.pid === this.state.spawnedPids[0]
+    ) {
+      this.state.releaseClose = close;
+    } else {
+      setImmediate(close);
+    }
     return true;
   }
 }

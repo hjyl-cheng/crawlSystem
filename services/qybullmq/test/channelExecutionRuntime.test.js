@@ -258,6 +258,36 @@ test("channel runtime propagates Rota cancellation raised during YouTube cleanup
   assert.equal(calls.finishes[0].value.error, reason);
 });
 
+test("channel runtime makes an in-progress yt-dlp release cancellable", async () => {
+  const currentProxy = { value: { ...proxy } };
+  const controller = new AbortController();
+  const reason = new Error("Rota cancelled during yt-dlp release");
+  const releaseOptions = [];
+  const { runtime, calls } = runtimeFixture({
+    runtime: {
+      releaseYtDlp: async (options) => {
+        releaseOptions.push(options);
+        if (releaseOptions.length === 1) controller.abort(reason);
+        if (options.signal?.aborted) throw options.signal.reason;
+        return null;
+      },
+    },
+  });
+
+  await assert.rejects(
+    runtime.run({
+      ...context(currentProxy),
+      abortSignal: controller.signal,
+    }, async () => ({ ok: true })),
+    (error) => error === reason,
+  );
+
+  assert.equal(releaseOptions[0].cancelled, false);
+  assert.equal(releaseOptions[0].signal, controller.signal);
+  assert.equal(calls.checkpoints.length, 0);
+  assert.equal(calls.finishes[0].value.status, "aborted");
+});
+
 test("channel runtime preserves cancellation reasons that cannot carry attempt metadata", async () => {
   const reasons = [
     "Rota cancelled as text",

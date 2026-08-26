@@ -2,16 +2,18 @@
 
 ## 1. 文档状态
 
-- 状态：**工作树已实施并完成代码级验证，未提交、未部署**
+- 状态：**已实施并完成本地验证；初始实现已提交，审查修复随本文所在后续提交落地；未部署**
 - 定稿日期：2026-08-26
 - 实施日期：2026-08-26
-- 代码基线：`aacd03870921e336c28d71f6dbb0faeb4edfccc4`
+- 起始代码基线：`aacd03870921e336c28d71f6dbb0faeb4edfccc4`
+- 初始实现提交：`49a92ade9ab78cb27a35bb1bb7e7c12c2e02f34f`
+- 审查修复：本文所在的独立后续提交，不 amend `49a92ad`
 - 工作分支：`agent/incremental`
 - 范围：`services/qybullmq` 的 Incremental、Content Enrich、Channel Crawl/Migration、YouTube.js、yt-dlp 与频道执行记账
-- 验证摘要：15 个取消重点测试文件全部通过；全量 1245 项中 1167 项通过、76 项跳过、2 项因本机缺少 Python 模块而未运行成功
-- 环境限制：`fingerprintGateway.integration.test.js` 阻塞在缺少 `aiohttp`，`ytdlpSession.integration.test.js` 阻塞在缺少 `yt_dlp`
+- 验证摘要：15 个取消重点测试文件全部通过；依赖完整环境全量 1249 项中 1173 项通过、76 项跳过、0 项失败、0 项取消
+- 验证环境：Node.js 26.7.0；Python 使用仓库 `.venv`，已包含 `aiohttp==3.14.3` 与 `yt-dlp==2026.07.04`
 
-本文是本次取消问题的单一方案来源和实施记录。下文设计行号均以代码基线为准，实施后允许漂移；函数名、接口不变式和验收条件不得因行号漂移而省略。当前结论只覆盖本地工作树，不表示代码已经提交或生产已经部署。
+本文是本次取消问题的单一方案来源和实施记录。下文设计行号均以起始代码基线为准，实施后允许漂移；函数名、接口不变式和验收条件不得因行号漂移而省略。当前结论只覆盖本地提交与验证，不表示生产已经部署。
 
 ## 2. 目标
 
@@ -241,19 +243,27 @@ Channel Metadata 不经过 `annotateYtDlpFailure()`，因此只属于 F2，不�
 |---|---|
 | `request()` | 业务请求，允许调用 `start()` |
 | `requestExisting()` | 只操作现存健康进程，禁止调用 `start()` |
-| `terminate()` | 直接终止，不经过 stdin，不启动进程，幂等 |
+| `terminate()` | 直接终止，不经过 stdin，不启动进程，幂等；返回值只在真实 `exit`/`close` 后完成 |
 
 原 `stop()` 不得再通过允许启动的 `request()` 发送 shutdown。
+
+`terminate()` 发出 `SIGKILL` 后只立即拒绝 pending work，不得同步伪造退出并清空 child。被 terminate 的 daemon 实例永久不可再次 `start()`。模块级退出屏障覆盖 cancel、restart、profile change 与 close；任何 replacement spawn 必须等待旧 child 的真实 `exit`/`close`。
 
 #### G1. 三态清理
 
 | 状态 | 动作 |
 |---|---|
-| 取消或会话已失效 | 先清模块级 `daemon` 与 `activeLease`，再对捕获的旧实例调用 `terminate()`；后续 release 自动短路 |
-| 正常成功完成 | `requestExisting("release")`，回收 `cookie_state`，保留 daemon 和 PID 供下个频道复用 |
+| 取消或会话已失效 | 先清模块级 `daemon` 与 `activeLease`，再对捕获的旧实例调用并等待 `terminate()`；后续 release 自动短路 |
+| 正常成功完成 | `requestExisting("release", ..., { signal })`，回收 `cookie_state`，保留 daemon 和 PID 供下个频道复用 |
 | close | 不继承已经取消的业务 signal；健康进程使用不允许 start 的优雅 shutdown，死亡/终止中进程直接清理 |
 
 正常 release 的返回值由 `channelExecutionRuntime.js` 提取 `cookie_state` 并写回 profile store。禁止把正常 release 改成每频道直接 kill。
+
+正常 release 开始时必须收到频道执行的原始 `abortSignal`。release 期间取消时，`requestExisting()` 立即拒绝、终止 child、等待真实退出并原样抛出取消原因；未取消的正常完成仍回收 Cookie 并复用 PID。
+
+#### G2. 命令超时证据
+
+内部 yt-dlp command timeout 使用稳定错误码 `YTDLP_SESSION_COMMAND_TIMEOUT`。`requestWithRecovery()` 在取消检查之后、restart/retry 之前记录第一次真实 timeout；如果 recovery 成功，指标同时保留第一次失败证据和第二次成功结果。外部取消仍优先，不能因为 timeout 标记而新增取消失败证据。
 
 ### H. 评论首页回填停止吞取消
 
@@ -470,6 +480,7 @@ K1 只依赖现有 HTTP transport，可与 A 同期完成。
 1. 外部取消：HTTP/YouTube.js transport 不记失败、不新增 evidence、不增加 `stats.failures`；
 2. 内部 timeout：仍记录真实 `upstream_transient` 和失败指标；
 3. 被取消请求仍计入 YouTube.js `stats.requests`，这是预期尝试次数口径。
+4. yt-dlp 第一次 command timeout 后 recovery 成功：最终结果成功，同时保留一条带 `YTDLP_SESSION_COMMAND_TIMEOUT` 的失败证据。
 
 ### 7.5 yt-dlp 启动、请求与 acquire
 
@@ -486,13 +497,14 @@ K1 只依赖现有 HTTP transport，可与 A 同期完成。
 3. killed child 到 `close` 事件之间调用清理，不通过旧 `stop()` 竞态 spawn；
 4. persistent 返回 `null` 的三个 adapter 均不启动 `runPythonJson()`。
 
-进程断言必须包括：原 PID/child 已退出、abort 到 finally 结束之间没有第二次 spawn、下一次正常 acquire 才允许出现新 PID。禁止只用 `persistentYtDlpState().process_pid === null` 代替 OS/child 断言。
+进程断言必须包括：原 PID/child 已触发真实 `exit`/`close`、abort 到 finally 结束之间没有第二次 spawn、下一次正常 acquire 也只能在旧 child 退出后出现新 PID。`child.killed` 只表示 kill signal 已发送，不是退出证据；禁止只用它或 `persistentYtDlpState().process_pid === null` 代替 OS/child 断言。
 
 ### 7.7 正常路径回归
 
 1. 正常 release 仍返回并落盘 `cookie_state`；
 2. 持久 daemon 跨频道复用，正常 release 前后 PID 不变；
 3. close 对健康进程优雅关闭，对死亡/终止中进程不启动 replacement。
+4. 正常 release 进行中收到取消时，在明显低于 15 秒 command timeout 的上界内终止，等待 child 退出并保留原始 reason。
 
 ### 7.8 频道执行记账
 
@@ -566,18 +578,18 @@ processContentDetailRun
 - 取消路径覆盖 release、recovery、killed-child stop 竞态和三个 one-shot fallback；
 - 实施后审查额外覆盖了 transport 与取消同时完成时的成功记账竞态，以及三个 one-shot adapter 在 child 快速 close 时的 reason 身份。
 - 频道 cleanup 中发生的代理漂移或 Rota abort 会重新核对状态并终止已 release 的旧 yt-dlp daemon；字符串、空字符串和不可扩展 Error 形式的取消 reason 均保持原值。
+- `49a92ad` 后续审查修复增加了真实 child 退出屏障、release 期间取消和首次 command timeout 证据；修复作为独立提交落地，没有 amend 初始实现。
 
 ### 10.2 验证结果
 
 - 取消重点矩阵：15 个测试文件全部通过；
-- 全量命令：`npm test`；
-- 全量统计：1245 tests，1167 passed，76 skipped，2 failed；
-- 两个失败均发生在未改动的 Python 进程启动依赖阶段：缺少 `aiohttp` 和 `yt_dlp`；
-- `buildImages.test.js` 与 `businessPublicationIngress.test.js` 在允许临时 git 进程和 localhost 端口后通过，确认先前失败仅来自沙箱限制；
-- `git diff --check` 通过，九个修改/新增生产模块的 `node --check` 通过。
+- 全量命令：`node --test test/*.test.js`，等价于 package 的 `npm test` 脚本；
+- 全量统计：1249 tests，1173 passed，76 skipped，0 failed，0 cancelled；
+- Python 集成测试使用仓库依赖完整 `.venv`，`fingerprintGateway.integration.test.js` 与 `ytdlpSession.integration.test.js` 均通过；
+- `buildImages.test.js` 与 `businessPublicationIngress.test.js` 在允许临时 git 进程和 localhost 端口的完整环境中通过；
+- 本次新增 4 条回归测试：真实退出屏障、release signal 透传、release 中途取消、timeout recovery 失败证据；
+- `git diff --check` 与本次修改生产模块的 `node --check` 通过。
 
 ### 10.3 尚未声明完成的事项
 
-- 未安装缺失 Python 模块，因此两项真实 Python 集成测试未通过；
-- 当前没有实现提交哈希，改动仍在 `agent/incremental` 工作树；
 - 未执行生产部署或线上验证。

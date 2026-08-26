@@ -25,6 +25,16 @@ class YtDlpSessionRemoteError extends Error {
   }
 }
 
+class YtDlpSessionCommandTimeoutError extends Error {
+  constructor(command, timeoutMs) {
+    super(`yt-dlp session command ${command} timed out after ${timeoutMs}ms`);
+    this.name = "YtDlpSessionCommandTimeoutError";
+    this.code = "YTDLP_SESSION_COMMAND_TIMEOUT";
+    this.command = command;
+    this.timeoutMs = timeoutMs;
+  }
+}
+
 function waitForSignal(promise, signal, onAbort) {
   if (!signal) return promise;
   throwIfAborted(signal);
@@ -69,17 +79,27 @@ class YtDlpDaemon {
     this.stopping = false;
     this.profileKey = null;
     this.profileId = null;
+    this.exitPromise = null;
+    this.exitResolve = null;
+    this.terminationRequested = false;
+    this.terminationReason = null;
   }
 
   async start({ signal = null } = {}) {
     throwIfAborted(signal);
-    if (this.child && !this.child.killed && this.readyPromise) {
+    if (this.terminationRequested) throw this.terminationReason;
+    if (this.child && !this.stopping && !this.child.killed && this.readyPromise) {
       await waitForSignal(
         this.readyPromise,
         signal,
         (reason) => this.terminate(reason),
       );
       return this.readyInfo;
+    }
+    if (this.child && this.exitPromise) {
+      await waitForSignal(this.exitPromise, signal);
+      throwIfAborted(signal);
+      if (this.terminationRequested) throw this.terminationReason;
     }
     this.proxyUrl = null;
     this.startedAt = Date.now();
@@ -96,18 +116,25 @@ class YtDlpDaemon {
       env: { ...process.env },
     });
     this.child = child;
+    this.exitPromise = new Promise((resolve) => {
+      this.exitResolve = resolve;
+    });
     child.stdout.on("data", (chunk) => this.#onStdout(chunk));
     child.stderr.on("data", (chunk) => {
       this.stderrBuffer = `${this.stderrBuffer}${chunk.toString()}`.slice(-16000);
     });
-    child.on("error", (error) => this.#onExit(error, child));
+    child.on("error", (error) => this.#onChildError(error, child));
+    child.on("exit", (code, signal) => {
+      const suffix = this.stderrBuffer.trim() ? `: ${this.stderrBuffer.trim().slice(-1000)}` : "";
+      this.#onExit(new Error(`yt-dlp session exited code=${code} signal=${signal}${suffix}`), child);
+    });
     child.on("close", (code, signal) => {
       const suffix = this.stderrBuffer.trim() ? `: ${this.stderrBuffer.trim().slice(-1000)}` : "";
       this.#onExit(new Error(`yt-dlp session exited code=${code} signal=${signal}${suffix}`), child);
     });
     const timer = setTimeout(() => {
       const error = new Error(`yt-dlp session start timeout after ${START_TIMEOUT_MS}ms`);
-      this.terminate(error);
+      void this.terminate(error);
     }, START_TIMEOUT_MS);
     try {
       const readyPromise = this.readyPromise;
@@ -134,7 +161,7 @@ class YtDlpDaemon {
       try {
         message = JSON.parse(line);
       } catch (error) {
-        this.terminate(new Error(`yt-dlp session returned invalid JSON: ${error?.message || error}`));
+        void this.terminate(new Error(`yt-dlp session returned invalid JSON: ${error?.message || error}`));
         return;
       }
       if (message.event === "ready") {
@@ -156,14 +183,24 @@ class YtDlpDaemon {
     }
   }
 
-  #onExit(error, exitedChild = this.child) {
-    if (exitedChild && this.child && exitedChild !== this.child) return;
-    if (!this.child && !this.readyPromise) return;
+  #rejectWork(error) {
     this.readyReject?.(error);
     for (const pending of this.pending.values()) {
       pending.reject(error);
     }
     this.pending.clear();
+  }
+
+  #onChildError(error, child) {
+    if (child !== this.child) return;
+    this.#rejectWork(error);
+  }
+
+  #onExit(error, exitedChild = this.child) {
+    if (exitedChild && exitedChild !== this.child) return;
+    if (!this.child && !this.readyPromise) return;
+    this.#rejectWork(error);
+    const resolveExit = this.exitResolve;
     this.child = null;
     this.readyPromise = null;
     this.readyResolve = null;
@@ -172,12 +209,21 @@ class YtDlpDaemon {
     this.profileKey = null;
     this.profileId = null;
     this.proxyUrl = null;
+    this.exitPromise = null;
+    this.exitResolve = null;
+    resolveExit?.();
   }
 
   terminate(reason = new Error("yt-dlp session terminated")) {
     const child = this.child;
-    if (!child && !this.readyPromise) return;
+    const exitPromise = this.exitPromise;
     this.stopping = true;
+    if (!this.terminationRequested) {
+      this.terminationRequested = true;
+      this.terminationReason = reason;
+    }
+    if (!child && !this.readyPromise) return exitPromise ?? Promise.resolve();
+    this.#rejectWork(reason);
     if (child && !child.killed) {
       try {
         child.kill("SIGKILL");
@@ -185,7 +231,7 @@ class YtDlpDaemon {
         // The process is already gone.
       }
     }
-    this.#onExit(reason, child);
+    return exitPromise ?? Promise.resolve();
   }
 
   async request(command, payload = {}, timeoutMs = 90000, { signal = null } = {}) {
@@ -216,13 +262,13 @@ class YtDlpDaemon {
         callback(value);
       };
       const timer = setTimeout(() => {
-        const error = new Error(`yt-dlp session command ${command} timed out after ${timeoutMs}ms`);
+        const error = new YtDlpSessionCommandTimeoutError(command, timeoutMs);
         finish(reject, error);
-        this.terminate(error);
+        void this.terminate(error);
       }, timeoutMs);
       const handleAbort = () => {
         finish(reject, signal.reason);
-        this.terminate(signal.reason);
+        void this.terminate(signal.reason);
       };
       this.pending.set(requestId, {
         resolve: (value) => finish(resolve, value),
@@ -271,14 +317,31 @@ class YtDlpDaemon {
   async stop() {
     const child = this.child;
     if (!child || child.killed || !this.readyPromise || !this.readyInfo) {
-      this.terminate();
+      await this.terminate();
       return;
     }
     this.stopping = true;
+    this.terminationRequested = true;
+    this.terminationReason = new Error("yt-dlp session stopped");
     try {
       await this.requestExisting("shutdown", {}, STOP_TIMEOUT_MS);
+      const exitPromise = this.exitPromise;
+      if (!exitPromise) return;
+      let timer;
+      try {
+        await Promise.race([
+          exitPromise,
+          new Promise((_, reject) => {
+            timer = setTimeout(() => {
+              reject(new Error(`yt-dlp session shutdown timed out after ${STOP_TIMEOUT_MS}ms`));
+            }, STOP_TIMEOUT_MS);
+          }),
+        ]);
+      } finally {
+        clearTimeout(timer);
+      }
     } catch (error) {
-      this.terminate(error);
+      await this.terminate(error);
     }
   }
 }
@@ -287,6 +350,7 @@ let daemon = null;
 let activeLease = null;
 let activeProfileConfig = null;
 let disabledReason = null;
+let daemonExitBarrier = Promise.resolve();
 
 function commandSource(command) {
   if (command === "video_detail") return "yt_dlp_detail";
@@ -360,20 +424,33 @@ function profileConfig(profile, proxyUrl, language) {
   };
 }
 
-function clearAndTerminateDaemon(reason) {
+function trackDaemonExit(exitPromise) {
+  const prior = daemonExitBarrier;
+  const barrier = Promise.all([prior, Promise.resolve(exitPromise)]).then(() => undefined);
+  daemonExitBarrier = barrier;
+  return barrier;
+}
+
+function terminateDaemon(current, reason) {
+  if (!current) return daemonExitBarrier;
+  return trackDaemonExit(current.terminate(reason));
+}
+
+async function clearAndTerminateDaemon(reason) {
   const current = daemon;
   daemon = null;
   activeLease = null;
-  current?.terminate(reason);
+  await terminateDaemon(current, reason);
 }
 
-function abortSessionIfNeeded(signal) {
+async function abortSessionIfNeeded(signal) {
   if (!signal?.aborted) return;
-  clearAndTerminateDaemon(signal.reason);
+  await clearAndTerminateDaemon(signal.reason);
   throw signal.reason;
 }
 
 async function ensureDaemon(config = activeProfileConfig, { signal = null } = {}) {
+  await daemonExitBarrier;
   throwIfAborted(signal);
   if (!enabledByEnvironment()) return null;
   if (!config) throw new Error("yt-dlp fingerprint profile is not configured");
@@ -386,8 +463,10 @@ async function ensureDaemon(config = activeProfileConfig, { signal = null } = {}
     config.timezone,
   ]);
   if (daemon && daemon.profileKey !== nextKey && !activeLease) {
-    daemon.terminate(new Error("yt-dlp fingerprint profile changed"));
+    const previous = daemon;
     daemon = null;
+    await terminateDaemon(previous, new Error("yt-dlp fingerprint profile changed"));
+    throwIfAborted(signal);
   }
   if (!daemon) daemon = new YtDlpDaemon();
   await daemon.start({ signal });
@@ -401,8 +480,9 @@ async function restartDaemon({ signal = null } = {}) {
   throwIfAborted(signal);
   const previous = daemon;
   daemon = null;
-  previous?.terminate(new Error("restarting yt-dlp session"));
   const previousLease = activeLease;
+  await terminateDaemon(previous, new Error("restarting yt-dlp session"));
+  throwIfAborted(signal);
   if (!previousLease) return ensureDaemon(activeProfileConfig, { signal });
   const next = await ensureDaemon(activeProfileConfig, { signal });
   await next.request("acquire", previousLease, 15000, { signal });
@@ -412,7 +492,7 @@ async function restartDaemon({ signal = null } = {}) {
 
 async function requestWithRecovery(command, payload, timeoutMs, { signal = null } = {}) {
   const effectiveSignal = combineAbortSignals(signal, currentChannelExecutionAbortSignal());
-  abortSessionIfNeeded(effectiveSignal);
+  await abortSessionIfNeeded(effectiveSignal);
   const startedAt = Date.now();
   const active = activeLease;
   const strict = fingerprintTransportRequired() && Boolean(currentChannelExecution());
@@ -436,8 +516,11 @@ async function requestWithRecovery(command, payload, timeoutMs, { signal = null 
     return result;
   } catch (error) {
     if (effectiveSignal?.aborted) {
-      clearAndTerminateDaemon(effectiveSignal.reason);
+      await clearAndTerminateDaemon(effectiveSignal.reason);
       throw effectiveSignal.reason;
+    }
+    if (error?.code === "YTDLP_SESSION_COMMAND_TIMEOUT") {
+      recordCommandFailure(command, error, startedAt);
     }
     if (error instanceof ProxyIdentityChangedError) throw error;
     if (error?.remote) throw recordCommandFailure(command, error, startedAt);
@@ -455,14 +538,17 @@ async function requestWithRecovery(command, payload, timeoutMs, { signal = null 
       return result;
     } catch (retryError) {
       if (effectiveSignal?.aborted) {
-        clearAndTerminateDaemon(effectiveSignal.reason);
+        await clearAndTerminateDaemon(effectiveSignal.reason);
         throw effectiveSignal.reason;
       }
+      const recordedRetryTimeout = retryError?.code === "YTDLP_SESSION_COMMAND_TIMEOUT"
+        ? recordCommandFailure(command, retryError, startedAt)
+        : null;
       if (retryError instanceof ProxyIdentityChangedError) throw retryError;
       if (retryError?.remote) throw recordCommandFailure(command, retryError, startedAt);
       disabledReason = String(retryError?.message || retryError);
-      clearAndTerminateDaemon(retryError);
-      if (strict) throw recordCommandFailure(command, retryError, startedAt);
+      await clearAndTerminateDaemon(retryError);
+      if (strict) throw recordedRetryTimeout ?? recordCommandFailure(command, retryError, startedAt);
       return null;
     }
   }
@@ -484,7 +570,7 @@ export async function acquirePersistentYtDlp(channelId, language = "pt-BR", {
   signal = null,
 } = {}) {
   const effectiveSignal = combineAbortSignals(signal, currentChannelExecutionAbortSignal());
-  abortSessionIfNeeded(effectiveSignal);
+  await abortSessionIfNeeded(effectiveSignal);
   if (!enabledByEnvironment()) return { enabled: false, mode: "one_shot" };
   if (activeLease) throw new Error(`yt-dlp process is already leased by ${activeLease.channel_id}`);
   activeProfileConfig = profileConfig(profile, proxyUrl, language);
@@ -508,7 +594,7 @@ export async function acquirePersistentYtDlp(channelId, language = "pt-BR", {
     };
   } catch (error) {
     if (effectiveSignal?.aborted) {
-      clearAndTerminateDaemon(effectiveSignal.reason);
+      await clearAndTerminateDaemon(effectiveSignal.reason);
       throw effectiveSignal.reason;
     }
     activeLease = null;
@@ -517,9 +603,11 @@ export async function acquirePersistentYtDlp(channelId, language = "pt-BR", {
   }
 }
 
-export async function releasePersistentYtDlp({ cancelled = false, reason = null } = {}) {
-  if (cancelled) {
-    clearAndTerminateDaemon(reason ?? new Error("yt-dlp channel execution cancelled"));
+export async function releasePersistentYtDlp({ cancelled = false, reason = null, signal = null } = {}) {
+  if (cancelled || signal?.aborted) {
+    await clearAndTerminateDaemon(
+      signal?.aborted ? signal.reason : reason ?? new Error("yt-dlp channel execution cancelled"),
+    );
     return null;
   }
   const lease = activeLease;
@@ -527,10 +615,18 @@ export async function releasePersistentYtDlp({ cancelled = false, reason = null 
   const current = daemon;
   if (!lease || !current) return null;
   try {
-    return await current.requestExisting("release", { lease_id: lease.lease_id }, 15000);
+    const result = await current.requestExisting(
+      "release",
+      { lease_id: lease.lease_id },
+      15000,
+      { signal },
+    );
+    throwIfAborted(signal);
+    return result;
   } catch (error) {
     if (daemon === current) daemon = null;
-    current.terminate(error);
+    await terminateDaemon(current, signal?.aborted ? signal.reason : error);
+    if (signal?.aborted) throw signal.reason;
     return { error: String(error?.message || error), restarted: true };
   }
 }
@@ -540,8 +636,11 @@ export async function closePersistentYtDlp() {
   activeProfileConfig = null;
   const current = daemon;
   daemon = null;
-  if (!current) return;
-  await current.stop();
+  if (!current) {
+    await daemonExitBarrier;
+    return;
+  }
+  await trackDaemonExit(current.stop());
 }
 
 export async function persistentChannelMetadata(url, { timeoutMs = 90000, signal = null } = {}) {
