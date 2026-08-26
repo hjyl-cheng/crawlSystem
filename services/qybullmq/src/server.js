@@ -18,6 +18,7 @@ import {
 } from "./manualMigrationDispatch.js";
 import { assertMigrationChannelInventorySchema } from "./migrationInventorySchema.js";
 import {
+  migrationInventoryForceSyncEnabled,
   migrationInventorySyncConfigured,
   syncMigrationChannelInventory,
 } from "./migrationInventorySync.js";
@@ -59,7 +60,7 @@ if (migrationInventorySyncConfigured()) {
   await assertMigrationChannelInventorySchema({ query: pool.query.bind(pool) });
   const inventorySync = await syncMigrationChannelInventory({
     targetPool: pool,
-    force: String(process.env.MIGRATION_INVENTORY_FORCE_SYNC || "").toLowerCase() === "true",
+    force: migrationInventoryForceSyncEnabled(),
     onProgress: ({ source_id: sourceId, eligible_count: eligibleCount }) => {
       console.log(JSON.stringify({
         event: "migration_channel_inventory_sync_progress",

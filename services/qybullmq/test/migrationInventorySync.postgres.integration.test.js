@@ -119,7 +119,8 @@ test("pre-deploy gate syncs 410292 Source rows through the real PostgreSQL curso
     EXPECTED_MIGRATION_DATABASE_OID: sourceDatabaseOidResult.rows[0].database_oid,
     EXPECTED_MIGRATION_DATABASE_USER: sourceReaderIdentity.user,
     EXPECTED_CRAWLER_DATABASE: targetIdentity.database,
-    MIGRATION_POSTGRES_STATEMENT_TIMEOUT_MS: "120000",
+    MIGRATION_POSTGRES_STATEMENT_TIMEOUT_MS: "10000",
+    MIGRATION_INVENTORY_SOURCE_STATEMENT_TIMEOUT_MS: "120000",
   };
   const sourceStatements = [];
   const observedSourcePool = {

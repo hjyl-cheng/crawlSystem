@@ -39,7 +39,7 @@ test("Migration Source config requires a pinned source identity distinct from Ta
     expectedDatabaseOid: "16384",
     expectedUser: "migration_reader",
     targetDatabase: "newcrawler_crawler",
-    statementTimeoutMs: 120000,
+    statementTimeoutMs: 10000,
   });
   assert.throws(
     () => migrationSourceRuntimeConfig({ ...environment, EXPECTED_MIGRATION_DATABASE_OID: "" }),
@@ -72,7 +72,7 @@ test("every Migration Source query runs after identity verification in one expli
 
   assert.deepEqual(result.rows, [{ value: "source-row" }]);
   assert.equal(statements[0], "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
-  assert.equal(statements[1], "SET LOCAL statement_timeout=120000");
+  assert.equal(statements[1], "SET LOCAL statement_timeout=10000");
   assert.match(statements[2], /current_database\(\) AS database_name/);
   assert.equal(statements.at(-2), "COMMIT");
   assert.equal(statements.at(-1), "RELEASE");

@@ -213,7 +213,8 @@ MIGRATION_POSTGRES_DB=bullmq_crawler_migration
 MIGRATION_POSTGRES_DATABASE_OID=<approved OID, never 0>
 MIGRATION_INVENTORY_SYNC_BATCH_SIZE=5000
 MIGRATION_INVENTORY_FORCE_SYNC=false
-MIGRATION_POSTGRES_STATEMENT_TIMEOUT_MS=120000
+MIGRATION_POSTGRES_STATEMENT_TIMEOUT_MS=10000
+MIGRATION_INVENTORY_SOURCE_STATEMENT_TIMEOUT_MS=120000
 EXPECTED_MIGRATION_INVENTORY_ROW_COUNT=0
 CRAWLER_POSTGRES_VOLUME_NAME=qy-newcrawler-crawler-postgres-20260824-v1
 BUSINESS_POSTGRES_VOLUME_NAME=qy-newcrawler-business-postgres-20260824-v1
@@ -271,9 +272,11 @@ EXPECTED_MIGRATION_INVENTORY_ROW_COUNT=0 \
 
 Archive the publisher JSON and require `ok=true`, the exact approved database
 name, and the expected row count. The running API never creates or alters these
-objects. It performs a read-only table, column, and index check and exits before
-health becomes ready when the controlled Schema publication is missing or
-invalid.
+objects. It performs a read-only PostgreSQL catalog contract check and exits
+before health becomes ready when the controlled Schema publication is missing
+or invalid. The check verifies the exact column types, nullability and defaults,
+primary/unique/foreign-key/CHECK constraints, and the complete page-index
+contract.
 
 Run the dedicated runtime-role administrator as a plan:
 
@@ -379,9 +382,13 @@ exact stored row count skips the Source connection. To intentionally refresh
 membership or Source snapshot fields, set `MIGRATION_INVENTORY_FORCE_SYNC=true`
 for one API restart, repeat the same ready/count gate, then immediately restore
 it to `false` and recreate the API container. Leaving it true would repeat a
-full Source scan on every restart. Change `MIGRATION_INVENTORY_SYNC_BATCH_SIZE`
-or `MIGRATION_POSTGRES_STATEMENT_TIMEOUT_MS` only through an approved change;
-invalid values stop startup instead of silently falling back.
+full Source scan on every restart. The force value accepts only `true` or
+`false`; misspellings stop startup. Normal Source detail and dispatch reads use
+`MIGRATION_POSTGRES_STATEMENT_TIMEOUT_MS` (10 seconds by default), while only
+the full inventory scan uses
+`MIGRATION_INVENTORY_SOURCE_STATEMENT_TIMEOUT_MS` (120 seconds by default).
+Change either timeout or `MIGRATION_INVENTORY_SYNC_BATCH_SIZE` only through an
+approved change; invalid values stop startup instead of silently falling back.
 
 Confirm the rendered and running service lists exclude:
 

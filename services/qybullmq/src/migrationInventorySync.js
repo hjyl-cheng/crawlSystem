@@ -6,6 +6,7 @@ import {
 
 const DEFAULT_BATCH_SIZE = 5000;
 const MAX_BATCH_SIZE = 20000;
+const DEFAULT_SOURCE_STATEMENT_TIMEOUT_MS = 120000;
 const SOURCE_CURSOR = "migration_channel_inventory_source";
 
 function positiveBatchSize(value) {
@@ -24,6 +25,24 @@ export function migrationInventorySyncConfigured(environment = process.env) {
   const databaseUrl = String(environment.MIGRATION_DATABASE_URL || "").trim();
   const databaseUrlFile = String(environment.MIGRATION_DATABASE_URL_FILE || "").trim();
   return Boolean(databaseUrl || databaseUrlFile);
+}
+
+export function migrationInventoryForceSyncEnabled(environment = process.env) {
+  const value = String(environment.MIGRATION_INVENTORY_FORCE_SYNC ?? "")
+    .trim()
+    .toLowerCase();
+  if (!value || value === "false") return false;
+  if (value === "true") return true;
+  throw new TypeError("MIGRATION_INVENTORY_FORCE_SYNC must be true or false");
+}
+
+function sourceStatementTimeoutMs(value) {
+  const normalized = String(value ?? "").trim();
+  const parsed = normalized ? Number(normalized) : DEFAULT_SOURCE_STATEMENT_TIMEOUT_MS;
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+    throw new TypeError("MIGRATION_INVENTORY_SOURCE_STATEMENT_TIMEOUT_MS must be a positive integer");
+  }
+  return parsed;
 }
 
 function inventoryRecord(row) {
@@ -121,6 +140,7 @@ export async function syncMigrationChannelInventory({
   sourcePool = null,
   environment = process.env,
   batchSize = environment.MIGRATION_INVENTORY_SYNC_BATCH_SIZE,
+  statementTimeoutMs = environment.MIGRATION_INVENTORY_SOURCE_STATEMENT_TIMEOUT_MS,
   force = false,
   onProgress = () => {},
 } = {}) {
@@ -130,6 +150,7 @@ export async function syncMigrationChannelInventory({
   if (typeof onProgress !== "function") throw new TypeError("onProgress must be a function");
 
   const normalizedBatchSize = positiveBatchSize(batchSize);
+  const normalizedStatementTimeoutMs = sourceStatementTimeoutMs(statementTimeoutMs);
   const config = migrationSourceRuntimeConfig(environment);
   const targetClient = await targetPool.connect();
   const lockKey = `migration-inventory-sync:${config.sourceId}`;
@@ -206,7 +227,11 @@ export async function syncMigrationChannelInventory({
           },
         });
       },
-      { pool: sourcePool, environment },
+      {
+        pool: sourcePool,
+        environment,
+        statementTimeoutMs: normalizedStatementTimeoutMs,
+      },
     );
 
     await targetClient.query(

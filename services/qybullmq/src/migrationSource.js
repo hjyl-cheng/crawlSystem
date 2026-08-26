@@ -65,7 +65,7 @@ export function migrationSourceRuntimeConfig(environment = process.env) {
     targetDatabase,
     statementTimeoutMs: positiveInteger(
       environment.MIGRATION_POSTGRES_STATEMENT_TIMEOUT_MS,
-      120000,
+      10000,
       "MIGRATION_POSTGRES_STATEMENT_TIMEOUT_MS",
     ),
   };
@@ -94,14 +94,18 @@ export async function closeMigrationSourcePool() {
 export async function withMigrationSourceReadTransaction(action, {
   pool = null,
   environment = process.env,
+  statementTimeoutMs = null,
 } = {}) {
   if (typeof action !== "function") throw new TypeError("Migration Source action is required");
   const config = migrationSourceRuntimeConfig(environment);
+  const selectedStatementTimeoutMs = statementTimeoutMs == null
+    ? config.statementTimeoutMs
+    : positiveInteger(statementTimeoutMs, null, "Migration Source statement timeout");
   const selectedPool = pool || await migrationSourcePool(config);
   const client = await selectedPool.connect();
   try {
     await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
-    await client.query(`SET LOCAL statement_timeout=${config.statementTimeoutMs}`);
+    await client.query(`SET LOCAL statement_timeout=${selectedStatementTimeoutMs}`);
     const identity = await verifyMigrationSourceDatabase(client.query.bind(client), environment);
     const result = await action(client, identity, config);
     await client.query("COMMIT");

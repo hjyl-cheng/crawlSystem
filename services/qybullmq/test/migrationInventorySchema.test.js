@@ -12,25 +12,25 @@ function readySchemaState(overrides = {}) {
   return {
     sync_table_ready: true,
     inventory_table_ready: true,
-    sync_columns_ready: true,
-    inventory_columns_ready: true,
-    page_index_valid: true,
-    page_index_ready: true,
-    page_index_definition: `CREATE INDEX idx_crawler_migration_inventory_page
-      ON crawler.migration_channel_inventory USING btree
-      (source_id, priority DESC, source_candidate_id)`,
+    sync_columns_match: true,
+    inventory_columns_match: true,
+    sync_constraints_match: true,
+    inventory_constraints_match: true,
+    page_index_match: true,
     ...overrides,
   };
 }
 
-test("runtime and fresh bootstrap schemas include the Migration inventory contract", async () => {
-  const [runtime, bootstrap] = await Promise.all([
+test("only the controlled publisher and fresh bootstrap include inventory DDL", async () => {
+  const [runtime, controlled, bootstrap] = await Promise.all([
     readFile(new URL("../src/schema.sql", import.meta.url), "utf8"),
+    readFile(new URL("../src/migrationInventorySchema.sql", import.meta.url), "utf8"),
     readFile(new URL("../../../database/bootstrap/crawler.sql", import.meta.url), "utf8"),
   ]);
 
-  const runtimeBlock = migrationChannelInventorySchemaBlock(runtime);
-  for (const schema of [runtimeBlock, bootstrap]) {
+  assert.doesNotMatch(runtime, /migration_channel_inventory/);
+  const controlledBlock = migrationChannelInventorySchemaBlock(controlled);
+  for (const schema of [controlledBlock, bootstrap]) {
     assert.match(
       schema,
       /CREATE TABLE(?: IF NOT EXISTS)? crawler\.migration_channel_inventory_syncs/,
@@ -59,23 +59,23 @@ test("runtime inventory schema check is read-only and accepts the published cont
 
   assert.equal(state.inventory_table_ready, true);
   assert.equal(calls.length, 1);
-  assert.match(calls[0].sql, /^SELECT /);
+  assert.match(calls[0].sql, /^(?:WITH|SELECT) /);
   assert.doesNotMatch(
     calls[0].sql,
     /\b(?:CREATE|ALTER|DROP|TRUNCATE|INSERT|UPDATE|DELETE)\b/i,
   );
-  assert.equal(calls[0].params[0].length, 10);
-  assert.equal(calls[0].params[1].length, 13);
+  assert.equal(JSON.parse(calls[0].params[0]).length, 10);
+  assert.equal(JSON.parse(calls[0].params[1]).length, 13);
 });
 
 test("runtime inventory schema check blocks missing or invalid schema", () => {
   for (const state of [
     readySchemaState({ sync_table_ready: false }),
-    readySchemaState({ inventory_columns_ready: false }),
-    readySchemaState({ page_index_valid: false }),
-    readySchemaState({
-      page_index_definition: "CREATE INDEX wrong_order ON inventory (source_id,source_candidate_id)",
-    }),
+    readySchemaState({ sync_columns_match: false }),
+    readySchemaState({ inventory_columns_match: false }),
+    readySchemaState({ sync_constraints_match: false }),
+    readySchemaState({ inventory_constraints_match: false }),
+    readySchemaState({ page_index_match: false }),
   ]) {
     assert.throws(
       () => assertMigrationChannelInventorySchemaState(state),

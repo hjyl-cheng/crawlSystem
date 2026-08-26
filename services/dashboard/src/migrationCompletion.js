@@ -124,10 +124,3 @@ export function migrationDisplayStatusSql(
     )
   END`;
 }
-
-export function migrationWorkSql() {
-  return `(
-    candidate.status IN ('discovered','queued','validating','failed')
-    OR ${migrationIncompleteSql()}
-  )`;
-}

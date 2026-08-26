@@ -28,6 +28,7 @@ import {
 } from "./publicationComparison.js";
 import {
   MIGRATION_FINALIZED_SQL,
+  MIGRATION_WORK_STATUSES,
 } from "./migrationCompletion.js";
 import {
   assertCrawlerDashboardIdentity,
@@ -87,6 +88,16 @@ const agentModelOptions = [
   ["qwen-max", "qwen-max"],
   ["qwen-plus", "qwen-plus"],
 ];
+const migrationCandidateStatusLabels = Object.freeze({
+  discovered: "待迁移",
+  queued: "待迁移",
+  validating: "验证中",
+  finishing: "待收尾",
+  accepted: "已通过",
+  rejected: "已拒绝",
+  existing: "已存在",
+  failed: "失败",
+});
 
 const queueNames = [
   "youtube-query-quality",
@@ -1533,7 +1544,7 @@ async function migrationChannelListData(req) {
   const offset = intValue(req.query.offset, 0, 0, 1_000_000);
   const search = String(req.query.q || "").trim();
   const requestedCandidateStatus = String(req.query.channel_status || "all").trim();
-  const candidateStatuses = new Set(["all", "discovered", "queued", "validating", "failed", "finishing"]);
+  const candidateStatuses = new Set(["all", ...MIGRATION_WORK_STATUSES]);
   const channelStatus = candidateStatuses.has(requestedCandidateStatus) ? requestedCandidateStatus : "all";
   const agentStatus = String(req.query.agent_status || "").trim();
   const finalStatus = String(req.query.final_status || "").trim();
@@ -3277,18 +3288,8 @@ ${autoRefresh}`,
 }
 
 function migrationCandidateSummary(channel) {
-  const labels = {
-    discovered: "待迁移",
-    queued: "待迁移",
-    validating: "验证中",
-    finishing: "待收尾",
-    accepted: "已通过",
-    rejected: "已拒绝",
-    existing: "已存在",
-    failed: "失败",
-  };
   const status = String(channel?.status || "discovered");
-  return `<span class="pill ${statusClass(status)}">${h(labels[status] || status)}</span><div class="note mono">${h(status)}</div>`;
+  return `<span class="pill ${statusClass(status)}">${h(migrationCandidateStatusLabels[status] || status)}</span><div class="note mono">${h(status)}</div>`;
 }
 
 function channelIdentityCell(channel, { showAvatar = true } = {}) {
@@ -3430,11 +3431,10 @@ function migrationChannelListPage(migration) {
   const hasNext = filters.offset + migration.channels.length < Number(migration.total || 0);
   const candidateOptions = [
     ["all", "全部未迁移"],
-    ["discovered", "待迁移"],
-    ["queued", "已入队"],
-    ["validating", "验证中"],
-    ["failed", "失败"],
-    ["finishing", "待收尾"],
+    ...MIGRATION_WORK_STATUSES.map((status) => [
+      status,
+      status === "queued" ? "已入队" : migrationCandidateStatusLabels[status],
+    ]),
   ];
   const agentOptions = ["", "pending", "queued", "running", "done", "failed", "skipped"];
   const finalOptions = ["", "pending", "pending_detail", "pending_api", "pending_agent", "ready_auto", "ready_partial", "failed"];

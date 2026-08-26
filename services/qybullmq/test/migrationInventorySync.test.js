@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
-import { syncMigrationChannelInventory } from "../src/migrationInventorySync.js";
+import {
+  migrationInventoryForceSyncEnabled,
+  syncMigrationChannelInventory,
+} from "../src/migrationInventorySync.js";
 
 const environment = {
   MIGRATION_DATABASE_URL: "postgresql://migration_reader:secret@migration-postgres:5432/bullmq_crawler_migration",
@@ -10,6 +13,8 @@ const environment = {
   EXPECTED_MIGRATION_DATABASE_OID: "16384",
   EXPECTED_MIGRATION_DATABASE_USER: "migration_reader",
   EXPECTED_CRAWLER_DATABASE: "newcrawler_crawler",
+  MIGRATION_POSTGRES_STATEMENT_TIMEOUT_MS: "2500",
+  MIGRATION_INVENTORY_SOURCE_STATEMENT_TIMEOUT_MS: "120000",
 };
 
 function identityRow() {
@@ -120,8 +125,19 @@ test("Migration inventory sync streams Source rows and atomically publishes Targ
   )));
   assert.ok(targetStatements.some((entry) => /SET status='ready'/.test(entry.sql)));
   assert.ok(sourceStatements.some((statement) => statement.startsWith("DECLARE migration_channel_inventory_source")));
+  assert.ok(sourceStatements.includes("SET LOCAL statement_timeout=120000"));
   assert.equal(sourceStatements.filter((statement) => statement.startsWith("FETCH FORWARD")).length, 2);
   assert.deepEqual(progress, [{ source_id: "qy-migration-v1", eligible_count: 2 }]);
+});
+
+test("Migration inventory force refresh accepts only explicit true or false", () => {
+  assert.equal(migrationInventoryForceSyncEnabled({}), false);
+  assert.equal(migrationInventoryForceSyncEnabled({ MIGRATION_INVENTORY_FORCE_SYNC: "false" }), false);
+  assert.equal(migrationInventoryForceSyncEnabled({ MIGRATION_INVENTORY_FORCE_SYNC: " TRUE " }), true);
+  assert.throws(
+    () => migrationInventoryForceSyncEnabled({ MIGRATION_INVENTORY_FORCE_SYNC: "treu" }),
+    /MIGRATION_INVENTORY_FORCE_SYNC must be true or false/,
+  );
 });
 
 test("ready Migration inventory skips Source without opening a connection", async () => {
@@ -175,6 +191,11 @@ test("QYBullMQ API prepares inventory before becoming healthy", async () => {
   assert.ok(syncIndex > assertIndex);
   assert.ok(listenIndex > syncIndex);
   assert.match(server, /migrationInventorySyncConfigured\(\)/);
+  assert.match(server, /migrationInventoryForceSyncEnabled\(\)/);
+  assert.doesNotMatch(server, /MIGRATION_INVENTORY_FORCE_SYNC \|\| ""/);
   assert.doesNotMatch(server, /ensureMigrationChannelInventorySchema/);
   assert.doesNotMatch(server, /loadMigrationChannelInventorySchemaSql/);
+
+  const runtimeSchema = await readFile(new URL("../src/schema.sql", import.meta.url), "utf8");
+  assert.doesNotMatch(runtimeSchema, /migration_channel_inventory/);
 });
