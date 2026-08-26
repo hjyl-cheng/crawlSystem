@@ -239,6 +239,88 @@ function normalizeState(row) {
   };
 }
 
+const ROLLBACK_TARGET_EVIDENCE_FIELDS = Object.freeze([
+  "rollback_target_exists",
+  "rollback_target_reachable",
+  "rollback_target_count",
+  "rollback_target_expected_count",
+  "rollback_target_parity_diffs",
+  "rollback_chain_errors",
+]);
+
+function normalizeRollbackTarget(row) {
+  if (!row) throw new Error("Creator Search rollback target state is missing");
+  return {
+    rollback_target_exists: row.rollback_target_exists === true,
+    rollback_target_reachable: row.rollback_target_reachable === true,
+    rollback_target_count: integer(row.rollback_target_count, "rollback target count"),
+    rollback_target_expected_count: integer(
+      row.rollback_target_expected_count,
+      "rollback target expected count",
+    ),
+    rollback_target_parity_diffs: integer(
+      row.rollback_target_parity_diffs,
+      "rollback target parity count",
+    ),
+    rollback_chain_errors: integer(
+      row.rollback_chain_errors,
+      "rollback chain error count",
+    ),
+  };
+}
+
+function expectedRollbackTarget(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError("expected rollback target evidence is required");
+  }
+  for (const field of ["rollback_target_exists", "rollback_target_reachable"]) {
+    if (typeof value[field] !== "boolean") {
+      throw new TypeError(`expected rollback target ${field} must be boolean`);
+    }
+  }
+  for (const field of ROLLBACK_TARGET_EVIDENCE_FIELDS.slice(2)) {
+    if (!Number.isSafeInteger(value[field]) || value[field] < 0) {
+      throw new TypeError(`expected rollback target ${field} must be a non-negative integer`);
+    }
+  }
+  return Object.fromEntries(ROLLBACK_TARGET_EVIDENCE_FIELDS.map((field) => [field, value[field]]));
+}
+
+function rollbackTargetBlockers(target) {
+  const blockers = [];
+  if (!target.rollback_target_exists) blockers.push("rollback target release is missing");
+  if (!target.rollback_target_reachable) {
+    blockers.push("rollback target is not reachable from active release");
+  }
+  if (target.rollback_chain_errors !== 0) {
+    blockers.push(`${target.rollback_chain_errors} rollback releases have incomplete changes`);
+  }
+  if (
+    target.rollback_target_exists
+      && target.rollback_target_reachable
+      && target.rollback_chain_errors === 0
+      && (
+        target.rollback_target_count !== target.rollback_target_expected_count
+        || target.rollback_target_parity_diffs !== 0
+      )
+  ) {
+    blockers.push(
+      `rollback target Legacy snapshot has ${target.rollback_target_count}/${target.rollback_target_expected_count} rows and ${target.rollback_target_parity_diffs} parity differences`,
+    );
+  }
+  return blockers;
+}
+
+function assertRollbackTargetExpected(actual, expected) {
+  for (const field of ROLLBACK_TARGET_EVIDENCE_FIELDS) {
+    if (actual[field] !== expected[field]) {
+      throw new Error(
+        `Creator Search rollback target changed after the approved plan: ${field}`,
+      );
+    }
+  }
+}
+
 function assertIdentity(state, config) {
   if (state.database_name !== config.expectedDatabase) {
     throw new Error(
@@ -372,52 +454,20 @@ export class BusinessCreatorSearchStorageAdministrator {
       await client.query("SET LOCAL lock_timeout='10s'");
       await client.query("SET LOCAL statement_timeout='180s'");
       const state = await inspectStorage(client, this.config);
-      const targetState = (await client.query(INSPECT_ROLLBACK_TARGET_SQL, [target])).rows[0] ?? {};
+      const targetState = normalizeRollbackTarget(
+        (await client.query(INSPECT_ROLLBACK_TARGET_SQL, [target])).rows[0],
+      );
       const combined = {
         ...state,
         rollback_target_watermark: target,
-        rollback_target_count: integer(
-          targetState.rollback_target_count,
-          "rollback target count",
-        ),
-        rollback_target_expected_count: integer(
-          targetState.rollback_target_expected_count,
-          "rollback target expected count",
-        ),
-        rollback_target_parity_diffs: integer(
-          targetState.rollback_target_parity_diffs,
-          "rollback target parity count",
-        ),
-        rollback_target_exists: targetState.rollback_target_exists === true,
-        rollback_target_reachable: targetState.rollback_target_reachable === true,
-        rollback_chain_errors: integer(
-          targetState.rollback_chain_errors,
-          "rollback chain error count",
-        ),
+        ...targetState,
       };
       const blockers = [];
       if (state.rollback_function_ready === false) blockers.push("storage rollback function is missing");
       if (state.write_mode !== "incremental" || state.read_mode !== "live") {
         blockers.push(`storage mode is ${state.write_mode}/${state.read_mode}, expected incremental/live`);
       }
-      if (!combined.rollback_target_exists) blockers.push("rollback target release is missing");
-      if (!combined.rollback_target_reachable) blockers.push("rollback target is not reachable from active release");
-      if (combined.rollback_chain_errors !== 0) {
-        blockers.push(`${combined.rollback_chain_errors} rollback releases have incomplete changes`);
-      }
-      if (
-        combined.rollback_target_exists
-          && combined.rollback_target_reachable
-          && combined.rollback_chain_errors === 0
-          && (
-            combined.rollback_target_count !== combined.rollback_target_expected_count
-            || combined.rollback_target_parity_diffs !== 0
-          )
-      ) {
-        blockers.push(
-          `rollback target Legacy snapshot has ${combined.rollback_target_count}/${combined.rollback_target_expected_count} rows and ${combined.rollback_target_parity_diffs} parity differences`,
-        );
-      }
+      blockers.push(...rollbackTargetBlockers(combined));
       if (state.in_flight_projection_count !== 0) {
         blockers.push(`${state.in_flight_projection_count} Projection Outbox rows are in flight`);
       }
@@ -436,15 +486,13 @@ export class BusinessCreatorSearchStorageAdministrator {
     expectedActiveWatermark,
     expectedCurrentLiveCount,
     targetWatermark,
-    expectedLiveCount,
+    expectedTarget,
   }) {
     const expectedActive = requiredText(expectedActiveWatermark, "expected active watermark");
     const target = requiredText(targetWatermark, "rollback target watermark");
+    const approvedTarget = expectedRollbackTarget(expectedTarget);
     if (!Number.isSafeInteger(expectedCurrentLiveCount) || expectedCurrentLiveCount < 0) {
       throw new TypeError("expected current Live count must be a non-negative integer");
-    }
-    if (!Number.isSafeInteger(expectedLiveCount) || expectedLiveCount < 0) {
-      throw new TypeError("expected rollback Live count must be a non-negative integer");
     }
     const client = await this.pool.connect();
     let began = false;
@@ -464,10 +512,25 @@ export class BusinessCreatorSearchStorageAdministrator {
       if (state.in_flight_projection_count !== 0) {
         throw new Error("Creator Search storage rollback is blocked by in-flight Projections");
       }
+      const lockedTarget = normalizeRollbackTarget(
+        (await client.query(INSPECT_ROLLBACK_TARGET_SQL, [target])).rows[0],
+      );
+      assertRollbackTargetExpected(lockedTarget, approvedTarget);
+      const targetBlockers = rollbackTargetBlockers(lockedTarget);
+      if (targetBlockers.length > 0) {
+        throw new Error(
+          `Creator Search storage rollback target is blocked: ${targetBlockers.join("; ")}`,
+        );
+      }
       const result = (await client.query(
         `SELECT public.rollback_creator_search_incremental_storage_v1($1,$2,$3,$4)
            AS rollback_count`,
-        [target, expectedLiveCount, this.config.actor, this.config.reason],
+        [
+          target,
+          lockedTarget.rollback_target_expected_count,
+          this.config.actor,
+          this.config.reason,
+        ],
       )).rows[0];
       const rollbackCount = integer(result?.rollback_count, "rollback count");
       await client.query("COMMIT");
@@ -477,7 +540,7 @@ export class BusinessCreatorSearchStorageAdministrator {
         database_name: state.database_name,
         previous_active_watermark: expectedActive,
         active_watermark: target,
-        live_count: expectedLiveCount,
+        live_count: lockedTarget.rollback_target_expected_count,
         rollback_count: rollbackCount,
       };
     } catch (error) {

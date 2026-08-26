@@ -771,7 +771,6 @@ services:
     environment:
       BUSINESS_ADMIN_DATABASE_URL_FILE: /run/secrets/business_admin_database_url
       EXPECTED_BUSINESS_DATABASE: ${BUSINESS_DB_NAME:-newcrawler_business}
-      EXPECTED_BUSINESS_CHANNEL_COUNT: ${EXPECTED_BUSINESS_CHANNEL_COUNT:-0}
       TZ: UTC
     secrets:
       - business_admin_database_url

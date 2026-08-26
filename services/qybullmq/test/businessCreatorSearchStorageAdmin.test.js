@@ -341,7 +341,14 @@ test("Creator Search storage rollback locks, rechecks, and calls the guarded fun
     expectedActiveWatermark: inspected.active_watermark,
     expectedCurrentLiveCount: inspected.live_count,
     targetWatermark: "publication_projection_baseline",
-    expectedLiveCount: 197,
+    expectedTarget: {
+      rollback_target_exists: true,
+      rollback_target_reachable: true,
+      rollback_target_count: 197,
+      rollback_target_expected_count: 197,
+      rollback_target_parity_diffs: 0,
+      rollback_chain_errors: 0,
+    },
   });
   assert.equal(result.outcome, "rolled_back");
   assert.equal(result.rollback_count, 3);
@@ -354,4 +361,52 @@ test("Creator Search storage rollback locks, rechecks, and calls the guarded fun
     "storage-test",
     "enable incremental Creator Search storage",
   ]);
+});
+
+test("Creator Search storage rollback rejects target drift after taking the publish lock", async () => {
+  const config = businessCreatorSearchStorageConfig(environment());
+  const inspected = state({
+    write_mode: "incremental",
+    read_mode: "live",
+  });
+  const approvedTarget = {
+    rollback_target_exists: true,
+    rollback_target_reachable: true,
+    rollback_target_count: 197,
+    rollback_target_expected_count: 197,
+    rollback_target_parity_diffs: 0,
+    rollback_chain_errors: 0,
+  };
+  for (const [field, driftedValue] of [
+    ["rollback_target_exists", false],
+    ["rollback_target_reachable", false],
+    ["rollback_target_count", 196],
+    ["rollback_target_expected_count", 196],
+    ["rollback_target_parity_diffs", 1],
+    ["rollback_chain_errors", 1],
+  ]) {
+    const fixture = fakePool(inspected, {
+      rollbackTarget: { ...approvedTarget, [field]: driftedValue },
+    });
+    const administrator = new BusinessCreatorSearchStorageAdministrator({
+      pool: fixture.pool,
+      config,
+    });
+    await assert.rejects(
+      administrator.rollback({
+        expectedActiveWatermark: inspected.active_watermark,
+        expectedCurrentLiveCount: inspected.live_count,
+        targetWatermark: "publication_projection_baseline",
+        expectedTarget: approvedTarget,
+      }),
+      new RegExp(`rollback target changed after the approved plan: ${field}`),
+    );
+    const lockIndex = fixture.calls.findIndex(({ sql }) => /creator-search-publish/.test(sql));
+    const targetIndex = fixture.calls.findIndex(({ sql }) => /WITH RECURSIVE release_chain/.test(sql));
+    assert.ok(lockIndex >= 0 && targetIndex > lockIndex);
+    assert.ok(fixture.calls.some(({ sql }) => sql === "ROLLBACK"));
+    assert.ok(!fixture.calls.some(({ sql }) => (
+      /SELECT public\.rollback_creator_search_incremental_storage_v1/.test(sql)
+    )));
+  }
 });

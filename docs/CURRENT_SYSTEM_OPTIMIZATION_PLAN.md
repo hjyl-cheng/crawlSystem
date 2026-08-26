@@ -388,6 +388,7 @@ npm run publication:creator-search-storage -- --rollback --apply
 ```text
 ./scripts/compose.sh production \
   --profile manual-business-creator-search-storage-admin run --rm \
+  -e EXPECTED_BUSINESS_CHANNEL_COUNT='<current exact count>' \
   -e PUBLICATION_OPERATOR='<operator>' \
   -e PUBLICATION_ACTION_REASON='<reviewed reason>' \
   business-creator-search-storage-admin
@@ -401,11 +402,41 @@ stdout 作为审计输出并在容器外归档，不依赖一次性只读容器�
 ```text
 ./scripts/compose.sh production \
   --profile manual-business-creator-search-storage-admin run --rm \
+  -e EXPECTED_BUSINESS_CHANNEL_COUNT='<same exact count as plan>' \
   -e PUBLICATION_OPERATOR='<same operator as plan>' \
   -e PUBLICATION_ACTION_REASON='<same reason as plan>' \
   -e CONFIRM_BUSINESS_CREATOR_SEARCH_STORAGE='<exact plan value>' \
   business-creator-search-storage-admin \
   node scripts/manageBusinessCreatorSearchStorage.mjs --apply
+```
+
+Rollback plan 和 Rollback Apply 同样必须显式传入精确频道数：
+
+```text
+./scripts/compose.sh production \
+  --profile manual-business-creator-search-storage-admin run --rm \
+  -e EXPECTED_BUSINESS_CHANNEL_COUNT='<current exact count>' \
+  -e PUBLICATION_OPERATOR='<operator>' \
+  -e PUBLICATION_ACTION_REASON='<reviewed rollback reason>' \
+  -e BUSINESS_CREATOR_SEARCH_ROLLBACK_WATERMARK='<target watermark>' \
+  business-creator-search-storage-admin \
+  node scripts/manageBusinessCreatorSearchStorage.mjs --rollback
+```
+
+Rollback Apply 复用计划中的精确频道数、操作人、原因和目标 watermark，并额外传入计划
+输出的确认串，最后显式追加 `--rollback --apply`。管理服务本身不提供频道数默认值；漏传
+时必须在连接数据库前失败。
+
+```text
+./scripts/compose.sh production \
+  --profile manual-business-creator-search-storage-admin run --rm \
+  -e EXPECTED_BUSINESS_CHANNEL_COUNT='<same exact count as rollback plan>' \
+  -e PUBLICATION_OPERATOR='<same operator as rollback plan>' \
+  -e PUBLICATION_ACTION_REASON='<same reason as rollback plan>' \
+  -e BUSINESS_CREATOR_SEARCH_ROLLBACK_WATERMARK='<same target as rollback plan>' \
+  -e CONFIRM_BUSINESS_CREATOR_SEARCH_STORAGE='<exact rollback plan value>' \
+  business-creator-search-storage-admin \
+  node scripts/manageBusinessCreatorSearchStorage.mjs --rollback --apply
 ```
 
 默认和 `--rollback` 均只生成只读计划。写操作必须显式传入 `--apply`，并要求
@@ -418,7 +449,9 @@ stdout 作为审计输出并在容器外归档，不依赖一次性只读容器�
 
 Apply 会在 `SERIALIZABLE` 事务中获取 Creator Search 发布 advisory lock，重新读取全部
 状态，阻断在途 Projection、模式漂移、watermark 漂移、行数漂移和 parity 差异，然后才
-调用数据库已有的 guarded cutover/rollback 函数。
+调用数据库已有的 guarded cutover/rollback 函数。Rollback Apply 还会在锁内重新按变更
+链构建目标态，并逐项比对确认串批准的目标存在性、可达性、Legacy/预期行数、parity 和
+change-chain 完整性；任一项漂移都在调用回滚函数前终止事务。
 
 Apply 使用 `--output` 时，会在任何数据库访问前以独占方式预留文件；已存在或不可写的
 路径会提前阻断。数据库动作提交后若最终文件写入仍失败，命令会将成功结果回退到

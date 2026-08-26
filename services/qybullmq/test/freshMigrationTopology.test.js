@@ -153,6 +153,7 @@ test("Creator Search storage administration uses the standard Business admin sec
   );
   assert.match(administrator, /- business_admin_database_url/);
   assert.doesNotMatch(administrator, /BUSINESS_DATABASE_URL(?:_FILE)?:/);
+  assert.doesNotMatch(administrator, /EXPECTED_BUSINESS_CHANNEL_COUNT:/);
   assert.doesNotMatch(administrator, /--apply/);
 });
 

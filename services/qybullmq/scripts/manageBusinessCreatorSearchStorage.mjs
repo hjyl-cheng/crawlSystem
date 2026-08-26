@@ -149,7 +149,14 @@ export async function runBusinessCreatorSearchStorage({
         expectedActiveWatermark: plan.state.active_watermark,
         expectedCurrentLiveCount: plan.state.live_count,
         targetWatermark: plan.state.rollback_target_watermark,
-        expectedLiveCount: plan.state.rollback_target_expected_count,
+        expectedTarget: {
+          rollback_target_exists: plan.state.rollback_target_exists,
+          rollback_target_reachable: plan.state.rollback_target_reachable,
+          rollback_target_count: plan.state.rollback_target_count,
+          rollback_target_expected_count: plan.state.rollback_target_expected_count,
+          rollback_target_parity_diffs: plan.state.rollback_target_parity_diffs,
+          rollback_chain_errors: plan.state.rollback_chain_errors,
+        },
       })
       : await administrator.apply({
         expectedWatermark: plan.state.active_watermark,
