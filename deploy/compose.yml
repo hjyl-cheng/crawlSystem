@@ -337,6 +337,9 @@ services:
       EXPECTED_MIGRATION_DATABASE: ${MIGRATION_POSTGRES_DB:-bullmq_crawler_migration}
       EXPECTED_MIGRATION_DATABASE_OID: ${MIGRATION_POSTGRES_DATABASE_OID:-0}
       EXPECTED_MIGRATION_DATABASE_USER: ${MIGRATION_POSTGRES_USER:-migration_reader}
+      MIGRATION_INVENTORY_SYNC_BATCH_SIZE: ${MIGRATION_INVENTORY_SYNC_BATCH_SIZE:-5000}
+      MIGRATION_INVENTORY_FORCE_SYNC: ${MIGRATION_INVENTORY_FORCE_SYNC:-false}
+      MIGRATION_POSTGRES_STATEMENT_TIMEOUT_MS: ${MIGRATION_POSTGRES_STATEMENT_TIMEOUT_MS:-120000}
     secrets:
       - migration_database_url
     networks: [internal]
@@ -345,6 +348,32 @@ services:
       interval: 10s
       timeout: 5s
       retries: 20
+    logging: *default-logging
+
+  migration-inventory-schema-publisher:
+    <<: *qybullmq-image
+    profiles: [manual-migration-inventory-schema]
+    restart: "no"
+    depends_on:
+      crawler-postgres:
+        condition: service_healthy
+    command: ["node", "scripts/applyMigrationChannelInventorySchema.mjs", "--apply"]
+    environment:
+      POSTGRES_HOST: crawler-postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: ${CRAWLER_DB_USER:-bullmq}
+      POSTGRES_PASSWORD: ${CRAWLER_DB_PASSWORD:?CRAWLER_DB_PASSWORD is required}
+      POSTGRES_DB: ${CRAWLER_DB_NAME:-newcrawler_crawler}
+      EXPECTED_CRAWLER_DATABASE: ${CRAWLER_DB_NAME:-newcrawler_crawler}
+      FORBIDDEN_CRAWLER_DATABASE: bullmq_crawler_migration
+      CONFIRM_MIGRATION_INVENTORY_SCHEMA_APPLY: ${CONFIRM_MIGRATION_INVENTORY_SCHEMA_APPLY:-}
+      EXPECTED_MIGRATION_INVENTORY_ROW_COUNT: ${EXPECTED_MIGRATION_INVENTORY_ROW_COUNT:-0}
+      TZ: UTC
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    networks: [internal]
     logging: *default-logging
 
   local-agent-config:

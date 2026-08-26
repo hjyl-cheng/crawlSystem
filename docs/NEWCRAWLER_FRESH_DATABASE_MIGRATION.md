@@ -19,8 +19,14 @@ separate change window and operator approval.
 - A Migration intent is unique by `(source_id, channel_id)` and by
   `(source_id, source_candidate_id)`. Its source snapshot is immutable.
   Repeated clicks and BullMQ retries reuse the same target Candidate.
-- Migration list membership comes from the legacy Source. Intent, Candidate,
-  Run, Finalize, and result state come from the fresh Crawler database.
+- Authoritative Migration list membership originates in the legacy Source and
+  is copied into the narrow `crawler.migration_channel_inventory` table before
+  the API becomes healthy. Normal list requests, including filtering, sorting,
+  counting, and pagination, read only the fresh Crawler database. Source
+  connections remain limited to inventory refresh, detail, and dispatch
+  snapshots. The inventory's `search_subscriber_count` is a legacy discovery
+  snapshot, so the Dashboard labels it as `源库订阅`; it is not a fresh About
+  metric.
 - Full Crawl, future Incremental Crawl, and future Query work share the fresh
   Crawler database. Incremental, Query, Discover, Daily Clock, and Feature
   Dispatch remain disabled throughout this canary.
@@ -89,13 +95,14 @@ Legacy Migration PostgreSQL: bullmq_crawler_migration
   BEGIN ... REPEATABLE READ READ ONLY
   database name + OID + user identity gate
        |
-       | Candidate/channel snapshot only
-       v
-Dashboard + QYBullMQ controlled Migration API
-       |
-       | immutable, idempotent Migration intent
+       | Startup inventory sync and immutable dispatch/detail snapshots
        v
 Fresh Crawler PostgreSQL: newcrawler_crawler
+  migration_channel_inventory
+       |
+       | Dashboard WHERE -> ORDER BY -> LIMIT 50
+       | QYBullMQ immutable, idempotent Migration intent
+       v
   Candidate -> Full Run -> Channel/Video/Comment -> Local Agent -> Finalize
        |
        | Publication stream, revision, outbox
@@ -120,8 +127,8 @@ Connection ownership is explicit:
 
 | Component | Migration Source | Fresh Crawler | Fresh Business | Redis/MinIO/Rota |
 | --- | --- | --- | --- | --- |
-| Dashboard | read-only list/detail | read status/result | audit read | fresh Redis/MinIO, shared Rota UI |
-| QYBullMQ API | read-only dispatch snapshot | write intent/Candidate | none | fresh Redis |
+| Dashboard | read-only detail | read inventory/status/result | audit read | fresh Redis/MinIO, shared Rota UI |
+| QYBullMQ API | read-only inventory/dispatch snapshot | write inventory/intent/Candidate | none | fresh Redis |
 | Controller, Full, Data API | none | writer | none | fresh Redis/MinIO, shared Rota |
 | Local Agent, Finalize | none | writer with Crawler identity gate | none | fresh Redis |
 | Feature Bridge | none | Crawler/feature schema | none | fresh Redis |
@@ -204,6 +211,10 @@ CRAWLER_DB_NAME=newcrawler_crawler
 BUSINESS_DB_NAME=newcrawler_business
 MIGRATION_POSTGRES_DB=bullmq_crawler_migration
 MIGRATION_POSTGRES_DATABASE_OID=<approved OID, never 0>
+MIGRATION_INVENTORY_SYNC_BATCH_SIZE=5000
+MIGRATION_INVENTORY_FORCE_SYNC=false
+MIGRATION_POSTGRES_STATEMENT_TIMEOUT_MS=120000
+EXPECTED_MIGRATION_INVENTORY_ROW_COUNT=0
 CRAWLER_POSTGRES_VOLUME_NAME=qy-newcrawler-crawler-postgres-20260824-v1
 BUSINESS_POSTGRES_VOLUME_NAME=qy-newcrawler-business-postgres-20260824-v1
 CRAWLER_REDIS_VOLUME_NAME=qy-newcrawler-redis-20260824-v1
@@ -242,6 +253,27 @@ must match its current database, and all channel, Candidate, Run, Publication,
 Business Current, Redis queue, and MinIO object counts must be zero. If a named
 volume already contains data or lacks the identity marker, stop. Allocate a
 new versioned volume name. Never delete or repair the old volume in place.
+
+Before starting any API process, publish the Migration inventory tables and
+page index through the manual Schema publisher. For a fresh Target the expected
+inventory row count is `0`; for an existing Target, first record the exact
+current count and use that value instead. The publisher connects directly to
+`crawler-postgres:5432`, verifies the Crawler database identity, runs in one
+transaction, and refuses to commit if the inventory row count changes:
+
+```bash
+EXPECTED_MIGRATION_INVENTORY_ROW_COUNT=0 \
+./scripts/compose.sh production \
+  --profile manual-migration-inventory-schema run --rm \
+  -e CONFIRM_MIGRATION_INVENTORY_SCHEMA_APPLY=newcrawler_crawler \
+  migration-inventory-schema-publisher
+```
+
+Archive the publisher JSON and require `ok=true`, the exact approved database
+name, and the expected row count. The running API never creates or alters these
+objects. It performs a read-only table, column, and index check and exits before
+health becomes ready when the controlled Schema publication is missing or
+invalid.
 
 Run the dedicated runtime-role administrator as a plan:
 
@@ -310,12 +342,46 @@ Start the Crawler control path with one Full worker and no automatic producer:
   crawler-outbox-publisher
 ```
 
-Finally start the controlled API and UI path:
+Start only QYBullMQ API first. Its first startup performs the real, read-only
+legacy Source inventory sync in batches of `5000`; each Source statement has a
+`120000` ms timeout. The API cannot become healthy until the Target inventory
+is atomically marked `ready`:
+
+```bash
+./scripts/compose.sh production up -d --no-build qybullmq-api
+```
+
+This first sync is a deployment gate, not background warm-up. Record its
+elapsed time and final `migration_channel_inventory_sync_ready` event. Query
+fresh Crawler and require `status='ready'`, the pinned Source database name and
+OID, and exact equality between `eligible_count` and the inventory row count.
+Any timeout, Source identity mismatch, failed status, count mismatch, or API
+restart blocks Dashboard/Nginx startup. The synthetic two-database regression
+test with 410,292 rows must also pass before the change window:
+
+```bash
+cd services/qybullmq
+MIGRATION_INVENTORY_SOURCE_POSTGRES_ADMIN_TEST_URL='<local Source admin test URL>' \
+MIGRATION_INVENTORY_SOURCE_POSTGRES_TEST_URL='<local read-only Source test URL>' \
+MIGRATION_INVENTORY_TARGET_POSTGRES_TEST_URL='<different local Target test URL>' \
+node --test test/migrationInventorySync.postgres.integration.test.js
+```
+
+After the initial inventory gate passes, start the controlled UI path:
 
 ```bash
 ./scripts/compose.sh production up -d --no-build \
-  auth-secret-init auth qybullmq-api dashboard nginx
+  auth-secret-init auth dashboard nginx
 ```
+
+On later starts, a `ready` inventory with the same Source database/OID and an
+exact stored row count skips the Source connection. To intentionally refresh
+membership or Source snapshot fields, set `MIGRATION_INVENTORY_FORCE_SYNC=true`
+for one API restart, repeat the same ready/count gate, then immediately restore
+it to `false` and recreate the API container. Leaving it true would repeat a
+full Source scan on every restart. Change `MIGRATION_INVENTORY_SYNC_BATCH_SIZE`
+or `MIGRATION_POSTGRES_STATEMENT_TIMEOUT_MS` only through an approved change;
+invalid values stop startup instead of silently falling back.
 
 Confirm the rendered and running service lists exclude:
 
@@ -358,9 +424,12 @@ Require all of the following:
 ## 9. 100, 1000, And 2000 Channel Gates
 
 Use three disjoint Dashboard cohorts in order: 100, then 1000, then 2000.
-The list is sourced from the legacy database, while already-started and result
-state are merged from fresh Crawler in chunks. Do not start the next cohort
-until the previous gate is signed off.
+The list, its Target lifecycle joins, filtering, stable ordering, counts, and
+`LIMIT 50/OFFSET` pagination all run in fresh Crawler PostgreSQL against the
+published inventory. The legacy Source is not queried by normal list requests;
+it is used only for controlled inventory refreshes and immutable detail or
+dispatch snapshots. Do not start the next cohort until the previous gate is
+signed off.
 
 For each cohort, archive the batch response, Source fingerprints, target
 queries, queue counts, MinIO object summary, Publication summary, Business
@@ -445,10 +514,15 @@ scripts/bootstrap.sh
 scripts/compose.sh
 scripts/verify.sh
 services/qybullmq/src/databaseIdentity.js
+services/qybullmq/src/migrationInventorySchema.js
+services/qybullmq/src/migrationInventorySync.js
 services/qybullmq/src/migrationSource.js
 services/qybullmq/src/manualMigrationDispatch.js
+services/qybullmq/scripts/applyMigrationChannelInventorySchema.mjs
 services/qybullmq/src/freshPublicationBootstrap.js
 services/qybullmq/scripts/bootstrapFreshPublication.mjs
+services/dashboard/src/migrationCompletion.js
+services/dashboard/src/migrationInventory.js
 services/dashboard/src/migrationTopology.js
 services/dashboard/src/server.js
 ```

@@ -5404,6 +5404,45 @@ CREATE INDEX idx_crawler_migration_intents_target
 ON crawler.migration_channel_intents (target_candidate_id)
 WHERE target_candidate_id IS NOT NULL;
 
+-- migration-channel-inventory-schema:start
+CREATE TABLE crawler.migration_channel_inventory_syncs (
+    source_id text PRIMARY KEY,
+    source_database text NOT NULL,
+    source_database_oid oid NOT NULL,
+    status text DEFAULT 'syncing'::text NOT NULL,
+    sync_token uuid NOT NULL,
+    eligible_count bigint DEFAULT 0 NOT NULL,
+    started_at timestamp with time zone DEFAULT now() NOT NULL,
+    completed_at timestamp with time zone,
+    last_error text,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT migration_channel_inventory_syncs_eligible_count_check CHECK ((eligible_count >= 0)),
+    CONSTRAINT migration_channel_inventory_syncs_status_check CHECK ((status = ANY (ARRAY['syncing'::text, 'ready'::text, 'failed'::text])))
+);
+
+CREATE TABLE crawler.migration_channel_inventory (
+    source_id text NOT NULL REFERENCES crawler.migration_channel_inventory_syncs(source_id) ON DELETE CASCADE,
+    source_candidate_id bigint NOT NULL,
+    channel_id text NOT NULL,
+    channel_url text NOT NULL,
+    handle text,
+    title text,
+    avatar_url text,
+    search_subscriber_count bigint,
+    priority integer DEFAULT 100 NOT NULL,
+    source_candidate_status text NOT NULL,
+    source_updated_at timestamp with time zone,
+    sync_token uuid NOT NULL,
+    synced_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT migration_channel_inventory_pkey PRIMARY KEY (source_id, channel_id),
+    CONSTRAINT migration_channel_inventory_source_candidate_key UNIQUE (source_id, source_candidate_id),
+    CONSTRAINT migration_channel_inventory_source_status_check CHECK ((source_candidate_status = ANY (ARRAY['discovered'::text, 'queued'::text, 'validating'::text, 'failed'::text])))
+);
+
+CREATE INDEX idx_crawler_migration_inventory_page
+ON crawler.migration_channel_inventory (source_id, priority DESC, source_candidate_id ASC);
+-- migration-channel-inventory-schema:end
+
 CREATE FUNCTION crawler.prevent_migration_intent_source_update()
 RETURNS trigger
 LANGUAGE plpgsql

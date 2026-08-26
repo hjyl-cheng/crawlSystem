@@ -65,7 +65,7 @@ export function migrationSourceRuntimeConfig(environment = process.env) {
     targetDatabase,
     statementTimeoutMs: positiveInteger(
       environment.MIGRATION_POSTGRES_STATEMENT_TIMEOUT_MS,
-      10000,
+      120000,
       "MIGRATION_POSTGRES_STATEMENT_TIMEOUT_MS",
     ),
   };

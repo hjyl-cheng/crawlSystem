@@ -11,11 +11,16 @@ import {
   publishAgentTemplate,
   updateDefaultAgentConfig,
 } from "./agentConfig.js";
-import { closeDb, ensureSchema, query, withTransaction } from "./db.js";
+import { closeDb, ensureSchema, pool, query, withTransaction } from "./db.js";
 import {
   dispatchManualMigrationBatch,
   dispatchManualMigrationChannel,
 } from "./manualMigrationDispatch.js";
+import { assertMigrationChannelInventorySchema } from "./migrationInventorySchema.js";
+import {
+  migrationInventorySyncConfigured,
+  syncMigrationChannelInventory,
+} from "./migrationInventorySync.js";
 import { closeMigrationSourcePool } from "./migrationSource.js";
 import {
   ManagedJobOutboxDispatcher,
@@ -50,6 +55,26 @@ const stronglyTypedManagedQueues = new Set([
   queuesByRole.contentEnrich,
 ]);
 await ensureSchema();
+if (migrationInventorySyncConfigured()) {
+  await assertMigrationChannelInventorySchema({ query: pool.query.bind(pool) });
+  const inventorySync = await syncMigrationChannelInventory({
+    targetPool: pool,
+    force: String(process.env.MIGRATION_INVENTORY_FORCE_SYNC || "").toLowerCase() === "true",
+    onProgress: ({ source_id: sourceId, eligible_count: eligibleCount }) => {
+      console.log(JSON.stringify({
+        event: "migration_channel_inventory_sync_progress",
+        source_id: sourceId,
+        eligible_count: eligibleCount,
+      }));
+    },
+  });
+  console.log(JSON.stringify({
+    event: "migration_channel_inventory_sync_ready",
+    source_id: inventorySync.source_id,
+    eligible_count: inventorySync.eligible_count,
+    skipped: inventorySync.skipped,
+  }));
+}
 await ensureDefaultAgentConfig();
 
 const app = express();
