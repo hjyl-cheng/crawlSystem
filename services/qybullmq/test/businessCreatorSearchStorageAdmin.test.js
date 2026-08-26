@@ -46,6 +46,7 @@ function state(overrides = {}) {
 function fakePool(initialState, {
   activationResult = "incremental",
   rollbackTarget = null,
+  unlockResult = true,
 } = {}) {
   const calls = [];
   const client = {
@@ -68,10 +69,13 @@ function fakePool(initialState, {
       if (sql.includes("rollback_creator_search_incremental_storage_v1")) {
         return { rows: [{ rollback_count: 3 }] };
       }
+      if (sql.includes("pg_advisory_unlock")) {
+        return { rows: [{ unlocked: unlockResult }] };
+      }
       return { rows: [] };
     },
-    release() {
-      calls.push({ sql: "RELEASE", parameters: [] });
+    release(error) {
+      calls.push({ sql: "RELEASE", parameters: [error] });
     },
   };
   return {
@@ -221,6 +225,44 @@ test("Creator Search storage confirmation binds the exact inspected state and ac
   );
 });
 
+test("Creator Search storage rollback confirmation binds all target evidence", () => {
+  const config = businessCreatorSearchStorageConfig(environment());
+  const rollbackState = state({
+    write_mode: "incremental",
+    read_mode: "live",
+    rollback_target_watermark: "publication_projection_baseline",
+    rollback_target_exists: true,
+    rollback_target_reachable: true,
+    rollback_target_count: 197,
+    rollback_target_expected_count: 197,
+    rollback_target_parity_diffs: 0,
+    rollback_chain_errors: 0,
+  });
+  const confirmation = businessCreatorSearchStorageConfirmation(
+    config,
+    rollbackState,
+    "rollback",
+  );
+  for (const [field, driftedValue] of [
+    ["rollback_target_exists", false],
+    ["rollback_target_reachable", false],
+    ["rollback_target_count", 196],
+    ["rollback_target_expected_count", 196],
+    ["rollback_target_parity_diffs", 1],
+    ["rollback_chain_errors", 1],
+  ]) {
+    assert.notEqual(
+      businessCreatorSearchStorageConfirmation(
+        config,
+        { ...rollbackState, [field]: driftedValue },
+        "rollback",
+      ),
+      confirmation,
+      `${field} must be bound by the confirmation`,
+    );
+  }
+});
+
 test("Creator Search storage plan is read-only and reports cutover blockers", async () => {
   const config = businessCreatorSearchStorageConfig(environment());
   const fixture = fakePool(state({ in_flight_projection_count: 2 }));
@@ -250,8 +292,12 @@ test("Creator Search storage apply locks, rechecks, and calls the guarded databa
   });
   assert.equal(result.outcome, "applied");
   assert.equal(result.storage_mode, "incremental");
-  assert.ok(fixture.calls.some(({ sql }) => /BEGIN.*SERIALIZABLE/i.test(sql)));
-  assert.ok(fixture.calls.some(({ sql }) => /creator-search-publish/.test(sql)));
+  const lockIndex = fixture.calls.findIndex(({ sql }) => /pg_advisory_lock/.test(sql));
+  const beginIndex = fixture.calls.findIndex(({ sql }) => /BEGIN.*SERIALIZABLE/i.test(sql));
+  const commitIndex = fixture.calls.findIndex(({ sql }) => sql === "COMMIT");
+  const unlockIndex = fixture.calls.findIndex(({ sql }) => /pg_advisory_unlock/.test(sql));
+  assert.ok(lockIndex >= 0 && lockIndex < beginIndex);
+  assert.ok(unlockIndex > commitIndex);
   assert.ok(fixture.calls.some(({ sql }) => /SELECT public\.activate_creator_search_incremental_v1/.test(sql)));
   assert.ok(fixture.calls.some(({ sql }) => sql === "COMMIT"));
 });
@@ -270,8 +316,30 @@ test("Creator Search storage apply rejects stale or unsafe state before calling 
     }),
     /active watermark changed/,
   );
-  assert.ok(fixture.calls.some(({ sql }) => sql === "ROLLBACK"));
+  const rollbackIndex = fixture.calls.findIndex(({ sql }) => sql === "ROLLBACK");
+  const unlockIndex = fixture.calls.findIndex(({ sql }) => /pg_advisory_unlock/.test(sql));
+  const releaseIndex = fixture.calls.findIndex(({ sql }) => sql === "RELEASE");
+  assert.ok(rollbackIndex >= 0 && unlockIndex > rollbackIndex && releaseIndex > unlockIndex);
   assert.ok(!fixture.calls.some(({ sql }) => /SELECT public\.activate_creator_search_incremental_v1/.test(sql)));
+});
+
+test("Creator Search storage destroys a connection that cannot release its session lock", async () => {
+  const config = businessCreatorSearchStorageConfig(environment());
+  const inspected = state();
+  const fixture = fakePool(inspected, { unlockResult: false });
+  const administrator = new BusinessCreatorSearchStorageAdministrator({
+    pool: fixture.pool,
+    config,
+  });
+  await assert.rejects(
+    administrator.apply({
+      expectedWatermark: inspected.active_watermark,
+      expectedLiveCount: inspected.live_count,
+    }),
+    /session lock was not released/,
+  );
+  const release = fixture.calls.find(({ sql }) => sql === "RELEASE");
+  assert.ok(release.parameters[0] instanceof Error);
 });
 
 test("Creator Search storage rollback plan verifies the retained change chain", async () => {
@@ -361,6 +429,12 @@ test("Creator Search storage rollback locks, rechecks, and calls the guarded fun
     "storage-test",
     "enable incremental Creator Search storage",
   ]);
+  const lockIndex = fixture.calls.findIndex(({ sql }) => /pg_advisory_lock/.test(sql));
+  const beginIndex = fixture.calls.findIndex(({ sql }) => /BEGIN.*SERIALIZABLE/i.test(sql));
+  const commitIndex = fixture.calls.findIndex(({ sql }) => sql === "COMMIT");
+  const unlockIndex = fixture.calls.findIndex(({ sql }) => /pg_advisory_unlock/.test(sql));
+  assert.ok(lockIndex >= 0 && lockIndex < beginIndex);
+  assert.ok(unlockIndex > commitIndex);
 });
 
 test("Creator Search storage rollback rejects target drift after taking the publish lock", async () => {
@@ -401,10 +475,12 @@ test("Creator Search storage rollback rejects target drift after taking the publ
       }),
       new RegExp(`rollback target changed after the approved plan: ${field}`),
     );
-    const lockIndex = fixture.calls.findIndex(({ sql }) => /creator-search-publish/.test(sql));
+    const lockIndex = fixture.calls.findIndex(({ sql }) => /pg_advisory_lock/.test(sql));
     const targetIndex = fixture.calls.findIndex(({ sql }) => /WITH RECURSIVE release_chain/.test(sql));
+    const rollbackIndex = fixture.calls.findIndex(({ sql }) => sql === "ROLLBACK");
+    const unlockIndex = fixture.calls.findIndex(({ sql }) => /pg_advisory_unlock/.test(sql));
     assert.ok(lockIndex >= 0 && targetIndex > lockIndex);
-    assert.ok(fixture.calls.some(({ sql }) => sql === "ROLLBACK"));
+    assert.ok(unlockIndex > rollbackIndex);
     assert.ok(!fixture.calls.some(({ sql }) => (
       /SELECT public\.rollback_creator_search_incremental_storage_v1/.test(sql)
     )));

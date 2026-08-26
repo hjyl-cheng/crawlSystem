@@ -75,6 +75,8 @@ export function businessCreatorSearchStorageConfirmation(config, state, action) 
     write_mode: state.write_mode,
     read_mode: state.read_mode,
     rollback_target_watermark: state.rollback_target_watermark ?? null,
+    rollback_target_exists: state.rollback_target_exists ?? null,
+    rollback_target_reachable: state.rollback_target_reachable ?? null,
     rollback_target_count: state.rollback_target_count == null
       ? null
       : Number(state.rollback_target_count),
@@ -84,6 +86,9 @@ export function businessCreatorSearchStorageConfirmation(config, state, action) 
     rollback_target_parity_diffs: state.rollback_target_parity_diffs == null
       ? null
       : Number(state.rollback_target_parity_diffs),
+    rollback_chain_errors: state.rollback_chain_errors == null
+      ? null
+      : Number(state.rollback_chain_errors),
   })}`;
 }
 
@@ -370,6 +375,49 @@ function assertExpected(state, expectedWatermark, expectedLiveCount) {
   }
 }
 
+async function withSearchPublishSessionLock(pool, operation) {
+  const client = await pool.connect();
+  let lockHeld = false;
+  let operationError = null;
+  let releaseError = null;
+  try {
+    await client.query("SET lock_timeout='10s'");
+    try {
+      await client.query("SELECT pg_advisory_lock(hashtext($1))", [
+        SEARCH_PUBLISH_LOCK,
+      ]);
+      lockHeld = true;
+    } finally {
+      try {
+        await client.query("RESET lock_timeout");
+      } catch (error) {
+        releaseError = error;
+        throw error;
+      }
+    }
+    return await operation(client);
+  } catch (error) {
+    operationError = error;
+    throw error;
+  } finally {
+    if (lockHeld) {
+      try {
+        const unlocked = (await client.query(
+          "SELECT pg_advisory_unlock(hashtext($1)) AS unlocked",
+          [SEARCH_PUBLISH_LOCK],
+        )).rows[0]?.unlocked;
+        if (unlocked !== true) {
+          throw new Error("Creator Search publish session lock was not released");
+        }
+      } catch (error) {
+        releaseError ??= error;
+      }
+    }
+    client.release(releaseError ?? undefined);
+    if (!operationError && releaseError) throw releaseError;
+  }
+}
+
 export class BusinessCreatorSearchStorageAdministrator {
   constructor({ pool, config }) {
     if (!pool?.connect) throw new TypeError("a PostgreSQL Pool is required");
@@ -403,45 +451,41 @@ export class BusinessCreatorSearchStorageAdministrator {
     if (!Number.isSafeInteger(expectedLiveCount) || expectedLiveCount < 0) {
       throw new TypeError("expected Live count must be a non-negative integer");
     }
-    const client = await this.pool.connect();
-    let began = false;
-    try {
-      await client.query("BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE");
-      began = true;
-      await client.query("SET LOCAL lock_timeout='10s'");
-      await client.query("SET LOCAL statement_timeout='180s'");
-      await client.query(
-        `SELECT pg_advisory_xact_lock(hashtext('${SEARCH_PUBLISH_LOCK}'))`,
-      );
-      const state = await inspectStorage(client, this.config);
-      assertExpected(state, watermark, expectedLiveCount);
-      const blockers = activationBlockers(state);
-      if (blockers.length > 0) {
-        throw new Error(`Creator Search storage cutover is blocked: ${blockers.join("; ")}`);
+    return withSearchPublishSessionLock(this.pool, async (client) => {
+      let began = false;
+      try {
+        await client.query("BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE");
+        began = true;
+        await client.query("SET LOCAL lock_timeout='10s'");
+        await client.query("SET LOCAL statement_timeout='180s'");
+        const state = await inspectStorage(client, this.config);
+        assertExpected(state, watermark, expectedLiveCount);
+        const blockers = activationBlockers(state);
+        if (blockers.length > 0) {
+          throw new Error(`Creator Search storage cutover is blocked: ${blockers.join("; ")}`);
+        }
+        const result = (await client.query(
+          `SELECT public.activate_creator_search_incremental_v1($1,$2,$3,$4)
+             AS storage_mode`,
+          [watermark, expectedLiveCount, this.config.actor, this.config.reason],
+        )).rows[0];
+        if (result?.storage_mode !== "incremental") {
+          throw new Error("Creator Search storage cutover returned an unexpected mode");
+        }
+        await client.query("COMMIT");
+        began = false;
+        return {
+          outcome: "applied",
+          database_name: state.database_name,
+          active_watermark: watermark,
+          live_count: expectedLiveCount,
+          storage_mode: result.storage_mode,
+        };
+      } catch (error) {
+        if (began) await client.query("ROLLBACK").catch(() => {});
+        throw error;
       }
-      const result = (await client.query(
-        `SELECT public.activate_creator_search_incremental_v1($1,$2,$3,$4)
-           AS storage_mode`,
-        [watermark, expectedLiveCount, this.config.actor, this.config.reason],
-      )).rows[0];
-      if (result?.storage_mode !== "incremental") {
-        throw new Error("Creator Search storage cutover returned an unexpected mode");
-      }
-      await client.query("COMMIT");
-      began = false;
-      return {
-        outcome: "applied",
-        database_name: state.database_name,
-        active_watermark: watermark,
-        live_count: expectedLiveCount,
-        storage_mode: result.storage_mode,
-      };
-    } catch (error) {
-      if (began) await client.query("ROLLBACK").catch(() => {});
-      throw error;
-    } finally {
-      client.release();
-    }
+    });
   }
 
   async inspectRollbackReadOnly(targetWatermark = this.config.rollbackWatermark) {
@@ -494,60 +538,56 @@ export class BusinessCreatorSearchStorageAdministrator {
     if (!Number.isSafeInteger(expectedCurrentLiveCount) || expectedCurrentLiveCount < 0) {
       throw new TypeError("expected current Live count must be a non-negative integer");
     }
-    const client = await this.pool.connect();
-    let began = false;
-    try {
-      await client.query("BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE");
-      began = true;
-      await client.query("SET LOCAL lock_timeout='10s'");
-      await client.query("SET LOCAL statement_timeout='900s'");
-      await client.query(
-        `SELECT pg_advisory_xact_lock(hashtext('${SEARCH_PUBLISH_LOCK}'))`,
-      );
-      const state = await inspectStorage(client, this.config);
-      assertExpected(state, expectedActive, expectedCurrentLiveCount);
-      if (state.write_mode !== "incremental" || state.read_mode !== "live") {
-        throw new Error("Creator Search storage is not in incremental/live mode");
-      }
-      if (state.in_flight_projection_count !== 0) {
-        throw new Error("Creator Search storage rollback is blocked by in-flight Projections");
-      }
-      const lockedTarget = normalizeRollbackTarget(
-        (await client.query(INSPECT_ROLLBACK_TARGET_SQL, [target])).rows[0],
-      );
-      assertRollbackTargetExpected(lockedTarget, approvedTarget);
-      const targetBlockers = rollbackTargetBlockers(lockedTarget);
-      if (targetBlockers.length > 0) {
-        throw new Error(
-          `Creator Search storage rollback target is blocked: ${targetBlockers.join("; ")}`,
+    return withSearchPublishSessionLock(this.pool, async (client) => {
+      let began = false;
+      try {
+        await client.query("BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE");
+        began = true;
+        await client.query("SET LOCAL lock_timeout='10s'");
+        await client.query("SET LOCAL statement_timeout='900s'");
+        const state = await inspectStorage(client, this.config);
+        assertExpected(state, expectedActive, expectedCurrentLiveCount);
+        if (state.write_mode !== "incremental" || state.read_mode !== "live") {
+          throw new Error("Creator Search storage is not in incremental/live mode");
+        }
+        if (state.in_flight_projection_count !== 0) {
+          throw new Error("Creator Search storage rollback is blocked by in-flight Projections");
+        }
+        const lockedTarget = normalizeRollbackTarget(
+          (await client.query(INSPECT_ROLLBACK_TARGET_SQL, [target])).rows[0],
         );
+        assertRollbackTargetExpected(lockedTarget, approvedTarget);
+        const targetBlockers = rollbackTargetBlockers(lockedTarget);
+        if (targetBlockers.length > 0) {
+          throw new Error(
+            `Creator Search storage rollback target is blocked: ${targetBlockers.join("; ")}`,
+          );
+        }
+        const result = (await client.query(
+          `SELECT public.rollback_creator_search_incremental_storage_v1($1,$2,$3,$4)
+             AS rollback_count`,
+          [
+            target,
+            lockedTarget.rollback_target_expected_count,
+            this.config.actor,
+            this.config.reason,
+          ],
+        )).rows[0];
+        const rollbackCount = integer(result?.rollback_count, "rollback count");
+        await client.query("COMMIT");
+        began = false;
+        return {
+          outcome: "rolled_back",
+          database_name: state.database_name,
+          previous_active_watermark: expectedActive,
+          active_watermark: target,
+          live_count: lockedTarget.rollback_target_expected_count,
+          rollback_count: rollbackCount,
+        };
+      } catch (error) {
+        if (began) await client.query("ROLLBACK").catch(() => {});
+        throw error;
       }
-      const result = (await client.query(
-        `SELECT public.rollback_creator_search_incremental_storage_v1($1,$2,$3,$4)
-           AS rollback_count`,
-        [
-          target,
-          lockedTarget.rollback_target_expected_count,
-          this.config.actor,
-          this.config.reason,
-        ],
-      )).rows[0];
-      const rollbackCount = integer(result?.rollback_count, "rollback count");
-      await client.query("COMMIT");
-      began = false;
-      return {
-        outcome: "rolled_back",
-        database_name: state.database_name,
-        previous_active_watermark: expectedActive,
-        active_watermark: target,
-        live_count: lockedTarget.rollback_target_expected_count,
-        rollback_count: rollbackCount,
-      };
-    } catch (error) {
-      if (began) await client.query("ROLLBACK").catch(() => {});
-      throw error;
-    } finally {
-      client.release();
-    }
+    });
   }
 }

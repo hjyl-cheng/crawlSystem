@@ -445,13 +445,18 @@ Rollback Apply 复用计划中的精确频道数、操作人、原因和目标 w
 - Business 数据库名和预期 Channel 数。
 - 操作类型、操作人和原因。
 - 当前 active watermark、Live/Legacy 行数、parity 和存储模式。
-- rollback target、按变更链重建的预期行数、保留 Legacy 行数及逐行 parity（回滚时）。
+- rollback target 的存在性与 active 可达性、按变更链重建的预期行数、保留 Legacy 行数、
+  逐行 parity 及 change-chain 完整性（回滚时，共六项证据）。
 
-Apply 会在 `SERIALIZABLE` 事务中获取 Creator Search 发布 advisory lock，重新读取全部
-状态，阻断在途 Projection、模式漂移、watermark 漂移、行数漂移和 parity 差异，然后才
-调用数据库已有的 guarded cutover/rollback 函数。Rollback Apply 还会在锁内重新按变更
-链构建目标态，并逐项比对确认串批准的目标存在性、可达性、Legacy/预期行数、parity 和
-change-chain 完整性；任一项漂移都在调用回滚函数前终止事务。
+Apply 先在事务外通过同一数据库 session 获取 Creator Search 发布 advisory lock（锁等待
+上限 10 秒），拿锁后才开启 `SERIALIZABLE` 事务并重新读取全部状态。这样等待锁不会提前
+建立旧事务快照。事务内阻断在途 Projection、模式漂移、watermark 漂移、行数漂移和
+parity 差异，然后才调用数据库已有的 guarded cutover/rollback 函数。Rollback Apply 还会
+在锁内重新按变更链构建目标态，并逐项比对确认串批准的目标存在性、可达性、Legacy/预期
+行数、parity 和 change-chain 完整性；任一项漂移都在调用回滚函数前终止事务。提交或回滚
+后在 `finally` 中释放 session lock；解锁失败时销毁该池连接，禁止把仍可能持锁的连接放回
+池中。该管理命令必须直连或使用保持 session 的连接方式，不得经过 transaction-mode
+PgBouncer。
 
 Apply 使用 `--output` 时，会在任何数据库访问前以独占方式预留文件；已存在或不可写的
 路径会提前阻断。数据库动作提交后若最终文件写入仍失败，命令会将成功结果回退到
