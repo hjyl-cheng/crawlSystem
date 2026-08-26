@@ -9,6 +9,7 @@ const YOUTUBEJS_COMMENT_SCENARIOS = new Set([
 const YOUTUBEJS_DETAIL_SCENARIOS = new Set([
   ...YOUTUBEJS_COMMENT_SCENARIOS,
   "youtubejs_unlisted_ytdlp_public",
+  "detail_cancelled",
 ]);
 
 function result(rows = [], rowCount = rows.length) {
@@ -363,8 +364,13 @@ export function parseChannelHeader() { return {}; }
 export function youtubeJsChannelEnabled() { return false; }
 export function youtubeJsDetailEnabled() { return YOUTUBEJS_DETAIL_SCENARIOS.has(state().scenario); }
 export async function openYoutubeJsChannel() { return null; }
-export async function fetchYoutubeJsVideoDetail(videoId) {
+export async function fetchYoutubeJsVideoDetail(videoId, { signal = null } = {}) {
   state().youtubeJsDetailAttempts += 1;
+  if (state().scenario === "detail_cancelled") {
+    state().forwardedDetailSignal = signal === state().cancellationSignal;
+    state().cancelDetail();
+    throw state().cancellationSignal.reason;
+  }
   const unlistedConflict = state().scenario === "youtubejs_unlisted_ytdlp_public";
   const visible = state().scenario === "youtubejs_visible_ytdlp_disabled" || unlistedConflict;
   return {

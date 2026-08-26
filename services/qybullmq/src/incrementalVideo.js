@@ -3,6 +3,7 @@ import {
   currentChannelExecution,
   currentChannelExecutionAbortSignal,
 } from "./channelExecutionContext.js";
+import { combineAbortSignals, throwIfAborted } from "./abortSignal.js";
 import {
   CONTENT_ENRICH_CLOCK_MODE,
   loadContentEnrichMode,
@@ -510,23 +511,21 @@ export async function fetchIncrementalVideoDetail(videoId, {
   fetchYtDlp = fetchVideoYtDlpDetail,
   signal = null,
 } = {}) {
-  const throwIfAborted = () => {
-    if (!signal?.aborted) return;
-    throw signal.reason instanceof Error
-      ? signal.reason
-      : new Error("incremental Video detail fetch was aborted");
-  };
-  throwIfAborted();
+  const effectiveSignal = combineAbortSignals(signal, currentChannelExecutionAbortSignal());
+  const assertNotAborted = () => throwIfAborted(effectiveSignal);
+  assertNotAborted();
   const url = `https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}`;
   let youtubeJsDetail = null;
   let youtubeJsDetailForMerge = null;
   let youtubeJsDisabledCommentsNeedVerification = false;
   try {
-    youtubeJsDetail = assertYoutubeContentObservation(await fetchYoutubeJs(videoId, { signal }), {
+    youtubeJsDetail = assertYoutubeContentObservation(await fetchYoutubeJs(videoId, {
+      signal: effectiveSignal,
+    }), {
       videoId,
       source: "youtubejs_player",
     });
-    throwIfAborted();
+    assertNotAborted();
     youtubeJsDisabledCommentsNeedVerification = youtubeJsDetail.comments_disabled === true
       || youtubeJsDetail.comment_count_status === "disabled";
     youtubeJsDetailForMerge = youtubeJsDisabledCommentsNeedVerification
@@ -547,16 +546,18 @@ export async function fetchIncrementalVideoDetail(videoId, {
       return youtubeJsDetail;
     }
   } catch (youtubeJsError) {
-    throwIfAborted();
+    assertNotAborted();
     try {
-      const detail = assertYoutubeContentObservation(await fetchYtDlp(videoId, url, { signal }), {
+      const detail = assertYoutubeContentObservation(await fetchYtDlp(videoId, url, {
+        signal: effectiveSignal,
+      }), {
         videoId,
         source: "yt_dlp_detail",
       });
-      throwIfAborted();
+      assertNotAborted();
       return detail;
     } catch (ytDlpError) {
-      throwIfAborted();
+      assertNotAborted();
       if (isYoutubeCollectionFailureError(ytDlpError)) throw ytDlpError;
       throw new AggregateError(
         [youtubeJsError, ytDlpError],
@@ -564,16 +565,18 @@ export async function fetchIncrementalVideoDetail(videoId, {
       );
     }
   }
-  throwIfAborted();
+  assertNotAborted();
   try {
-    const ytDlpDetail = assertYoutubeContentObservation(await fetchYtDlp(videoId, url, { signal }), {
+    const ytDlpDetail = assertYoutubeContentObservation(await fetchYtDlp(videoId, url, {
+      signal: effectiveSignal,
+    }), {
       videoId,
       source: "yt_dlp_detail",
     });
-    throwIfAborted();
+    assertNotAborted();
     return mergeIncrementalVideoDetail(youtubeJsDetailForMerge, ytDlpDetail);
   } catch (ytDlpError) {
-    throwIfAborted();
+    assertNotAborted();
     if (isYoutubeCollectionFailureError(ytDlpError)) throw ytDlpError;
     const error = new AggregateError(
       [
@@ -619,12 +622,17 @@ function nextVideoChangeProbability(row, facts, alpha) {
   return previous == null ? observed : (alpha * observed) + ((1 - alpha) * previous);
 }
 
-async function captureDetails(entries, fetchDetail, limit) {
+async function captureDetails(entries, fetchDetail, limit, { signal = null } = {}) {
   const output = new Map();
+  throwIfAborted(signal);
   for (const entry of entries.slice(0, Math.max(0, limit))) {
+    throwIfAborted(signal);
     try {
-      output.set(entry.id, { detail: await fetchDetail(entry.id), error: null });
+      const detail = await fetchDetail(entry.id, { signal });
+      throwIfAborted(signal);
+      output.set(entry.id, { detail, error: null });
     } catch (error) {
+      throwIfAborted(signal);
       if (shouldReportProxyFailure({ error })) throw error;
       output.set(entry.id, { detail: error?.partial_detail ?? null, error });
     }
@@ -2322,6 +2330,7 @@ async function prepareClockRecentSampling({
   withTransaction,
   executionAttemptId,
   observedAt,
+  signal = null,
 }) {
   const leaseOwner = clockContentEnrichLeaseOwner({ runId, executionAttemptId });
   return withTransaction(async (client) => {
@@ -2343,6 +2352,7 @@ async function prepareClockRecentSampling({
       samplePlan.rows.map((row) => ({ id: row.source_content_id })),
       fetchDetail,
       samplePlan.rows.length,
+      { signal },
     );
     const preparedCaptures = new Map();
     for (const row of samplePlan.rows) {
@@ -2789,12 +2799,7 @@ export async function executeIncrementalVideo({
     ?? `job-attempt:${plan.job_id}`;
   const anchors = await loadDiscoveryAnchors(query, plan.channel_id);
   const signal = currentChannelExecutionAbortSignal();
-  const throwIfAborted = () => {
-    if (!signal?.aborted) return;
-    throw signal.reason instanceof Error
-      ? signal.reason
-      : new Error("incremental Video discovery was aborted");
-  };
+  const assertNotAborted = () => throwIfAborted(signal);
   let rawScan;
   let youtubeJsScanError = null;
   try {
@@ -2813,7 +2818,7 @@ export async function executeIncrementalVideo({
       : new Error(`YouTube.js Uploads pagination failed for ${plan.channel_id}`);
   }
   if (youtubeJsScanError) {
-    throwIfAborted();
+    assertNotAborted();
     const fallbackLimit = Math.min(
       100,
       Math.max(30, positiveInteger(config.discoveryCatchUpMaxItems) ?? 50),
@@ -2823,10 +2828,10 @@ export async function executeIncrementalVideo({
         language: process.env.YOUTUBE_LANGUAGE,
         signal,
       });
-      throwIfAborted();
+      assertNotAborted();
       rawScan = incrementalScanFromMigrationUploads(uploads, anchors, youtubeJsScanError);
     } catch (ytDlpError) {
-      throwIfAborted();
+      assertNotAborted();
       throw new AggregateError(
         [youtubeJsScanError, ytDlpError],
         `incremental Video Uploads scan failed for ${plan.channel_id}: YouTube.js and yt-dlp both failed`,
@@ -2897,6 +2902,7 @@ export async function executeIncrementalVideo({
       detailEligibleFirstSeen,
       detailFetcher,
       detailEligibleFirstSeen.length,
+      { signal },
     );
     const newlyCheckpointedFirstSeen = await checkpointFirstSeenEnrichFailures({
       plan,
@@ -2921,6 +2927,7 @@ export async function executeIncrementalVideo({
       withTransaction,
       executionAttemptId,
       observedAt,
+      signal,
     });
     recorded = await recordVideoCycle({
       plan,

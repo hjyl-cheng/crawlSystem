@@ -49,7 +49,11 @@ import {
   claimChannelRegistryPromotion,
   resolveChannelRegistryRunId,
 } from "./channelRegistryPromotion.js";
-import { currentChannelExecution } from "./channelExecutionContext.js";
+import {
+  currentChannelExecution,
+  currentChannelExecutionAbortSignal,
+} from "./channelExecutionContext.js";
+import { throwIfAborted } from "./abortSignal.js";
 import { detailAgeDays } from "./contentWindow.js";
 import { query, withTransaction } from "./db.js";
 import {
@@ -181,6 +185,10 @@ const incrementalAgentResultStore = new IncrementalAgentResultStore({
   withTransaction,
   maxAttempts: intValue(process.env.INCREMENTAL_AGENT_MAX_ATTEMPTS, 8, 1, 50),
 });
+
+function throwIfChannelExecutionAborted() {
+  throwIfAborted(currentChannelExecutionAbortSignal());
+}
 const localOfflineProfileExecutor = new LocalOfflineProfileExecutor({
   loadLatestRunIds: async (channelIds) => {
     if (!Array.isArray(channelIds) || channelIds.length === 0) return new Map();
@@ -1190,6 +1198,7 @@ export async function processChannelCrawlV2(job, { resumeMode = "initial" } = {}
       const detailResult = await processContentDetailRun({
         runId,
         channelId,
+        signal: currentChannelExecutionAbortSignal(),
         executionMode: "channel_inline_resume",
         finalize: false,
         contentMaxAgeDays,
@@ -1277,6 +1286,7 @@ export async function processChannelCrawlV2(job, { resumeMode = "initial" } = {}
         metadata: { channel_id: channelId, run_id: runId },
       });
     } catch (error) {
+      throwIfChannelExecutionAborted();
       youtubeJsChannelError = error;
     }
   }
@@ -1294,6 +1304,7 @@ export async function processChannelCrawlV2(job, { resumeMode = "initial" } = {}
       header = youtubeJsChannel ? mergeChannelMetadata(legacy.header, header) : legacy.header;
       channelExtractor = youtubeJsChannel ? "youtubejs+legacy_html" : "legacy_html";
     } catch (error) {
+      throwIfChannelExecutionAborted();
       legacyHeaderError = error;
       if (!youtubeJsChannel) primaryError = error;
     }
@@ -1358,6 +1369,7 @@ export async function processChannelCrawlV2(job, { resumeMode = "initial" } = {}
         metadata: { channel_id: channelId, run_id: runId },
       });
     } catch (error) {
+      throwIfChannelExecutionAborted();
       if (primaryError) throw primaryError;
       fallback = { error: String(error?.message ?? error) };
     }
@@ -1780,6 +1792,7 @@ export async function processChannelCrawlV2(job, { resumeMode = "initial" } = {}
       });
       uploadsExtractor = "youtubejs";
     } catch (error) {
+      throwIfChannelExecutionAborted();
       youtubeJsUploadsError = error;
     }
   }
@@ -1938,6 +1951,7 @@ export async function processChannelCrawlV2(job, { resumeMode = "initial" } = {}
     detailResult = await processContentDetailRun({
       runId,
       channelId,
+      signal: currentChannelExecutionAbortSignal(),
       executionMode: "channel_inline",
       finalize: false,
       contentMaxAgeDays,
@@ -2185,15 +2199,19 @@ function shouldPrefetchYoutubeJsDetail(row, settings) {
   return !(settings.contentMaxAgeDays > 0 && ageDays != null && ageDays > settings.contentMaxAgeDays);
 }
 
-async function captureYoutubeJsDetail(videoId) {
+async function captureYoutubeJsDetail(videoId, { signal = null } = {}) {
   try {
-    return { detail: await fetchYoutubeJsVideoDetail(videoId), error: null };
+    return { detail: await fetchYoutubeJsVideoDetail(videoId, { signal }), error: null };
   } catch (error) {
     return { detail: null, error };
   }
 }
 
-async function processOneCandidate(row, settings, { youtubeJsDetail = null } = {}) {
+async function processOneCandidate(row, settings, {
+  youtubeJsDetail = null,
+  signal = null,
+} = {}) {
+  throwIfAborted(signal);
   if (isUndisposedTerminalCandidate(row)) {
     return recoverTerminalCandidateDisposition(row);
   }
@@ -2229,8 +2247,9 @@ async function processOneCandidate(row, settings, { youtubeJsDetail = null } = {
 
   if (youtubeJsDetailEnabled()) {
     const youtubeJsResult = youtubeJsDetail === null
-      ? await captureYoutubeJsDetail(row.source_content_id)
+      ? await captureYoutubeJsDetail(row.source_content_id, { signal })
       : await youtubeJsDetail;
+    throwIfAborted(signal);
     if (!youtubeJsResult?.error && youtubeJsResult?.detail) {
       const youtubeJsObservation = youtubeJsResult.detail;
       verifyYoutubeJsDisabledComments =
@@ -2268,7 +2287,13 @@ async function processOneCandidate(row, settings, { youtubeJsDetail = null } = {
 
   if (youtubeJsFallback.length > 0) {
     try {
-      detail = mergeDetail(detail, await fetchVideoYtDlpDetail(row.source_content_id, row.source_url, { language }));
+      const ytDlpDetail = await fetchVideoYtDlpDetail(
+        row.source_content_id,
+        row.source_url,
+        { language, signal },
+      );
+      throwIfAborted(signal);
+      detail = mergeDetail(detail, ytDlpDetail);
       commentAttemptSources.push("yt_dlp_top_comments");
       detailExtractor = youtubeJsDetailEnabled() ? "youtubejs+yt_dlp" : "yt_dlp";
       if (
@@ -2279,6 +2304,7 @@ async function processOneCandidate(row, settings, { youtubeJsDetail = null } = {
         detailError = youtubeJsDetailError;
       }
     } catch (error) {
+      throwIfAborted(signal);
       detailError = error;
     }
   }
@@ -2292,11 +2318,13 @@ async function processOneCandidate(row, settings, { youtubeJsDetail = null } = {
     try {
       detail = mergeDetail(detail, await fetchYoutubeJsCommentFirstPage(
         row.source_content_id,
-        { totalCount: integer(detail?.comment_count) },
+        { totalCount: integer(detail?.comment_count), signal },
       ));
+      throwIfAborted(signal);
       commentAttemptSources.push("youtubejs_comments");
       detailExtractor = `${detailExtractor}+youtubejs_comments`;
     } catch (error) {
+      throwIfAborted(signal);
       youtubeJsCommentError = error;
       commentAttemptSources.push("youtubejs_comments_error");
     }
@@ -2789,6 +2817,7 @@ async function excludeRemainingCandidatesByAge(rows, cutoffResult, maxAgeDays) {
 async function processContentDetailRun({
   runId,
   channelId,
+  signal = null,
   executionMode = "detail_queue",
   finalize = true,
   publishedAtRequiredPrecision = null,
@@ -2841,9 +2870,13 @@ async function processContentDetailRun({
   const execution = await processWithOrderedPrefetch({
     items: rows.rows,
     concurrency: settings.detailConcurrency,
+    signal,
     shouldPrefetch: (row) => shouldPrefetchYoutubeJsDetail(row, settings),
-    prefetch: (row) => captureYoutubeJsDetail(row.source_content_id),
-    process: (row, youtubeJsDetail) => processOneCandidate(row, settings, { youtubeJsDetail }),
+    prefetch: (row) => captureYoutubeJsDetail(row.source_content_id, { signal }),
+    process: (row, youtubeJsDetail) => processOneCandidate(row, settings, {
+      youtubeJsDetail,
+      signal,
+    }),
     stopAfter: (result) => result.retryable ? "retryable" : result.cutoff ? "cutoff" : null,
   });
   const results = [...execution.results];
@@ -2925,6 +2958,7 @@ export async function processContentDetailBatchV2(job) {
   const result = await processContentDetailRun({
     runId,
     channelId,
+    signal: currentChannelExecutionAbortSignal(),
     publishedAtRequiredPrecision: text(job.data?.published_at_required_precision),
     apiFallbackMode: text(job.data?.api_fallback_mode),
     contentMaxAgeDays: job.data?.content_max_age_days,
@@ -2960,6 +2994,7 @@ export async function processCheckpointRepairV2(job) {
     const result = await processContentDetailRun({
       runId: targetRunId,
       channelId,
+      signal: currentChannelExecutionAbortSignal(),
       executionMode: "checkpoint_repair",
       finalize: true,
       publishedAtRequiredPrecision: text(job.data?.published_at_required_precision),

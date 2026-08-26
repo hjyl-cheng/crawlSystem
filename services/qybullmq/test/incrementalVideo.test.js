@@ -5,6 +5,7 @@ import {
   executeIncrementalVideo as executeIncrementalVideoWithSystemClock,
   fetchIncrementalVideoDetail,
 } from "../src/incrementalVideo.js";
+import { runWithChannelExecution } from "../src/channelExecutionContext.js";
 
 function executeIncrementalVideo(options) {
   return executeIncrementalVideoWithSystemClock({
@@ -2784,6 +2785,56 @@ test("Video detail propagates cancellation and does not start a fallback after a
 
   assert.equal(forwardedSignal, controller.signal);
   assert.equal(fallbackCalls, 0);
+});
+
+test("Video discovery forwards cancellation through the real capture loop and stops the batch", async () => {
+  const fixture = databaseFixture();
+  const controller = new AbortController();
+  const leaseLost = new Error("Enrich lease lost during discovery detail");
+  const calls = [];
+  let forwardedSignal = null;
+
+  const operation = () => executeIncrementalVideo({
+    plan: plan(),
+    runId: "incremental:detail-cancelled",
+    startedAt: "2026-07-20T00:00:00.000Z",
+    query: fixture.query,
+    withTransaction: fixture.withTransaction,
+    getChannelSnapshot: async () => ({
+      async scanUploads() {
+        return {
+          playlist_id: "UUvideo",
+          entries: [
+            { id: "cancel-first", position: 1, title: "Cancel first" },
+            { id: "must-not-run", position: 2, title: "Must not run" },
+            { id: "known-anchor", position: 3, title: "Known anchor" },
+          ],
+          pages: 1,
+          item_count: 3,
+          parse_gap_count: 0,
+          anchor_matched: true,
+          matched_anchor_id: "known-anchor",
+          stop_reason: "anchor_matched",
+          terminal_reason: "anchor_matched",
+          complete: true,
+          raw: { engine: "youtubei.js@test" },
+        };
+      },
+    }),
+    fetchDetail: async (videoId, { signal } = {}) => {
+      calls.push(videoId);
+      forwardedSignal = signal ?? null;
+      if (videoId === "cancel-first") controller.abort(leaseLost);
+      return detail(videoId, 84);
+    },
+  });
+
+  await assert.rejects(
+    runWithChannelExecution({ abort_signal: controller.signal }, operation),
+    (error) => error === leaseLost,
+  );
+  assert.equal(forwardedSignal, controller.signal);
+  assert.deepEqual(calls, ["cancel-first"]);
 });
 
 test("Video discovery falls back to the migration yt-dlp Uploads collector without losing anchor safety", async () => {
