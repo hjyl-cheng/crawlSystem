@@ -1017,6 +1017,24 @@ function isoToTimestamp(value) {
   return Number.isFinite(date.getTime()) ? date.toISOString() : null;
 }
 
+function unixSecondsToTimestamp(value) {
+  const raw = String(value ?? "").trim();
+  if (!/^[1-9]\d*$/.test(raw)) return null;
+  const seconds = Number(raw);
+  if (!Number.isSafeInteger(seconds)) return null;
+  const date = new Date(seconds * 1000);
+  return Number.isFinite(date.getTime()) ? date.toISOString() : null;
+}
+
+function compactUtcDateToTimestamp(value) {
+  const match = /^(\d{4})(\d{2})(\d{2})$/.exec(String(value ?? "").trim());
+  if (!match) return null;
+  const day = `${match[1]}-${match[2]}-${match[3]}`;
+  const date = new Date(`${day}T00:00:00.000Z`);
+  if (!Number.isFinite(date.getTime()) || date.toISOString().slice(0, 10) !== day) return null;
+  return date.toISOString();
+}
+
 function dateTextFromIsoLike(value) {
   const match = String(value ?? "").trim().match(/^(\d{4}-\d{2}-\d{2})/);
   return match?.[1] ?? null;
@@ -1840,14 +1858,8 @@ export function detailFromYtDlpResult(parsed, url = null) {
 }
 
 export function channelUploadEntryFromYtDlpResult(entry, index = 0) {
-  const compactUploadDate = /^\d{8}$/.test(String(entry?.upload_date ?? ""))
-    ? `${String(entry.upload_date).slice(0, 4)}-${String(entry.upload_date).slice(4, 6)}-${String(entry.upload_date).slice(6, 8)}`
-    : null;
-  const timestampSeconds = Number(entry?.timestamp);
-  const timestampPublishedAt = Number.isFinite(timestampSeconds) && timestampSeconds > 0
-    ? new Date(timestampSeconds * 1000).toISOString()
-    : isoToTimestamp(entry?.timestamp);
-  const uploadDatePublishedAt = isoToTimestamp(compactUploadDate);
+  const timestampPublishedAt = unixSecondsToTimestamp(entry?.timestamp);
+  const uploadDatePublishedAt = compactUtcDateToTimestamp(entry?.upload_date);
   const publishedAt = timestampPublishedAt ?? uploadDatePublishedAt;
   const liveStatus = String(entry?.live_status ?? "").trim().toLowerCase();
   return {

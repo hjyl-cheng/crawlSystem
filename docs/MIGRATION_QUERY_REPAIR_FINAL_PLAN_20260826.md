@@ -462,13 +462,20 @@ Publication 继续拥有自己的 `video-window-v1`。Migration 使用独立 pol
 18. Candidate 重试恢复发布时间时，既有 Detail 是 current、Uploads flat 是 candidate；同质量冲突保留既有 Detail，并同步按该方向选择 `published_text`，避免在联网复查前被旧 flat 错误排除。
 19. 发布时间幂等按 `published_at + status + precision` 判断；来源不同但三者相同不构成冲突，纯函数与 PostgreSQL 冲突条件保持一致。来源仍随被选中的完整证据四元组原子保留。
 
-复审后的本地验证结果：聚焦改动面的 14 个测试文件全部通过；完整 `npm test` 共 255 个测试文件，251 个通过，4 个既有环境失败。失败原因分别为 sandbox 禁止 `spawnSync git`、两个本地监听 `EPERM`、以及当前 Python 环境缺少 `yt_dlp`，与本轮改动无关。
+2026-08-27 针对提交 `0c0fa16` 的复审补充：
+
+20. yt-dlp flat Uploads 只接受正整数 Unix 秒级时间戳；非法 timestamp 会回退到通过 UTC 日历回读校验的 `YYYYMMDD` Upload Date。两者均非法时产出完整的 `unresolved/unknown/null` 四元组，`timestamp="0"` 不再被 JavaScript 日期解析成 2000 年，`20260230` 也不再自动进位成 3 月 2 日。
+21. Incremental 历史 Video Activity 证据改为按 `(channel_id, source_content_id)` 现有唯一索引做键集分页，策略版本升级为 `incremental-video-activity-v3`。默认最多读取 1000 行、每页 200 行、分页墙钟预算 500ms；可分别通过 `INCREMENTAL_VIDEO_ACTIVITY_EVIDENCE_ROW_LIMIT`、`INCREMENTAL_VIDEO_ACTIVITY_EVIDENCE_PAGE_SIZE`、`INCREMENTAL_VIDEO_ACTIVITY_EVIDENCE_TIME_BUDGET_MS` 调整。超过任一预算即令 `evidence_complete=false`，禁止据此判 dormant。
+22. Incremental Observation 的 `result_summary_json.activity` 与 Payload `activity_evidence` 同步保存扫描完整性、行数、页数、耗时、停止原因和预算值。`evidence_scan_truncated_count` 是通过多取一条哨兵行确认的已观测截断下界，并由 `evidence_scan_truncated_count_is_lower_bound=true` 明示，不执行会抵消性能收益的全量 `COUNT(*)`。
+23. 本轮已经抓到的 Uploads/Detail 发布时间四元组直接并入生命周期证据；因此大频道历史扫描被截断时，明确的近期证据仍可恢复 active，未结束 Live 仍可阻止错误休眠。
+
+复审后的本地验证结果：聚焦逻辑与链路测试全部通过；完整 `npm test` 共 255 个测试文件，251 个通过，4 个既有环境失败。失败原因分别为 sandbox 禁止 `spawnSync git`、两个本地监听 `EPERM`、以及当前 Python 环境缺少 `yt_dlp`，与本轮改动无关。复审方另行在 PostgreSQL 16 实际执行 Full Video SQL 与 Migration Gate 集成测试，结果均为 1/1 通过、无跳过。
 
 尚未声称完成的数据工作：
 
 1. 当前工作树没有生产只读数据库和 S3 凭据，因此尚未统计 `youtube_channel_uploads_flat_json` 的实际可读覆盖率，也未对 100 个 Run 执行 raw-object dry-run 重分类。
 2. 尚未生成 A/B/C 历史修复清单，未执行 `evidence_correction` 或 `policy_reclassification` Apply。
 3. 上述数据步骤必须继续遵守第 10-12 节：单连接或低并发、先只读副本、稳定清单/哈希、小批次、正常 Crawler/Publication 传播。
-4. 在 raw object 可读覆盖率、A/B/C 历史清单和只读 dry-run 完成前，本分支不得提交、合并或部署；本轮也未执行这些动作。
+4. 在 raw object 可读覆盖率、A/B/C 历史清单和只读 dry-run 完成前，本分支不得合并或部署；经明确批准可以创建本地 checkpoint commit，但不得据此宣称生产门禁完成。
 
-本轮复审新增的回归覆盖包括：空时间不变 1970、Incremental 当前直播与节流期直播均阻止休眠、不完整扫描不能休眠但近期详情仍可通过、年龄排除项计入 outside、同质量冲突双向保留当前值并生成冲突记录。PostgreSQL 集成用例已加入“当前值保留 + `raw_json` 冲突记录”断言；未配置 `VIDEO_POSTGRES_TEST_URL` 的环境会跳过实际数据库执行，因此生产前仍须在只读测试库运行该用例。
+本轮复审新增的回归覆盖包括：空时间不变 1970、Incremental 当前直播与节流期直播均阻止休眠、不完整扫描不能休眠但近期详情仍可通过、年龄排除项计入 outside、同质量冲突双向保留当前值并生成冲突记录、非法 yt-dlp timestamp 回退、非法 Upload Date 归 unresolved、历史证据完整分页、行数/时间预算截断、截断时本轮近期证据恢复 active，以及扫描指标写入 Observation。PostgreSQL 冲突集成用例仍要求生产前在可控只读测试库执行。

@@ -12,7 +12,31 @@ import {
   PUBLICATION_TIME_CLASSIFIER_VERSION,
 } from "./publicationTimeEvidence.js";
 
-export const INCREMENTAL_VIDEO_ACTIVITY_POLICY_VERSION = "incremental-video-activity-v2";
+export const INCREMENTAL_VIDEO_ACTIVITY_POLICY_VERSION = "incremental-video-activity-v3";
+
+function boundedPositiveInteger(value, fallback, maximum) {
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) return fallback;
+  return Math.min(parsed, maximum);
+}
+
+export const INCREMENTAL_VIDEO_ACTIVITY_EVIDENCE_SCAN_DEFAULTS = Object.freeze({
+  rowLimit: boundedPositiveInteger(
+    process.env.INCREMENTAL_VIDEO_ACTIVITY_EVIDENCE_ROW_LIMIT,
+    1000,
+    10000,
+  ),
+  pageSize: boundedPositiveInteger(
+    process.env.INCREMENTAL_VIDEO_ACTIVITY_EVIDENCE_PAGE_SIZE,
+    200,
+    1000,
+  ),
+  timeBudgetMs: boundedPositiveInteger(
+    process.env.INCREMENTAL_VIDEO_ACTIVITY_EVIDENCE_TIME_BUDGET_MS,
+    500,
+    5000,
+  ),
+});
 
 function canonicalStatus(row) {
   if (row?.status === "rejected" && row?.reject_reason === DORMANT_REASON) return "dormant";
@@ -78,11 +102,111 @@ export function classifyStoredVideoActivity(rows, {
   };
 }
 
+async function loadStoredVideoActivityEvidence(client, {
+  channelId,
+  rowLimit,
+  pageSize,
+  timeBudgetMs,
+  monotonicNow,
+}) {
+  const effectiveRowLimit = boundedPositiveInteger(
+    rowLimit,
+    INCREMENTAL_VIDEO_ACTIVITY_EVIDENCE_SCAN_DEFAULTS.rowLimit,
+    10000,
+  );
+  const effectivePageSize = Math.min(
+    boundedPositiveInteger(
+      pageSize,
+      INCREMENTAL_VIDEO_ACTIVITY_EVIDENCE_SCAN_DEFAULTS.pageSize,
+      1000,
+    ),
+    effectiveRowLimit,
+  );
+  const effectiveTimeBudgetMs = boundedPositiveInteger(
+    timeBudgetMs,
+    INCREMENTAL_VIDEO_ACTIVITY_EVIDENCE_SCAN_DEFAULTS.timeBudgetMs,
+    5000,
+  );
+  const clock = typeof monotonicNow === "function" ? monotonicNow : () => performance.now();
+  const startedAt = Number(clock());
+  const rows = [];
+  let cursor = "";
+  let pageCount = 0;
+  let elapsedMs = 0;
+  let complete = false;
+  let stopReason = "complete";
+  let truncatedCount = 0;
+
+  while (rows.length < effectiveRowLimit) {
+    const acceptedLimit = Math.min(effectivePageSize, effectiveRowLimit - rows.length);
+    const pageResult = await client.query(
+      `SELECT source_content_id,content_type,live_ended_at,duration_seconds,
+              published_at,published_at_status,published_at_precision,published_at_source
+       FROM crawler.contents
+       WHERE channel_id=$1
+         AND content_type IN ('video','short','live')
+         AND source_content_id>$2
+       ORDER BY source_content_id
+       LIMIT $3`,
+      [channelId, cursor, acceptedLimit + 1],
+    );
+    pageCount += 1;
+    const pageRows = Array.isArray(pageResult.rows) ? pageResult.rows : [];
+    const acceptedRows = pageRows.slice(0, acceptedLimit);
+    rows.push(...acceptedRows);
+    const observedNow = Number(clock());
+    elapsedMs = Number.isFinite(startedAt) && Number.isFinite(observedNow)
+      ? Math.max(0, observedNow - startedAt)
+      : 0;
+
+    if (pageRows.length <= acceptedLimit) {
+      complete = true;
+      stopReason = "complete";
+      break;
+    }
+
+    if (rows.length >= effectiveRowLimit) {
+      truncatedCount = pageRows.length - acceptedRows.length;
+      stopReason = "row_limit";
+      break;
+    }
+    if (elapsedMs >= effectiveTimeBudgetMs) {
+      truncatedCount = pageRows.length - acceptedRows.length;
+      stopReason = "time_budget";
+      break;
+    }
+
+    cursor = String(acceptedRows.at(-1)?.source_content_id ?? "");
+    if (!cursor) {
+      truncatedCount = pageRows.length - acceptedRows.length;
+      stopReason = "invalid_cursor";
+      break;
+    }
+  }
+
+  return {
+    rows,
+    complete,
+    rowLimit: effectiveRowLimit,
+    pageSize: effectivePageSize,
+    timeBudgetMs: effectiveTimeBudgetMs,
+    pageCount,
+    elapsedMs,
+    truncatedCount,
+    truncatedCountIsLowerBound: !complete && truncatedCount > 0,
+    stopReason,
+  };
+}
+
 export async function applyVideoActivityLifecycle(client, {
   channelId,
   observedAt,
   discoveryComplete,
   runActivityEvidence = [],
+  evidenceScanRowLimit = INCREMENTAL_VIDEO_ACTIVITY_EVIDENCE_SCAN_DEFAULTS.rowLimit,
+  evidenceScanPageSize = INCREMENTAL_VIDEO_ACTIVITY_EVIDENCE_SCAN_DEFAULTS.pageSize,
+  evidenceScanTimeBudgetMs = INCREMENTAL_VIDEO_ACTIVITY_EVIDENCE_SCAN_DEFAULTS.timeBudgetMs,
+  monotonicNow = () => performance.now(),
 }) {
   if (!client || typeof client.query !== "function") {
     throw new TypeError("an active PostgreSQL client is required");
@@ -104,27 +228,39 @@ export async function applyVideoActivityLifecycle(client, {
     throw new Error(`Channel lifecycle does not permit Video activity: ${channel.status}`);
   }
 
-  const evidenceRows = await client.query(
-    `SELECT source_content_id,content_type,live_ended_at,duration_seconds,
-            published_at,published_at_status,published_at_precision,published_at_source
-     FROM crawler.contents
-     WHERE channel_id=$1
-       AND content_type IN ('video','short','live')
-     ORDER BY source_content_id`,
-    [channelId],
-  );
+  const evidenceScan = await loadStoredVideoActivityEvidence(client, {
+    channelId,
+    rowLimit: evidenceScanRowLimit,
+    pageSize: evidenceScanPageSize,
+    timeBudgetMs: evidenceScanTimeBudgetMs,
+    monotonicNow,
+  });
   const evidence = classifyStoredVideoActivity([
+    ...evidenceScan.rows,
     ...(Array.isArray(runActivityEvidence) ? runActivityEvidence : []),
-    ...evidenceRows.rows,
   ], {
     observedAt: observed,
   });
   const recent = evidence.recentPublishedContentCount;
   const uncertain = evidence.uncertainContentCount;
+  const evidenceComplete = discoveryComplete === true && evidenceScan.complete;
+  const evidenceMetrics = {
+    evidence_complete: evidenceComplete,
+    evidence_scan_complete: evidenceScan.complete,
+    evidence_scan_rows: evidenceScan.rows.length,
+    evidence_scan_page_count: evidenceScan.pageCount,
+    evidence_scan_elapsed_ms: evidenceScan.elapsedMs,
+    evidence_scan_truncated_count: evidenceScan.truncatedCount,
+    evidence_scan_truncated_count_is_lower_bound: evidenceScan.truncatedCountIsLowerBound,
+    evidence_scan_stop_reason: evidenceScan.stopReason,
+    evidence_scan_row_limit: evidenceScan.rowLimit,
+    evidence_scan_page_size: evidenceScan.pageSize,
+    evidence_scan_time_budget_ms: evidenceScan.timeBudgetMs,
+  };
   const decision = evaluateVideoActivity({
     recentPublishedContentCount: recent,
     uncertainContentCount: uncertain,
-    discoveryComplete,
+    discoveryComplete: evidenceComplete,
   });
 
   if (decision.decision === "inconclusive") {
@@ -145,6 +281,7 @@ export async function applyVideoActivityLifecycle(client, {
       policy_version: evidence.policyVersion,
       relation_counts: evidence.relationCounts,
       unresolved_by_status_counts: evidence.unresolvedByStatusCounts,
+      ...evidenceMetrics,
       conclusive: false,
     };
   }
@@ -167,6 +304,7 @@ export async function applyVideoActivityLifecycle(client, {
       policy_version: evidence.policyVersion,
       relation_counts: evidence.relationCounts,
       unresolved_by_status_counts: evidence.unresolvedByStatusCounts,
+      ...evidenceMetrics,
       conclusive: true,
       transitioned: currentStatus !== "active",
     };
@@ -208,6 +346,7 @@ export async function applyVideoActivityLifecycle(client, {
     policy_version: evidence.policyVersion,
     relation_counts: evidence.relationCounts,
     unresolved_by_status_counts: evidence.unresolvedByStatusCounts,
+    ...evidenceMetrics,
     conclusive: true,
     transitioned: currentStatus !== "dormant",
     dormant_recheck_day: dormantState.dormant_recheck_day,

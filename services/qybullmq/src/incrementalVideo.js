@@ -752,27 +752,49 @@ function scannedVideoDispositionWork(entries, priorByVideoId, observedAt, {
   return { workEntries, pendingDeferredVideoIds };
 }
 
-function currentRunLiveActivityEvidence(scanEntries, dispositions) {
-  const videoIds = new Set();
+function currentRunActivityEvidence(commandEntries, scanEntries, dispositions) {
+  const evidenceByVideoId = new Map();
+  for (const entry of Array.isArray(commandEntries) ? commandEntries : []) {
+    const videoId = text(entry?.video_id);
+    if (!videoId) continue;
+    evidenceByVideoId.set(videoId, {
+      source_content_id: videoId,
+      content_type: ["video", "short", "live"].includes(text(entry?.content_type))
+        ? text(entry.content_type)
+        : "video",
+      published_at: entry?.published_at ?? null,
+      published_at_status: entry?.published_at_status ?? "unresolved",
+      published_at_precision: entry?.published_at_precision ?? "unknown",
+      published_at_source: entry?.published_at_source ?? null,
+    });
+  }
   for (const entry of Array.isArray(scanEntries) ? scanEntries : []) {
     if (unfinishedLiveReason(entry) === "live_in_progress" && text(entry?.id)) {
-      videoIds.add(text(entry.id));
+      evidenceByVideoId.set(text(entry.id), {
+        source_content_id: text(entry.id),
+        content_type: "live",
+        is_live: true,
+        published_at: null,
+        published_at_status: "unresolved",
+        published_at_precision: "unknown",
+        published_at_source: null,
+      });
     }
   }
   for (const item of Array.isArray(dispositions) ? dispositions : []) {
     if (item?.reason_code === "live_in_progress" && text(item?.video_id)) {
-      videoIds.add(text(item.video_id));
+      evidenceByVideoId.set(text(item.video_id), {
+        source_content_id: text(item.video_id),
+        content_type: "live",
+        is_live: true,
+        published_at: null,
+        published_at_status: "unresolved",
+        published_at_precision: "unknown",
+        published_at_source: null,
+      });
     }
   }
-  return [...videoIds].map((videoId) => ({
-    source_content_id: videoId,
-    content_type: "live",
-    is_live: true,
-    published_at: null,
-    published_at_status: "unresolved",
-    published_at_precision: "unknown",
-    published_at_source: null,
-  }));
+  return [...evidenceByVideoId.values()];
 }
 
 async function loadDueVideoDispositionEntries(query, channelId, observedAt, scanEntries, limit = 10) {
@@ -2773,11 +2795,25 @@ async function recordVideoCycle({
             channelId: plan.channel_id,
             observedAt,
             discoveryComplete: scan.complete === true,
-            runActivityEvidence: currentRunLiveActivityEvidence(scan.entries, [
+            runActivityEvidence: currentRunActivityEvidence(commandEntries, scan.entries, [
               ...discovery.payload.dispositions,
               ...discovery.payload.recheck_dispositions,
             ]),
           });
+          const lifecycleEvidenceMetrics = {
+            evidence_complete: lifecycle.evidence_complete,
+            evidence_scan_complete: lifecycle.evidence_scan_complete,
+            evidence_scan_rows: lifecycle.evidence_scan_rows,
+            evidence_scan_page_count: lifecycle.evidence_scan_page_count,
+            evidence_scan_elapsed_ms: lifecycle.evidence_scan_elapsed_ms,
+            evidence_scan_truncated_count: lifecycle.evidence_scan_truncated_count,
+            evidence_scan_truncated_count_is_lower_bound:
+              lifecycle.evidence_scan_truncated_count_is_lower_bound,
+            evidence_scan_stop_reason: lifecycle.evidence_scan_stop_reason,
+            evidence_scan_row_limit: lifecycle.evidence_scan_row_limit,
+            evidence_scan_page_size: lifecycle.evidence_scan_page_size,
+            evidence_scan_time_budget_ms: lifecycle.evidence_scan_time_budget_ms,
+          };
           const outcome = discovery.outcome === "complete" && recentSampling.outcome === "complete"
             ? "complete"
             : "partial";
@@ -2799,6 +2835,7 @@ async function recordVideoCycle({
                 policy_version: lifecycle.policy_version,
                 relation_counts: lifecycle.relation_counts,
                 unresolved_by_status_counts: lifecycle.unresolved_by_status_counts,
+                ...lifecycleEvidenceMetrics,
                 conclusive: lifecycle.conclusive,
               },
             },
@@ -2815,6 +2852,7 @@ async function recordVideoCycle({
                 policy_version: lifecycle.policy_version,
                 relation_counts: lifecycle.relation_counts,
                 unresolved_by_status_counts: lifecycle.unresolved_by_status_counts,
+                ...lifecycleEvidenceMetrics,
               },
               ...(lifecycle.activity ? { activity: lifecycle.activity } : {}),
             },

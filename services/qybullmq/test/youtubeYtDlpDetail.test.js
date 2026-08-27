@@ -173,3 +173,40 @@ test("yt-dlp flat Uploads preserve timestamp and upload-date evidence", async ()
     source: null,
   });
 });
+
+test("yt-dlp flat Uploads reject invalid publication timestamps and calendar dates", async () => {
+  const youtube = await import("../src/youtube.js");
+  const uploadDateFallback = youtube.channelUploadEntryFromYtDlpResult({
+    id: "fallback-date-video",
+    timestamp: "0",
+    upload_date: "20260528",
+  });
+  const invalid = youtube.channelUploadEntryFromYtDlpResult({
+    id: "invalid-date-video",
+    timestamp: "not-a-unix-timestamp",
+    upload_date: "20260230",
+  });
+
+  assert.deepEqual({
+    published_at: uploadDateFallback.published_at,
+    status: uploadDateFallback.published_at_status,
+    precision: uploadDateFallback.published_at_precision,
+    source: uploadDateFallback.published_at_source,
+  }, {
+    published_at: "2026-05-28T00:00:00.000Z",
+    status: "exact",
+    precision: "date_only",
+    source: "yt_dlp_flat_upload_date",
+  });
+  assert.deepEqual({
+    published_at: invalid.published_at,
+    status: invalid.published_at_status,
+    precision: invalid.published_at_precision,
+    source: invalid.published_at_source,
+  }, {
+    published_at: null,
+    status: "unresolved",
+    precision: "unknown",
+    source: null,
+  });
+});

@@ -83,6 +83,9 @@ function databaseFixture({
         source_content_id: "known-anchor",
         content_type: "video",
         published_at: "2026-07-10T00:00:00.000Z",
+        published_at_status: "exact",
+        published_at_precision: "second",
+        published_at_source: "test_existing_detail",
         last_seen_at: "2026-07-20T00:00:00.000Z",
         view_count: 200,
         player_last_observed_at: "2026-07-20T00:00:00.000Z",
@@ -97,6 +100,9 @@ function databaseFixture({
         source_content_id: "old-video",
         content_type: "video",
         published_at: "2026-07-09T00:00:00.000Z",
+        published_at_status: "exact",
+        published_at_precision: "second",
+        published_at_source: "test_existing_detail",
         last_seen_at: "2026-07-20T00:00:00.000Z",
         view_count: 90,
         player_last_observed_at: null,
@@ -179,6 +185,15 @@ function databaseFixture({
         const rows = params[1].filter((id) => known.has(id)).map((video_id) => ({ video_id }));
         return { rowCount: rows.length, rows };
       }
+      if (sql.includes("FROM crawler.contents") && sql.includes("source_content_id>$2")) {
+        const cursor = String(params[1] ?? "");
+        const limit = Number(params[2] ?? state.contents.length);
+        const rows = state.contents
+          .filter((row) => row.channel_id === params[0] && row.source_content_id > cursor)
+          .sort((left, right) => left.source_content_id.localeCompare(right.source_content_id))
+          .slice(0, limit);
+        return { rowCount: rows.length, rows };
+      }
       if (sql.includes("UPDATE crawler.contents content") && sql.includes("jsonb_to_recordset")) {
         for (const input of JSON.parse(params[2])) {
           const row = state.contents.find((item) => item.source_content_id === input.video_id);
@@ -242,6 +257,9 @@ function databaseFixture({
           source_content_id: params[5],
           content_type: params[3],
           published_at: params[15],
+          published_at_status: params[16],
+          published_at_source: params[17],
+          published_at_precision: params[18],
           view_count: params[23],
           player_last_observed_at: params[39],
           next_last_observed_at: params[40] ? params[39] : null,
@@ -3264,9 +3282,17 @@ test("Video discovery does not persist a live broadcast while it is in progress"
   );
   assert.equal(result.lifecycle_status, "active");
   assert.equal(fixture.state.channelStatus, "active");
+  const activityEvidence = fixture.state.outbox[0].payload.activity_evidence;
+  assert.equal(activityEvidence.uncertain_content_count, 1);
+  assert.equal(activityEvidence.evidence_complete, true);
+  assert.equal(activityEvidence.evidence_scan_complete, true);
+  assert.equal(activityEvidence.evidence_scan_rows, 2);
+  assert.equal(activityEvidence.evidence_scan_page_count, 1);
+  assert.equal(activityEvidence.evidence_scan_truncated_count, 0);
+  assert.equal(activityEvidence.evidence_scan_stop_reason, "complete");
   assert.equal(
-    fixture.state.outbox[0].payload.activity_evidence.uncertain_content_count,
-    1,
+    fixture.state.observationSummaries[0].activity.evidence_scan_rows,
+    activityEvidence.evidence_scan_rows,
   );
 });
 
