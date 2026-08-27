@@ -193,9 +193,12 @@ func (m *Manager) CompleteTask(ctx context.Context, request CompleteTaskRequest)
 	}
 	if result.ControlState == CompletionPendingNewRoute && len(credentialRotations) == 1 &&
 		replacementProxyID != nil {
-		m.activatePendingRoute(
-			ctx, request.SlotName, *replacementProxyID, *result.PendingRouteGeneration,
-		)
+		m.activatePendingRoute(ctx, routeActivationFence{
+			SlotName:        request.SlotName,
+			LeaseID:         request.LeaseID,
+			ProxyID:         *replacementProxyID,
+			RouteGeneration: *result.PendingRouteGeneration,
+		})
 	} else {
 		m.invalidateCredentials(credentialRotations)
 	}

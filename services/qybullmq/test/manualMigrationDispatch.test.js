@@ -81,15 +81,24 @@ test("one-channel dispatch closes Source before opening the independent Target t
   const events = [];
   const snapshot = sourceSnapshot();
   const queueAdds = [];
+  let persistedQueueJob = null;
   const result = await dispatchManualMigrationChannel({
     channelId: snapshot.channel_id,
     candidateId: 42,
     queue: {
       name: "youtube-channel-crawl",
-      async getJob() { return null; },
+      async getJob(jobId) {
+        return persistedQueueJob?.id === jobId ? persistedQueueJob : null;
+      },
       async add(name, data, options) {
         queueAdds.push({ name, data, options });
-        return { id: options.jobId };
+        persistedQueueJob = {
+          id: options.jobId,
+          name,
+          data,
+          async getState() { return "waiting"; },
+        };
+        return persistedQueueJob;
       },
     },
     sourceLoader: async () => {
@@ -172,6 +181,51 @@ test("a repeated click reuses the Target intent and does not duplicate the queue
   assert.equal(result.created, false);
   assert.equal(result.already_in_progress, true);
   assert.equal(queueCalls, 0);
+});
+
+test("a represented deterministic Job must match the manual migration identity", async () => {
+  const snapshot = sourceSnapshot();
+  const jobId = `channel-snapshot__${DEFAULT_MANUAL_MIGRATION_BATCH_ID}__${snapshot.channel_id}__g1`;
+  const conflictingJob = {
+    id: jobId,
+    name: "unrelated-channel-job",
+    data: { candidate_id: 999, dispatch_generation: 1 },
+    async getState() { return "waiting"; },
+  };
+
+  await assert.rejects(
+    dispatchManualMigrationChannel({
+      channelId: snapshot.channel_id,
+      candidateId: 42,
+      queue: {
+        name: "youtube-channel-crawl",
+        async getJob(candidateJobId) {
+          return candidateJobId === jobId ? conflictingJob : null;
+        },
+        async add() {
+          assert.fail("a represented deterministic Job must not be added again");
+        },
+      },
+      sourceLoader: async () => snapshot,
+      transaction: (action) => action({}),
+      targetPreparer: async () => ({
+        candidate: {
+          candidate_id: 91,
+          channel_id: snapshot.channel_id,
+          channel_url: snapshot.channel_url,
+          priority: 100,
+          status: "queued",
+          snapshot_dispatch_generation: 1,
+        },
+        batchId: DEFAULT_MANUAL_MIGRATION_BATCH_ID,
+        previousStatus: "failed",
+        shouldEnqueue: true,
+        intentId: 7,
+      }),
+      dbQuery: async () => ({ rowCount: 1 }),
+    }),
+    (error) => error?.code === "job_identity_conflict",
+  );
 });
 
 test("batch dispatch reads Target exclusions, closes Source, then materializes only fresh intents", async () => {
@@ -275,6 +329,21 @@ test("an ambiguous queue delivery is recovered from the persisted deterministic 
   const snapshot = sourceSnapshot();
   const persistedJob = {
     id: `channel-snapshot__${DEFAULT_MANUAL_MIGRATION_BATCH_ID}__${snapshot.channel_id}__g1`,
+    name: "channel-snapshot",
+    data: {
+      candidate_id: 91,
+      dispatch_generation: 1,
+      dispatch_batch_id: DEFAULT_MANUAL_MIGRATION_BATCH_ID,
+      channel_id: snapshot.channel_id,
+      channel_url: snapshot.channel_url,
+      crawl_mode: "full",
+      query_id: null,
+      query_text: "results.db migration",
+      pipeline_cycle_id: DEFAULT_MANUAL_MIGRATION_BATCH_ID,
+      enforce_min_subscribers: true,
+      min_subscriber_count: 1000,
+      reject_if_no_recent_content: true,
+    },
     async getState() { return "waiting"; },
   };
   const compensation = [];
@@ -316,4 +385,86 @@ test("an ambiguous queue delivery is recovered from the persisted deterministic 
   assert.equal(result.job.id, persistedJob.id);
   assert.equal(result.job.state, "waiting");
   assert.deepEqual(compensation, []);
+});
+
+test("all raced deterministic Job reuse paths reject conflicting identity", async (t) => {
+  const snapshot = sourceSnapshot();
+  const jobId = `channel-snapshot__${DEFAULT_MANUAL_MIGRATION_BATCH_ID}__${snapshot.channel_id}__g1`;
+  const conflicting = () => ({
+    id: jobId,
+    name: "channel-snapshot",
+    data: { candidate_id: 999, dispatch_generation: 1 },
+    async getState() { return "waiting"; },
+  });
+  const dispatch = (queue) => dispatchManualMigrationChannel({
+    channelId: snapshot.channel_id,
+    candidateId: 42,
+    queue: { name: "youtube-channel-crawl", ...queue },
+    sourceLoader: async () => snapshot,
+    transaction: (action) => action({}),
+    targetPreparer: async () => ({
+      candidate: {
+        candidate_id: 91,
+        channel_id: snapshot.channel_id,
+        channel_url: snapshot.channel_url,
+        priority: 100,
+        status: "queued",
+        snapshot_dispatch_generation: 1,
+      },
+      batchId: DEFAULT_MANUAL_MIGRATION_BATCH_ID,
+      previousStatus: "failed",
+      shouldEnqueue: true,
+      intentId: 7,
+    }),
+    dbQuery: async () => ({ rowCount: 1 }),
+  });
+
+  await t.test("a Job that wins the remove race", async () => {
+    let reads = 0;
+    const replaced = {
+      id: jobId,
+      async getState() { return "completed"; },
+      async remove() { throw new Error("Job became active before remove"); },
+    };
+    await assert.rejects(
+      dispatch({
+        async getJob() {
+          reads += 1;
+          return reads === 1 ? replaced : conflicting();
+        },
+        async add() { assert.fail("remove-race Job must not be added again"); },
+      }),
+      (error) => error?.code === "job_identity_conflict",
+    );
+  });
+
+  await t.test("a Job recovered after an ambiguous queue.add", async () => {
+    let reads = 0;
+    await assert.rejects(
+      dispatch({
+        async getJob() {
+          reads += 1;
+          return reads === 1 ? null : conflicting();
+        },
+        async add() { throw new Error("connection closed after Redis reply"); },
+      }),
+      (error) => error?.code === "job_identity_conflict",
+    );
+  });
+
+  await t.test("a Job that wins between getJob and a successful queue.add", async () => {
+    let reads = 0;
+    await assert.rejects(
+      dispatch({
+        async getJob() {
+          reads += 1;
+          return reads === 1 ? null : conflicting();
+        },
+        async add(name, data, options) {
+          return { id: options.jobId, name, data };
+        },
+      }),
+      (error) => error?.code === "job_identity_conflict",
+    );
+  });
 });

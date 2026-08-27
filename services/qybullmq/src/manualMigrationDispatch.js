@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { canonicalJsonEqual } from "./canonicalJson.js";
 import { channelSnapshotPayload } from "./migrationDispatchPolicy.js";
 import {
   loadMigrationSourceBatch,
@@ -61,6 +62,22 @@ function safeJobId(...parts) {
     .filter(Boolean)
     .join("__");
   return (id || "job").slice(0, 240);
+}
+
+function assertMatchingMigrationJob(job, { jobId, payload }) {
+  if (String(job?.id ?? "") !== jobId
+      || job?.name !== "channel-snapshot"
+      || !canonicalJsonEqual(job?.data, payload)) {
+    throw new ManualMigrationDispatchError(
+      `deterministic migration Job conflicts with ${jobId}`,
+      {
+        statusCode: 409,
+        code: "job_identity_conflict",
+        details: { job_id: jobId },
+      },
+    );
+  }
+  return job;
 }
 
 async function defaultTargetTransaction(action) {
@@ -717,11 +734,17 @@ async function addOrReuseJob(queue, { candidate, batchId, minSubscriberCount }) 
     candidate.channel_id,
     `g${dispatchGeneration}`,
   );
+  const payload = channelSnapshotPayload(candidate, batchId, { minSubscriberCount });
   const existing = await queue.getJob(jobId);
   if (existing) {
     const state = await existing.getState();
     if (REPRESENTED_JOB_STATES.has(state)) {
-      return { job: existing, jobId, state, created: false };
+      return {
+        job: assertMatchingMigrationJob(existing, { jobId, payload }),
+        jobId,
+        state,
+        created: false,
+      };
     }
     try {
       await existing.remove();
@@ -729,7 +752,12 @@ async function addOrReuseJob(queue, { candidate, batchId, minSubscriberCount }) 
       const current = await queue.getJob(jobId);
       const currentState = current ? await current.getState() : null;
       if (current && REPRESENTED_JOB_STATES.has(currentState)) {
-        return { job: current, jobId, state: currentState, created: false };
+        return {
+          job: assertMatchingMigrationJob(current, { jobId, payload }),
+          jobId,
+          state: currentState,
+          created: false,
+        };
       }
       throw new ManualMigrationDispatchError(`existing migration job cannot be replaced: ${state}`, {
         statusCode: 409,
@@ -740,20 +768,38 @@ async function addOrReuseJob(queue, { candidate, batchId, minSubscriberCount }) 
   }
   let job;
   try {
-    job = await queue.add(
+    await queue.add(
       "channel-snapshot",
-      channelSnapshotPayload(candidate, batchId, { minSubscriberCount }),
+      payload,
       { jobId, priority: Number(candidate.priority ?? 100) },
     );
   } catch (error) {
     const persisted = await queue.getJob(jobId).catch(() => null);
     const persistedState = persisted ? await persisted.getState().catch(() => null) : null;
     if (persisted && REPRESENTED_JOB_STATES.has(persistedState)) {
-      return { job: persisted, jobId, state: persistedState, created: false };
+      return {
+        job: assertMatchingMigrationJob(persisted, { jobId, payload }),
+        jobId,
+        state: persistedState,
+        created: false,
+      };
     }
     throw error;
   }
-  return { job, jobId, state: "waiting", created: true };
+  const persisted = await queue.getJob(jobId);
+  if (!persisted) {
+    throw new ManualMigrationDispatchError(
+      `migration Job was not persisted for ${jobId}`,
+      {
+        statusCode: 503,
+        code: "job_persistence_unconfirmed",
+        details: { job_id: jobId },
+      },
+    );
+  }
+  job = assertMatchingMigrationJob(persisted, { jobId, payload });
+  const state = await job.getState();
+  return { job, jobId, state, created: true };
 }
 
 export async function dispatchManualMigrationChannel({

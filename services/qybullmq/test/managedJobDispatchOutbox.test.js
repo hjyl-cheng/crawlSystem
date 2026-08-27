@@ -214,7 +214,7 @@ test("a Migration Recovery Outbox dispatches the whitelisted Channel recovery jo
   });
 });
 
-test("a terminal Recovery Outbox update is fenced by Candidate generation and active attempt", async () => {
+test("a terminal Recovery Outbox update rolls back when the Candidate fence is lost", async () => {
   const calls = [];
   const client = {
     async query(sql, params) {
@@ -245,13 +245,16 @@ test("a terminal Recovery Outbox update is fenced by Candidate generation and ac
     withTransaction: (action) => action(client),
   });
 
-  await repository.markFailed({
-    dispatchId: "migration-retry-dispatch:intent-1",
-    attempt: 1,
-    error: "Redis delivery exhausted",
-    terminal: true,
-    nextAttemptAt: null,
-  });
+  await assert.rejects(
+    repository.markFailed({
+      dispatchId: "migration-retry-dispatch:intent-1",
+      attempt: 1,
+      error: "Redis delivery exhausted",
+      terminal: true,
+      nextAttemptAt: null,
+    }),
+    /lost its Candidate fence/,
+  );
 
   const candidateUpdate = calls.find(({ sql }) => sql.includes("UPDATE crawler.channel_candidates"));
   assert.match(candidateUpdate.sql, /snapshot_dispatch_generation=\$3/);

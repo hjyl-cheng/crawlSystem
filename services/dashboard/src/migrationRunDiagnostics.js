@@ -83,15 +83,15 @@ export async function loadRotaBusinessRunBudget({
     payload.execution_tasks_limit,
     "execution_tasks_limit",
   );
-  if (businessTasksUsed > businessTasksLimit || executionTasksUsed > executionTasksLimit) {
-    throw new TypeError("Rota Business Run budget response exceeds its persisted limit");
-  }
+  const overBudget = businessTasksUsed > businessTasksLimit
+    || executionTasksUsed > executionTasksLimit;
   const budgetExhaustedAt = textOrNull(payload.budget_exhausted_at);
   if (budgetExhaustedAt && !Number.isFinite(Date.parse(budgetExhaustedAt))) {
     throw new TypeError("budget_exhausted_at must be an ISO timestamp or null");
   }
   return {
     available: true,
+    over_budget: overBudget,
     workload_scope: textOrNull(payload.workload_scope),
     business_run_id: normalizedBusinessRunId,
     business_tasks_used: businessTasksUsed,
@@ -168,7 +168,8 @@ export function renderMigrationRunDiagnostics(diagnostics) {
     ["Rota attempt", diagnostics.rota_attempt],
     ["latest Job ID", diagnostics.latest_job_id],
     ["latest attempt status", diagnostics.latest_attempt_status],
-    ["Rota budget status", budget ? "available" : "unavailable"],
+    ["Rota budget status", budget ? (budget.over_budget ? "over_budget" : "available") : "unavailable"],
+    ["over_budget", budget?.over_budget],
     [
       "Business Run budget",
       budget ? `${budget.business_tasks_used} / ${budget.business_tasks_limit}` : null,

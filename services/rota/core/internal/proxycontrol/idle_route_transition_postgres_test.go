@@ -21,6 +21,48 @@ type idleRouteDataPlaneStub struct {
 	retiredUsers    []string
 }
 
+type expiringRouteActivationDataPlane struct {
+	pool              *pgxpool.Pool
+	slotName          string
+	leaseID           string
+	activatedUsername string
+	retiredUsers      []string
+}
+
+func (*expiringRouteActivationDataPlane) RefreshProxyUser(string) {}
+
+func (s *expiringRouteActivationDataPlane) RetireProxyUser(
+	_ context.Context,
+	username string,
+) error {
+	s.retiredUsers = append(s.retiredUsers, username)
+	return nil
+}
+
+func (s *expiringRouteActivationDataPlane) ActivateProxyUser(
+	_ context.Context,
+	_ string,
+	newUsername string,
+	_ int,
+) error {
+	s.activatedUsername = newUsername
+	if _, err := s.pool.Exec(context.Background(), `
+		UPDATE proxy_running_slots
+		SET lease_until=NOW()-interval '1 second'
+		WHERE slot_name=$1 AND current_lease_id=$2
+	`, s.slotName, s.leaseID); err != nil {
+		return err
+	}
+	if _, err := s.pool.Exec(context.Background(), `
+		UPDATE proxy_control_leases
+		SET lease_until=NOW()-interval '1 second'
+		WHERE lease_id=$1
+	`, s.leaseID); err != nil {
+		return err
+	}
+	return nil
+}
+
 func TestFailedProxyOnExecutionLockedSlotFinishesBeforeIdleTransition(t *testing.T) {
 	manager, pool := newProxyControlPostgres(t)
 	ctx := context.Background()
@@ -151,6 +193,198 @@ func (s *idleRouteDataPlaneStub) ActivateProxyUser(
 	s.newUsername = newUsername
 	s.expectedProxyID = expectedProxyID
 	return nil
+}
+
+func TestExpiredLeaseCannotActivatePendingRoute(t *testing.T) {
+	manager, pool := newProxyControlPostgres(t)
+	ctx := context.Background()
+
+	proxyID := insertControlProxy(t, pool, "expired-activation.example:8080", 10)
+	manager.SetCacheInvalidator(func(string) {})
+	if err := manager.syncResources(ctx); err != nil {
+		t.Fatalf("sync managed resources: %v", err)
+	}
+	if _, err := manager.reconcile(ctx); err != nil {
+		t.Fatalf("reconcile initial assignment: %v", err)
+	}
+	claim, err := manager.Claim(ctx, testClaimRequest(
+		"claim-expired-activation", "worker-expired-activation", "instance-expired-activation",
+	))
+	if err != nil {
+		t.Fatalf("claim initial Route: %v", err)
+	}
+	if claim.ProxyID == nil || *claim.ProxyID != proxyID {
+		t.Fatalf("initial assignment = %+v, want proxy %d", claim, proxyID)
+	}
+	if _, err := pool.Exec(ctx, `
+		UPDATE proxy_running_slots
+		SET ready_after=NULL,control_state='pending_new_route',
+		    route_activation_old_username='retired-proxy-user',
+		    lease_until=NOW()-interval '1 second'
+		WHERE slot_name=$1 AND current_lease_id=$2
+	`, claim.SlotName, claim.LeaseID); err != nil {
+		t.Fatalf("expire pending Route Lease: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		UPDATE proxy_control_leases
+		SET lease_until=NOW()-interval '1 second'
+		WHERE lease_id=$1
+	`, claim.LeaseID); err != nil {
+		t.Fatalf("expire Lease history: %v", err)
+	}
+
+	dataPlane := &idleRouteDataPlaneStub{}
+	manager.SetDataPlaneController(dataPlane)
+	if activated := manager.activatePendingRoute(ctx, routeActivationFence{
+		SlotName:        claim.SlotName,
+		LeaseID:         claim.LeaseID,
+		ProxyID:         proxyID,
+		RouteGeneration: claim.AssignmentVersion,
+	}); activated {
+		t.Fatal("expired Lease activated its pending Route")
+	}
+	if dataPlane.activationCalls != 0 {
+		t.Fatalf("expired Lease made %d data-plane activation calls, want 0", dataPlane.activationCalls)
+	}
+	var controlState string
+	var ready bool
+	if err := pool.QueryRow(ctx, `
+		SELECT control_state,ready_after IS NOT NULL
+		FROM proxy_running_slots WHERE slot_name=$1
+	`, claim.SlotName).Scan(&controlState, &ready); err != nil {
+		t.Fatalf("load expired pending Route: %v", err)
+	}
+	if controlState != "pending_new_route" || ready {
+		t.Fatalf("expired pending Route state=%q ready=%v", controlState, ready)
+	}
+}
+
+func TestExpiredLeaseCannotReleasePendingRouteActivationClaim(t *testing.T) {
+	manager, pool := newProxyControlPostgres(t)
+	ctx := context.Background()
+
+	proxyID := insertControlProxy(t, pool, "expired-activation-release.example:8080", 10)
+	manager.SetCacheInvalidator(func(string) {})
+	if err := manager.syncResources(ctx); err != nil {
+		t.Fatalf("sync managed resources: %v", err)
+	}
+	if _, err := manager.reconcile(ctx); err != nil {
+		t.Fatalf("reconcile initial assignment: %v", err)
+	}
+	lease, err := manager.Claim(ctx, testClaimRequest(
+		"claim-expired-activation-release", "worker-expired-activation-release",
+		"instance-expired-activation-release",
+	))
+	if err != nil {
+		t.Fatalf("claim initial Route: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		UPDATE proxy_running_slots
+		SET ready_after=NULL,control_state='pending_new_route',
+		    route_activation_old_username='retired-proxy-user'
+		WHERE slot_name=$1 AND current_lease_id=$2
+	`, lease.SlotName, lease.LeaseID); err != nil {
+		t.Fatalf("prepare pending Route: %v", err)
+	}
+	fence := routeActivationFence{
+		SlotName:        lease.SlotName,
+		LeaseID:         lease.LeaseID,
+		ProxyID:         proxyID,
+		RouteGeneration: lease.AssignmentVersion,
+	}
+	activation, found, err := manager.claimPendingRouteActivation(ctx, fence)
+	if err != nil {
+		t.Fatalf("claim pending Route activation: %v", err)
+	}
+	if !found {
+		t.Fatal("live Lease did not claim its pending Route activation")
+	}
+	if _, err := pool.Exec(ctx, `
+		UPDATE proxy_running_slots
+		SET lease_until=NOW()-interval '1 second'
+		WHERE slot_name=$1 AND current_lease_id=$2
+	`, lease.SlotName, lease.LeaseID); err != nil {
+		t.Fatalf("expire claimed Route Slot Lease: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		UPDATE proxy_control_leases
+		SET lease_until=NOW()-interval '1 second'
+		WHERE lease_id=$1
+	`, lease.LeaseID); err != nil {
+		t.Fatalf("expire claimed Route Lease history: %v", err)
+	}
+
+	manager.releaseRouteActivationClaim(ctx, activation)
+	var persistedClaimID string
+	if err := pool.QueryRow(ctx, `
+		SELECT COALESCE(route_activation_claim_id,'')
+		FROM proxy_running_slots WHERE slot_name=$1
+	`, lease.SlotName).Scan(&persistedClaimID); err != nil {
+		t.Fatalf("load pending Route activation claim: %v", err)
+	}
+	if persistedClaimID != activation.ClaimID {
+		t.Fatalf(
+			"expired Lease released activation claim %q, want %q retained",
+			persistedClaimID,
+			activation.ClaimID,
+		)
+	}
+}
+
+func TestLeaseLostDuringRouteActivationRetiresActivatedDataPlaneUser(t *testing.T) {
+	manager, pool := newProxyControlPostgres(t)
+	ctx := context.Background()
+
+	proxyID := insertControlProxy(t, pool, "activation-lease-race.example:8080", 10)
+	manager.SetCacheInvalidator(func(string) {})
+	if err := manager.syncResources(ctx); err != nil {
+		t.Fatalf("sync managed resources: %v", err)
+	}
+	if _, err := manager.reconcile(ctx); err != nil {
+		t.Fatalf("reconcile initial assignment: %v", err)
+	}
+	claim, err := manager.Claim(ctx, testClaimRequest(
+		"claim-activation-lease-race", "worker-activation-lease-race",
+		"instance-activation-lease-race",
+	))
+	if err != nil {
+		t.Fatalf("claim initial Route: %v", err)
+	}
+	if claim.ProxyID == nil || *claim.ProxyID != proxyID {
+		t.Fatalf("initial assignment = %+v, want proxy %d", claim, proxyID)
+	}
+	if _, err := pool.Exec(ctx, `
+		UPDATE proxy_running_slots
+		SET ready_after=NULL,control_state='pending_new_route',
+		    route_activation_old_username='retired-proxy-user'
+		WHERE slot_name=$1 AND current_lease_id=$2
+	`, claim.SlotName, claim.LeaseID); err != nil {
+		t.Fatalf("prepare pending Route: %v", err)
+	}
+
+	dataPlane := &expiringRouteActivationDataPlane{
+		pool: pool, slotName: claim.SlotName, leaseID: claim.LeaseID,
+	}
+	manager.SetDataPlaneController(dataPlane)
+	if activated := manager.activatePendingRoute(ctx, routeActivationFence{
+		SlotName:        claim.SlotName,
+		LeaseID:         claim.LeaseID,
+		ProxyID:         proxyID,
+		RouteGeneration: claim.AssignmentVersion,
+	}); activated {
+		t.Fatal("Route activation survived loss of its Lease Fence")
+	}
+	if dataPlane.activatedUsername == "" {
+		t.Fatal("test did not reach data-plane activation")
+	}
+	if len(dataPlane.retiredUsers) != 1 ||
+		dataPlane.retiredUsers[0] != dataPlane.activatedUsername {
+		t.Fatalf(
+			"compensating retired users = %v, want %q",
+			dataPlane.retiredUsers,
+			dataPlane.activatedUsername,
+		)
+	}
 }
 
 func TestFailedProxyOnLeaseOwnedIdleSlotRotatesToHealthyReserve(t *testing.T) {

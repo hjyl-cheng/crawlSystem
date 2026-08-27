@@ -16,25 +16,26 @@ const (
 )
 
 type routeActivationClaim struct {
-	ClaimID           string
-	SlotName          string
-	OldUsername       string
-	NewUsername       string
-	ProxyID           int
-	AssignmentVersion int64
+	Fence       routeActivationFence
+	ClaimID     string
+	OldUsername string
+	NewUsername string
+}
+
+type routeActivationFence struct {
+	SlotName        string
+	LeaseID         string
+	ProxyID         int
+	RouteGeneration int64
 }
 
 func (m *Manager) activatePendingRoute(
 	ctx context.Context,
-	slotName string,
-	proxyID int,
-	assignmentVersion int64,
+	fence routeActivationFence,
 ) bool {
-	claim, found, err := m.claimPendingRouteActivation(
-		ctx, slotName, proxyID, assignmentVersion,
-	)
+	claim, found, err := m.claimPendingRouteActivation(ctx, fence)
 	if err != nil {
-		m.logError("claim pending Route activation failed", err, "slot", slotName)
+		m.logError("claim pending Route activation failed", err, "slot", fence.SlotName)
 		return false
 	}
 	if !found {
@@ -43,7 +44,7 @@ func (m *Manager) activatePendingRoute(
 
 	activationCtx, cancel := context.WithTimeout(ctx, routeActivationAttemptTimeout)
 	activated := m.activateUser(
-		activationCtx, claim.OldUsername, claim.NewUsername, claim.ProxyID,
+		activationCtx, claim.OldUsername, claim.NewUsername, claim.Fence.ProxyID,
 	)
 	cancel()
 	if !activated {
@@ -56,45 +57,59 @@ func (m *Manager) activatePendingRoute(
 		SET ready_after=NOW(),control_state='leased_idle',
 		    route_activation_old_username=NULL,route_activation_claim_id=NULL,
 		    route_activation_claim_until=NULL,rotation_deadline_at=NULL,updated_at=NOW()
-		WHERE slot_name=$1 AND proxy_id=$2 AND assignment_version=$3
+		WHERE slot_name=$1 AND current_lease_id=$2 AND lease_until > NOW()
+		  AND proxy_id=$3 AND assignment_version=$4
 		  AND active_task_id IS NULL AND control_state='pending_new_route'
-		  AND route_activation_claim_id=$4
-	`, claim.SlotName, claim.ProxyID, claim.AssignmentVersion, claim.ClaimID)
+		  AND route_activation_claim_id=$5
+	`, claim.Fence.SlotName, claim.Fence.LeaseID, claim.Fence.ProxyID,
+		claim.Fence.RouteGeneration, claim.ClaimID)
 	if err != nil {
-		m.logError("mark pending proxy binding ready failed", err, "slot", slotName)
+		m.compensateLostRouteActivation(ctx, claim)
+		m.logError("mark pending proxy binding ready failed", err, "slot", fence.SlotName)
 		return false
 	}
 	if tag.RowsAffected() != 1 {
+		m.compensateLostRouteActivation(ctx, claim)
 		m.logError(
 			"pending Route activation lost its Fence",
 			ErrLeaseConflict,
-			"slot", slotName,
-			"route_generation", assignmentVersion,
+			"slot", fence.SlotName,
+			"route_generation", fence.RouteGeneration,
 		)
 		return false
 	}
 	return true
 }
 
+func (m *Manager) compensateLostRouteActivation(
+	ctx context.Context,
+	claim routeActivationClaim,
+) {
+	compensationCtx, cancel := context.WithTimeout(
+		context.WithoutCancel(ctx),
+		routeActivationAttemptTimeout,
+	)
+	defer cancel()
+	m.retireUser(compensationCtx, claim.NewUsername)
+	m.releaseRouteActivationClaim(compensationCtx, claim)
+}
+
 func (m *Manager) claimPendingRouteActivation(
 	ctx context.Context,
-	slotName string,
-	proxyID int,
-	assignmentVersion int64,
+	fence routeActivationFence,
 ) (routeActivationClaim, bool, error) {
 	claim := routeActivationClaim{
-		ClaimID:           uuid.NewString(),
-		SlotName:          slotName,
-		ProxyID:           proxyID,
-		AssignmentVersion: assignmentVersion,
+		Fence:   fence,
+		ClaimID: uuid.NewString(),
 	}
 	err := m.db.Pool.QueryRow(ctx, `
 		UPDATE proxy_running_slots slot
-		SET route_activation_claim_id=$4,
-		    route_activation_claim_until=NOW()+($5::bigint*interval '1 millisecond'),
+		SET route_activation_claim_id=$5,
+		    route_activation_claim_until=NOW()+($6::bigint*interval '1 millisecond'),
 		    updated_at=NOW()
 		FROM proxy_users proxy_user
-		WHERE slot.slot_name=$1 AND slot.proxy_id=$2 AND slot.assignment_version=$3
+		WHERE slot.slot_name=$1 AND slot.current_lease_id=$2 AND slot.lease_until > NOW()
+		  AND slot.proxy_id=$3 AND slot.assignment_version=$4
 		  AND slot.user_id=proxy_user.id AND slot.ready_after IS NULL
 		  AND slot.active_task_id IS NULL AND slot.control_state='pending_new_route'
 		  AND (
@@ -103,7 +118,7 @@ func (m *Manager) claimPendingRouteActivation(
 		    OR slot.route_activation_claim_until <= NOW()
 		  )
 		RETURNING COALESCE(slot.route_activation_old_username,''),proxy_user.username
-	`, slotName, proxyID, assignmentVersion, claim.ClaimID,
+	`, fence.SlotName, fence.LeaseID, fence.ProxyID, fence.RouteGeneration, claim.ClaimID,
 		routeActivationClaimTTL.Milliseconds()).Scan(
 		&claim.OldUsername, &claim.NewUsername,
 	)
@@ -120,10 +135,12 @@ func (m *Manager) releaseRouteActivationClaim(ctx context.Context, claim routeAc
 	if _, err := m.db.Pool.Exec(ctx, `
 		UPDATE proxy_running_slots
 		SET route_activation_claim_id=NULL,route_activation_claim_until=NULL,updated_at=NOW()
-		WHERE slot_name=$1 AND proxy_id=$2 AND assignment_version=$3
+		WHERE slot_name=$1 AND current_lease_id=$2 AND lease_until > NOW()
+		  AND proxy_id=$3 AND assignment_version=$4
 		  AND active_task_id IS NULL AND control_state='pending_new_route'
-		  AND route_activation_claim_id=$4
-	`, claim.SlotName, claim.ProxyID, claim.AssignmentVersion, claim.ClaimID); err != nil {
-		m.logError("release pending Route activation claim failed", err, "slot", claim.SlotName)
+		  AND route_activation_claim_id=$5
+	`, claim.Fence.SlotName, claim.Fence.LeaseID, claim.Fence.ProxyID,
+		claim.Fence.RouteGeneration, claim.ClaimID); err != nil {
+		m.logError("release pending Route activation claim failed", err, "slot", claim.Fence.SlotName)
 	}
 }

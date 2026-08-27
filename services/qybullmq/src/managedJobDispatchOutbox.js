@@ -286,16 +286,18 @@ async function updateAggregate(client, row, { status, jobId = null, reason = nul
       [row.aggregate_id, status, reason, row.intent_hash],
     );
     if (status === "terminal" && updated.rows[0]) {
-      await client.query(
+      const candidate = await client.query(
         `UPDATE crawler.channel_candidates
-         SET status=CASE WHEN status='queued' THEN 'failed' ELSE status END,
-             error_message=CASE WHEN status='queued' THEN $2 ELSE error_message END,
-             validation_finished_at=CASE WHEN status='queued' THEN now() ELSE validation_finished_at END,
+         SET status='failed',error_message=$2,validation_finished_at=now(),
              updated_at=now()
          WHERE candidate_id=$1 AND snapshot_dispatch_generation=$3
-           AND snapshot_active_job_id IS NULL AND snapshot_active_job_attempt IS NULL`,
+           AND snapshot_active_job_id IS NULL AND snapshot_active_job_attempt IS NULL
+           AND status='queued'`,
         [updated.rows[0].candidate_id, reason, updated.rows[0].dispatch_generation],
       );
+      if (candidate.rowCount !== 1) {
+        throw new Error(`Recovery Intent ${row.aggregate_id} lost its Candidate fence`);
+      }
     }
     return;
   }

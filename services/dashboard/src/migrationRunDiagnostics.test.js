@@ -42,6 +42,7 @@ test("Rota budget diagnostics use the authenticated authoritative endpoint", asy
   assert.equal(calls[0].options.headers.authorization, "Bearer control-token-secret");
   assert.deepEqual(budget, {
     available: true,
+    over_budget: false,
     workload_scope: "qy-production",
     business_run_id: "run:budget/1",
     business_tasks_used: 9,
@@ -52,6 +53,43 @@ test("Rota budget diagnostics use the authenticated authoritative endpoint", asy
     budget_exhausted_at: "2026-08-26T06:50:33Z",
   });
   assert.doesNotMatch(JSON.stringify(budget), /control-token-secret/);
+});
+
+test("Rota budget diagnostics preserve and mark persisted over-budget evidence", async () => {
+  const budget = await loadRotaBusinessRunBudget({
+    controlUrl: "http://rota-core:8001/api/v1/proxy-control",
+    controlToken: "control-token-secret",
+    businessRunId: "run:over-budget",
+    fetchImpl: async () => ({
+      ok: true,
+      async json() {
+        return {
+          ok: true,
+          business_run_id: "run:over-budget",
+          business_tasks_used: 10,
+          business_tasks_limit: 9,
+          current_execution_id: "exec:v1:over-budget",
+          execution_tasks_used: 4,
+          execution_tasks_limit: 3,
+          budget_exhausted_at: "2026-08-27T01:02:03Z",
+        };
+      },
+    }),
+  });
+
+  assert.equal(budget.available, true);
+  assert.equal(budget.over_budget, true);
+  assert.equal(budget.business_tasks_used, 10);
+  assert.equal(budget.business_tasks_limit, 9);
+  assert.equal(budget.execution_tasks_used, 4);
+  assert.equal(budget.execution_tasks_limit, 3);
+  const html = renderMigrationRunDiagnostics({
+    binding_status: "terminal",
+    budget,
+  });
+  assert.match(html, /over_budget/);
+  assert.match(html, />10 \/ 9</);
+  assert.match(html, />4 \/ 3</);
 });
 
 test("Migration diagnostics expose the latest persisted Business Run attempt", async () => {

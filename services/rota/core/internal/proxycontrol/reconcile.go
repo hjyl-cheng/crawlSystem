@@ -34,6 +34,7 @@ type bindingRefresh struct {
 	ProxyID           *int
 	AssignmentVersion int64
 	ControlState      string
+	ActivationFence   *routeActivationFence
 }
 
 type reconcileSummary struct {
@@ -167,6 +168,15 @@ func (m *Manager) reconcile(ctx context.Context) (reconcileSummary, error) {
 			}
 		}
 		if desired != nil && slot.ReadyAfter == nil {
+			var activationFence *routeActivationFence
+			if slot.ControlState == "pending_new_route" && slot.CurrentLeaseID != nil {
+				activationFence = &routeActivationFence{
+					SlotName:        slot.Name,
+					LeaseID:         *slot.CurrentLeaseID,
+					ProxyID:         *desired,
+					RouteGeneration: slot.AssignmentVersion,
+				}
+			}
 			refreshes = append(refreshes, bindingRefresh{
 				SlotName:          slot.Name,
 				OldProxyUser:      oldProxyUser,
@@ -174,6 +184,7 @@ func (m *Manager) reconcile(ctx context.Context) (reconcileSummary, error) {
 				ProxyID:           desired,
 				AssignmentVersion: slot.AssignmentVersion,
 				ControlState:      slot.ControlState,
+				ActivationFence:   activationFence,
 			})
 		} else if changed {
 			refreshes = append(refreshes, bindingRefresh{
@@ -497,7 +508,8 @@ func (m *Manager) finalizeBindings(ctx context.Context, bindings []bindingRefres
 			left.ProxyUser == right.ProxyUser &&
 			left.AssignmentVersion == right.AssignmentVersion &&
 			equalOptionalInt(left.ProxyID, right.ProxyID) &&
-			left.ControlState == right.ControlState
+			left.ControlState == right.ControlState &&
+			equalRouteActivationFence(left.ActivationFence, right.ActivationFence)
 	})
 	for _, binding := range bindings {
 		if binding.ProxyID == nil {
@@ -508,9 +520,15 @@ func (m *Manager) finalizeBindings(ctx context.Context, bindings []bindingRefres
 			continue
 		}
 		if binding.ControlState == "pending_new_route" {
-			m.activatePendingRoute(
-				ctx, binding.SlotName, *binding.ProxyID, binding.AssignmentVersion,
-			)
+			if binding.ActivationFence == nil {
+				m.logError(
+					"pending Route activation is missing its Fence",
+					ErrLeaseConflict,
+					"slot", binding.SlotName,
+				)
+				continue
+			}
+			m.activatePendingRoute(ctx, *binding.ActivationFence)
 			continue
 		}
 		if !m.invalidateUser(binding.ProxyUser) {
@@ -525,4 +543,11 @@ func (m *Manager) finalizeBindings(ctx context.Context, bindings []bindingRefres
 			m.logError("mark proxy binding ready failed", err, "proxy_user", binding.ProxyUser)
 		}
 	}
+}
+
+func equalRouteActivationFence(left, right *routeActivationFence) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return *left == *right
 }
