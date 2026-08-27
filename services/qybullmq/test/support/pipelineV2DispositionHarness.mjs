@@ -24,6 +24,7 @@ const dataApiLive = scenario === "data_api_live";
 const dataApiScenario = dataApiReplay || dataApiLive;
 const dispositionWriteRetry = scenario === "disposition_write_retry";
 const flatLiveInProgress = scenario === "live_in_progress_flat";
+const candidateRetryPublicationConflict = scenario === "candidate_retry_publication_conflict";
 const deferredDisposition = {
   version: "video-disposition-v1",
   kind: "deferred",
@@ -53,10 +54,11 @@ globalThis.__pipelineV2DispositionState = {
       : existingContent || dataApiReplay ? "youtube_watch_canonical" : null,
     detail_status: scenario === "undisposed_terminal"
       ? "done"
+      : candidateRetryPublicationConflict ? "failed"
       : dataApiScenario ? "api_pending" : "queued",
     api_status: dataApiScenario ? "queued" : "not_needed",
     missing_fields: dataApiLive ? ["comment_count"] : dataApiReplay ? ["access_status"] : [],
-    attempts: 0,
+    attempts: candidateRetryPublicationConflict ? 1 : 0,
     content_key: dataApiLive
       ? "UCsharedDisposition:live:public-without-type"
       : existingContent ? "UCsharedDisposition:video:public-without-type" : null,
@@ -82,14 +84,54 @@ globalThis.__pipelineV2DispositionState = {
               live_status: "is_live",
             }
           : {}),
+        ...(candidateRetryPublicationConflict
+          ? {
+              published_text: "Old flat text",
+              published_at: "2026-01-01T00:00:00.000Z",
+              published_at_status: "exact",
+              published_at_precision: "second",
+              published_at_source: "yt_dlp_flat_timestamp",
+            }
+          : {}),
       },
       ...(scenario === "age_excluded"
         ? {
             detail: {
               id: "public-without-type",
               published_at: "2025-01-01T00:00:00.000Z",
+              published_at_status: "exact",
               published_at_precision: "second",
+              published_at_source: "yt_dlp_timestamp",
               access_status: "public",
+            },
+          }
+        : {}),
+      ...(candidateRetryPublicationConflict
+        ? {
+            detail: {
+              id: "public-without-type",
+              title: "Existing retry Detail",
+              description: "Existing complete Detail",
+              description_status: "exact",
+              description_source: "youtubejs_player",
+              published_text: "Existing recent Detail text",
+              published_at: "2026-07-19T00:00:00.000Z",
+              published_at_status: "exact",
+              published_at_precision: "second",
+              published_at_source: "youtubejs_player_microformat",
+              duration_seconds: 90,
+              view_count: 100,
+              view_count_text: "100",
+              like_count: 3,
+              comment_count: 0,
+              comments_disabled: false,
+              access_status: "public",
+              content_type_signals: {
+                source: "youtubei_player",
+                canonical_url: "https://www.youtube.com/watch?v=public-without-type",
+                is_shorts_eligible: false,
+                is_live_content: false,
+              },
             },
           }
         : {}),
@@ -263,7 +305,11 @@ if (dispositionWriteRetry) {
           run_id: "run:shared-video-disposition",
           channel_id: "UCsharedDisposition",
           api_fallback_mode: "disabled",
-          content_max_age_days: scenario === "age_excluded" ? 90 : 0,
+          content_max_age_days: [
+            "age_excluded",
+            "stored_public",
+            "candidate_retry_publication_conflict",
+          ].includes(scenario) ? 90 : 0,
         },
         }));
     if (transportCancellation) {

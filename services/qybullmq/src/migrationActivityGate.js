@@ -1,4 +1,9 @@
-import { evaluateMigrationActivity } from "./migrationActivityPolicy.js";
+import {
+  evaluateMigrationActivity,
+  evaluateMigrationUploadsActivity,
+  MIGRATION_ACTIVITY_POLICY_VERSION,
+} from "./migrationActivityPolicy.js";
+import { PUBLICATION_TIME_CLASSIFIER_VERSION } from "./publicationTimeEvidence.js";
 import {
   buildDormantLifecycle,
   DORMANT_REASON,
@@ -15,6 +20,85 @@ function boundedInteger(value, fallback, min, max) {
 function optionalText(value) {
   const output = String(value ?? "").trim();
   return output || null;
+}
+
+function storedMetricCount(run, name) {
+  return boundedInteger(
+    run?.result_json?.migration_activity_metrics?.[name],
+    0,
+    0,
+    1_000_000,
+  );
+}
+
+function initialActivityEvidence(run, activityEvidence) {
+  if (activityEvidence?.complete === true) {
+    return {
+      evidence_complete: true,
+      recent_published_content_count: boundedInteger(
+        activityEvidence.recentPublishedContentCount,
+        0,
+        0,
+        1_000_000,
+      ),
+      uncertain_content_count: boundedInteger(
+        activityEvidence.uncertainContentCount,
+        0,
+        0,
+        1_000_000,
+      ),
+    };
+  }
+  return run?.result_json?.migration_activity_initial_evidence ?? null;
+}
+
+function candidateActivityEvidence(rows) {
+  const entries = [];
+  const recoveredRelationCounts = {
+    inside: 0,
+    outside: 0,
+    after_as_of: 0,
+    cutoff_overlap: 0,
+    unresolved: 0,
+  };
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const scopeStatus = optionalText(row.scope_status);
+    const scopeReason = optionalText(row.scope_reason);
+    if (scopeStatus === "excluded") {
+      if (scopeReason === "live_in_progress") {
+        entries.push({
+          video_id: optionalText(row.source_content_id),
+          content_type: "live",
+          is_live: true,
+          published_at: null,
+          published_at_status: "unresolved",
+          published_at_precision: "unknown",
+          published_at_source: null,
+        });
+      } else if (
+        ["older_than_max_age", "after_chronological_age_cutoff"].includes(scopeReason)
+        && optionalText(row.scope_relation) === "outside"
+      ) {
+        recoveredRelationCounts.outside += 1;
+      }
+      continue;
+    }
+    const contentType = optionalText(row.content_type);
+    const completedLive = contentType === "live"
+      && (row.live_ended_at != null || row.duration_seconds != null);
+    const usableContent = ["video", "short"].includes(contentType) || completedLive;
+    const unavailable = row.detail_status === "unavailable" || !row.content_key || !usableContent;
+    entries.push({
+      video_id: optionalText(row.source_content_id),
+      content_type: contentType,
+      is_live: contentType === "live" && !completedLive,
+      published_at: unavailable ? null : row.published_at,
+      published_at_status: unavailable ? "unresolved" : row.published_at_status,
+      published_at_precision: unavailable ? "unknown" : row.published_at_precision,
+      published_at_source: unavailable ? null : row.published_at_source,
+    });
+  }
+  return { entries, recoveredRelationCounts };
 }
 
 export async function applyMigrationActivityGate(client, {
@@ -64,6 +148,16 @@ export async function applyMigrationActivityGate(client, {
       recentPublishedContentCount: Number(configured.recent_published_content_count ?? 0),
       uncertainContentCount: Number(configured.uncertain_content_count ?? 0),
       maxAgeDays,
+      referenceAt: configured.reference_at ?? null,
+      classifierVersion: configured.classifier_version ?? null,
+      policyVersion: configured.policy_version ?? null,
+      evidenceComplete: configured.evidence_complete === true,
+      detailsRequestedDueToUnresolvedCount: Number(
+        configured.details_requested_due_to_unresolved_count ?? 0,
+      ),
+      dormantReversedAfterDetailCount: Number(
+        configured.dormant_reversed_after_detail_count ?? 0,
+      ),
       dormantSince: configured.dormant_since ?? null,
       dormantRecheckDay: configured.dormant_recheck_day ?? null,
       dormantCycle: Number(configured.dormant_cycle ?? 0),
@@ -80,10 +174,18 @@ export async function applyMigrationActivityGate(client, {
   }
 
   const evidenceReferenceDay = optionalText(activityEvidence?.referenceDay);
+  const evidenceReferenceAt = new Date(activityEvidence?.referenceAt ?? "");
+  const fallbackReferenceAt = new Date(run.started_at ?? evaluatedAt);
+  const referenceAt = activityEvidence?.complete === true && !Number.isNaN(evidenceReferenceAt.getTime())
+    ? evidenceReferenceAt
+    : fallbackReferenceAt;
   const referenceDay = activityEvidence?.complete === true
       && /^\d{4}-\d{2}-\d{2}$/.test(evidenceReferenceDay ?? "")
     ? evidenceReferenceDay
-    : new Date(run.started_at ?? evaluatedAt).toISOString().slice(0, 10);
+    : referenceAt.toISOString().slice(0, 10);
+  const initialEvidence = initialActivityEvidence(run, activityEvidence);
+  const evidenceComplete = activityEvidence?.complete === true
+    || initialEvidence?.evidence_complete === true;
   let evidence;
   if (activityEvidence?.complete === true) {
     evidence = {
@@ -99,52 +201,77 @@ export async function applyMigrationActivityGate(client, {
         0,
         1_000_000,
       ),
+      classifier_version: optionalText(activityEvidence.classifierVersion)
+        ?? PUBLICATION_TIME_CLASSIFIER_VERSION,
+      policy_version: optionalText(activityEvidence.policyVersion)
+        ?? MIGRATION_ACTIVITY_POLICY_VERSION,
+      relation_counts: activityEvidence.relationCounts ?? null,
+      unresolved_by_status_counts: activityEvidence.unresolvedByStatusCounts ?? null,
+      evidence_complete: true,
     };
   } else {
     const evidenceRows = await client.query(
-      `SELECT
-         count(DISTINCT content.source_content_id) FILTER (
-           WHERE (
-                  content.content_type IN ('video','short')
-                  OR (
-                    content.content_type='live'
-                    AND (content.live_ended_at IS NOT NULL OR content.duration_seconds IS NOT NULL)
-                  )
-                 )
-             AND content.published_at IS NOT NULL
-             AND (content.published_at AT TIME ZONE 'UTC')::date
-                   BETWEEN ($2::date-($3::int-1)) AND $2::date
-         )::int AS recent_published_content_count,
-         count(candidate.candidate_id) FILTER (
-           WHERE COALESCE(candidate.result_json#>>'{scope,status}','')<>'excluded'
-             AND (
-               candidate.detail_status='unavailable'
-               OR candidate.content_key IS NULL
-               OR content.published_at IS NULL
-               OR (
-                 content.content_type='live'
-                 AND content.live_ended_at IS NULL
-                 AND content.duration_seconds IS NULL
-               )
-             )
-         )::int AS uncertain_content_count
+      `SELECT candidate.source_content_id,candidate.detail_status,candidate.content_key,
+              candidate.result_json#>>'{scope,status}' AS scope_status,
+              candidate.result_json#>>'{scope,reason}' AS scope_reason,
+              candidate.result_json#>>'{scope,relation}' AS scope_relation,
+              COALESCE(content.content_type,candidate.content_type) AS content_type,
+              content.live_ended_at,content.duration_seconds,
+              content.published_at,content.published_at_status,
+              content.published_at_precision,content.published_at_source
        FROM crawler.content_candidates candidate
        LEFT JOIN crawler.contents content
          ON content.content_key=candidate.content_key
         AND content.channel_id=candidate.channel_id
-       WHERE candidate.run_id=$1`,
-      [runId, referenceDay, maxAgeDays],
+       WHERE candidate.run_id=$1
+       ORDER BY candidate.candidate_id`,
+      [runId],
     );
-    evidence = evidenceRows.rows[0] ?? {};
+    const candidateEvidence = candidateActivityEvidence(evidenceRows.rows);
+    const classified = evaluateMigrationUploadsActivity({
+      required: true,
+      entries: candidateEvidence.entries,
+      evidenceComplete,
+      maxAgeDays,
+      observedAt: referenceAt,
+    });
+    const relationCounts = Object.fromEntries(
+      Object.keys(classified.relationCounts).map((relation) => [
+        relation,
+        Number(classified.relationCounts[relation] ?? 0)
+          + Number(candidateEvidence.recoveredRelationCounts[relation] ?? 0),
+      ]),
+    );
+    evidence = {
+      recent_published_content_count: classified.recentPublishedContentCount,
+      uncertain_content_count: classified.uncertainContentCount,
+      classifier_version: classified.classifierVersion,
+      policy_version: classified.policyVersion,
+      relation_counts: relationCounts,
+      unresolved_by_status_counts: classified.unresolvedByStatusCounts,
+      evidence_complete: evidenceComplete,
+    };
   }
   const decision = evaluateMigrationActivity({
     required,
     detailStatus,
+    evidenceComplete: evidence.evidence_complete === true,
     recentPublishedContentCount: evidence.recent_published_content_count,
     uncertainContentCount: evidence.uncertain_content_count,
     maxAgeDays,
   });
   const recordedAt = new Date(evaluatedAt).toISOString();
+  const detailsRequestedDueToUnresolvedCount = storedMetricCount(
+    run,
+    "details_requested_due_to_unresolved_count",
+  );
+  const dormantReversedAfterDetailCount = decision.decision === "passed"
+      && detailsRequestedDueToUnresolvedCount > 0
+      && initialEvidence?.evidence_complete === true
+      && boundedInteger(initialEvidence.recent_published_content_count, 0, 0, 1_000_000) === 0
+      && boundedInteger(initialEvidence.uncertain_content_count, 0, 0, 1_000_000) > 0
+    ? 1
+    : 0;
   const dormantState = decision.dormant
     ? buildDormantLifecycle({
         channelId: run.channel_id,
@@ -159,8 +286,16 @@ export async function applyMigrationActivityGate(client, {
     reason: decision.reason,
     max_age_days: decision.maxAgeDays,
     reference_day: referenceDay,
+    reference_at: referenceAt.toISOString(),
     recent_published_content_count: decision.recentPublishedContentCount,
     uncertain_content_count: decision.uncertainContentCount,
+    evidence_complete: evidence.evidence_complete === true,
+    classifier_version: evidence.classifier_version ?? PUBLICATION_TIME_CLASSIFIER_VERSION,
+    policy_version: evidence.policy_version ?? MIGRATION_ACTIVITY_POLICY_VERSION,
+    relation_counts: evidence.relation_counts,
+    unresolved_by_status_counts: evidence.unresolved_by_status_counts,
+    details_requested_due_to_unresolved_count: detailsRequestedDueToUnresolvedCount,
+    dormant_reversed_after_detail_count: dormantReversedAfterDetailCount,
     evaluated_at: recordedAt,
     ...(activityEvidence?.complete === true
       ? {
@@ -207,10 +342,15 @@ export async function applyMigrationActivityGate(client, {
     await client.query(
       `UPDATE crawler.channel_runs
        SET result_json=result_json
-             || jsonb_build_object('migration_activity_gate',$2::jsonb),
+             || jsonb_build_object('migration_activity_gate',$2::jsonb)
+             || jsonb_build_object(
+                  'migration_activity_metrics',
+                  COALESCE(result_json->'migration_activity_metrics','{}'::jsonb)
+                    || jsonb_build_object('dormant_reversed_after_detail_count',$3::int)
+                ),
            updated_at=now()
        WHERE run_id=$1`,
-      [runId, JSON.stringify(storedDecision)],
+      [runId, JSON.stringify(storedDecision), dormantReversedAfterDetailCount],
     );
   } else if (decision.dormant) {
     await client.query(
@@ -316,10 +456,19 @@ export async function applyMigrationActivityGate(client, {
            result_json=result_json || jsonb_build_object(
              'migration_activity_gate',$2::jsonb,
              'initial_video_observation_id',$3::text
+           ) || jsonb_build_object(
+             'migration_activity_metrics',
+             COALESCE(result_json->'migration_activity_metrics','{}'::jsonb)
+               || jsonb_build_object('dormant_reversed_after_detail_count',$4::int)
            ),
            finished_at=COALESCE(finished_at,now()),updated_at=now()
        WHERE run_id=$1`,
-      [runId, JSON.stringify(storedDecision), videoObservation.observation_id],
+      [
+        runId,
+        JSON.stringify(storedDecision),
+        videoObservation.observation_id,
+        dormantReversedAfterDetailCount,
+      ],
     );
   }
   return {
@@ -327,6 +476,8 @@ export async function applyMigrationActivityGate(client, {
     dormantSince: dormantState?.dormant_since ?? null,
     dormantRecheckDay: dormantState?.dormant_recheck_day ?? null,
     dormantCycle: dormantState?.dormant_cycle ?? 0,
+    detailsRequestedDueToUnresolvedCount,
+    dormantReversedAfterDetailCount,
     candidateId: run.candidate_id == null ? null : Number(run.candidate_id),
     dispatchBatchId: optionalText(run.result_json?.dispatch_batch_id),
   };

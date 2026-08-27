@@ -15,6 +15,10 @@ test("Full Crawl persists numeric Video Current and retains trusted facts on wea
   const channelId = `UCfullvideo${suffix}`;
   const contentId = `full${suffix}`;
   const terminalContentId = `terminal${suffix}`;
+  const exactFirstContentId = `exactfirst${suffix}`;
+  const relativeFirstContentId = `relativefirst${suffix}`;
+  const conflictContentId = `conflict${suffix}`;
+  const equivalentSourceContentId = `equivalentsource${suffix}`;
 
   async function upsert(sourceContentId, detail, access = {
     is_members_only: false,
@@ -134,6 +138,86 @@ test("Full Crawl persists numeric Video Current and retains trusted facts on wea
       [contentKey],
     )).rows[0];
     assert.deepEqual(retained, first);
+
+    const exactDate = {
+      published_at: "2026-05-28T00:00:00.000Z",
+      published_at_status: "exact",
+      published_at_source: "yt_dlp_flat_upload_date",
+      published_at_precision: "date_only",
+    };
+    const relativeDate = {
+      published_at: "2026-05-01T00:00:00.000Z",
+      published_at_status: "relative",
+      published_at_source: "youtube_uploads_relative_time",
+      published_at_precision: "date_only",
+    };
+    await upsert(exactFirstContentId, exactDate);
+    await upsert(exactFirstContentId, relativeDate);
+    await upsert(relativeFirstContentId, relativeDate);
+    await upsert(relativeFirstContentId, exactDate);
+    const publicationRows = await pool.query(
+      `SELECT source_content_id,published_at,published_at_status,
+              published_at_source,published_at_precision
+       FROM crawler.contents
+       WHERE channel_id=$1 AND source_content_id=ANY($2::text[])
+       ORDER BY source_content_id`,
+      [channelId, [exactFirstContentId, relativeFirstContentId]],
+    );
+    for (const row of publicationRows.rows) {
+      assert.equal(new Date(row.published_at).toISOString(), exactDate.published_at);
+      assert.equal(row.published_at_status, exactDate.published_at_status);
+      assert.equal(row.published_at_source, exactDate.published_at_source);
+      assert.equal(row.published_at_precision, exactDate.published_at_precision);
+    }
+
+    const currentConflictDate = {
+      ...exactDate,
+      published_at: "2026-05-29T00:00:00.000Z",
+      published_at_source: "same_quality_source",
+    };
+    const candidateConflictDate = {
+      ...currentConflictDate,
+      published_at: "2026-05-28T00:00:00.000Z",
+    };
+    await upsert(conflictContentId, currentConflictDate);
+    await upsert(conflictContentId, candidateConflictDate);
+    const conflictRow = (await pool.query(
+      `SELECT published_at,published_at_status,published_at_source,published_at_precision,
+              raw_json->'publication_evidence_conflict' AS publication_evidence_conflict
+       FROM crawler.contents
+       WHERE channel_id=$1 AND source_content_id=$2`,
+      [channelId, conflictContentId],
+    )).rows[0];
+    assert.equal(new Date(conflictRow.published_at).toISOString(), currentConflictDate.published_at);
+    assert.equal(
+      conflictRow.publication_evidence_conflict?.reason_code,
+      "equal_quality_publication_conflict",
+    );
+    assert.equal(
+      conflictRow.publication_evidence_conflict?.resolution?.reason_code,
+      "equal_quality_conflict_current_retained",
+    );
+
+    const equivalentCurrent = {
+      ...exactDate,
+      published_at_source: "youtubejs_player_microformat",
+    };
+    const equivalentCandidate = {
+      ...equivalentCurrent,
+      published_at_source: "yt_dlp_upload_date",
+    };
+    await upsert(equivalentSourceContentId, equivalentCurrent);
+    await upsert(equivalentSourceContentId, equivalentCandidate);
+    const equivalentRow = (await pool.query(
+      `SELECT published_at,published_at_status,published_at_source,published_at_precision,
+              raw_json->'publication_evidence_conflict' AS publication_evidence_conflict
+       FROM crawler.contents
+       WHERE channel_id=$1 AND source_content_id=$2`,
+      [channelId, equivalentSourceContentId],
+    )).rows[0];
+    assert.equal(new Date(equivalentRow.published_at).toISOString(), equivalentCurrent.published_at);
+    assert.equal(equivalentRow.published_at_source, equivalentCurrent.published_at_source);
+    assert.equal(equivalentRow.publication_evidence_conflict, null);
 
     await upsert(contentId, {
       comments_disabled: true,

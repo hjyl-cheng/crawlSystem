@@ -31,6 +31,8 @@ function candidateSummary() {
     age_excluded: ["older_than_max_age", "after_chronological_age_cutoff"].includes(scopeReason) ? 1 : 0,
     upcoming_excluded: scopeReason === "upcoming_live" ? 1 : 0,
     live_in_progress_excluded: scopeReason === "live_in_progress" ? 1 : 0,
+    details_requested_due_to_unresolved_count:
+      candidate.result_json?.detail_request?.reason_code === "initial_publication_unresolved" ? 1 : 0,
   };
 }
 
@@ -253,6 +255,7 @@ export async function fetchVideoYtDlpDetail(videoId) {
       "stored_public",
       "disabled_comments",
       "disposition_write_retry",
+      "candidate_retry_publication_conflict",
       ...YOUTUBEJS_DETAIL_SCENARIOS,
     ].includes(state().scenario);
   const commentsVisible = state().scenario === "youtubejs_disabled_ytdlp_visible";

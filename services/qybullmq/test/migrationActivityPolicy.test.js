@@ -8,30 +8,53 @@ import {
 
 const observedAt = "2026-07-23T12:00:00.000Z";
 
-test("Uploads publication dates short-circuit migration at the 90-day boundary", () => {
+function exactDate(videoId, publishedAt) {
+  return {
+    video_id: videoId,
+    published_at: publishedAt,
+    published_at_status: "exact",
+    published_at_precision: publishedAt.includes("T") ? "second" : "date_only",
+    published_at_source: publishedAt.includes("T") ? "yt_dlp_flat_timestamp" : "yt_dlp_flat_upload_date",
+  };
+}
+
+test("an exact date-only cutoff overlap cannot short-circuit migration", () => {
   const result = evaluateMigrationUploadsActivity({
     required: true,
     evidenceComplete: true,
     entries: [
-      { video_id: "old", published_at: "2026-04-24" },
-      { video_id: "older", published_text: "4 months ago" },
+      exactDate("cutoff", "2026-04-24"),
+      exactDate("older", "2026-04-23"),
     ],
     observedAt,
-    locale: "en",
+  });
+  assert.equal(result.decision, "inconclusive");
+  assert.equal(result.dormant, false);
+  assert.equal(result.recentPublishedContentCount, 0);
+  assert.equal(result.uncertainContentCount, 1);
+  assert.equal(result.newestPublishedDay, "2026-04-24");
+  assert.equal(result.referenceDay, "2026-07-23");
+  assert.equal(result.relationCounts.cutoff_overlap, 1);
+  assert.equal(result.relationCounts.outside, 1);
+});
+
+test("only resolved old evidence can short-circuit migration as dormant", () => {
+  const result = evaluateMigrationUploadsActivity({
+    required: true,
+    evidenceComplete: true,
+    entries: [exactDate("old", "2026-04-23")],
+    observedAt,
   });
   assert.equal(result.decision, "dormant");
   assert.equal(result.dormant, true);
-  assert.equal(result.recentPublishedContentCount, 0);
   assert.equal(result.uncertainContentCount, 0);
-  assert.equal(result.newestPublishedDay, "2026-04-24");
-  assert.equal(result.referenceDay, "2026-07-23");
 });
 
 test("an Upload published inside the 90-day UTC window keeps the detail flow", () => {
   const result = evaluateMigrationUploadsActivity({
     required: true,
     evidenceComplete: true,
-    entries: [{ video_id: "recent", published_at: "2026-04-25" }],
+    entries: [exactDate("recent", "2026-04-25")],
     observedAt,
   });
   assert.equal(result.decision, "continue");
@@ -43,7 +66,7 @@ test("Uploads gaps and unknown publication dates cannot short-circuit details", 
   assert.equal(evaluateMigrationUploadsActivity({
     required: true,
     evidenceComplete: false,
-    entries: [{ video_id: "old", published_at: "2025-01-01" }],
+    entries: [exactDate("old", "2025-01-01")],
     observedAt,
   }).decision, "pending");
   assert.equal(evaluateMigrationUploadsActivity({
@@ -52,6 +75,19 @@ test("Uploads gaps and unknown publication dates cannot short-circuit details", 
     entries: [{ video_id: "unknown" }],
     observedAt,
   }).decision, "inconclusive");
+  const relative = evaluateMigrationUploadsActivity({
+    required: true,
+    evidenceComplete: true,
+    entries: [{
+      video_id: "relative",
+      published_at: "2026-04-01",
+      published_at_status: "relative",
+      published_at_precision: "date_only",
+      published_at_source: "youtube_uploads_relative_time",
+    }],
+    observedAt,
+  });
+  assert.equal(relative.unresolvedByStatusCounts.relative, 1);
 });
 
 test("upcoming Live is excluded but a running Live remains uncertain", () => {
@@ -60,7 +96,7 @@ test("upcoming Live is excluded but a running Live remains uncertain", () => {
     evidenceComplete: true,
     entries: [
       { video_id: "upcoming", content_type: "live", is_upcoming: true },
-      { video_id: "old", published_at: "2025-01-01" },
+      exactDate("old", "2025-01-01"),
     ],
     observedAt,
   });
@@ -100,6 +136,19 @@ test("one published item inside the UTC window keeps the Channel", () => {
     uncertainContentCount: 2,
     maxAgeDays: 90,
   });
+});
+
+test("a recent detail passes even when the Uploads scan was incomplete", () => {
+  const result = evaluateMigrationActivity({
+    required: true,
+    detailStatus: "done",
+    evidenceComplete: false,
+    recentPublishedContentCount: 1,
+    uncertainContentCount: 0,
+  });
+  assert.equal(result.decision, "passed");
+  assert.equal(result.activate, true);
+  assert.equal(result.dormant, false);
 });
 
 test("unknown publication evidence cannot be misclassified as inactivity", () => {

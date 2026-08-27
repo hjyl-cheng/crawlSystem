@@ -30,6 +30,14 @@ import { resolveYoutubeContentType } from "./youtubeContentType.js";
 import { fullVideoStorageAction } from "./fullVideoContentStore.js";
 import { normalizeVideoTextMetadata } from "./videoMetadata.js";
 import {
+  normalizePublicationEvidence,
+  publicationEvidenceFromFields,
+  publicationEvidenceCandidateWinsSql,
+  publicationEvidenceConflictPatchSql,
+  publicationEvidenceConflictRecord,
+  selectPublicationEvidence,
+} from "./publicationTimeEvidence.js";
+import {
   resolveVideoDisposition,
   videoAccessRecheckAt,
   videoDispositionSummary,
@@ -46,6 +54,16 @@ import { refreshVideoPublicationItemHashes } from "./videoPublicationItemStore.j
 const GAP_ABANDONMENT_STOP_REASON = "gap_abandoned_latest_30";
 const GAP_ABANDONMENT_POLICY_VERSION = "latest-30-on-catchup-limit-v1";
 const GAP_ABANDONMENT_ITEM_LIMIT = 30;
+const CONTENT_UPSERT_PUBLICATION_WINS = publicationEvidenceCandidateWinsSql(
+  "crawler.contents",
+  "EXCLUDED",
+);
+const CONTENT_UPSERT_PUBLICATION_CONFLICT = publicationEvidenceConflictPatchSql(
+  "crawler.contents",
+  "EXCLUDED",
+);
+const SCAN_PUBLICATION_WINS = publicationEvidenceCandidateWinsSql("content", "input");
+const SCAN_PUBLICATION_CONFLICT = publicationEvidenceConflictPatchSql("content", "input");
 const TERMINAL_CONTENT_ACCESS_STATUSES = new Set([
   "members_only",
   "private",
@@ -102,6 +120,10 @@ function mergeDefined(base, patch) {
     if (value !== undefined && value !== null && value !== "") output[key] = value;
   }
   return output;
+}
+
+function extractorPublicationEvidence(detail, fallbackSource = null) {
+  return publicationEvidenceFromFields(detail, { fallbackSource });
 }
 
 function incrementalCommentObservation(detail) {
@@ -218,17 +240,15 @@ function mergeIncrementalVideoDetail(base, patch) {
     );
   }
 
-  const precisionRank = { unknown: 0, date_only: 1, second: 2 };
-  const previousPrecision = previous.published_at_precision ?? "unknown";
-  const nextPrecision = next.published_at_precision ?? "unknown";
-  const nextHasUsablePublishedAt = Boolean(next.published_at)
-    && (precisionRank[nextPrecision] ?? 0) >= (precisionRank[previousPrecision] ?? 0);
-  if (previous.published_at && !nextHasUsablePublishedAt) {
-    output.published_at = previous.published_at;
-    output.published_text = previous.published_text;
-    output.published_at_precision = previousPrecision;
-    output.published_at_source = previous.published_at_source;
-  }
+  const publicationSelection = selectPublicationEvidence(
+    extractorPublicationEvidence(previous),
+    extractorPublicationEvidence(next),
+  );
+  Object.assign(output, publicationSelection.evidence);
+  if (publicationSelection.selected === "current") output.published_text = previous.published_text;
+  else if (publicationSelection.selected === "candidate") output.published_text = next.published_text;
+  const publicationConflict = publicationEvidenceConflictRecord(publicationSelection);
+  if (publicationConflict) output.publication_evidence_conflict = publicationConflict;
 
   const previousComment = incrementalCommentObservation(previous);
   const nextComment = incrementalCommentObservation(next);
@@ -274,10 +294,14 @@ function mergeIncrementalVideoDetail(base, patch) {
 function incrementalUploadEntry(entry, index) {
   const id = text(entry?.video_id ?? entry?.id);
   if (!id) return null;
-  const publishedAt = text(entry?.published_at);
-  const publishedDay = publishedAt && /^\d{4}-\d{2}-\d{2}/.test(publishedAt)
-    ? publishedAt.slice(0, 10)
-    : null;
+  const source = text(entry?.published_at_source);
+  const publication = normalizePublicationEvidence({
+    published_at: entry?.published_at,
+    published_at_status: entry?.published_at_status
+      ?? (source?.startsWith("yt_dlp_flat_") ? "exact" : "unresolved"),
+    published_at_precision: entry?.published_at_precision ?? "unknown",
+    published_at_source: source,
+  });
   return {
     id,
     title: text(entry?.title),
@@ -287,7 +311,8 @@ function incrementalUploadEntry(entry, index) {
     duration: positiveInteger(entry?.duration_seconds ?? entry?.duration),
     view_count: integer(entry?.view_count ?? entry?.view_count_text),
     published_text: text(entry?.published_text),
-    published_day: publishedDay,
+    published_day: publication.published_at?.slice(0, 10) ?? null,
+    ...publication,
     position: positiveInteger(entry?.position) ?? index + 1,
     content_type: ["video", "short", "live"].includes(entry?.content_type)
       ? entry.content_type
@@ -441,15 +466,14 @@ function publishedAt(detail) {
 }
 
 function uploadsPublishedFacts(entry) {
-  const day = text(entry?.published_day);
-  if (!day || !/^\d{4}-\d{2}-\d{2}$/.test(day)) return null;
-  const parsed = new Date(`${day}T00:00:00.000Z`);
-  if (Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== day) return null;
-  return {
-    published_at: parsed.toISOString(),
-    published_at_precision: "date_only",
-    published_at_source: "youtube_uploads",
-  };
+  const published = text(entry?.published_at) ?? text(entry?.published_day);
+  const evidence = publicationEvidenceFromFields({
+    published_at: published,
+    published_at_status: entry?.published_at_status,
+    published_at_precision: entry?.published_at_precision,
+    published_at_source: entry?.published_at_source,
+  });
+  return evidence.published_at ? evidence : null;
 }
 
 function detailSource(detail) {
@@ -469,15 +493,12 @@ function detailSource(detail) {
 function detailFacts(detail) {
   if (!detail) return null;
   const source = detailSource(detail);
+  const publication = extractorPublicationEvidence(detail, source);
   const commentsDisabled = detail.comments_disabled === true;
   return {
     title: text(detail.title),
     thumbnail_url: text(detail.thumbnail_url),
-    published_at: publishedAt(detail),
-    published_at_precision: ["second", "date_only"].includes(detail.published_at_precision)
-      ? detail.published_at_precision
-      : "unknown",
-    published_at_source: text(detail.published_at_source) ?? source,
+    ...publication,
     view_count: detailViewCount(detail),
     view_count_source: text(detail.view_count_source) ?? source,
     like_count: integer(detail.like_count),
@@ -729,6 +750,68 @@ function scannedVideoDispositionWork(entries, priorByVideoId, observedAt, {
     return [];
   });
   return { workEntries, pendingDeferredVideoIds };
+}
+
+function videoActivityEvidence(videoIdValue, contentTypeValue, publication, facts = null) {
+  const videoId = text(videoIdValue);
+  if (!videoId) return null;
+  const contentType = text(contentTypeValue);
+  return {
+    source_content_id: videoId,
+    content_type: ["video", "short", "live"].includes(contentType) ? contentType : "video",
+    ...normalizePublicationEvidence(publication),
+    live_ended_at: facts?.live_ended_at ?? null,
+    duration_seconds: facts?.duration_seconds ?? null,
+  };
+}
+
+function currentRunActivityEvidence(
+  commandEntries,
+  scanEntries,
+  dispositions,
+  storedActivityEvidence = [],
+) {
+  const evidenceByVideoId = new Map();
+  for (const entry of Array.isArray(commandEntries) ? commandEntries : []) {
+    const videoId = text(entry?.video_id);
+    if (!videoId) continue;
+    evidenceByVideoId.set(
+      videoId,
+      videoActivityEvidence(videoId, entry?.content_type, entry, entry),
+    );
+  }
+  for (const evidence of Array.isArray(storedActivityEvidence) ? storedActivityEvidence : []) {
+    const videoId = text(evidence?.source_content_id);
+    if (!videoId) continue;
+    evidenceByVideoId.set(videoId, evidence);
+  }
+  for (const entry of Array.isArray(scanEntries) ? scanEntries : []) {
+    if (unfinishedLiveReason(entry) === "live_in_progress" && text(entry?.id)) {
+      evidenceByVideoId.set(text(entry.id), {
+        source_content_id: text(entry.id),
+        content_type: "live",
+        is_live: true,
+        published_at: null,
+        published_at_status: "unresolved",
+        published_at_precision: "unknown",
+        published_at_source: null,
+      });
+    }
+  }
+  for (const item of Array.isArray(dispositions) ? dispositions : []) {
+    if (item?.reason_code === "live_in_progress" && text(item?.video_id)) {
+      evidenceByVideoId.set(text(item.video_id), {
+        source_content_id: text(item.video_id),
+        content_type: "live",
+        is_live: true,
+        published_at: null,
+        published_at_status: "unresolved",
+        published_at_precision: "unknown",
+        published_at_source: null,
+      });
+    }
+  }
+  return [...evidenceByVideoId.values()];
 }
 
 async function loadDueVideoDispositionEntries(query, channelId, observedAt, scanEntries, limit = 10) {
@@ -1319,6 +1402,9 @@ async function upsertFirstSeenContent(client, {
     discoveryDeferred,
   });
   const { detail, facts, uploadFacts, classification, disposition } = resolved;
+  const publicationSelection = selectPublicationEvidence(uploadFacts, facts);
+  const publication = publicationSelection.evidence;
+  const publicationConflict = publicationEvidenceConflictRecord(publicationSelection);
   if (disposition.kind !== "stored") {
     const terminalExcluded = disposition.kind === "terminal_excluded";
     const collectionFailed = capture?.error != null;
@@ -1348,6 +1434,7 @@ async function upsertFirstSeenContent(client, {
         access_status_source: facts?.access_status_source ?? null,
       },
       disposition,
+      ...(publicationConflict ? { publication_evidence_conflict: publicationConflict } : {}),
       ...(scanIncomplete ? { discovery_deferred: discoveryDeferred } : {}),
       extractor: {
         source: detail ? detailSource(detail) : null,
@@ -1379,10 +1466,10 @@ async function upsertFirstSeenContent(client, {
       classification,
       facts,
       enrichOutcomeKind: null,
-      publishedAt: facts?.published_at ?? uploadFacts?.published_at ?? null,
-      publishedAtPrecision: facts?.published_at
-        ? facts.published_at_precision
-        : uploadFacts?.published_at_precision ?? "unknown",
+      publishedAt: publication.published_at,
+      publishedAtStatus: publication.published_at_status,
+      publishedAtPrecision: publication.published_at_precision,
+      publishedAtSource: publication.published_at_source,
     };
   }
   const contentType = classification.content_type;
@@ -1402,13 +1489,9 @@ async function upsertFirstSeenContent(client, {
   const descriptionStatus = facts?.description == null
     ? "unresolved"
     : facts.description === "" ? "empty" : "exact";
-  const published = facts?.published_at ?? uploadFacts?.published_at ?? null;
-  const publishedPrecision = facts?.published_at
-    ? facts.published_at_precision
-    : uploadFacts?.published_at_precision ?? "unknown";
-  const publishedSource = facts?.published_at
-    ? facts.published_at_source
-    : uploadFacts?.published_at_source ?? null;
+  const published = publication.published_at;
+  const publishedPrecision = publication.published_at_precision;
+  const publishedSource = publication.published_at_source;
   const isRecent = published == null
     ? true
     : new Date(published).getTime() >= new Date(observedAt).getTime() - (30 * 86400000);
@@ -1482,12 +1565,14 @@ async function upsertFirstSeenContent(client, {
              COALESCE(cardinality(EXCLUDED.keywords),0)>0
              OR COALESCE(cardinality(crawler.contents.keywords),0)=0
            ) THEN EXCLUDED.keywords ELSE crawler.contents.keywords END,
-         published_at=COALESCE(EXCLUDED.published_at,crawler.contents.published_at),
-         published_at_status=CASE WHEN EXCLUDED.published_at IS NOT NULL THEN 'exact' ELSE crawler.contents.published_at_status END,
-         published_at_source=COALESCE(EXCLUDED.published_at_source,crawler.contents.published_at_source),
-         published_at_precision=CASE
-           WHEN EXCLUDED.published_at IS NOT NULL THEN EXCLUDED.published_at_precision
-           ELSE crawler.contents.published_at_precision END,
+         published_at=CASE WHEN ${CONTENT_UPSERT_PUBLICATION_WINS}
+           THEN EXCLUDED.published_at ELSE crawler.contents.published_at END,
+         published_at_status=CASE WHEN ${CONTENT_UPSERT_PUBLICATION_WINS}
+           THEN EXCLUDED.published_at_status ELSE crawler.contents.published_at_status END,
+         published_at_source=CASE WHEN ${CONTENT_UPSERT_PUBLICATION_WINS}
+           THEN EXCLUDED.published_at_source ELSE crawler.contents.published_at_source END,
+         published_at_precision=CASE WHEN ${CONTENT_UPSERT_PUBLICATION_WINS}
+           THEN EXCLUDED.published_at_precision ELSE crawler.contents.published_at_precision END,
          duration_seconds=COALESCE(EXCLUDED.duration_seconds,crawler.contents.duration_seconds),
          duration_status=CASE WHEN EXCLUDED.duration_seconds IS NOT NULL THEN 'exact' ELSE crawler.contents.duration_status END,
          duration_source=COALESCE(EXCLUDED.duration_source,crawler.contents.duration_source),
@@ -1545,7 +1630,8 @@ async function upsertFirstSeenContent(client, {
              THEN crawler.contents.access_status_source
            ELSE EXCLUDED.access_status_source END,
          extractor_version=COALESCE(EXCLUDED.extractor_version,crawler.contents.extractor_version),
-         raw_json=crawler.contents.raw_json || EXCLUDED.raw_json,
+         raw_json=crawler.contents.raw_json || EXCLUDED.raw_json
+           || ${CONTENT_UPSERT_PUBLICATION_CONFLICT},
          last_seen_at=GREATEST(crawler.contents.last_seen_at,EXCLUDED.last_seen_at),
          last_enriched_at=CASE WHEN $41::boolean THEN $40::timestamptz ELSE crawler.contents.last_enriched_at END,
          playlist_last_seen_at=$40::timestamptz,
@@ -1570,7 +1656,7 @@ async function upsertFirstSeenContent(client, {
       facts?.hashtags ?? [],
       facts?.keywords ?? [],
       published,
-      published == null ? "unresolved" : "exact",
+      publication.published_at_status,
       publishedSource,
       publishedPrecision,
       isRecent,
@@ -1598,6 +1684,7 @@ async function upsertFirstSeenContent(client, {
           playlist_position: entry.position,
           detail_collected: facts != null,
         },
+        ...(publicationConflict ? { publication_evidence_conflict: publicationConflict } : {}),
       }),
       observedAt,
       detailComplete,
@@ -1628,6 +1715,7 @@ async function upsertFirstSeenContent(client, {
         access_status_source: facts?.access_status_source ?? null,
       },
       disposition,
+      ...(publicationConflict ? { publication_evidence_conflict: publicationConflict } : {}),
       extractor: {
         source: detail ? detailSource(detail) : null,
         client: text(detail?.ytdlp_client),
@@ -1664,7 +1752,9 @@ async function upsertFirstSeenContent(client, {
     facts,
     enrichOutcomeKind: preparedEnrich.skipped ? null : preparedEnrich.outcome?.kind ?? null,
     publishedAt: published,
+    publishedAtStatus: publication.published_at_status,
     publishedAtPrecision: publishedPrecision,
+    publishedAtSource: publishedSource,
   };
 }
 
@@ -1719,7 +1809,8 @@ async function loadPendingFirstSeenCheckpoints(query, { channelId }) {
             candidate.position,candidate.title,candidate.thumbnail_url,
             candidate.result_json,
             content.content_key,content.content_type,
-            content.published_at,content.published_at_precision
+            content.published_at,content.published_at_status,
+            content.published_at_precision,content.published_at_source
      FROM crawler.content_candidates candidate
      JOIN crawler.contents content
        ON content.content_key=candidate.content_key
@@ -1767,7 +1858,9 @@ async function loadPendingFirstSeenCheckpoints(query, { channelId }) {
       publishedAt: row.published_at == null
         ? null
         : new Date(row.published_at).toISOString(),
+      publishedAtStatus: text(row.published_at_status) ?? "unresolved",
       publishedAtPrecision: text(row.published_at_precision) ?? "unknown",
+      publishedAtSource: text(row.published_at_source),
     };
   });
 }
@@ -1828,30 +1921,40 @@ async function applyDiscovery({
         terminal_reason: text(scan.terminal_reason),
         parse_gap_count: Number(scan.parse_gap_count ?? 0),
       };
-  const scanInput = scan.entries.map((entry) => ({
-    video_id: entry.id,
-    position: entry.position,
-    published_at: uploadsPublishedFacts(entry)?.published_at ?? null,
-  }));
+  const scanInput = scan.entries.map((entry) => {
+    const publication = uploadsPublishedFacts(entry)
+      ?? normalizePublicationEvidence();
+    return {
+      video_id: entry.id,
+      position: entry.position,
+      ...publication,
+    };
+  });
   if (scanInput.length > 0) {
     await transactionClient.query(
            `WITH input AS (
              SELECT * FROM jsonb_to_recordset($3::jsonb)
-               AS item(video_id text,position integer,published_at timestamptz)
+               AS item(
+                 video_id text,
+                 position integer,
+                 published_at timestamptz,
+                 published_at_status text,
+                 published_at_precision text,
+                 published_at_source text
+               )
            )
            UPDATE crawler.contents content
            SET playlist_last_seen_at=$2,last_seen_at=GREATEST(content.last_seen_at,$2::timestamptz),
                position=input.position,
-               published_at=COALESCE(content.published_at,input.published_at),
-               published_at_status=CASE
-                 WHEN content.published_at IS NULL AND input.published_at IS NOT NULL THEN 'exact'
-                 ELSE content.published_at_status END,
-               published_at_source=CASE
-                 WHEN content.published_at IS NULL AND input.published_at IS NOT NULL THEN 'youtube_uploads'
-                 ELSE content.published_at_source END,
-               published_at_precision=CASE
-                 WHEN content.published_at IS NULL AND input.published_at IS NOT NULL THEN 'date_only'
-                 ELSE content.published_at_precision END,
+               published_at=CASE WHEN ${SCAN_PUBLICATION_WINS}
+                 THEN input.published_at ELSE content.published_at END,
+               published_at_status=CASE WHEN ${SCAN_PUBLICATION_WINS}
+                 THEN input.published_at_status ELSE content.published_at_status END,
+               published_at_source=CASE WHEN ${SCAN_PUBLICATION_WINS}
+                 THEN input.published_at_source ELSE content.published_at_source END,
+               published_at_precision=CASE WHEN ${SCAN_PUBLICATION_WINS}
+                 THEN input.published_at_precision ELSE content.published_at_precision END,
+               raw_json=content.raw_json || ${SCAN_PUBLICATION_CONFLICT},
                last_observation_id=$4
            FROM input
            WHERE content.channel_id=$1 AND content.source_content_id=input.video_id`,
@@ -1887,6 +1990,7 @@ async function applyDiscovery({
   );
   const firstSeenEntries = candidateEntries.filter((entry) => !alreadyKnown.has(entry.id));
   const firstSeen = [];
+  const activityEvidence = [];
   const dispositions = [];
   const recheckDispositions = [];
   const unresolvedVideoIds = [...new Set(pendingDeferredVideoIds)];
@@ -1905,8 +2009,21 @@ async function applyDiscovery({
       position: entry.position,
       content_type: current.contentType,
       published_at: current.publishedAt,
+      published_at_status: current.publishedAtStatus,
       published_at_precision: current.publishedAtPrecision,
+      published_at_source: current.publishedAtSource,
     });
+    activityEvidence.push(videoActivityEvidence(
+      entry.id,
+      current.contentType ?? current.classification?.content_type ?? entry.content_type,
+      {
+        published_at: current.publishedAt,
+        published_at_status: current.publishedAtStatus,
+        published_at_precision: current.publishedAtPrecision,
+        published_at_source: current.publishedAtSource,
+      },
+      current.facts,
+    ));
   }
   for (const entry of firstSeenEntries) {
     const capture = captures.get(entry.id) ?? { detail: null, error: null };
@@ -1923,6 +2040,17 @@ async function applyDiscovery({
     const dispositionSummary = videoDispositionSummary(entry.id, current.disposition);
     if (entry.disposition_recheck) recheckDispositions.push(dispositionSummary);
     else dispositions.push(dispositionSummary);
+    activityEvidence.push(videoActivityEvidence(
+      entry.id,
+      current.contentType ?? current.classification?.content_type ?? entry.content_type,
+      {
+        published_at: current.publishedAt,
+        published_at_status: current.publishedAtStatus,
+        published_at_precision: current.publishedAtPrecision,
+        published_at_source: current.publishedAtSource,
+      },
+      current.facts,
+    ));
     if (current.disposition.kind === "deferred") {
       if (entry.disposition_recheck) recheckDeferredVideoIds.push(entry.id);
       else unresolvedVideoIds.push(entry.id);
@@ -1942,7 +2070,9 @@ async function applyDiscovery({
       position: entry.position,
       content_type: current.contentType,
       published_at: current.publishedAt,
+      published_at_status: current.publishedAtStatus,
       published_at_precision: current.publishedAtPrecision,
+      published_at_source: current.publishedAtSource,
     });
   }
   const discoveredVideoIds = [...new Set(
@@ -2044,6 +2174,7 @@ async function applyDiscovery({
     },
     firstSeen,
     claimedFirstSeen,
+    activityEvidence,
   };
 }
 
@@ -2083,9 +2214,13 @@ export async function applyIncrementalVideoDetail(client, {
       && previousComment !== facts.comment_count);
   const changeProbability = nextVideoChangeProbability(row, facts, changeAlpha);
   const commentsObserved = facts.comments_disabled === true || facts.comment_count != null;
-  const isRecent = facts.published_at == null
+  const storedPublication = row.stored_publication ?? row;
+  const publicationSelection = selectPublicationEvidence(storedPublication, facts);
+  const publication = publicationSelection.evidence;
+  const publicationConflict = publicationEvidenceConflictRecord(publicationSelection);
+  const isRecent = publication.published_at == null
     ? null
-    : new Date(facts.published_at).getTime() >= new Date(observedAt).getTime() - (30 * 86400000);
+    : new Date(publication.published_at).getTime() >= new Date(observedAt).getTime() - (30 * 86400000);
   await client.query(
     `UPDATE crawler.contents
      SET content_type=CASE WHEN $36::text IS NULL THEN content_type ELSE $36 END,
@@ -2116,10 +2251,10 @@ export async function applyIncrementalVideoDetail(client, {
            WHEN $18::boolean AND (
              COALESCE(cardinality($17::text[]),0)>0 OR COALESCE(cardinality(keywords),0)=0
            ) THEN $17::text[] ELSE keywords END,
-         published_at=COALESCE($19::timestamptz,published_at),
-         published_at_status=CASE WHEN $19::timestamptz IS NULL THEN published_at_status ELSE 'exact' END,
-         published_at_source=CASE WHEN $19::timestamptz IS NULL THEN published_at_source ELSE $20 END,
-         published_at_precision=CASE WHEN $19::timestamptz IS NULL THEN published_at_precision ELSE $21 END,
+         published_at=$19::timestamptz,
+         published_at_status=$41::text,
+         published_at_source=$20::text,
+         published_at_precision=$21::text,
          is_recent=COALESCE($22::boolean,is_recent),
          duration_seconds=COALESCE($23::integer,duration_seconds),
          duration_status=CASE WHEN $23::integer IS NULL THEN duration_status ELSE 'exact' END,
@@ -2160,7 +2295,8 @@ export async function applyIncrementalVideoDetail(client, {
            $40::text,jsonb_strip_nulls(jsonb_build_object(
              'observation_id',$8::uuid::text,
              'detail_collected',true,
-             'source',$34::text
+             'source',$34::text,
+             'publication_evidence_conflict',$42::jsonb
            ))
          ),
          player_last_observed_at=$2,
@@ -2188,9 +2324,9 @@ export async function applyIncrementalVideoDetail(client, {
       facts.hashtags_observed,
       facts.keywords,
       facts.keywords_observed,
-      facts.published_at,
-      facts.published_at_source,
-      facts.published_at_precision,
+      publication.published_at,
+      publication.published_at_source,
+      publication.published_at_precision,
       isRecent,
       facts.duration_seconds,
       facts.duration_source,
@@ -2210,6 +2346,8 @@ export async function applyIncrementalVideoDetail(client, {
       storageAction.kind === "upsert" ? classification.canonical_url : null,
       facts.comments_first_page == null ? null : JSON.stringify(facts.comments_first_page),
       detailMetadataKey,
+      publication.published_at_status,
+      publicationConflict == null ? null : JSON.stringify(publicationConflict),
     ],
   );
   return {
@@ -2218,6 +2356,12 @@ export async function applyIncrementalVideoDetail(client, {
     engagementChanged,
     changeProbability,
     accessStatus: facts.access_status,
+    activityEvidence: videoActivityEvidence(
+      row.source_content_id,
+      storageAction.content_type ?? row.content_type,
+      publication,
+      facts,
+    ),
   };
 }
 
@@ -2315,6 +2459,12 @@ async function loadClockRecentSamplingRows(client, {
   );
   return recentRows.rows.map((row) => ({
     ...row,
+    stored_publication: {
+      published_at: row.published_at,
+      published_at_status: row.published_at_status,
+      published_at_precision: row.published_at_precision,
+      published_at_source: row.published_at_source,
+    },
     published_at: row.sampling_published_at ?? row.published_at,
   }));
 }
@@ -2426,6 +2576,7 @@ async function applyRecentSampling({
   let viewDeltaTotal = 0;
   let comparableViewCount = 0;
   let engagementChangedCount = 0;
+  const activityEvidence = [];
   for (const row of locked.rows) {
     const spec = planned.get(row.content_key);
     const prepared = preparedCaptures.get(row.content_key);
@@ -2465,6 +2616,7 @@ async function applyRecentSampling({
       continue;
     }
     successCount += 1;
+    if (applied.activityEvidence) activityEvidence.push(applied.activityEvidence);
     if (applied.viewDelta != null) {
       comparableViewCount += 1;
       viewDeltaTotal += applied.viewDelta;
@@ -2491,6 +2643,7 @@ async function applyRecentSampling({
   return {
     outcome,
     payload,
+    activityEvidence,
     summary: {
       recent_count: payload.recent_count,
       candidate_count: samplePlan.candidate_count,
@@ -2519,14 +2672,23 @@ async function recordVideoCycle({
   crawlerVersion,
   executionAttemptId,
 }) {
-  const commandEntries = scan.entries.map((entry) => ({
-    video_id: entry.id,
-    position: entry.position,
-    content_type: entry.content_type,
-    published_at: detailFacts(discoveryCaptures.get(entry.id)?.detail)?.published_at
-      ?? uploadsPublishedFacts(entry)?.published_at
-      ?? null,
-  }));
+  const commandEntries = scan.entries.map((entry) => {
+    const facts = detailFacts(discoveryCaptures.get(entry.id)?.detail);
+    const publicationSelection = selectPublicationEvidence(
+      uploadsPublishedFacts(entry),
+      facts,
+    );
+    const publicationConflict = publicationEvidenceConflictRecord(publicationSelection);
+    return {
+      video_id: entry.id,
+      position: entry.position,
+      content_type: entry.content_type,
+      live_ended_at: facts?.live_ended_at ?? null,
+      duration_seconds: facts?.duration_seconds ?? null,
+      ...publicationSelection.evidence,
+      ...(publicationConflict ? { publication_evidence_conflict: publicationConflict } : {}),
+    };
+  });
   let recorded = null;
   let transactionError = null;
   try {
@@ -2686,7 +2848,33 @@ async function recordVideoCycle({
             channelId: plan.channel_id,
             observedAt,
             discoveryComplete: scan.complete === true,
+            runActivityEvidence: currentRunActivityEvidence(
+              commandEntries,
+              scan.entries,
+              [
+                ...discovery.payload.dispositions,
+                ...discovery.payload.recheck_dispositions,
+              ],
+              [
+                ...discovery.activityEvidence,
+                ...recentSampling.activityEvidence,
+              ],
+            ),
           });
+          const lifecycleEvidenceMetrics = {
+            evidence_complete: lifecycle.evidence_complete,
+            evidence_scan_complete: lifecycle.evidence_scan_complete,
+            evidence_scan_rows: lifecycle.evidence_scan_rows,
+            evidence_scan_page_count: lifecycle.evidence_scan_page_count,
+            evidence_scan_elapsed_ms: lifecycle.evidence_scan_elapsed_ms,
+            evidence_scan_truncated_count: lifecycle.evidence_scan_truncated_count,
+            evidence_scan_truncated_count_is_lower_bound:
+              lifecycle.evidence_scan_truncated_count_is_lower_bound,
+            evidence_scan_stop_reason: lifecycle.evidence_scan_stop_reason,
+            evidence_scan_row_limit: lifecycle.evidence_scan_row_limit,
+            evidence_scan_page_size: lifecycle.evidence_scan_page_size,
+            evidence_scan_time_budget_ms: lifecycle.evidence_scan_time_budget_ms,
+          };
           const outcome = discovery.outcome === "complete" && recentSampling.outcome === "complete"
             ? "complete"
             : "partial";
@@ -2703,6 +2891,12 @@ async function recordVideoCycle({
               activity: {
                 lifecycle_status: lifecycle.lifecycle_status,
                 recent_published_content_count: lifecycle.recent_published_content_count,
+                uncertain_content_count: lifecycle.uncertain_content_count,
+                classifier_version: lifecycle.classifier_version,
+                policy_version: lifecycle.policy_version,
+                relation_counts: lifecycle.relation_counts,
+                unresolved_by_status_counts: lifecycle.unresolved_by_status_counts,
+                ...lifecycleEvidenceMetrics,
                 conclusive: lifecycle.conclusive,
               },
             },
@@ -2711,6 +2905,15 @@ async function recordVideoCycle({
               recent_sampling: {
                 outcome: recentSampling.outcome,
                 payload: recentSampling.payload,
+              },
+              activity_evidence: {
+                recent_published_content_count: lifecycle.recent_published_content_count,
+                uncertain_content_count: lifecycle.uncertain_content_count,
+                classifier_version: lifecycle.classifier_version,
+                policy_version: lifecycle.policy_version,
+                relation_counts: lifecycle.relation_counts,
+                unresolved_by_status_counts: lifecycle.unresolved_by_status_counts,
+                ...lifecycleEvidenceMetrics,
               },
               ...(lifecycle.activity ? { activity: lifecycle.activity } : {}),
             },
