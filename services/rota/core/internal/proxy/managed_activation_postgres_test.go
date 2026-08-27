@@ -101,6 +101,23 @@ func TestActivateProxyUserRetiresOldTunnelsAndWarmsExactNewRoute(t *testing.T) {
 	if !prepared || entry.chain == nil || !entry.chain.HasExactProxy(targetProxyID) {
 		t.Fatalf("prepared managed chain = %#v", entry.chain)
 	}
+	if err := server.RetireProxyUser(ctx, "managed-new"); err != nil {
+		t.Fatalf("retire new proxy user after uncertain Finalize: %v", err)
+	}
+	if err := server.ActivateProxyUser(ctx, "", "managed-new", targetProxyID); err != nil {
+		t.Fatalf("reactivate proxy user after transient Finalize failure: %v", err)
+	}
+	retryClient, retryPeer := net.Pipe()
+	retryUpstream, retryUpstreamPeer := net.Pipe()
+	retriedTunnel, accepted := handler.beginTunnel(retryClient, retryUpstream, "managed-new")
+	if !accepted {
+		t.Fatal("reactivated managed proxy user remained permanently retired")
+	}
+	handler.endTunnel(retriedTunnel)
+	_ = retryClient.Close()
+	_ = retryPeer.Close()
+	_ = retryUpstream.Close()
+	_ = retryUpstreamPeer.Close()
 
 	if _, err := db.Exec(ctx, `INSERT INTO pool_proxies (pool_id,proxy_id) VALUES ($1,$2)`, poolID, otherProxyID); err != nil {
 		t.Fatalf("add illegal second proxy: %v", err)

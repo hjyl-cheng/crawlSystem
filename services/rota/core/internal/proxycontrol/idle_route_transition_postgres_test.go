@@ -387,6 +387,66 @@ func TestLeaseLostDuringRouteActivationRetiresActivatedDataPlaneUser(t *testing.
 	}
 }
 
+func TestCommittedRouteFinalizeResponseLossKeepsActivatedDataPlaneUser(t *testing.T) {
+	manager, pool := newProxyControlPostgres(t)
+	ctx := context.Background()
+
+	proxyID := insertControlProxy(t, pool, "activation-finalize-lost.example:8080", 10)
+	manager.SetCacheInvalidator(func(string) {})
+	if err := manager.syncResources(ctx); err != nil {
+		t.Fatalf("sync managed resources: %v", err)
+	}
+	if _, err := manager.reconcile(ctx); err != nil {
+		t.Fatalf("reconcile initial assignment: %v", err)
+	}
+	lease, err := manager.Claim(ctx, testClaimRequest(
+		"claim-activation-finalize-lost", "worker-activation-finalize-lost",
+		"instance-activation-finalize-lost",
+	))
+	if err != nil {
+		t.Fatalf("claim initial Route: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		UPDATE proxy_running_slots
+		SET ready_after=NULL,control_state='pending_new_route',
+		    route_activation_old_username='retired-proxy-user'
+		WHERE slot_name=$1 AND current_lease_id=$2
+	`, lease.SlotName, lease.LeaseID); err != nil {
+		t.Fatalf("prepare pending Route: %v", err)
+	}
+
+	fence := routeActivationFence{
+		SlotName: lease.SlotName, LeaseID: lease.LeaseID, ProxyID: proxyID,
+		RouteGeneration: lease.AssignmentVersion,
+	}
+	claim, found, err := manager.claimPendingRouteActivation(ctx, fence)
+	if err != nil {
+		t.Fatalf("claim pending Route activation: %v", err)
+	}
+	if !found {
+		t.Fatal("pending Route activation was not claimed")
+	}
+	if _, err := pool.Exec(ctx, `
+		UPDATE proxy_running_slots
+		SET ready_after=NOW(),control_state='leased_idle',
+		    route_activation_old_username=NULL,route_activation_claim_id=NULL,
+		    route_activation_claim_until=NULL,rotation_deadline_at=NULL,updated_at=NOW()
+		WHERE slot_name=$1 AND current_lease_id=$2 AND proxy_id=$3
+		  AND assignment_version=$4 AND route_activation_claim_id=$5
+	`, fence.SlotName, fence.LeaseID, fence.ProxyID, fence.RouteGeneration, claim.ClaimID); err != nil {
+		t.Fatalf("commit Route Finalize before simulated response loss: %v", err)
+	}
+
+	dataPlane := &idleRouteDataPlaneStub{}
+	manager.SetDataPlaneController(dataPlane)
+	if committed := manager.compensateLostRouteActivation(ctx, claim); !committed {
+		t.Fatal("authoritative read did not resolve the lost Finalize response as committed")
+	}
+	if len(dataPlane.retiredUsers) != 0 {
+		t.Fatalf("committed Route data plane was retired after response loss: %v", dataPlane.retiredUsers)
+	}
+}
+
 func TestFailedProxyOnLeaseOwnedIdleSlotRotatesToHealthyReserve(t *testing.T) {
 	manager, pool := newProxyControlPostgres(t)
 	ctx := context.Background()

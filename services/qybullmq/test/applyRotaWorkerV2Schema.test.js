@@ -29,6 +29,7 @@ test("Rota Worker V2 deployment extracts the complete additive integration schem
     /SET snapshot_dispatch_generation = expectation\.expected_generation,[\s\S]*snapshot_active_job_id = NULL,[\s\S]*snapshot_active_job_attempt = NULL/,
   );
   assert.match(block, /CREATE TABLE IF NOT EXISTS crawler\.migration_retry_intents/);
+  assert.match(block, /channel_execution_attempts[\s\S]*dispatch_generation BIGINT/);
   assert.match(block, /UNIQUE \(candidate_id,dispatch_generation\)/);
   assert.match(block, /ux_crawler_migration_retry_intents_active_candidate/);
   assert.match(block, /idx_crawler_migration_retry_intents_status/);
@@ -44,6 +45,7 @@ test("Crawler bootstrap includes the Candidate attempt Fence shape", async () =>
   assert.match(bootstrap, /snapshot_active_job_id text/);
   assert.match(bootstrap, /snapshot_active_job_attempt integer/);
   assert.match(bootstrap, /channel_candidates_snapshot_active_job_check/);
+  assert.match(bootstrap, /channel_execution_attempts[\s\S]*dispatch_generation bigint/);
 });
 
 test("Rota Worker V2 deployment requires explicit database and row-count confirmation", () => {

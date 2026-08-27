@@ -64,12 +64,16 @@ func (m *Manager) activatePendingRoute(
 	`, claim.Fence.SlotName, claim.Fence.LeaseID, claim.Fence.ProxyID,
 		claim.Fence.RouteGeneration, claim.ClaimID)
 	if err != nil {
-		m.compensateLostRouteActivation(ctx, claim)
+		if m.compensateLostRouteActivation(ctx, claim) {
+			return true
+		}
 		m.logError("mark pending proxy binding ready failed", err, "slot", fence.SlotName)
 		return false
 	}
 	if tag.RowsAffected() != 1 {
-		m.compensateLostRouteActivation(ctx, claim)
+		if m.compensateLostRouteActivation(ctx, claim) {
+			return true
+		}
 		m.logError(
 			"pending Route activation lost its Fence",
 			ErrLeaseConflict,
@@ -84,14 +88,45 @@ func (m *Manager) activatePendingRoute(
 func (m *Manager) compensateLostRouteActivation(
 	ctx context.Context,
 	claim routeActivationClaim,
-) {
+) bool {
 	compensationCtx, cancel := context.WithTimeout(
 		context.WithoutCancel(ctx),
 		routeActivationAttemptTimeout,
 	)
 	defer cancel()
+	var controlState, persistedClaimID string
+	var ready bool
+	err := m.db.Pool.QueryRow(compensationCtx, `
+		SELECT slot.control_state,slot.ready_after IS NOT NULL,
+		       COALESCE(slot.route_activation_claim_id,'')
+		FROM proxy_running_slots slot
+		JOIN proxy_users proxy_user ON proxy_user.id=slot.user_id
+		WHERE slot.slot_name=$1 AND slot.current_lease_id=$2 AND slot.lease_until > NOW()
+		  AND slot.proxy_id=$3 AND slot.assignment_version=$4
+		  AND proxy_user.username=$5
+	`, claim.Fence.SlotName, claim.Fence.LeaseID, claim.Fence.ProxyID,
+		claim.Fence.RouteGeneration, claim.NewUsername).Scan(
+		&controlState, &ready, &persistedClaimID,
+	)
+	if err == nil && ready &&
+		(controlState == "leased_idle" || controlState == "active_task") {
+		return true
+	}
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		m.logError(
+			"resolve uncertain Route activation failed", err,
+			"slot", claim.Fence.SlotName,
+			"route_generation", claim.Fence.RouteGeneration,
+		)
+		return false
+	}
+	if err == nil && (controlState != "pending_new_route" || ready ||
+		persistedClaimID != claim.ClaimID) {
+		return false
+	}
 	m.retireUser(compensationCtx, claim.NewUsername)
 	m.releaseRouteActivationClaim(compensationCtx, claim)
+	return false
 }
 
 func (m *Manager) claimPendingRouteActivation(

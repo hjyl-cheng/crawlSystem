@@ -181,3 +181,22 @@ test("trusted source metadata cannot be combined with TLS text from an Aggregate
   assert.equal(result.retry_mode, "same_identity");
   assert.equal(result.proxy_action, "none");
 });
+
+test("structured failure evidence does not borrow HTTP status from an AggregateError sibling", () => {
+  const proxyFailure = Object.assign(new Error("gateway failed"), {
+    failureKind: "proxy_transport",
+    code: "FINGERPRINT_PROXY_TRANSPORT",
+    youtube_failure_evidence: { source: "fingerprint_gateway" },
+  });
+  const missingContent = annotateYoutubeFailure(new Error("video missing"), {
+    status: 404,
+    source: "youtubejs_player",
+  });
+  const result = decideYoutubeFailure({
+    error: new AggregateError([proxyFailure, missingContent], "parallel failures"),
+  });
+
+  assert.equal(result.kind, "proxy_transport");
+  assert.equal(result.status, null);
+  assert.equal(result.evidence.source, "fingerprint_gateway");
+});

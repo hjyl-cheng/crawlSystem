@@ -24,7 +24,7 @@ function job(id = "job-1") {
     id,
     queueName: "youtube-channel-crawl",
     attemptsMade: 0,
-    data: { channel_id: "UCtest", run_id: "run-test" },
+    data: { channel_id: "UCtest", run_id: "run-test", dispatch_generation: 3 },
   };
 }
 
@@ -92,6 +92,28 @@ test("channel runtime binds both client profiles and checkpoints cookies without
   assert.equal(runtime.activeAttemptId, null);
 });
 
+test("channel runtime writes the persisted dispatch generation into execution audit", async () => {
+  const currentProxy = { value: { ...proxy } };
+  const { runtime, calls } = runtimeFixture();
+
+  await runtime.run(context(currentProxy), async () => ({ ok: true }));
+
+  assert.equal(calls.attempts[0].dispatchGeneration, 3);
+});
+
+test("channel runtime rejects a missing dispatch generation before audit starts", async () => {
+  const currentProxy = { value: { ...proxy } };
+  const { runtime, calls } = runtimeFixture();
+  const invalid = context(currentProxy);
+  delete invalid.job.data.dispatch_generation;
+
+  await assert.rejects(
+    runtime.run(invalid, async () => ({ ok: true })),
+    /dispatch_generation must be a positive integer/,
+  );
+  assert.equal(calls.attempts.length, 0);
+});
+
 test("channel runtime opens a Rota v2 session at initial profile epoch zero", async () => {
   const initialProxy = {
     slot_name: "bullmq-channel-01",
@@ -128,7 +150,7 @@ test("channel runtime links an immutable Incremental Plan through prepared Busin
   const incrementalJob = {
     ...job(),
     queueName: "youtube-channel-incremental",
-    data: { channel_id: "UCtest", plan_id: "plan-1" },
+    data: { channel_id: "UCtest", plan_id: "plan-1", dispatch_generation: 4 },
   };
 
   await runtime.run({
@@ -138,7 +160,9 @@ test("channel runtime links an immutable Incremental Plan through prepared Busin
   }, async () => ({ ok: true }));
 
   assert.equal(calls.attempts[0].runId, "incremental:plan-1");
-  assert.deepEqual(incrementalJob.data, { channel_id: "UCtest", plan_id: "plan-1" });
+  assert.deepEqual(incrementalJob.data, {
+    channel_id: "UCtest", plan_id: "plan-1", dispatch_generation: 4,
+  });
 });
 
 test("channel runtime aborts and skips cookie checkpoint when proxy identity drifts", async () => {

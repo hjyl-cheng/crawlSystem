@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import test from "node:test";
-import { Queue } from "bullmq";
+import { Queue, QueueEvents, Worker } from "bullmq";
 
 import {
   DEFAULT_MANUAL_MIGRATION_BATCH_ID,
@@ -100,6 +100,70 @@ test("manual migration validates the Redis Job after a duplicate BullMQ add", {
     assert.equal(persisted?.name, "unrelated-channel-job");
     assert.deepEqual(persisted?.data, conflictingPayload);
   } finally {
+    await queue.obliterate({ force: true }).catch(() => {});
+    await queue.close();
+  }
+});
+
+test("manual migration preserves a conflicting completed Redis Job", {
+  skip: redisUrl ? false : "MANAGED_JOB_TEST_REDIS_URL is not configured",
+}, async () => {
+  const url = new URL(redisUrl);
+  const queueName = `manual-migration-terminal-${randomUUID()}`;
+  const connection = {
+    host: url.hostname,
+    port: Number(url.port),
+    password: url.password || undefined,
+    maxRetriesPerRequest: null,
+  };
+  const queue = new Queue(queueName, { connection, prefix: "rota-fix-review" });
+  const events = new QueueEvents(queueName, { connection, prefix: "rota-fix-review" });
+  const worker = new Worker(queueName, async () => ({ ok: true }), {
+    connection,
+    prefix: "rota-fix-review",
+  });
+  const snapshot = sourceSnapshot();
+  const jobId = `channel-snapshot__${DEFAULT_MANUAL_MIGRATION_BATCH_ID}__${snapshot.channel_id}__g1`;
+  const conflictingPayload = { candidate_id: 999, dispatch_generation: 1 };
+
+  try {
+    await Promise.all([queue.waitUntilReady(), events.waitUntilReady(), worker.waitUntilReady()]);
+    const conflicting = await queue.add("unrelated-channel-job", conflictingPayload, { jobId });
+    await conflicting.waitUntilFinished(events, 5_000);
+    await worker.close();
+
+    await assert.rejects(
+      dispatchManualMigrationChannel({
+        channelId: snapshot.channel_id,
+        candidateId: 42,
+        queue,
+        sourceLoader: async () => snapshot,
+        transaction: (action) => action({}),
+        targetPreparer: async () => ({
+          candidate: {
+            candidate_id: 91,
+            channel_id: snapshot.channel_id,
+            channel_url: snapshot.channel_url,
+            priority: 100,
+            status: "queued",
+            snapshot_dispatch_generation: 1,
+          },
+          batchId: DEFAULT_MANUAL_MIGRATION_BATCH_ID,
+          previousStatus: "failed",
+          shouldEnqueue: true,
+          intentId: 7,
+        }),
+        dbQuery: async () => ({ rowCount: 1 }),
+      }),
+      (error) => error?.code === "job_identity_conflict",
+    );
+    const persisted = await queue.getJob(jobId);
+    assert.equal(await persisted?.getState(), "completed");
+    assert.equal(persisted?.name, "unrelated-channel-job");
+    assert.deepEqual(persisted?.data, conflictingPayload);
+  } finally {
+    await worker.close().catch(() => {});
+    await events.close().catch(() => {});
     await queue.obliterate({ force: true }).catch(() => {});
     await queue.close();
   }

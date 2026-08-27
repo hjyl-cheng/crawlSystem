@@ -419,6 +419,30 @@ test("all raced deterministic Job reuse paths reject conflicting identity", asyn
     dbQuery: async () => ({ rowCount: 1 }),
   });
 
+  await t.test("a conflicting terminal Job is never removed", async () => {
+    for (const state of ["completed", "failed"]) {
+      let removed = false;
+      await assert.rejects(
+        dispatch({
+          async getJob() {
+            return {
+              ...conflicting(),
+              async getState() { return state; },
+              async remove() {
+                removed = true;
+                throw new Error("conflicting terminal Job must not be removed");
+              },
+            };
+          },
+          async add() { assert.fail("conflicting terminal Job must not be replaced"); },
+        }),
+        (error) => error?.code === "job_identity_conflict",
+        state,
+      );
+      assert.equal(removed, false, state);
+    }
+  });
+
   await t.test("a Job that wins the remove race", async () => {
     let reads = 0;
     const replaced = {

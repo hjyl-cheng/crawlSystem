@@ -1278,6 +1278,7 @@ CREATE TABLE crawler.channel_execution_attempts (
     queue_name text NOT NULL,
     job_id text,
     job_attempt integer DEFAULT 0 NOT NULL,
+    dispatch_generation bigint,
     worker_id text NOT NULL,
     slot_name text NOT NULL,
     proxy_user text NOT NULL,
@@ -1304,6 +1305,7 @@ CREATE TABLE crawler.channel_execution_attempts (
     network_identity_key text,
     identity_policy_id text,
     identity_policy_version integer,
+    CONSTRAINT channel_execution_attempts_dispatch_generation_check CHECK (((dispatch_generation IS NULL) OR (dispatch_generation > 0))),
     CONSTRAINT channel_execution_attempts_status_check CHECK ((status = ANY (ARRAY['running'::text, 'success'::text, 'failed'::text, 'aborted'::text])))
 );
 

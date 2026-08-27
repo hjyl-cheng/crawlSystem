@@ -737,10 +737,11 @@ async function addOrReuseJob(queue, { candidate, batchId, minSubscriberCount }) 
   const payload = channelSnapshotPayload(candidate, batchId, { minSubscriberCount });
   const existing = await queue.getJob(jobId);
   if (existing) {
+    assertMatchingMigrationJob(existing, { jobId, payload });
     const state = await existing.getState();
     if (REPRESENTED_JOB_STATES.has(state)) {
       return {
-        job: assertMatchingMigrationJob(existing, { jobId, payload }),
+        job: existing,
         jobId,
         state,
         created: false,

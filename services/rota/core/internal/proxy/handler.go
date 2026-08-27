@@ -153,6 +153,16 @@ func (h *UpstreamProxyHandler) RetireProxyUser(ctx context.Context, username str
 	return nil
 }
 
+func (h *UpstreamProxyHandler) restoreProxyUser(username string) {
+	username = strings.TrimSpace(username)
+	if username == "" {
+		return
+	}
+	h.tunnelMu.Lock()
+	delete(h.retiredUsers, username)
+	h.tunnelMu.Unlock()
+}
+
 // ShutdownTunnels closes hijacked CONNECT connections and waits for both copy
 // directions and their handler to finish.
 func (h *UpstreamProxyHandler) ShutdownTunnels(ctx context.Context) error {

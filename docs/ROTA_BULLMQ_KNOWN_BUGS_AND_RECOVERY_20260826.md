@@ -8,7 +8,10 @@
 `3fc32ab9dc59cea5416829a9265f2e42aec833aa`。2026-08-27 第二次独立复审确认
 `3fc32ab` 仍缺 Route activation Lease Fence、普通迁移 Redis Job 身份校验、Recovery
 Intent/Candidate 原子终态，以及 Dashboard 超预算证据显示。第二次阻断修订已随本文所在
-提交完成本地实现和隔离环境回归；尚未形成镜像 digest。
+历史提交 `f1e0583` 完成本地实现和隔离环境回归。2026-08-27 第三次独立复审确认
+`f1e0583` 仍缺 Route Finalize 不确定结果的权威回读、终态 Redis Job 身份门禁、Execution
+审计的 `dispatch_generation`，并会跨 `AggregateError` 兄弟错误拼接失败证据。第三次阻断
+修订已随本文所在提交完成本地实现和隔离环境回归；尚未形成镜像 digest。
 
 文档状态：故障、解决方案和实施边界冻结基线。本文同时保留 `a8e07f1` 的原始故障行为，
 并记录 2026-08-27 当前分支中的实现。源码提交不等于已构建、已部署或已完成
@@ -38,7 +41,7 @@ Intent/Candidate 原子终态，以及 Dashboard 超预算证据显示。第二�
 
 ### 1.1 当前分支实施记录
 
-`5bcb3dd` 和随本文提交的阻断修订已覆盖以下代码边界：
+`5bcb3dd`、`3fc32ab`、`f1e0583` 和随本文提交的阻断修订已覆盖以下代码边界：
 
 - BUG-1：Worker 三类错误分派、materialized/reserved Business Run 原子终止、failed
   listener 终态门禁、Rota Business Run 预算优先检查；
@@ -51,7 +54,9 @@ Intent/Candidate 原子终态，以及 Dashboard 超预算证据显示。第二�
   Lease Route Transition，active Task 允许当前 Attempt 收尾，Health Incident 不冒充 Task
   Observation，BeginTask 执行最终 Proxy eligibility 检查；Route activation 的 Claim、
   Finalize 和 Release 共同使用 Slot + Lease + generation Fence，异步激活丢失 Lease 后会
-  retire 已打开的数据面用户名；
+  retire 已打开的数据面用户名；Finalize 返回不确定时先按完整 Route Fence 和当前用户名
+  权威回读，已提交则保留数据面，明确未提交才补偿 retire；补偿后的同一新凭据在下一次
+  成功 Prepare 后可以安全解除本地退休；
 - 跨问题边界：`exec:v1:<sha256>` Execution ID、强制持久 dispatch generation、Recovery
   Intent、PostgreSQL Outbox、白名单恢复 Job Data 和默认只读的受控 Recovery Intent CLI；
   Outbox 按 aggregate 校验 payload，并在每次 `queue.add()` 后用 `getJob()` 回读 Redis 中
@@ -59,7 +64,11 @@ Intent/Candidate 原子终态，以及 Dashboard 超预算证据显示。第二�
   事件；普通迁移的确定性 Job 同样在全部复用路径和成功 `queue.add()` 后校验 Redis 实际
   Job；Recovery Outbox 只有在 Candidate generation/active-attempt Fence 同时成立时才原子
   终止 Intent 和 Candidate，Fence 丢失则回滚并保留可协调状态；Dashboard 保留超预算的
-  used/limit，并明确标记 `over_budget=true`。
+  used/limit，并明确标记 `over_budget=true`；普通迁移在读取状态或删除前校验所有现存 Job
+  的 ID、name 和 canonical data，冲突的 completed/failed Job 也必须原样保留；Channel
+  Execution 审计从 Job Runtime 到 PostgreSQL 持久化 `dispatch_generation`，生产 Schema
+  marker 和 postflight 同时覆盖该列；Failure Policy 按 cause 分支独立分类 Aggregate，所选
+  kind/source/status 不再跨兄弟错误拼接。
 
 当前仍未完成：固定和核对运行镜像 digest、构建镜像、部署、生产冒烟，以及任何真实频道
 恢复。Dashboard 预算诊断已在源码中实现，但未构建或部署。两个卡住频道和 18 个历史
@@ -75,6 +84,8 @@ Fingerprint 失败频道均未被重试或修改。
 5. 新恢复调度使用新的 Business Run、Job ID 和 dispatch generation；
 6. BUG-3 分类已修复；
 7. BUG-4 的 idle Route Transition 和 active Task 协议已经实现并验证。
+8. Route Finalize 回执不确定时不会形成“控制面 ready、数据面 retired”；
+9. `channel_execution_attempts` 已部署 generation 列并通过 postflight。
 
 ## 2. 关键术语和预算边界
 
@@ -899,6 +910,11 @@ Observation，Rota 也不在 active Task 中途静默改写 endpoint。
 | T25 | Outbox | 三种 aggregate 在 Redis 前校验固定队列和 payload 合同 |
 | T26 | Worker PostgreSQL | 终态事务与迟到 failed 事件并发时 Candidate 不回退 |
 | T27 | Dispatch identity | Content/Full/Demo 新调度不复用旧 Job Execution；Full retry 崩溃重放保持同一 generation |
+| T28 | Route activation | Finalize 已提交但回执丢失时权威回读为 ready，不能 retire 数据面用户名 |
+| T29 | Route activation | Finalize 明确失败补偿后，同一凭据重试 Prepare 可以解除退休并接受新 Tunnel |
+| T30 | Dispatch identity | completed/failed 冲突 Job 在读状态或删除前即 fail-closed，Redis 原 Job 保持不变 |
+| T31 | Execution audit | Runtime、Store、Schema marker、bootstrap 和 postflight 均携带正数 dispatch generation |
+| T32 | Failure policy | Aggregate 每个分支独立分类，结构化代理错误不借用兄弟错误的 HTTP 状态或来源 |
 
 计划执行的静态和定向命令至少包括：
 
@@ -968,6 +984,25 @@ Rota 需要在 `services/rota/core` 下执行相关 Go 单元测试和 PostgreSQ
 - QYBullMQ 全套 255 个测试文件中 251 个直接通过；Docker/本地监听权限导致的两个环境用例
   授权后 5/5 通过，宿主缺少 `aiohttp`/`yt_dlp` 的两个用例在现有 qybullmq 镜像中 2/2
   通过；上述测试只使用独立 PostgreSQL、独立 Redis 和临时容器，未执行部署或生产写入。
+
+2026-08-27 第三次阻断修订新增的隔离回归如下：
+
+- Rota PostgreSQL 红测先稳定复现“Finalize 已提交但补偿仍 retire”和“同一新用户名补偿
+  retire 后无法重试”两个症状；修复后两个聚焦用例、完整 `internal/proxy`、完整
+  `internal/proxycontrol` 和 `go test ./... -count=1` 全部通过，原有 Lease 丢失补偿用例保持
+  通过；
+- 普通迁移在单元测试中拒绝 completed/failed 冲突 Job 且不调用 `remove()`；真实 Redis
+  中完成一个冲突 Job 后，恢复分发返回 `job_identity_conflict`，原 Job 的 completed 状态、
+  name 和 data 保持不变；
+- 独立 PostgreSQL 从删除 `channel_execution_attempts.dispatch_generation` 的旧 Schema 开始，
+  生产 Rota Worker V2 marker 重复应用和 postflight 通过；再次删除该列时 postflight 明确
+  fail-closed；Runtime 和 Store 单元测试同时验证正数 generation 持久化及缺失门禁；
+- Aggregate 红测先复现结构化 `proxy_transport` 借用兄弟 HTTP 404；修复后 Failure Policy
+  16/16 通过，既有 cause/source、Fingerprint legacy fallback 和普通 TLS 门禁保持不变；
+- 使用独立 PostgreSQL/Redis 的 254 个非 Python Node 测试文件全部通过；宿主缺少
+  `aiohttp`/`yt_dlp` 的两个 Python 集成用例在当前 qybullmq 镜像中 2/2 通过；Rota 全量、
+  修改文件 `node --check`、Go `gofmt -d`、`git diff --check` 和 `scripts/verify.sh` 均通过；
+- 上述验证未合并、推送、构建新镜像、部署、写生产数据或恢复任何频道。
 
 ## 9. 实施与部署顺序
 
@@ -1134,6 +1169,7 @@ PostgreSQL Outbox；该 CLI 不导入 BullMQ Queue，也不直接 Retry 旧 Job�
 - 有 Reserve 时使用不同 Proxy 和更高 Route generation；
 - 无 Reserve 时 delayed 且不消耗 BullMQ attempt；
 - cause 包装不丢失 `source=fingerprint_gateway`；
+- Aggregate 只选择一个完整错误分支，不跨兄弟错误拼接 kind/source/status；
 - 不把普通 TLS 错误误判为代理失效。
 
 ### 11.4 BUG-4
@@ -1146,6 +1182,8 @@ PostgreSQL Outbox；该 CLI 不导入 BullMQ Queue，也不直接 Retry 旧 Job�
 - generation、Credential 和 Health Incident 审计完整；
 - Route activation 的 Claim、Finalize 和 Release 均校验同一有效 Lease Fence；
 - 数据面激活完成前 Lease 失效时，旧激活被补偿 retire，不能重新开放失权 Route；
+- Finalize 已提交但回执丢失时，权威回读保持新数据面可用，不执行破坏性补偿；
+- Finalize 明确失败后重试时，Prepare 成功可以安全恢复被补偿退休的新凭据；
 - 并发和重复事件保持幂等且无双重代理绑定。
 
 ### 11.5 数据恢复
@@ -1154,6 +1192,8 @@ PostgreSQL Outbox；该 CLI 不导入 BullMQ Queue，也不直接 Retry 旧 Job�
 - 两个旧 delayed Job 离开 delayed；
 - 两个新恢复任务拥有新 Business Run、Job ID 和 generation；
 - 普通迁移和 Recovery Outbox 均拒绝同 ID 但 name/data 不一致的 Redis Job；
+- 冲突的 completed/failed Redis Job 不会被删除或替换；
+- 每条新 Channel Execution 审计记录都保存正数 dispatch generation；
 - Candidate Fence 丢失时 Recovery Intent 保持可协调，active/completed Job 能被重放收尾；
 - Dashboard 在 used 超过 limit 时仍显示真实预算并标记 `over_budget`；
 - 两个频道最终明确 accepted 或 failed；

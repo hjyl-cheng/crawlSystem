@@ -26,6 +26,14 @@ function encryptionKey(secret) {
   return createHash("sha256").update(`qy-browser-profile:${value}`).digest();
 }
 
+function positiveInteger(value, field) {
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+    throw new TypeError(`${field} must be a positive integer`);
+  }
+  return parsed;
+}
+
 export function encryptProfileState(value, secret) {
   if (value === null || value === undefined) return null;
   const iv = randomBytes(12);
@@ -398,12 +406,17 @@ export class BrowserProfileStore {
     queueName,
     jobId,
     jobAttempt,
+    dispatchGeneration,
     workerId,
     proxy,
     profileGroup,
     task = null,
     prepared = null,
   }) {
+    const normalizedDispatchGeneration = positiveInteger(
+      dispatchGeneration,
+      "dispatchGeneration",
+    );
     const attemptId = task?.task_id
       ? `channel-attempt:${String(task.task_id)}`
       : `channel-attempt:${channelId}:${Date.now()}:${nanoid(8)}`;
@@ -417,14 +430,14 @@ export class BrowserProfileStore {
     }
     await this.query(
       `INSERT INTO crawler.channel_execution_attempts (
-         attempt_id,channel_id,run_id,queue_name,job_id,job_attempt,worker_id,
+         attempt_id,channel_id,run_id,queue_name,job_id,job_attempt,dispatch_generation,worker_id,
          slot_name,proxy_user,proxy_id,proxy_address_hash,profile_group_id,
          profile_revision,youtubejs_profile_id,ytdlp_profile_id,
          workload_scope,worker_instance_id,business_run_id,attempt_number,task_id,
          route_generation,network_identity_key,identity_policy_id,identity_policy_version
        ) VALUES (
          $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,
-         $16,$17,$18,$19,$20,$21,$22,$23,$24
+         $16,$17,$18,$19,$20,$21,$22,$23,$24,$25
        )
        ON CONFLICT (attempt_id) DO NOTHING`,
       [
@@ -434,6 +447,7 @@ export class BrowserProfileStore {
         queueName,
         jobId == null ? null : String(jobId),
         Number(jobAttempt || 0),
+        normalizedDispatchGeneration,
         workerId,
         proxy.slot_name,
         proxy.proxy_user || proxy.slot_name,

@@ -631,6 +631,8 @@ CREATE TABLE IF NOT EXISTS crawler.channel_execution_attempts (
   queue_name TEXT NOT NULL,
   job_id TEXT,
   job_attempt INTEGER NOT NULL DEFAULT 0,
+  dispatch_generation BIGINT
+    CHECK (dispatch_generation IS NULL OR dispatch_generation > 0),
   worker_id TEXT NOT NULL,
   slot_name TEXT NOT NULL,
   proxy_user TEXT NOT NULL,
@@ -689,6 +691,12 @@ ALTER TABLE crawler.channel_execution_attempts ADD COLUMN IF NOT EXISTS route_ge
 ALTER TABLE crawler.channel_execution_attempts ADD COLUMN IF NOT EXISTS network_identity_key TEXT;
 ALTER TABLE crawler.channel_execution_attempts ADD COLUMN IF NOT EXISTS identity_policy_id TEXT;
 ALTER TABLE crawler.channel_execution_attempts ADD COLUMN IF NOT EXISTS identity_policy_version INTEGER;
+ALTER TABLE crawler.channel_execution_attempts ADD COLUMN IF NOT EXISTS dispatch_generation BIGINT;
+ALTER TABLE crawler.channel_execution_attempts
+DROP CONSTRAINT IF EXISTS channel_execution_attempts_dispatch_generation_check;
+ALTER TABLE crawler.channel_execution_attempts
+ADD CONSTRAINT channel_execution_attempts_dispatch_generation_check
+CHECK (dispatch_generation IS NULL OR dispatch_generation > 0);
 CREATE UNIQUE INDEX IF NOT EXISTS ux_crawler_channel_execution_attempts_rota_task
 ON crawler.channel_execution_attempts (task_id)
 WHERE task_id IS NOT NULL;

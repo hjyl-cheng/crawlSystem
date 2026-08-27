@@ -298,5 +298,6 @@ func (s *Server) ActivateProxyUser(
 	if err := s.userAuthMw.PrepareManagedUser(ctx, newUsername, expectedProxyID); err != nil {
 		return fmt.Errorf("prepare new proxy user: %w", err)
 	}
+	s.handler.restoreProxyUser(newUsername)
 	return nil
 }

@@ -114,6 +114,18 @@ export async function verifyRotaWorkerV2Schema(client) {
            AND contype='c' AND convalidated
        ) AS candidate_snapshot_active_job_check,
        EXISTS (
+         SELECT 1 FROM information_schema.columns
+         WHERE table_schema='crawler' AND table_name='channel_execution_attempts'
+           AND column_name='dispatch_generation'
+           AND data_type='bigint' AND is_nullable='YES' AND column_default IS NULL
+       ) AS channel_execution_attempt_dispatch_generation,
+       EXISTS (
+         SELECT 1 FROM pg_constraint
+         WHERE conrelid=to_regclass('crawler.channel_execution_attempts')
+           AND conname='channel_execution_attempts_dispatch_generation_check'
+           AND contype='c' AND convalidated
+       ) AS channel_execution_attempt_dispatch_generation_check,
+       EXISTS (
          SELECT 1 FROM pg_constraint
          WHERE conrelid=to_regclass('crawler.migration_retry_intents')
            AND conname='migration_retry_intents_candidate_id_dispatch_generation_key'

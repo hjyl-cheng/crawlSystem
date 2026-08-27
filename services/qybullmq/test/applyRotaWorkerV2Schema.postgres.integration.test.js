@@ -70,6 +70,9 @@ test("Rota Worker V2 schema block applies transactionally and is idempotent", {
      DROP COLUMN IF EXISTS snapshot_active_job_id,
      DROP COLUMN IF EXISTS snapshot_active_job_attempt`,
   );
+  await client.query(
+    "ALTER TABLE crawler.channel_execution_attempts DROP COLUMN IF EXISTS dispatch_generation",
+  );
   // Production databases created before the managed-job schema do not have this index.
   await client.query("DROP TABLE crawler.query_quality_chunk_members");
   await client.query("DROP INDEX crawler.ux_crawler_query_quality_tasks_batch_task");
@@ -116,6 +119,17 @@ test("Rota Worker V2 schema block applies transactionally and is idempotent", {
            AND conname='channel_candidates_snapshot_active_job_check'
            AND contype='c' AND convalidated
        ) AS candidate_active_job_check,
+       EXISTS (
+         SELECT 1 FROM information_schema.columns
+         WHERE table_schema='crawler' AND table_name='channel_execution_attempts'
+           AND column_name='dispatch_generation'
+       ) AS execution_dispatch_generation,
+       EXISTS (
+         SELECT 1 FROM pg_constraint
+         WHERE conrelid=to_regclass('crawler.channel_execution_attempts')
+           AND conname='channel_execution_attempts_dispatch_generation_check'
+           AND contype='c' AND convalidated
+       ) AS execution_dispatch_generation_check,
        to_regclass('crawler.ux_crawler_migration_retry_intents_active_candidate') IS NOT NULL
          AS active_retry_intent_key,
        to_regclass('crawler.idx_crawler_migration_retry_intents_status') IS NOT NULL
@@ -136,6 +150,8 @@ test("Rota Worker V2 schema block applies transactionally and is idempotent", {
     candidate_active_job_id: true,
     candidate_active_job_attempt: true,
     candidate_active_job_check: true,
+    execution_dispatch_generation: true,
+    execution_dispatch_generation_check: true,
     active_retry_intent_key: true,
     retry_intent_status_index: true,
     member_guard: true,
@@ -197,6 +213,16 @@ test("Rota Worker V2 schema block applies transactionally and is idempotent", {
   await assert.rejects(
     verifyRotaWorkerV2Schema(client),
     /missing: migration_retry_intents_status_index/,
+  );
+  await client.query("ROLLBACK");
+
+  await client.query("BEGIN");
+  await client.query(
+    "ALTER TABLE crawler.channel_execution_attempts DROP COLUMN dispatch_generation",
+  );
+  await assert.rejects(
+    verifyRotaWorkerV2Schema(client),
+    /missing: channel_execution_attempt_dispatch_generation/,
   );
   await client.query("ROLLBACK");
 

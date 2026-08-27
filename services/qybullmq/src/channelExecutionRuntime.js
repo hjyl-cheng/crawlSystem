@@ -168,6 +168,10 @@ export class ChannelExecutionRuntime {
       if (!sameProxyAssignment(proxy, currentProxy)) {
         throw new ProxyIdentityChangedError(proxy, currentProxy);
       }
+      const dispatchGeneration = Number(job.data?.dispatch_generation);
+      if (!Number.isSafeInteger(dispatchGeneration) || dispatchGeneration <= 0) {
+        throw new TypeError("job.data.dispatch_generation must be a positive integer");
+      }
 
       store = this.store();
       profileGroup = await store.loadOrCreate({
@@ -187,6 +191,7 @@ export class ChannelExecutionRuntime {
         queueName: job.queueName,
         jobId: job.id,
         jobAttempt: job.attemptsMade,
+        dispatchGeneration,
         workerId,
         proxy,
         profileGroup,
