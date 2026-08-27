@@ -199,30 +199,62 @@ func TestHealthCheckerActivatesProxyOnlyWhenBaseAndYouTubePass(t *testing.T) {
 	}
 }
 
-func TestAppliedHealthVerdictNotifiesProxyControlAfterPersistence(t *testing.T) {
-	base := statusServer(t, http.StatusOK)
-	youtube := statusServer(t, http.StatusOK)
-	upstream := statusProxy(t, http.StatusOK, http.StatusOK)
-	store := &healthLifecycleStoreStub{status: proxylifecycle.StatusIdle}
-	checker := NewHealthChecker(store, healthSettings(t, base.URL, youtube.URL+"/youtube"), nil)
-	var events []HealthVerdictEvent
-	checker.SetOnVerdictApplied(func(event HealthVerdictEvent) {
-		events = append(events, event)
-	})
-	proxy := httpProxyModel(upstream.URL)
-	proxy.ID = 785
+func TestEveryAppliedHealthVerdictNotifiesProxyControlAfterPersistence(t *testing.T) {
+	tests := []struct {
+		name              string
+		initialStatus     proxylifecycle.Status
+		directBaseStatus  int
+		proxyBaseStatus   int
+		proxyYouTubeState int
+		wantStatus        string
+		wantConclusive    bool
+	}{
+		{
+			name: "healthy", initialStatus: proxylifecycle.StatusIdle,
+			directBaseStatus: http.StatusOK, proxyBaseStatus: http.StatusOK,
+			proxyYouTubeState: http.StatusOK, wantStatus: "active", wantConclusive: true,
+		},
+		{
+			name: "inconclusive", initialStatus: proxylifecycle.StatusActive,
+			directBaseStatus: http.StatusBadGateway, proxyBaseStatus: http.StatusBadGateway,
+			proxyYouTubeState: http.StatusOK, wantStatus: "active", wantConclusive: false,
+		},
+		{
+			name: "failed", initialStatus: proxylifecycle.StatusActive,
+			directBaseStatus: http.StatusOK, proxyBaseStatus: http.StatusOK,
+			proxyYouTubeState: http.StatusForbidden, wantStatus: "failed", wantConclusive: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			base := statusServer(t, test.directBaseStatus)
+			youtube := statusServer(t, http.StatusOK)
+			upstream := statusProxy(t, test.proxyBaseStatus, test.proxyYouTubeState)
+			store := &healthLifecycleStoreStub{status: test.initialStatus}
+			checker := NewHealthChecker(store, healthSettings(t, base.URL, youtube.URL+"/youtube"), nil)
+			var events []HealthVerdictEvent
+			checker.SetOnVerdictApplied(func(event HealthVerdictEvent) {
+				events = append(events, event)
+			})
+			proxy := httpProxyModel(upstream.URL)
+			proxy.ID = 785
 
-	result, err := checker.CheckProxy(context.Background(), proxy)
-	if err != nil {
-		t.Fatalf("CheckProxy: %v", err)
-	}
-	if len(events) != 1 {
-		t.Fatalf("health verdict events = %v, want one", events)
-	}
-	event := events[0]
-	if event.ProxyID != proxy.ID || event.ResultingStatus != result.Status ||
-		event.Conclusive != result.Conclusive || event.CheckedAt.IsZero() {
-		t.Fatalf("health verdict event = %+v, result = %+v", event, result)
+			result, err := checker.CheckProxy(context.Background(), proxy)
+			if err != nil {
+				t.Fatalf("CheckProxy: %v", err)
+			}
+			if result.Status != test.wantStatus || result.Conclusive != test.wantConclusive {
+				t.Fatalf("result = %+v, want status=%s conclusive=%v", result, test.wantStatus, test.wantConclusive)
+			}
+			if len(events) != 1 {
+				t.Fatalf("health Verdict events = %v, want one", events)
+			}
+			event := events[0]
+			if event.ProxyID != proxy.ID || event.ResultingStatus != result.Status ||
+				event.Conclusive != result.Conclusive || event.CheckedAt.IsZero() {
+				t.Fatalf("health Verdict event = %+v, result = %+v", event, result)
+			}
+		})
 	}
 }
 

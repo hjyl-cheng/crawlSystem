@@ -336,7 +336,9 @@ async function attachIntentAndSource(client, {
        RETURNING dispatch_attempts
      )
      UPDATE crawler.channel_candidates candidate
-     SET snapshot_dispatch_generation=bumped.dispatch_attempts,updated_at=now()
+     SET snapshot_dispatch_generation=bumped.dispatch_attempts,
+         snapshot_active_job_id=NULL,snapshot_active_job_attempt=NULL,
+         updated_at=now()
      FROM bumped
      WHERE candidate.candidate_id=$2
        AND candidate.snapshot_dispatch_generation<=bumped.dispatch_attempts
@@ -736,11 +738,21 @@ async function addOrReuseJob(queue, { candidate, batchId, minSubscriberCount }) 
       });
     }
   }
-  const job = await queue.add(
-    "channel-snapshot",
-    channelSnapshotPayload(candidate, batchId, { minSubscriberCount }),
-    { jobId, priority: Number(candidate.priority ?? 100) },
-  );
+  let job;
+  try {
+    job = await queue.add(
+      "channel-snapshot",
+      channelSnapshotPayload(candidate, batchId, { minSubscriberCount }),
+      { jobId, priority: Number(candidate.priority ?? 100) },
+    );
+  } catch (error) {
+    const persisted = await queue.getJob(jobId).catch(() => null);
+    const persistedState = persisted ? await persisted.getState().catch(() => null) : null;
+    if (persisted && REPRESENTED_JOB_STATES.has(persistedState)) {
+      return { job: persisted, jobId, state: persistedState, created: false };
+    }
+    throw error;
+  }
   return { job, jobId, state: "waiting", created: true };
 }
 
@@ -819,13 +831,19 @@ export async function dispatchManualMigrationChannel({
       `WITH failed_candidate AS (
          UPDATE crawler.channel_candidates
          SET status='failed',error_message=$2,updated_at=now()
-         WHERE candidate_id=$1 AND status='queued'
+         WHERE candidate_id=$1 AND snapshot_dispatch_generation=$3
+           AND snapshot_active_job_id IS NULL AND snapshot_active_job_attempt IS NULL
+           AND status='queued'
          RETURNING candidate_id
        )
        UPDATE crawler.migration_channel_intents
        SET last_error=$2,updated_at=now()
-       WHERE target_candidate_id=$1`,
-      [prepared.candidate.candidate_id, `queue delivery failed: ${error?.message || String(error)}`],
+       WHERE target_candidate_id=$1 AND dispatch_attempts=$3`,
+      [
+        prepared.candidate.candidate_id,
+        `queue delivery failed: ${error?.message || String(error)}`,
+        prepared.candidate.snapshot_dispatch_generation,
+      ],
     ).catch(() => {});
     throw error;
   }

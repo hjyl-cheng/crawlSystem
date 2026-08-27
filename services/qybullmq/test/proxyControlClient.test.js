@@ -120,6 +120,20 @@ test("control conflicts retain the Rota status and machine code", async () => {
   );
 });
 
+test("temporary Route ineligibility preserves the machine code for Adapter deferral", async () => {
+  const { client } = fixture(async () => response({
+    code: "ROUTE_NOT_READY",
+    error: "proxy control route is not ready",
+  }, 409));
+  await assert.rejects(
+    client.beginTask({}),
+    (error) => error instanceof ProxyControlRequestError
+      && error.status === 409
+      && error.code === "ROUTE_NOT_READY"
+      && error.retryable === false,
+  );
+});
+
 test("retryable control failures replay the identical idempotent request", async () => {
   const request = { renew_request_id: "renew-stable", lease_id: "lease-1" };
   const { client, calls } = fixture(async (_url, _init, count) => (

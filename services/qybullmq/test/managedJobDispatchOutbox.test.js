@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   InMemoryManagedJobDispatchRepository,
   ManagedJobOutboxDispatcher,
+  PostgresManagedJobDispatchRepository,
 } from "../src/managedJobDispatchOutbox.js";
 
 function dispatch(overrides = {}) {
@@ -211,6 +212,52 @@ test("a Migration Recovery Outbox dispatches the whitelisted Channel recovery jo
     dispatch_status: "enqueued",
     dispatched_job_id: "channel-recovery__42__intent-1__g5",
   });
+});
+
+test("a terminal Recovery Outbox update is fenced by Candidate generation and active attempt", async () => {
+  const calls = [];
+  const client = {
+    async query(sql, params) {
+      calls.push({ sql, params });
+      if (sql.includes("UPDATE crawler.proxy_job_dispatch_outbox")) {
+        return {
+          rowCount: 1,
+          rows: [dispatch({
+            dispatch_id: "migration-retry-dispatch:intent-1",
+            aggregate_kind: "migration_retry",
+            aggregate_id: "intent-1",
+            intent_hash: "sha256:migration-intent",
+            status: "dead",
+            attempts: 1,
+          })],
+        };
+      }
+      if (sql.includes("UPDATE crawler.migration_retry_intents")) {
+        return { rowCount: 1, rows: [{ candidate_id: 42, dispatch_generation: "5" }] };
+      }
+      if (sql.includes("UPDATE crawler.channel_candidates")) {
+        return { rowCount: 0, rows: [] };
+      }
+      throw new Error("unexpected Outbox repository query");
+    },
+  };
+  const repository = new PostgresManagedJobDispatchRepository({
+    withTransaction: (action) => action(client),
+  });
+
+  await repository.markFailed({
+    dispatchId: "migration-retry-dispatch:intent-1",
+    attempt: 1,
+    error: "Redis delivery exhausted",
+    terminal: true,
+    nextAttemptAt: null,
+  });
+
+  const candidateUpdate = calls.find(({ sql }) => sql.includes("UPDATE crawler.channel_candidates"));
+  assert.match(candidateUpdate.sql, /snapshot_dispatch_generation=\$3/);
+  assert.match(candidateUpdate.sql, /snapshot_active_job_id IS NULL/);
+  assert.match(candidateUpdate.sql, /snapshot_active_job_attempt IS NULL/);
+  assert.deepEqual(candidateUpdate.params, [42, "Redis delivery exhausted", "5"]);
 });
 
 test("a Migration Recovery Outbox rejects an incomplete payload before BullMQ delivery", async () => {

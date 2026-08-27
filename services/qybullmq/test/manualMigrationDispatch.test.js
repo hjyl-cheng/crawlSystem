@@ -264,5 +264,56 @@ test("a Redis delivery failure records compensation only in the Target database"
   assert.equal(compensation.length, 1);
   assert.match(compensation[0].sql, /crawler\.channel_candidates/);
   assert.match(compensation[0].sql, /crawler\.migration_channel_intents/);
+  assert.match(compensation[0].sql, /snapshot_dispatch_generation=\$3/);
+  assert.match(compensation[0].sql, /snapshot_active_job_id IS NULL/);
+  assert.match(compensation[0].sql, /dispatch_attempts=\$3/);
   assert.equal(compensation[0].params[0], 91);
+  assert.equal(compensation[0].params[2], 1);
+});
+
+test("an ambiguous queue delivery is recovered from the persisted deterministic Job", async () => {
+  const snapshot = sourceSnapshot();
+  const persistedJob = {
+    id: `channel-snapshot__${DEFAULT_MANUAL_MIGRATION_BATCH_ID}__${snapshot.channel_id}__g1`,
+    async getState() { return "waiting"; },
+  };
+  const compensation = [];
+  const result = await dispatchManualMigrationChannel({
+    channelId: snapshot.channel_id,
+    candidateId: 42,
+    queue: {
+      name: "youtube-channel-crawl",
+      async getJob(jobId) {
+        return jobId === persistedJob.id ? persistedJob : null;
+      },
+      async add() {
+        throw new Error("connection closed after Redis accepted the Job");
+      },
+    },
+    sourceLoader: async () => snapshot,
+    transaction: (action) => action({}),
+    targetPreparer: async () => ({
+      candidate: {
+        candidate_id: 91,
+        channel_id: snapshot.channel_id,
+        channel_url: snapshot.channel_url,
+        priority: 100,
+        status: "queued",
+        snapshot_dispatch_generation: 1,
+      },
+      batchId: DEFAULT_MANUAL_MIGRATION_BATCH_ID,
+      previousStatus: null,
+      shouldEnqueue: true,
+      intentId: 7,
+    }),
+    dbQuery: async (...args) => {
+      compensation.push(args);
+      return { rowCount: 1 };
+    },
+  });
+
+  assert.equal(result.created, false);
+  assert.equal(result.job.id, persistedJob.id);
+  assert.equal(result.job.state, "waiting");
+  assert.deepEqual(compensation, []);
 });

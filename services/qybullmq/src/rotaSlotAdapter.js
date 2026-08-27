@@ -515,6 +515,9 @@ export class RotaSlotAdapter {
       if (["BUSINESS_RUN_BUDGET", "BUSINESS_RUN_BUDGET_EXHAUSTED"].includes(error?.code)) {
         throw new RotaBusinessRunBudgetExhaustedError(error);
       }
+      if (error?.code === "ROUTE_NOT_READY") {
+        throw new RotaSlotDeferredError("route_not_ready");
+      }
       throw error;
     }
   }

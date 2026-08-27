@@ -68,6 +68,10 @@ export async function recordBusinessRunBudgetExhaustion(client, job, {
   }
 
   const jobCandidateId = optionalPositiveInteger(job?.data?.candidate_id, "job.data.candidate_id");
+  const jobDispatchGeneration = optionalPositiveInteger(
+    job?.data?.dispatch_generation,
+    "job.data.dispatch_generation",
+  );
   const bindingCandidateId = optionalPositiveInteger(binding.candidate_id, "binding.candidate_id");
   if (jobCandidateId && bindingCandidateId && jobCandidateId !== bindingCandidateId) {
     throw new BusinessRunBudgetRecoveryError("BullMQ Job conflicts with the Binding Candidate");
@@ -80,7 +84,7 @@ export async function recordBusinessRunBudgetExhaustion(client, job, {
   let lockedCandidate = null;
   if (candidateId) {
     const candidate = await client.query(
-      `SELECT candidate_id,status,channel_id
+      `SELECT candidate_id,status,channel_id,snapshot_dispatch_generation
        FROM crawler.channel_candidates
        WHERE candidate_id=$1
        FOR UPDATE`,
@@ -91,6 +95,17 @@ export async function recordBusinessRunBudgetExhaustion(client, job, {
       throw new BusinessRunBudgetRecoveryError("Binding Candidate could not be locked consistently");
     }
     lockedCandidate = candidate.rows[0];
+    const candidateDispatchGeneration = Number(lockedCandidate.snapshot_dispatch_generation);
+    if (jobDispatchGeneration === null) {
+      throw new BusinessRunBudgetRecoveryError(
+        "job.data.dispatch_generation is required for Candidate budget recovery",
+      );
+    }
+    if (candidateDispatchGeneration !== jobDispatchGeneration) {
+      throw new BusinessRunBudgetRecoveryError(
+        `Candidate dispatch generation changed: expected ${jobDispatchGeneration}, got ${candidateDispatchGeneration}`,
+      );
+    }
     if (["accepted", "rejected", "existing"].includes(lockedCandidate.status)) {
       throw new BusinessRunBudgetRecoveryError(
         `Business Run Candidate is already terminal: ${lockedCandidate.status}`,
@@ -242,12 +257,16 @@ export async function recordBusinessRunBudgetExhaustion(client, job, {
                   ),
              true
            ),
+           snapshot_active_job_id=NULL,
+           snapshot_active_job_attempt=NULL,
            next_retry_at=NULL,
            validation_finished_at=COALESCE(validation_finished_at,now()),
            updated_at=now()
-       WHERE candidate_id=$1 AND status NOT IN ('accepted','rejected','existing')
+       WHERE candidate_id=$1
+         AND snapshot_dispatch_generation=$3
+         AND status NOT IN ('accepted','rejected','existing')
        RETURNING candidate_id,status`,
-      [candidateId, JSON.stringify(evidence)],
+      [candidateId, JSON.stringify(evidence), jobDispatchGeneration],
     );
     if (candidate.rowCount !== 1) {
       throw new BusinessRunBudgetRecoveryError("Business Run Candidate could not be terminated");

@@ -128,15 +128,19 @@ func (m *Manager) CompleteTask(ctx context.Context, request CompleteTaskRequest)
 				return CompleteTaskResult{}, err
 			}
 			tag, err := tx.Exec(ctx, `
-				UPDATE proxy_running_slots
-				SET active_task_id=NULL,active_task_started_at=NULL,
-				    proxy_id=$2,assignment_version=$3,assigned_at=NOW(),ready_after=NULL,
-				    network_identity_key=$4,profile_epoch=$5,
-				    control_state='pending_new_route',rotation_deadline_at=NULL,updated_at=NOW()
-				WHERE slot_name=$1 AND active_task_id=$6 AND current_lease_id=$7
-				  AND assignment_version=$8
-			`, request.SlotName, selected.ID, newGeneration, selected.NetworkIdentityKey,
-				profileEpoch, request.TaskID, request.LeaseID, request.RouteGeneration)
+					UPDATE proxy_running_slots
+					SET active_task_id=NULL,active_task_started_at=NULL,
+					    proxy_id=$2,assignment_version=$3,assigned_at=NOW(),ready_after=NULL,
+					    network_identity_key=$4,profile_epoch=$5,
+					    control_state='pending_new_route',rotation_deadline_at=NULL,
+					    route_activation_old_username=NULLIF($9,''),
+					    route_activation_claim_id=NULL,route_activation_claim_until=NULL,
+					    updated_at=NOW()
+					WHERE slot_name=$1 AND active_task_id=$6 AND current_lease_id=$7
+					  AND assignment_version=$8
+				`, request.SlotName, selected.ID, newGeneration, selected.NetworkIdentityKey,
+				profileEpoch, request.TaskID, request.LeaseID, request.RouteGeneration,
+				rotation.OldUsername)
 			if err != nil {
 				return CompleteTaskResult{}, fmt.Errorf("bind completed task replacement slot: %w", err)
 			}
@@ -189,19 +193,9 @@ func (m *Manager) CompleteTask(ctx context.Context, request CompleteTaskRequest)
 	}
 	if result.ControlState == CompletionPendingNewRoute && len(credentialRotations) == 1 &&
 		replacementProxyID != nil {
-		rotation := credentialRotations[0]
-		if m.activateUser(ctx, rotation.OldUsername, rotation.NewUsername, *replacementProxyID) {
-			if _, err := m.db.Pool.Exec(ctx, `
-				UPDATE proxy_running_slots
-				SET ready_after=NOW(),control_state='leased_idle',updated_at=NOW()
-				WHERE slot_name=$1 AND current_lease_id=$2 AND proxy_id=$3
-				  AND assignment_version=$4 AND active_task_id IS NULL
-				  AND control_state='pending_new_route'
-			`, request.SlotName, request.LeaseID, *replacementProxyID,
-				*result.PendingRouteGeneration); err != nil {
-				m.logError("mark replacement proxy binding ready failed", err, "slot", request.SlotName)
-			}
-		}
+		m.activatePendingRoute(
+			ctx, request.SlotName, *replacementProxyID, *result.PendingRouteGeneration,
+		)
 	} else {
 		m.invalidateCredentials(credentialRotations)
 	}
@@ -480,7 +474,9 @@ func pauseCompletionWithoutReserve(
 		SET active_task_id=NULL,active_task_started_at=NULL,
 		    proxy_id=NULL,assignment_version=$2,assigned_at=NULL,ready_after=NULL,
 		    network_identity_key=NULL,profile_epoch=0,
-		    control_state='paused_no_reserve',rotation_deadline_at=NULL,updated_at=NOW()
+		    control_state='paused_no_reserve',rotation_deadline_at=NULL,
+		    route_activation_old_username=NULL,route_activation_claim_id=NULL,
+		    route_activation_claim_until=NULL,updated_at=NOW()
 		WHERE slot_name=$1 AND active_task_id=$3 AND current_lease_id=$4
 		  AND assignment_version=$5
 	`, request.SlotName, newGeneration, request.TaskID, request.LeaseID, request.RouteGeneration)

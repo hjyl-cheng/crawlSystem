@@ -175,7 +175,7 @@ func (m *Manager) requestReconcile() {
 	}
 }
 
-func (m *Manager) NotifyHealthIncident(proxyID int) {
+func (m *Manager) NotifyHealthVerdictApplied(proxyID int) {
 	if proxyID > 0 {
 		m.requestReconcile()
 	}

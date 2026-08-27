@@ -57,8 +57,10 @@ import {
 } from "./managedWorkerExecution.js";
 import {
   channelCandidateFailureDisposition,
+  clearChannelCandidateJobAttempt,
+  markChannelCandidateJobAttemptActive,
   processManagedWorkerJob,
-  recordChannelCandidateJobFailure,
+  settleChannelCandidateJobFailure,
 } from "./managedWorkerJob.js";
 import {
   finishMigrationRetryIntent,
@@ -1483,6 +1485,10 @@ async function processJob(job, token) {
     const marked = await markMigrationRetryIntentRunning(query, job);
     if (!marked) throw new Error(`Recovery Intent fence rejected Job: ${job.id}`);
   }
+  if (job?.queueName === queuesByRole.channelCrawl && job?.data?.candidate_id) {
+    const marked = await markChannelCandidateJobAttemptActive(query, job);
+    if (!marked) throw new Error(`Candidate attempt fence rejected Job: ${job.id}`);
+  }
   if (!configuredForProxySlot()) return processJobInner(job);
   return processManagedWorkerJob({
     job,
@@ -1591,6 +1597,17 @@ async function startWorkerRuntime() {
 
     worker.on("completed", async (job) => {
       console.log(JSON.stringify({ event: "completed", queue: queueName, job_id: job.id, name: job.name }));
+      if (queueName === queuesByRole.channelCrawl && job?.data?.candidate_id) {
+        try {
+          await clearChannelCandidateJobAttempt(query, job);
+        } catch (eventError) {
+          console.error(JSON.stringify({
+            event: "candidate_attempt_fence_release_failed",
+            job_id: job.id,
+            error: eventError?.message || String(eventError),
+          }));
+        }
+      }
       if (job?.data?.retry_intent_id) {
         try {
           await finishMigrationRetryIntent(query, job, { outcome: "finished" });
@@ -1724,13 +1741,11 @@ async function startWorkerRuntime() {
             attemptsMade,
             maxAttempts,
           });
-          if (disposition !== "preserve") {
-            await recordChannelCandidateJobFailure(query, job, {
-              disposition,
-              message,
-              snapshotPatch: parserDetails ? { parser_contract_error: parserDetails } : {},
-            });
-          }
+          await settleChannelCandidateJobFailure(query, job, {
+            disposition,
+            message,
+            snapshotPatch: parserDetails ? { parser_contract_error: parserDetails } : {},
+          });
           if (job.data?.dispatch_batch_id) {
             await refreshDispatchCandidateCounts(String(job.data.dispatch_batch_id));
           }

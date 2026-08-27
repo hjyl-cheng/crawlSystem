@@ -1016,6 +1016,7 @@ services:
       MINIO_CONSOLE_URL: https://${QY_MINIO_HOST}
       PROXY_DASHBOARD_URL: https://${QY_ROTA_HOST}
       ROTA_PROXY_CONTROL_URL: ${ROTA_PROXY_CONTROL_URL:-http://rota-core:8001/api/v1/proxy-control}
+      ROTA_PROXY_CONTROL_TOKEN: ${ROTA_PROXY_CONTROL_TOKEN:?ROTA_PROXY_CONTROL_TOKEN is required}
       BUSINESS_PUBLICATION_AUDIT_DATABASE_URL_FILE: /run/secrets/business_publication_audit_database_url
       EXPECTED_BUSINESS_DATABASE: ${BUSINESS_DB_NAME:-newcrawler_business}
       EXPECTED_BUSINESS_AUDITOR_ROLE: ${BUSINESS_AUDITOR_ROLE:-${BUSINESS_DB_USER:-business}}

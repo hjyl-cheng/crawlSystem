@@ -1206,6 +1206,8 @@ CREATE TABLE crawler.channel_candidates (
     status text DEFAULT 'discovered'::text NOT NULL,
     snapshot_attempts integer DEFAULT 0 NOT NULL,
     snapshot_dispatch_generation bigint DEFAULT 0 NOT NULL,
+    snapshot_active_job_id text,
+    snapshot_active_job_attempt integer,
     snapshot_json jsonb DEFAULT '{}'::jsonb NOT NULL,
     source_json jsonb DEFAULT '{}'::jsonb NOT NULL,
     reject_reason text,
@@ -1216,6 +1218,7 @@ CREATE TABLE crawler.channel_candidates (
     accepted_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT channel_candidates_snapshot_active_job_check CHECK ((((snapshot_active_job_id IS NULL) AND (snapshot_active_job_attempt IS NULL)) OR ((snapshot_active_job_id IS NOT NULL) AND (snapshot_active_job_attempt IS NOT NULL) AND (snapshot_active_job_attempt > 0)))),
     CONSTRAINT channel_candidates_snapshot_dispatch_generation_check CHECK ((snapshot_dispatch_generation >= 0)),
     CONSTRAINT channel_candidates_status_check CHECK ((status = ANY (ARRAY['discovered'::text, 'queued'::text, 'validating'::text, 'accepted'::text, 'rejected'::text, 'existing'::text, 'failed'::text])))
 );

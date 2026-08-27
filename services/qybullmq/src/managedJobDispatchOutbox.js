@@ -282,7 +282,7 @@ async function updateAggregate(client, row, { status, jobId = null, reason = nul
            last_error=$3,updated_at=now()
        WHERE retry_intent_id=$1 AND intent_hash=$4
          AND status NOT IN ('finished','failed')
-       RETURNING candidate_id`,
+       RETURNING candidate_id,dispatch_generation`,
       [row.aggregate_id, status, reason, row.intent_hash],
     );
     if (status === "terminal" && updated.rows[0]) {
@@ -292,8 +292,9 @@ async function updateAggregate(client, row, { status, jobId = null, reason = nul
              error_message=CASE WHEN status='queued' THEN $2 ELSE error_message END,
              validation_finished_at=CASE WHEN status='queued' THEN now() ELSE validation_finished_at END,
              updated_at=now()
-         WHERE candidate_id=$1`,
-        [updated.rows[0].candidate_id, reason],
+         WHERE candidate_id=$1 AND snapshot_dispatch_generation=$3
+           AND snapshot_active_job_id IS NULL AND snapshot_active_job_attempt IS NULL`,
+        [updated.rows[0].candidate_id, reason, updated.rows[0].dispatch_generation],
       );
     }
     return;

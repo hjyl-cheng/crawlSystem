@@ -130,7 +130,9 @@ func expireLeases(
 			    identity_policy_version=NULL, identity_policy_hash=NULL,
 			    required_egress_country=NULL, active_task_id=NULL,
 			    active_task_started_at=NULL, pending_action=NULL, pending_incident_id=NULL,
-			    control_state='unleased', rotation_deadline_at=NULL, updated_at=NOW()
+			    control_state='unleased', rotation_deadline_at=NULL,
+			    route_activation_old_username=NULL,route_activation_claim_id=NULL,
+			    route_activation_claim_until=NULL,updated_at=NOW()
 			WHERE slot_name = ANY($1::text[])
 		`, slotNames); err != nil {
 			return nil, fmt.Errorf("expire proxy leases: %w", err)

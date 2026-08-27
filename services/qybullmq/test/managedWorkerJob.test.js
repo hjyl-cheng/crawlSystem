@@ -8,8 +8,11 @@ import {
 } from "../src/rotaSlotAdapter.js";
 import {
   channelCandidateFailureDisposition,
+  clearChannelCandidateJobAttempt,
+  markChannelCandidateJobAttemptActive,
   processManagedWorkerJob,
   recordChannelCandidateJobFailure,
+  settleChannelCandidateJobFailure,
 } from "../src/managedWorkerJob.js";
 
 function channelJob() {
@@ -82,6 +85,27 @@ test("no Reserve remains a BullMQ delay without consuming an attempt", async () 
   assert.deepEqual(calls[0].options, { delayMs: 2500 });
 });
 
+test("a temporarily unavailable Route remains a BullMQ delay without consuming an attempt", async () => {
+  const deferredError = new RotaSlotDeferredError("route_not_ready");
+  let terminated = false;
+  let delayed = false;
+  const result = await processManagedWorkerJob({
+    job: channelJob(),
+    token: "bullmq-lock-token",
+    execute: async () => { throw deferredError; },
+    terminateBusinessRun: async () => { terminated = true; },
+    deferForSlotPause: async (_job, _token, { delayMs }) => {
+      delayed = true;
+      assert.equal(delayMs, 5000);
+      return { delayed: true };
+    },
+  });
+
+  assert.deepEqual(result, { delayed: true });
+  assert.equal(delayed, true);
+  assert.equal(terminated, false);
+});
+
 test("the failed listener preserves only a Business Run terminal budget state", () => {
   assert.equal(channelCandidateFailureDisposition({
     error: new RotaBusinessRunBudgetExhaustedError(),
@@ -100,13 +124,71 @@ test("the failed listener preserves only a Business Run terminal budget state", 
   }), "failed");
 });
 
-test("a Candidate failed event is fenced by terminal state and dispatch generation", async () => {
+test("a Candidate attempt claim is monotonic within one dispatch generation", async () => {
+  let statement = null;
+  const updated = await markChannelCandidateJobAttemptActive(async (sql, params) => {
+    statement = { sql, params };
+    return { rowCount: 1, rows: [{}] };
+  }, {
+    id: "channel-job-01",
+    attemptsMade: 1,
+    data: { candidate_id: 42, dispatch_generation: 7 },
+  });
+
+  assert.equal(updated, true);
+  assert.match(statement.sql, /snapshot_active_job_attempt<=\$3/);
+  assert.match(statement.sql, /snapshot_dispatch_generation=\$4/);
+  assert.match(statement.sql, /status IN \('discovered','queued','validating'\)/);
+  assert.deepEqual(statement.params, [42, "channel-job-01", 2, 7]);
+});
+
+test("a completed Job only clears its own active Candidate attempt", async () => {
+  let statement = null;
+  const cleared = await clearChannelCandidateJobAttempt(async (sql, params) => {
+    statement = { sql, params };
+    return { rowCount: 1, rows: [{}] };
+  }, {
+    id: "channel-job-01",
+    attemptsMade: 2,
+    data: { candidate_id: 42, dispatch_generation: 7 },
+  });
+
+  assert.equal(cleared, true);
+  assert.match(statement.sql, /snapshot_dispatch_generation=\$2/);
+  assert.match(statement.sql, /snapshot_active_job_id=\$3/);
+  assert.match(statement.sql, /snapshot_active_job_attempt=\$4/);
+  assert.deepEqual(statement.params, [42, 7, "channel-job-01", 2]);
+});
+
+test("a preserved terminal failure still releases its own Candidate attempt Fence", async () => {
+  const statements = [];
+  const result = await settleChannelCandidateJobFailure(async (sql, params) => {
+    statements.push({ sql, params });
+    return { rowCount: 1, rows: [{ candidate_id: 42 }] };
+  }, {
+    id: "channel-job-01",
+    attemptsMade: 2,
+    data: { candidate_id: 42, dispatch_generation: 7 },
+  }, {
+    disposition: "preserve",
+    message: "Business Run terminal state is already persisted",
+  });
+
+  assert.deepEqual(result, { recorded: false, fenceCleared: true });
+  assert.equal(statements.length, 1);
+  assert.match(statements[0].sql, /snapshot_active_job_id=\$3/);
+  assert.deepEqual(statements[0].params, [42, 7, "channel-job-01", 2]);
+});
+
+test("a Candidate failed event is fenced by terminal state, generation and newer BullMQ attempt", async () => {
   let statement = null;
   const updated = await recordChannelCandidateJobFailure(async (sql, params) => {
     statement = { sql, params };
     return { rowCount: 0, rows: [] };
   }, {
     id: "channel-job-01",
+    queueName: queuesByRole.channelCrawl,
+    attemptsMade: 2,
     data: { candidate_id: 42, dispatch_generation: 7 },
   }, {
     disposition: "queued",
@@ -117,11 +199,15 @@ test("a Candidate failed event is fenced by terminal state and dispatch generati
   assert.equal(updated, false);
   assert.match(statement.sql, /snapshot_dispatch_generation=\$5/);
   assert.match(statement.sql, /status IN \('discovered','queued','validating'\)/);
+  assert.match(statement.sql, /snapshot_active_job_id=\$6/);
+  assert.match(statement.sql, /snapshot_active_job_attempt=\$7/);
   assert.deepEqual(statement.params, [
     42,
     "queued",
     "late failure",
     JSON.stringify({ failure_kind: "unknown" }),
     7,
+    "channel-job-01",
+    2,
   ]);
 });

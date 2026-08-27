@@ -643,8 +643,8 @@ func TestBeginTaskRejectsAnIneligibleLeasedProxy(t *testing.T) {
 		JobExecutionID:   "youtube-channel-crawl:channel-ineligible:1",
 		TaskKind:         "channel_full",
 	})
-	if !errors.Is(err, ErrLeaseConflict) {
-		t.Fatalf("begin error = %v, want lease conflict", err)
+	if !errors.Is(err, ErrRouteNotReady) {
+		t.Fatalf("begin error = %v, want route not ready", err)
 	}
 	var taskCount int
 	if err := pool.QueryRow(ctx, `

@@ -247,6 +247,7 @@ class PostgresMigrationRetryIntentTransaction {
     const candidate = await this.client.query(
       `UPDATE crawler.channel_candidates
        SET status='queued',snapshot_dispatch_generation=$2,
+           snapshot_active_job_id=NULL,snapshot_active_job_attempt=NULL,
            reject_reason=NULL,error_message=NULL,next_retry_at=NULL,
            validation_started_at=NULL,validation_finished_at=NULL,accepted_at=NULL,
            updated_at=now()
@@ -529,6 +530,8 @@ export class InMemoryMigrationRetryIntentRepository {
         }
         candidate.status = "queued";
         candidate.snapshot_dispatch_generation = Number(intent.dispatch_generation);
+        candidate.snapshot_active_job_id = null;
+        candidate.snapshot_active_job_attempt = null;
         candidate.error_message = null;
         candidate.next_retry_at = null;
         candidate.validation_started_at = null;

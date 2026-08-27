@@ -54,6 +54,99 @@ export function guardedRotaWorkerSchemaConfig(environment = process.env) {
   });
 }
 
+export async function verifyRotaWorkerV2Schema(client) {
+  if (!client || typeof client.query !== "function") {
+    throw new TypeError("PostgreSQL client is required");
+  }
+  const verified = await client.query(
+    `SELECT
+       to_regclass('crawler.business_run_bindings') IS NOT NULL AS business_run_bindings,
+       to_regclass('crawler.query_quality_chunks') IS NOT NULL AS query_quality_chunks,
+       to_regclass('crawler.query_quality_chunk_members') IS NOT NULL AS query_quality_chunk_members,
+       to_regclass('crawler.proxy_job_dispatch_outbox') IS NOT NULL AS proxy_job_dispatch_outbox,
+       to_regclass('crawler.migration_retry_intents') IS NOT NULL AS migration_retry_intents,
+       EXISTS (
+         SELECT 1 FROM information_schema.columns
+         WHERE table_schema='crawler' AND table_name='channel_candidates'
+           AND column_name='snapshot_dispatch_generation'
+           AND data_type='bigint' AND is_nullable='NO' AND column_default='0'
+       ) AS candidate_snapshot_dispatch_generation,
+       EXISTS (
+         SELECT 1 FROM pg_constraint
+         WHERE conrelid=to_regclass('crawler.channel_candidates')
+           AND conname='channel_candidates_snapshot_dispatch_generation_check'
+           AND contype='c' AND convalidated
+       ) AS candidate_snapshot_dispatch_generation_check,
+       NOT EXISTS (
+         SELECT 1
+         FROM crawler.channel_candidates AS candidate
+         LEFT JOIN (
+           SELECT
+             target_candidate_id,
+             MAX(dispatch_attempts)::BIGINT AS expected_generation
+           FROM crawler.migration_channel_intents
+           WHERE target_candidate_id IS NOT NULL
+           GROUP BY target_candidate_id
+         ) AS intent
+           ON intent.target_candidate_id = candidate.candidate_id
+         WHERE candidate.snapshot_dispatch_generation < CASE
+           WHEN intent.expected_generation IS NOT NULL THEN intent.expected_generation
+           WHEN candidate.status <> 'discovered' THEN 1::BIGINT
+           ELSE 0::BIGINT
+         END
+       ) AS candidate_snapshot_dispatch_generation_alignment,
+       EXISTS (
+         SELECT 1 FROM information_schema.columns
+         WHERE table_schema='crawler' AND table_name='channel_candidates'
+           AND column_name='snapshot_active_job_id'
+           AND data_type='text' AND is_nullable='YES' AND column_default IS NULL
+       ) AS candidate_snapshot_active_job_id,
+       EXISTS (
+         SELECT 1 FROM information_schema.columns
+         WHERE table_schema='crawler' AND table_name='channel_candidates'
+           AND column_name='snapshot_active_job_attempt'
+           AND data_type='integer' AND is_nullable='YES' AND column_default IS NULL
+       ) AS candidate_snapshot_active_job_attempt,
+       EXISTS (
+         SELECT 1 FROM pg_constraint
+         WHERE conrelid=to_regclass('crawler.channel_candidates')
+           AND conname='channel_candidates_snapshot_active_job_check'
+           AND contype='c' AND convalidated
+       ) AS candidate_snapshot_active_job_check,
+       EXISTS (
+         SELECT 1 FROM pg_constraint
+         WHERE conrelid=to_regclass('crawler.migration_retry_intents')
+           AND conname='migration_retry_intents_candidate_id_dispatch_generation_key'
+           AND contype='u' AND convalidated
+       ) AS migration_retry_intents_generation_key,
+       to_regclass('crawler.ux_crawler_migration_retry_intents_active_candidate') IS NOT NULL
+         AS migration_retry_intents_active_candidate_index,
+       to_regclass('crawler.idx_crawler_migration_retry_intents_status') IS NOT NULL
+         AS migration_retry_intents_status_index,
+       EXISTS (
+         SELECT 1 FROM information_schema.columns
+         WHERE table_schema='crawler' AND table_name='channel_runs'
+           AND column_name='identity_policy_hash'
+       ) AS channel_run_policy,
+       EXISTS (
+         SELECT 1 FROM pg_trigger
+         WHERE tgname='trg_guard_managed_query_page_state' AND NOT tgisinternal
+       ) AS discover_state_guard,
+       EXISTS (
+         SELECT 1 FROM pg_trigger
+         WHERE tgname='trg_guard_query_quality_chunk_members' AND NOT tgisinternal
+       ) AS query_quality_member_guard`,
+  );
+  const state = verified.rows[0] ?? {};
+  const missing = Object.entries(state)
+    .filter(([, present]) => present !== true)
+    .map(([name]) => name);
+  if (missing.length > 0) {
+    throw new Error(`Rota Worker V2 schema verification failed; missing: ${missing.join(", ")}`);
+  }
+  return state;
+}
+
 async function main() {
   if (!process.argv.includes("--apply")) {
     throw new Error("refusing to apply: pass --apply explicitly");
@@ -84,29 +177,7 @@ async function main() {
       );
     }
     await client.query(ddl);
-    const verified = await client.query(
-      `SELECT
-         to_regclass('crawler.business_run_bindings') IS NOT NULL AS business_run_bindings,
-         to_regclass('crawler.query_quality_chunks') IS NOT NULL AS query_quality_chunks,
-         to_regclass('crawler.query_quality_chunk_members') IS NOT NULL AS query_quality_chunk_members,
-         to_regclass('crawler.proxy_job_dispatch_outbox') IS NOT NULL AS proxy_job_dispatch_outbox,
-         EXISTS (
-           SELECT 1 FROM information_schema.columns
-           WHERE table_schema='crawler' AND table_name='channel_runs'
-             AND column_name='identity_policy_hash'
-         ) AS channel_run_policy,
-         EXISTS (
-           SELECT 1 FROM pg_trigger
-           WHERE tgname='trg_guard_managed_query_page_state' AND NOT tgisinternal
-         ) AS discover_state_guard,
-         EXISTS (
-           SELECT 1 FROM pg_trigger
-           WHERE tgname='trg_guard_query_quality_chunk_members' AND NOT tgisinternal
-         ) AS query_quality_member_guard`,
-    );
-    if (!Object.values(verified.rows[0] ?? {}).every(Boolean)) {
-      throw new Error("Rota Worker V2 schema verification failed");
-    }
+    await verifyRotaWorkerV2Schema(client);
     await client.query("COMMIT");
     began = false;
     process.stdout.write(`${JSON.stringify({

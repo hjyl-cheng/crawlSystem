@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/alpkeskin/rota/core/internal/proxycontrol"
+	"github.com/go-chi/chi/v5"
 )
 
 type proxyControlStub struct {
@@ -20,6 +21,7 @@ type proxyControlStub struct {
 	release     proxycontrol.ReleaseRequest
 	completeErr error
 	capacity    proxycontrol.Capacity
+	budget      proxycontrol.BusinessRunBudget
 }
 
 func (*proxyControlStub) Run(context.Context) {}
@@ -92,6 +94,15 @@ func (s *proxyControlStub) Capacity(context.Context) (proxycontrol.Capacity, err
 		return s.capacity, nil
 	}
 	return proxycontrol.Capacity{OK: true}, nil
+}
+
+func (s *proxyControlStub) BusinessRunBudget(_ context.Context, businessRunID string) (proxycontrol.BusinessRunBudget, error) {
+	if s.budget.BusinessRunID != "" {
+		return s.budget, nil
+	}
+	return proxycontrol.BusinessRunBudget{
+		OK: true, BusinessRunID: businessRunID,
+	}, nil
 }
 
 func TestProxyControlTokenMiddlewareRequiresExactBearerToken(t *testing.T) {
@@ -199,6 +210,57 @@ func TestProxyControlHandlerMapsLeaseConflict(t *testing.T) {
 	writeControlError(response, proxycontrol.ErrLeaseConflict)
 	if response.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want %d", response.Code, http.StatusConflict)
+	}
+}
+
+func TestProxyControlHandlerMapsRouteNotReady(t *testing.T) {
+	response := httptest.NewRecorder()
+	writeControlError(response, proxycontrol.ErrRouteNotReady)
+	if response.Code != http.StatusConflict ||
+		!strings.Contains(response.Body.String(), "ROUTE_NOT_READY") {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+}
+
+func TestProxyControlHandlerMapsMissingBusinessRun(t *testing.T) {
+	response := httptest.NewRecorder()
+	writeControlError(response, proxycontrol.ErrBusinessRunNotFound)
+	if response.Code != http.StatusNotFound ||
+		!strings.Contains(response.Body.String(), "BUSINESS_RUN_NOT_FOUND") {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+}
+
+func TestProxyControlHandlerReturnsAuthoritativeBusinessRunBudget(t *testing.T) {
+	want := proxycontrol.BusinessRunBudget{
+		OK:                  true,
+		WorkloadScope:       "qy-test",
+		BusinessRunID:       "run-budget-1",
+		BusinessTasksUsed:   9,
+		BusinessTasksLimit:  9,
+		CurrentExecutionID:  "exec:v1:test",
+		ExecutionTasksUsed:  3,
+		ExecutionTasksLimit: 3,
+	}
+	handler := NewProxyControlHandler(&proxyControlStub{budget: want})
+	router := chi.NewRouter()
+	router.Get("/business-runs/{businessRunID}/budget", handler.BusinessRunBudget)
+	request := httptest.NewRequest(
+		http.MethodGet,
+		"/business-runs/run-budget-1/budget",
+		nil,
+	)
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	var got proxycontrol.BusinessRunBudget
+	if err := json.Unmarshal(response.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode Business Run budget: %v", err)
+	}
+	if got != want {
+		t.Fatalf("Business Run budget = %+v, want %+v", got, want)
 	}
 }
 

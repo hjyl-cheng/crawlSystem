@@ -151,7 +151,7 @@ func New(
 		log,
 	)
 	healthChecker.SetOnVerdictApplied(func(event proxy.HealthVerdictEvent) {
-		control.NotifyHealthIncident(event.ProxyID)
+		control.NotifyHealthVerdictApplied(event.ProxyID)
 	})
 
 	// Initialize handlers
@@ -328,6 +328,7 @@ func (s *Server) setupRoutes() {
 			r.Post("/swap", s.proxyControlHandler.Swap)
 			r.Post("/release", s.proxyControlHandler.Release)
 			r.Get("/capacity", s.proxyControlHandler.Capacity)
+			r.Get("/business-runs/{businessRunID}/budget", s.proxyControlHandler.BusinessRunBudget)
 		})
 	}
 

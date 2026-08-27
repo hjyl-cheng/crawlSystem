@@ -277,6 +277,50 @@ test("Rota's Execution budget code ends the current BullMQ attempt", async () =>
   await adapter.close();
 });
 
+test("a temporarily unavailable Route defers without consuming the BullMQ attempt", async () => {
+  const { adapter } = createFixture({
+    clientOverrides: {
+      async beginTask() {
+        const error = new Error("proxy control Route is not ready");
+        error.code = "ROUTE_NOT_READY";
+        throw error;
+      },
+    },
+  });
+  await adapter.start();
+  await assert.rejects(
+    adapter.executeJob(job(), {
+      prepare: async () => prepared(),
+      executeAttempt: async () => assert.fail("an ineligible Route must not start an attempt"),
+    }),
+    (error) => error instanceof RotaSlotDeferredError
+      && error.reason === "route_not_ready",
+  );
+  await adapter.close();
+});
+
+test("a genuine BeginTask Lease conflict is not treated as capacity waiting", async () => {
+  const expected = Object.assign(new Error("proxy control lease conflict"), {
+    code: "LEASE_CONFLICT",
+  });
+  const { adapter } = createFixture({
+    clientOverrides: {
+      async beginTask() {
+        throw expected;
+      },
+    },
+  });
+  await adapter.start();
+  await assert.rejects(
+    adapter.executeJob(job(), {
+      prepare: async () => prepared(),
+      executeAttempt: async () => assert.fail("a fenced Lease must not start an attempt"),
+    }),
+    (error) => error === expected && !(error instanceof RotaSlotDeferredError),
+  );
+  await adapter.close();
+});
+
 test("the local Route switch limit ends the current BullMQ attempt", async () => {
   const { adapter, calls } = createFixture({
     challenge: true,

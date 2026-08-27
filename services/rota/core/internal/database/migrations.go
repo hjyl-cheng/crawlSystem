@@ -1383,6 +1383,32 @@ var migrations = []Migration{
 		NoTransaction:       true,
 		ConcurrentIndexName: "idx_proxy_health_checks_unpreserved_transitions",
 	},
+	{
+		Version:     1009,
+		Description: "Fence pending Route activation across Rota instances",
+		Up: `
+			ALTER TABLE proxy_running_slots
+			  ADD COLUMN IF NOT EXISTS route_activation_old_username TEXT,
+			  ADD COLUMN IF NOT EXISTS route_activation_claim_id TEXT,
+			  ADD COLUMN IF NOT EXISTS route_activation_claim_until TIMESTAMPTZ;
+			ALTER TABLE proxy_running_slots
+			  DROP CONSTRAINT IF EXISTS proxy_running_slots_route_activation_claim_check;
+			ALTER TABLE proxy_running_slots
+			  ADD CONSTRAINT proxy_running_slots_route_activation_claim_check CHECK (
+			    (route_activation_claim_id IS NULL AND route_activation_claim_until IS NULL)
+			    OR
+			    (route_activation_claim_id IS NOT NULL AND route_activation_claim_until IS NOT NULL)
+			  );
+		`,
+		Down: `
+			ALTER TABLE proxy_running_slots
+			  DROP CONSTRAINT IF EXISTS proxy_running_slots_route_activation_claim_check;
+			ALTER TABLE proxy_running_slots
+			  DROP COLUMN IF EXISTS route_activation_claim_until,
+			  DROP COLUMN IF EXISTS route_activation_claim_id,
+			  DROP COLUMN IF EXISTS route_activation_old_username;
+		`,
+	},
 }
 
 // Migrate runs all pending migrations

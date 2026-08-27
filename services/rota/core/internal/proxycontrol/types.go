@@ -11,11 +11,13 @@ var (
 	ErrInvalidInput         = errors.New("invalid proxy control request")
 	ErrLeaseConflict        = errors.New("proxy control lease conflict")
 	ErrLeaseGone            = errors.New("proxy control lease is no longer live")
+	ErrRouteNotReady        = errors.New("proxy control route is not ready")
 	ErrPolicyRejected       = errors.New("proxy control identity policy rejected")
 	ErrIdempotencyConflict  = errors.New("proxy control idempotency key reused")
 	ErrJobExecutionConflict = errors.New("proxy control job execution conflict")
 	ErrExecutionBudget      = errors.New("proxy control execution route budget exhausted")
 	ErrBusinessRunBudget    = errors.New("proxy control business run budget exhausted")
+	ErrBusinessRunNotFound  = errors.New("proxy control business run was not found")
 	ErrTaskConflict         = errors.New("proxy control task conflict")
 	ErrTaskCompleted        = errors.New("proxy control task is already completed")
 	ErrAttemptNotQuiesced   = errors.New("proxy control attempt is not quiesced")
@@ -342,7 +344,19 @@ type Capacity struct {
 	Roles               map[string]RoleCapacity `json:"roles"`
 }
 
-// Interface is the complete Worker-facing interface. Resource synchronization
+type BusinessRunBudget struct {
+	OK                  bool       `json:"ok"`
+	WorkloadScope       string     `json:"workload_scope"`
+	BusinessRunID       string     `json:"business_run_id"`
+	BusinessTasksUsed   int        `json:"business_tasks_used"`
+	BusinessTasksLimit  int        `json:"business_tasks_limit"`
+	CurrentExecutionID  string     `json:"current_execution_id,omitempty"`
+	ExecutionTasksUsed  int        `json:"execution_tasks_used"`
+	ExecutionTasksLimit int        `json:"execution_tasks_limit"`
+	BudgetExhaustedAt   *time.Time `json:"budget_exhausted_at"`
+}
+
+// Interface is the authenticated Proxy Control interface. Resource synchronization
 // and assignment reconciliation remain implementation details behind Run.
 type Interface interface {
 	Claim(context.Context, ClaimRequest) (Assignment, error)
@@ -354,4 +368,5 @@ type Interface interface {
 	Swap(context.Context, SwapRequest) (Assignment, error)
 	Release(context.Context, ReleaseRequest) (ReleaseResult, error)
 	Capacity(context.Context) (Capacity, error)
+	BusinessRunBudget(context.Context, string) (BusinessRunBudget, error)
 }

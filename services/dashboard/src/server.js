@@ -38,6 +38,11 @@ import {
 import { loadChannelCurrentContent } from "./channelCurrentContent.js";
 import { loadLatestContentEnrichOperational } from "./contentEnrichOperational.js";
 import { loadMigrationChannelInventory } from "./migrationInventory.js";
+import {
+  loadMigrationRunDiagnostics,
+  loadRotaBusinessRunBudget,
+  renderMigrationRunDiagnostics,
+} from "./migrationRunDiagnostics.js";
 
 const { Pool } = pg;
 
@@ -60,6 +65,7 @@ const rotaProxyControlUrl = String(
   || process.env.PROXY_RECONCILER_URL
   || "http://rota-core:8001/api/v1/proxy-control",
 ).replace(/\/+$/, "");
+const rotaProxyControlToken = optionalEnvironmentValue("ROTA_PROXY_CONTROL_TOKEN");
 const minioConsoleUrl = process.env.MINIO_CONSOLE_URL || "https://qyminio.example.test";
 const proxyDashboardUrl = process.env.PROXY_DASHBOARD_URL || "https://qyproxy.example.test/dashboard";
 const defaultChannelContentLimit = Number(process.env.YOUTUBE_CHANNEL_CONTENT_LIMIT || 30);
@@ -999,7 +1005,12 @@ async function crawlerOperationalMetrics() {
   ]);
   let proxy = { ok: false, roles: {}, reserve: 0, active: 0, cooldown: 0 };
   try {
-    const response = await fetch(`${rotaProxyControlUrl}/capacity`, { signal: AbortSignal.timeout(3000) });
+    const response = await fetch(`${rotaProxyControlUrl}/capacity`, {
+      headers: rotaProxyControlToken
+        ? { authorization: `Bearer ${rotaProxyControlToken}` }
+        : {},
+      signal: AbortSignal.timeout(3000),
+    });
     if (response.ok) proxy = await response.json();
   } catch {
     // The rest of the crawler metrics remain useful while the reconciler restarts.
@@ -1644,6 +1655,28 @@ async function migrationChannelDetailData(channelId) {
     `, [migrationSourceId, candidate.candidate_id, channelId]),
   ]);
   const targetState = intentRows.rows[0] || null;
+  const persistedRunDiagnostics = targetState?.target_candidate_id == null
+    ? null
+    : await loadMigrationRunDiagnostics({
+        read: db,
+        candidateId: targetState.target_candidate_id,
+      });
+  let migrationRunDiagnostics = persistedRunDiagnostics;
+  if (persistedRunDiagnostics) {
+    let budget = { available: false };
+    if (rotaProxyControlToken && persistedRunDiagnostics.business_run_id) {
+      try {
+        budget = await loadRotaBusinessRunBudget({
+          controlUrl: rotaProxyControlUrl,
+          controlToken: rotaProxyControlToken,
+          businessRunId: persistedRunDiagnostics.business_run_id,
+        });
+      } catch (error) {
+        console.error("Rota Business Run budget read failed", error?.message || String(error));
+      }
+    }
+    migrationRunDiagnostics = { ...persistedRunDiagnostics, budget };
+  }
   const merged = mergeMigrationCandidate(candidate, targetState);
   const avatarUrl = candidate.snapshot_json?.channel_header?.avatar_url || candidate.avatar_url || null;
   const detail = pipelineData || {
@@ -1684,6 +1717,7 @@ async function migrationChannelDetailData(channelId) {
     migrationIntent: targetState,
     sources: sourceRows.rows,
     batch: batchRows.rows[0] || null,
+    migrationRunDiagnostics,
     candidateOnly: !pipelineData,
   };
 }
@@ -3541,7 +3575,7 @@ function migrationChannelDetailPage(data) {
     ["source_database", candidate.source_database || "-"],
     ["source_database_sha256", candidate.source_database_sha256 || "-"],
   ];
-  const extraSections = `
+  const extraSections = `${renderMigrationRunDiagnostics(data.migrationRunDiagnostics)}
 <section class="grid detail-overview-grid mt">
   <div class="panel">
     <div class="panel-head"><div><h2>迁移来源字段</h2><div class="note">旧库字段与 crawler.channel_candidates 映射</div></div></div>

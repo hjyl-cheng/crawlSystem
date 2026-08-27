@@ -13,6 +13,7 @@ function budgetFixture({
   bindingStatus = "materialized",
   runMaterialized = true,
   candidateId = null,
+  candidateGeneration = 0,
 } = {}) {
   const fixture = { calls: [], committed: false };
   fixture.client = {
@@ -34,7 +35,12 @@ function budgetFixture({
       if (/FROM crawler\.channel_candidates/.test(sql) && /FOR UPDATE/.test(sql)) {
         return {
           rowCount: 1,
-          rows: [{ candidate_id: candidateId, status: "queued", channel_id: "UCtest" }],
+          rows: [{
+            candidate_id: candidateId,
+            status: "queued",
+            channel_id: "UCtest",
+            snapshot_dispatch_generation: candidateGeneration,
+          }],
         };
       }
       if (/FROM crawler\.channel_runs/.test(sql) && /FOR UPDATE/.test(sql)) {
@@ -148,7 +154,12 @@ test("a reserved Binding without a materialized Run still terminates atomically"
         if (/FROM crawler\.channel_candidates/.test(sql) && /FOR UPDATE/.test(sql)) {
           return {
             rowCount: 1,
-            rows: [{ candidate_id: 1, status: "queued", channel_id: "UCtest" }],
+            rows: [{
+              candidate_id: 1,
+              status: "queued",
+              channel_id: "UCtest",
+              snapshot_dispatch_generation: 1,
+            }],
           };
         }
         if (/FROM crawler\.channel_runs/.test(sql) && /FOR UPDATE/.test(sql)) {
@@ -178,6 +189,7 @@ test("a reserved Binding without a materialized Run still terminates atomically"
         business_run_key: "full-candidate:1",
         candidate_id: 1,
         channel_id: "UCtest",
+        dispatch_generation: 1,
       },
     }, {
       code: "BUSINESS_RUN_BUDGET_EXHAUSTED",
@@ -190,4 +202,91 @@ test("a reserved Binding without a materialized Run still terminates atomically"
   assert.equal(calls.some((call) => /UPDATE crawler\.channel_runs/.test(call.sql)), true);
   assert.equal(calls.some((call) => /UPDATE crawler\.business_run_bindings/.test(call.sql)), true);
   assert.equal(calls.some((call) => /UPDATE crawler\.channel_candidates/.test(call.sql)), true);
+});
+
+test("a late budget error cannot terminate a newer Candidate generation", async () => {
+  const fixture = budgetFixture({
+    runId: "run:generation-5",
+    businessRunKey: "full-candidate:42:recovery:generation-5",
+    candidateId: 42,
+    candidateGeneration: 6,
+  });
+
+  await assert.rejects(
+    recordBusinessRunBudgetExhaustion(fixture.client, {
+      id: "channel-job:generation-5",
+      queueName: "youtube-channel-crawl",
+      name: "channel-crawl",
+      data: {
+        run_id: "run:generation-5",
+        business_run_key: "full-candidate:42:recovery:generation-5",
+        candidate_id: 42,
+        channel_id: "UCtest",
+        dispatch_generation: 5,
+      },
+    }),
+    /Candidate dispatch generation changed: expected 5, got 6/,
+  );
+
+  assert.equal(
+    fixture.calls.some((call) => /^\s*UPDATE crawler\./.test(call.sql)),
+    false,
+  );
+});
+
+test("Candidate budget recovery refuses a Job without a persisted dispatch generation", async () => {
+  const fixture = budgetFixture({
+    runId: "run:missing-generation",
+    businessRunKey: "full-candidate:43",
+    candidateId: 43,
+    candidateGeneration: 1,
+  });
+
+  await assert.rejects(
+    recordBusinessRunBudgetExhaustion(fixture.client, {
+      id: "channel-job:missing-generation",
+      queueName: "youtube-channel-crawl",
+      name: "channel-crawl",
+      data: {
+        run_id: "run:missing-generation",
+        business_run_key: "full-candidate:43",
+        candidate_id: 43,
+        channel_id: "UCtest",
+      },
+    }),
+    /job.data.dispatch_generation is required for Candidate budget recovery/,
+  );
+
+  assert.equal(
+    fixture.calls.some((call) => /^\s*UPDATE crawler\./.test(call.sql)),
+    false,
+  );
+});
+
+test("Candidate budget termination carries its dispatch generation into the write fence", async () => {
+  const fixture = budgetFixture({
+    runId: "run:generation-7",
+    businessRunKey: "full-candidate:44:recovery:generation-7",
+    candidateId: 44,
+    candidateGeneration: 7,
+  });
+
+  await recordBusinessRunBudgetExhaustion(fixture.client, {
+    id: "channel-job:generation-7",
+    queueName: "youtube-channel-crawl",
+    name: "channel-crawl",
+    data: {
+      run_id: "run:generation-7",
+      business_run_key: "full-candidate:44:recovery:generation-7",
+      candidate_id: 44,
+      channel_id: "UCtest",
+      dispatch_generation: 7,
+    },
+  });
+
+  const candidateUpdate = fixture.calls.find(
+    (call) => /^\s*UPDATE crawler\.channel_candidates/.test(call.sql),
+  );
+  assert.match(candidateUpdate.sql, /snapshot_dispatch_generation=\$3/);
+  assert.equal(candidateUpdate.params[2], 7);
 });

@@ -608,7 +608,7 @@ func TestCompleteTaskRetriesDataPlaneActivationAndDoesNotLeakActionIntoNextTask(
 	); err != nil {
 		t.Fatalf("load reconciled replacement: %v", err)
 	}
-	if dataPlane.activationCalls != 2 || dataPlane.oldUsername != "" ||
+	if dataPlane.activationCalls != 2 || dataPlane.oldUsername != claim.ProxyUser ||
 		dataPlane.newUsername != newUsername || dataPlane.expectedProxy != warmStandbyID {
 		t.Fatalf("retried data-plane activation = %+v, new username = %q", dataPlane, newUsername)
 	}

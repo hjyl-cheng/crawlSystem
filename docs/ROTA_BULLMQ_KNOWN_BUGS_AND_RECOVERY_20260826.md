@@ -6,7 +6,8 @@
 
 首次实现提交：`5bcb3dd8fc7483db94f5ab29ad94bdc6f0d77514`。2026-08-27 独立复审发现
 Outbox、Completion 和迟到 failed 事件三个高优先级阻断；阻断修订已随本文所在的
-`agent/rota-fix` 本地提交完成，尚未形成镜像 digest，也未整合 `main@4ada615`。
+`agent/rota-fix` 本地提交完成，并已在 detached 临时 worktree 中通过
+`main@f31bbed` 合并态回归；尚未形成镜像 digest。
 
 文档状态：故障、解决方案和实施边界冻结基线。本文同时保留 `a8e07f1` 的原始故障行为，
 并记录 2026-08-27 当前分支中的实现。源码提交不等于已构建、已部署或已完成
@@ -54,9 +55,9 @@ Outbox、Completion 和迟到 failed 事件三个高优先级阻断；阻断修�
   实际持久化的 Job ID、name 和 data；Controller 周期补偿 Recovery Intent 遗失的异步终态
   事件。
 
-当前仍未完成：基于 `main@4ada615` 整合并回归取消链路、固定和核对运行镜像 digest、
-构建镜像、部署、生产冒烟、Dashboard 预算展示，以及任何真实频道恢复。两个卡住频道和
-18 个历史 Fingerprint 失败频道均未被重试或修改。
+当前仍未完成：固定和核对运行镜像 digest、构建镜像、部署、生产冒烟，以及任何真实频道
+恢复。Dashboard 预算诊断已在源码中实现，但未构建或部署。两个卡住频道和 18 个历史
+Fingerprint 失败频道均未被重试或修改。
 
 在以下条件全部满足前，不恢复两个卡住的频道，也不批量重试 18 个 Fingerprint 历史失败
 频道：
@@ -426,6 +427,12 @@ Dashboard 至少显示：
 - 当前 BullMQ attempt；
 - Business Run `budget_exhausted_at`。
 
+实现通过带 Proxy Control Token 的只读接口读取 Rota 权威预算：Business Run used 为
+`proxy_control_tasks` 的实际 Task 数，Execution used 为最新 `job_execution_id` 的 Task
+数；两层上限和 `budget_exhausted_at` 均来自对应的
+`proxy_control_business_runs` 持久记录。Crawler Dashboard 不使用当前默认策略或
+`observed_at` 推算历史 Run 预算；Rota 暂不可用时明确显示 unavailable。
+
 页面和日志不得显示 Redis 密码、数据库密码、Rota Token、代理认证信息或带认证的代理
 URL。
 
@@ -776,7 +783,8 @@ conclusive
 checked_at
 ```
 
-Server 适配器当前只把其中的 `proxy_id` 传给 `NotifyHealthIncident()` 以唤醒 Reconcile；
+Server 适配器当前只把其中的 `proxy_id` 传给 `NotifyHealthVerdictApplied()` 以唤醒
+Reconcile；healthy、inconclusive 和 failure 的已应用 Verdict 均不会被过滤；
 通知不携带 `previous_status`、`health_generation` 或持久 Event ID，也不作为迁移授权。
 周期 Reconcile 继续作为通知丢失的兜底。跨实例不会把本地通知当作权威，仍从数据库中的
 已提交 Proxy/Slot 状态恢复。
@@ -923,22 +931,20 @@ Rota 需要在 `services/rota/core` 下执行相关 Go 单元测试和 PostgreSQ
 
 2026-08-27 阻断修订重新验证如下：
 
-- QYBullMQ 全量运行 254 个 Node 测试文件，250 个在默认沙箱直接通过；
-  `buildImages.test.js` 和 `businessPublicationIngress.test.js` 在授权环境下共 5 个测试全部
-  通过；剩余两个集成测试仅因宿主 Python 缺少 `aiohttp` 和 `yt_dlp` 无法执行；
-- Feature Dispatch 的 6 个测试文件全部通过，Incremental Job 合同提升为含持久
-  `dispatch_generation` 的 schema v5；
-- Content Repair 新 batch、Full Repair 持久 retry generation/崩溃重放，以及同一 Channel
-  的多次 Demo Page 均通过独立 Job Execution 身份回归；
-- `services/qybullmq/src`、`scripts` 和 `test` 下 513 个 JavaScript/MJS 文件全部通过
-  `node --check`；
-- 真实 Redis 中的重复 BullMQ `jobId` 回归通过，确认 Outbox 校验的是 `getJob()` 回读的
-  持久 Job，而不是 `queue.add()` 返回对象；
-- 从当前 `services/qybullmq/src/schema.sql` 初始化的独立 PostgreSQL 中，Candidate 终态事务
-  与迟到 failed 事件并发回归通过；测试库和临时容器已删除；
-- 固定 `golang:1.25.3` 容器中 `go test ./... -count=1` 全部通过；源码只读挂载，未构建或
-  部署应用镜像；
-- 上述验证不包含与 `main@4ada615` 整合后的取消链路回归，也不是镜像或生产验证。
+- 基于 `main@f31bbed` 的 detached 临时合并态中，QYBullMQ 全量执行 1,402 个 Node 测试：
+  1,311 通过、89 个环境型用例跳过；宿主仅因缺少 `aiohttp` 和 `yt_dlp` 失败的两个 Python
+  集成用例，已在现有 qybullmq 镜像中以合并态源码只读挂载重跑并 2/2 通过；
+- 真实 Redis 中的 Candidate attempt 竞态与重复 BullMQ `jobId` 回归均通过，确认迟到 failed
+  事件不能覆盖新 attempt，且 Outbox 校验的是 `getJob()` 回读的持久 Job；
+- 独立 PostgreSQL 中，生产 Schema marker、generation 回填与 postflight、reserved 和
+  materialized Business Run 终止、旧 generation 并发回调、Recovery Intent、手工调度及
+  Dashboard 诊断查询全部通过；
+- 固定 `golang:1.25.3` 容器中的 `go test ./... -count=1` 全部通过，包括跨 Manager Route
+  激活 Claim，以及 Health Verdict/Renew/Reconcile/BeginTask 的真实 PostgreSQL 并发测试；
+- Dashboard 8/8、Auth 11/11、Feature Dispatch 6/6、Local Agent 135 passed/4 skipped、
+  Feature Engine 184 passed/18 skipped；`scripts/verify.sh` 通过；
+- 上述临时整合没有创建 Merge Commit、移动 `main` 指针或修改运行数据；它仍不是镜像构建、
+  部署或生产冒烟证据。
 
 ## 9. 实施与部署顺序
 

@@ -580,9 +580,19 @@ CREATE TABLE proxies (
   last_rota_youtube_check TIMESTAMPTZ,
   cooldown_until TIMESTAMPTZ,
   next_health_check_at TIMESTAMPTZ,
-  health_check_not_before TIMESTAMPTZ,
-  revalidation_required BOOLEAN NOT NULL DEFAULT false,
-  health_generation BIGINT NOT NULL DEFAULT 0,
+	health_check_not_before TIMESTAMPTZ,
+	revalidation_required BOOLEAN NOT NULL DEFAULT false,
+	health_generation BIGINT NOT NULL DEFAULT 0,
+	failed_since TIMESTAMPTZ,
+	continuous_failed_since TIMESTAMPTZ,
+	failure_episode_kind TEXT,
+	last_health_check_at TIMESTAMPTZ,
+	last_health_success_at TIMESTAMPTZ,
+	last_health_verdict JSONB,
+	archived_at TIMESTAMPTZ,
+	archive_reason TEXT,
+	last_check TIMESTAMPTZ,
+	last_error TEXT,
   youtube_successful_requests BIGINT NOT NULL DEFAULT 0,
   youtube_failed_requests BIGINT NOT NULL DEFAULT 0,
   youtube_avg_response_time INTEGER,
@@ -597,7 +607,8 @@ CREATE TABLE proxies (
 	identity_valid_until TIMESTAMPTZ,
 	network_identity_key TEXT NOT NULL DEFAULT ('net-' || gen_random_uuid()::text),
 	last_identity_verified_at TIMESTAMPTZ,
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE TABLE proxy_pools (
   id SERIAL PRIMARY KEY,
@@ -661,6 +672,9 @@ CREATE TABLE proxy_running_slots (
 	pending_incident_id TEXT,
 	control_state TEXT NOT NULL DEFAULT 'unleased',
 	rotation_deadline_at TIMESTAMPTZ,
+	route_activation_old_username TEXT,
+	route_activation_claim_id TEXT,
+	route_activation_claim_until TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   UNIQUE (role, slot_no)
@@ -668,7 +682,34 @@ CREATE TABLE proxy_running_slots (
 CREATE UNIQUE INDEX proxy_running_slots_proxy_unique
   ON proxy_running_slots(proxy_id) WHERE proxy_id IS NOT NULL;
 CREATE UNIQUE INDEX proxy_running_slots_worker_unique
-  ON proxy_running_slots(worker_id) WHERE worker_id IS NOT NULL;
+	ON proxy_running_slots(worker_id) WHERE worker_id IS NOT NULL;
+CREATE TABLE proxy_health_checks (
+	id BIGSERIAL PRIMARY KEY,
+	proxy_id INTEGER NOT NULL REFERENCES proxies(id) ON DELETE CASCADE,
+	started_at TIMESTAMPTZ NOT NULL,
+	checked_at TIMESTAMPTZ NOT NULL,
+	base_result JSONB NOT NULL,
+	youtube_result JSONB NOT NULL,
+	verdict TEXT NOT NULL,
+	conclusive BOOLEAN NOT NULL,
+	control_path_healthy BOOLEAN NOT NULL,
+	previous_status TEXT NOT NULL,
+	resulting_status TEXT NOT NULL,
+	applied BOOLEAN NOT NULL DEFAULT true,
+	transition_preserved BOOLEAN NOT NULL DEFAULT false,
+	error TEXT
+);
+CREATE TABLE proxy_lifecycle_events (
+	id BIGSERIAL PRIMARY KEY,
+	proxy_id INTEGER NOT NULL REFERENCES proxies(id) ON DELETE CASCADE,
+	health_check_id BIGINT UNIQUE REFERENCES proxy_health_checks(id) ON DELETE SET NULL,
+	occurred_at TIMESTAMPTZ NOT NULL,
+	event_kind TEXT NOT NULL,
+	previous_status TEXT NOT NULL,
+	resulting_status TEXT NOT NULL,
+	reason TEXT,
+	details JSONB NOT NULL DEFAULT '{}'::jsonb
+);
 CREATE TABLE proxy_control_reports (
   id BIGSERIAL PRIMARY KEY,
   incident_id TEXT UNIQUE,

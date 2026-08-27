@@ -148,6 +148,7 @@ test("Recovery Intent, Candidate generation, and Outbox commit as one PostgreSQL
     await client.query("ROLLBACK TO SAVEPOINT migration_retry_missing_outbox");
 
     const queued = [];
+    let persistedJob = null;
     const dispatcher = new ManagedJobOutboxDispatcher({
       repository: new PostgresManagedJobDispatchRepository({
         withTransaction: (action) => action(client),
@@ -156,7 +157,11 @@ test("Recovery Intent, Candidate generation, and Outbox commit as one PostgreSQL
         "youtube-channel-crawl": {
           async add(name, payload, options) {
             queued.push({ name, payload, options });
-            return { id: options.jobId, name, data: payload };
+            persistedJob = { id: options.jobId, name, data: payload };
+            return persistedJob;
+          },
+          async getJob(jobId) {
+            return persistedJob?.id === jobId ? persistedJob : null;
           },
         },
       },

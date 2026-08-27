@@ -25,6 +25,7 @@ export async function allocateChannelSnapshotDispatch(query, {
     `UPDATE crawler.channel_candidates
      SET status='queued',next_retry_at=NULL,validation_finished_at=NULL,
          snapshot_dispatch_generation=snapshot_dispatch_generation+1,
+         snapshot_active_job_id=NULL,snapshot_active_job_attempt=NULL,
          updated_at=now()
      WHERE candidate_id=$1
        AND snapshot_dispatch_generation=$2
@@ -57,6 +58,7 @@ export async function allocateDiscoveredChannelSnapshotDispatches(query, candida
            WHEN snapshot_dispatch_generation=0 THEN 1
            ELSE snapshot_dispatch_generation
          END,
+         snapshot_active_job_id=NULL,snapshot_active_job_attempt=NULL,
          updated_at=now()
      WHERE candidate_id=ANY($1::bigint[]) AND status='discovered'
      RETURNING candidate_id,snapshot_dispatch_generation`,

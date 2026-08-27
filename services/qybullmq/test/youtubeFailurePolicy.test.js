@@ -124,10 +124,60 @@ test("an unmarked generic TLS error is not blamed on the proxy", () => {
   assert.equal(result.proxy_action, "none");
 });
 
+test("trusted Fingerprint legacy SSLError text rotates the proxy", () => {
+  const gatewayError = Object.assign(
+    new Error("fingerprint gateway request failed: SSLError curl_code=35"),
+    { youtube_failure_evidence: { source: "fingerprint_gateway" } },
+  );
+  const result = decideYoutubeFailure({
+    error: new Error("channel snapshot failed", { cause: gatewayError }),
+  });
+
+  assert.equal(result.kind, "proxy_transport");
+  assert.equal(result.retry_mode, "new_identity");
+  assert.equal(result.proxy_action, "cooldown_network");
+});
+
+test("trusted Fingerprint legacy proxy_transport text rotates the proxy", () => {
+  const error = annotateYoutubeFailure(
+    new Error("fingerprint gateway proxy_transport: connection failed"),
+    { source: "fingerprint_gateway" },
+  );
+  const result = decideYoutubeFailure({ error });
+
+  assert.equal(result.kind, "proxy_transport");
+  assert.equal(result.proxy_action, "cooldown_network");
+});
+
+test("untrusted legacy Fingerprint-shaped text does not rotate the proxy", () => {
+  for (const message of [
+    "fingerprint gateway request failed: SSLError curl_code=35",
+    "fingerprint gateway proxy_transport: connection failed",
+  ]) {
+    const result = decideYoutubeFailure({ error: new Error(message) });
+    assert.notEqual(result.kind, "proxy_transport", message);
+    assert.equal(result.proxy_action, "none", message);
+  }
+});
+
 test("plain SSL routines text without trusted transport evidence does not rotate the proxy", () => {
   const result = decideYoutubeFailure({
     error: new Error("error:0A00010B:SSL routines::wrong version number"),
   });
   assert.notEqual(result.kind, "proxy_transport");
+  assert.equal(result.proxy_action, "none");
+});
+
+test("trusted source metadata cannot be combined with TLS text from an AggregateError sibling", () => {
+  const sourceOnly = annotateYoutubeFailure(new Error("managed request metadata"), {
+    source: "youtubejs_fetch",
+  });
+  const unrelatedTls = new Error("error:0A00010B:SSL routines::wrong version number");
+  const result = decideYoutubeFailure({
+    error: new AggregateError([sourceOnly, unrelatedTls], "parallel request failures"),
+  });
+
+  assert.equal(result.kind, "upstream_transient");
+  assert.equal(result.retry_mode, "same_identity");
   assert.equal(result.proxy_action, "none");
 });

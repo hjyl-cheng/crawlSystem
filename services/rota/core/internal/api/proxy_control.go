@@ -9,6 +9,7 @@ import (
 	"net/http"
 
 	"github.com/alpkeskin/rota/core/internal/proxycontrol"
+	"github.com/go-chi/chi/v5"
 )
 
 const maxProxyControlBody = 64 * 1024
@@ -125,6 +126,22 @@ func (h *ProxyControlHandler) Capacity(w http.ResponseWriter, r *http.Request) {
 	writeControlJSON(w, http.StatusOK, result)
 }
 
+func (h *ProxyControlHandler) BusinessRunBudget(w http.ResponseWriter, r *http.Request) {
+	if h == nil || h.control == nil {
+		writeControlError(w, proxycontrol.ErrDisabled)
+		return
+	}
+	result, err := h.control.BusinessRunBudget(
+		r.Context(),
+		chi.URLParam(r, "businessRunID"),
+	)
+	if err != nil {
+		writeControlError(w, err)
+		return
+	}
+	writeControlJSON(w, http.StatusOK, result)
+}
+
 func (h *ProxyControlHandler) command(
 	w http.ResponseWriter,
 	r *http.Request,
@@ -168,6 +185,9 @@ func writeControlError(w http.ResponseWriter, err error) {
 	case errors.Is(err, proxycontrol.ErrLeaseGone):
 		status = http.StatusGone
 		code = "LEASE_GONE"
+	case errors.Is(err, proxycontrol.ErrRouteNotReady):
+		status = http.StatusConflict
+		code = "ROUTE_NOT_READY"
 	case errors.Is(err, proxycontrol.ErrPolicyRejected):
 		status = http.StatusForbidden
 		code = "POLICY_REJECTED"
@@ -183,6 +203,9 @@ func writeControlError(w http.ResponseWriter, err error) {
 	case errors.Is(err, proxycontrol.ErrBusinessRunBudget):
 		status = http.StatusConflict
 		code = "BUSINESS_RUN_BUDGET_EXHAUSTED"
+	case errors.Is(err, proxycontrol.ErrBusinessRunNotFound):
+		status = http.StatusNotFound
+		code = "BUSINESS_RUN_NOT_FOUND"
 	case errors.Is(err, proxycontrol.ErrTaskConflict):
 		status = http.StatusConflict
 		code = "TASK_FENCE_CONFLICT"

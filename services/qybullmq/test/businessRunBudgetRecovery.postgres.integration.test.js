@@ -27,7 +27,11 @@ async function transaction(pool, action) {
   }
 }
 
-async function fixture(pool, { materializedRun = false, runStatus = "running" } = {}) {
+async function fixture(pool, {
+  materializedRun = false,
+  runStatus = "running",
+  dispatchGeneration = 1,
+} = {}) {
   const suffix = randomUUID();
   const batchId = `budget-recovery:${suffix}`;
   const channelId = `UC${suffix.replaceAll("-", "").slice(0, 22)}`;
@@ -47,10 +51,11 @@ async function fixture(pool, { materializedRun = false, runStatus = "running" } 
     );
     const candidate = await client.query(
       `INSERT INTO crawler.channel_candidates (
-         dispatch_batch_id,pipeline_cycle_id,channel_id,channel_url,status
-       ) VALUES ($1,$1,$2,$3,'queued')
+         dispatch_batch_id,pipeline_cycle_id,channel_id,channel_url,status,
+         snapshot_dispatch_generation
+       ) VALUES ($1,$1,$2,$3,'queued',$4)
        RETURNING candidate_id`,
-      [batchId, channelId, `https://www.youtube.com/channel/${channelId}`],
+      [batchId, channelId, `https://www.youtube.com/channel/${channelId}`, dispatchGeneration],
     );
     const id = Number(candidate.rows[0].candidate_id);
     await client.query(
@@ -79,7 +84,7 @@ async function fixture(pool, { materializedRun = false, runStatus = "running" } 
     }
     return id;
   });
-  return { batchId, businessRunKey, candidateId, channelId, runId };
+  return { batchId, businessRunKey, candidateId, channelId, dispatchGeneration, runId };
 }
 
 async function cleanup(pool, value) {
@@ -106,6 +111,7 @@ function budgetJob(value) {
       business_run_key: value.businessRunKey,
       candidate_id: value.candidateId,
       channel_id: value.channelId,
+      dispatch_generation: value.dispatchGeneration,
     },
   };
 }
@@ -239,6 +245,83 @@ test("a completed Channel Run is not downgraded by a late budget error", {
       binding_status: "materialized",
     });
   } finally {
+    if (value) await cleanup(pool, value).catch(() => {});
+    await pool.end();
+  }
+});
+
+test("a concurrent newer Candidate generation makes the old budget transaction roll back", {
+  skip: !integrationUrl,
+  timeout: 30_000,
+}, async () => {
+  const pool = new Pool({ connectionString: integrationUrl, max: 2 });
+  let value = null;
+  let releaseCandidateRead;
+  const candidateReadReleased = new Promise((resolve) => {
+    releaseCandidateRead = resolve;
+  });
+  let candidateReadReached;
+  const candidateReadBarrier = new Promise((resolve) => {
+    candidateReadReached = resolve;
+  });
+  try {
+    value = await fixture(pool, {
+      materializedRun: true,
+      runStatus: "running",
+      dispatchGeneration: 5,
+    });
+    const staleJob = budgetJob(value);
+    const recovery = terminateExhaustedBusinessRun(
+      (action) => transaction(pool, (client) => action({
+        async query(sql, params) {
+          if (/FROM crawler\.channel_candidates/.test(sql) && /FOR UPDATE/.test(sql)) {
+            candidateReadReached();
+            await candidateReadReleased;
+          }
+          return client.query(sql, params);
+        },
+      })),
+      { ...staleJob, data: { ...staleJob.data, run_id: value.runId } },
+      { code: "BUSINESS_RUN_BUDGET_EXHAUSTED" },
+    );
+
+    await candidateReadBarrier;
+    await pool.query(
+      `UPDATE crawler.channel_candidates
+       SET snapshot_dispatch_generation=6,status='queued',updated_at=now()
+       WHERE candidate_id=$1`,
+      [value.candidateId],
+    );
+    releaseCandidateRead();
+
+    await assert.rejects(
+      recovery,
+      (error) => error instanceof BusinessRunBudgetRecoveryError
+        && /expected 5, got 6/.test(error.message),
+    );
+
+    const state = await pool.query(
+      `SELECT candidate.status AS candidate_status,
+              candidate.snapshot_dispatch_generation::text AS candidate_generation,
+              binding.status AS binding_status,binding.terminal_reason,
+              run.status AS run_status,run.detail_status
+       FROM crawler.channel_candidates candidate
+       JOIN crawler.business_run_bindings binding
+         ON binding.candidate_id=candidate.candidate_id
+       JOIN crawler.channel_runs run ON run.run_id=binding.business_run_id
+       WHERE candidate.candidate_id=$1`,
+      [value.candidateId],
+    );
+    assert.deepEqual(state.rows[0], {
+      candidate_status: "queued",
+      candidate_generation: "6",
+      binding_status: "materialized",
+      terminal_reason: null,
+      run_status: "running",
+      detail_status: "running",
+    });
+  } finally {
+    releaseCandidateRead?.();
     if (value) await cleanup(pool, value).catch(() => {});
     await pool.end();
   }

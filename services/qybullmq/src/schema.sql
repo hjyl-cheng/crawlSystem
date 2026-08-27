@@ -230,6 +230,8 @@ CREATE TABLE IF NOT EXISTS crawler.channel_candidates (
   snapshot_attempts INTEGER NOT NULL DEFAULT 0,
   snapshot_dispatch_generation BIGINT NOT NULL DEFAULT 0
     CHECK (snapshot_dispatch_generation >= 0),
+  snapshot_active_job_id TEXT,
+  snapshot_active_job_attempt INTEGER,
   snapshot_json JSONB NOT NULL DEFAULT '{}'::jsonb,
   source_json JSONB NOT NULL DEFAULT '{}'::jsonb,
   reject_reason TEXT,
@@ -240,18 +242,16 @@ CREATE TABLE IF NOT EXISTS crawler.channel_candidates (
   accepted_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CONSTRAINT channel_candidates_snapshot_active_job_check CHECK (
+    (snapshot_active_job_id IS NULL AND snapshot_active_job_attempt IS NULL)
+    OR (
+      snapshot_active_job_id IS NOT NULL
+      AND snapshot_active_job_attempt IS NOT NULL
+      AND snapshot_active_job_attempt > 0
+    )
+  ),
   UNIQUE (dispatch_batch_id, channel_id)
 );
-
-ALTER TABLE crawler.channel_candidates
-ADD COLUMN IF NOT EXISTS snapshot_dispatch_generation BIGINT NOT NULL DEFAULT 0;
-
-ALTER TABLE crawler.channel_candidates
-DROP CONSTRAINT IF EXISTS channel_candidates_snapshot_dispatch_generation_check;
-
-ALTER TABLE crawler.channel_candidates
-ADD CONSTRAINT channel_candidates_snapshot_dispatch_generation_check
-CHECK (snapshot_dispatch_generation >= 0);
 
 CREATE INDEX IF NOT EXISTS idx_crawler_channel_candidates_claim
 ON crawler.channel_candidates (dispatch_batch_id, status, priority DESC, created_at ASC);
@@ -458,6 +458,58 @@ CREATE INDEX IF NOT EXISTS idx_crawler_channel_runs_channel
 ON crawler.channel_runs (channel_id, created_at DESC);
 
 -- qy-rota-worker-v2-schema:start
+ALTER TABLE crawler.channel_candidates
+ADD COLUMN IF NOT EXISTS snapshot_dispatch_generation BIGINT NOT NULL DEFAULT 0;
+
+ALTER TABLE crawler.channel_candidates
+ADD COLUMN IF NOT EXISTS snapshot_active_job_id TEXT;
+
+ALTER TABLE crawler.channel_candidates
+ADD COLUMN IF NOT EXISTS snapshot_active_job_attempt INTEGER;
+
+WITH candidate_generation_expectation AS (
+  SELECT
+    candidate.candidate_id,
+    CASE
+      WHEN MAX(intent.dispatch_attempts) IS NOT NULL
+        THEN MAX(intent.dispatch_attempts)::BIGINT
+      WHEN candidate.status <> 'discovered' THEN 1::BIGINT
+      ELSE 0::BIGINT
+    END AS expected_generation
+  FROM crawler.channel_candidates AS candidate
+  LEFT JOIN crawler.migration_channel_intents AS intent
+    ON intent.target_candidate_id = candidate.candidate_id
+  GROUP BY candidate.candidate_id,candidate.status
+)
+UPDATE crawler.channel_candidates AS candidate
+SET snapshot_dispatch_generation = expectation.expected_generation,
+    snapshot_active_job_id = NULL,
+    snapshot_active_job_attempt = NULL
+FROM candidate_generation_expectation AS expectation
+WHERE expectation.candidate_id = candidate.candidate_id
+  AND candidate.snapshot_dispatch_generation < expectation.expected_generation;
+
+ALTER TABLE crawler.channel_candidates
+DROP CONSTRAINT IF EXISTS channel_candidates_snapshot_dispatch_generation_check;
+
+ALTER TABLE crawler.channel_candidates
+ADD CONSTRAINT channel_candidates_snapshot_dispatch_generation_check
+CHECK (snapshot_dispatch_generation >= 0);
+
+ALTER TABLE crawler.channel_candidates
+DROP CONSTRAINT IF EXISTS channel_candidates_snapshot_active_job_check;
+
+ALTER TABLE crawler.channel_candidates
+ADD CONSTRAINT channel_candidates_snapshot_active_job_check
+CHECK (
+  (snapshot_active_job_id IS NULL AND snapshot_active_job_attempt IS NULL)
+  OR (
+    snapshot_active_job_id IS NOT NULL
+    AND snapshot_active_job_attempt IS NOT NULL
+    AND snapshot_active_job_attempt > 0
+  )
+);
+
 CREATE TABLE IF NOT EXISTS crawler.business_run_bindings (
   business_run_key TEXT PRIMARY KEY,
   business_run_id TEXT NOT NULL UNIQUE,

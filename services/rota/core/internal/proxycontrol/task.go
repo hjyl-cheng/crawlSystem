@@ -52,31 +52,56 @@ func (m *Manager) BeginTask(ctx context.Context, request BeginTaskRequest) (Task
 		return Task{}, err
 	}
 
-	var slotName, role, identityPolicyID, identityPolicyHash string
+	var slotName, role, identityPolicyID, identityPolicyHash, controlState string
 	var identityPolicyVersion int
+	var proxyID *int
+	var activeTaskID *string
 	err = tx.QueryRow(ctx, `
-		SELECT s.slot_name,s.role,s.identity_policy_id,s.identity_policy_version,s.identity_policy_hash
+		SELECT s.slot_name,s.role,s.identity_policy_id,s.identity_policy_version,s.identity_policy_hash,
+		       s.proxy_id,s.active_task_id,s.control_state
 		FROM proxy_running_slots s
-		JOIN proxies p ON p.id=s.proxy_id
 		WHERE s.slot_name=$1 AND s.worker_id=$2 AND s.worker_instance_id=$3 AND s.lease_id=$4
 		  AND s.assignment_version=$5 AND s.lease_until > NOW()
-		  AND s.active_task_id IS NULL AND s.control_state='leased_idle'
-		  AND p.status='active' AND p.revalidation_required=false
-		  AND (p.cooldown_until IS NULL OR p.cooldown_until <= NOW())
-		  AND (
-		    (p.base_health_status='passed' AND p.youtube_health_status='passed')
-		    OR (p.last_youtube_status=200 AND p.last_rota_youtube_status=200)
-		  )
-		FOR UPDATE OF s,p
+		FOR UPDATE OF s
 	`, request.SlotName, request.WorkerID, request.WorkerInstanceID,
 		request.LeaseID, request.RouteGeneration).Scan(
 		&slotName, &role, &identityPolicyID, &identityPolicyVersion, &identityPolicyHash,
+		&proxyID, &activeTaskID, &controlState,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Task{}, ErrLeaseConflict
 	}
 	if err != nil {
 		return Task{}, fmt.Errorf("lock proxy task lease: %w", err)
+	}
+	if activeTaskID != nil {
+		return Task{}, ErrLeaseConflict
+	}
+	if proxyID == nil || controlState != "leased_idle" {
+		return Task{}, ErrRouteNotReady
+	}
+	var routeEligible bool
+	err = tx.QueryRow(ctx, `
+		SELECT COALESCE(
+		  p.status='active' AND p.revalidation_required=false
+		  AND (p.cooldown_until IS NULL OR p.cooldown_until <= NOW())
+		  AND (
+		    (p.base_health_status='passed' AND p.youtube_health_status='passed')
+		    OR (p.last_youtube_status=200 AND p.last_rota_youtube_status=200)
+		  ), false
+		)
+		FROM proxies p
+		WHERE p.id=$1
+		FOR UPDATE OF p
+	`, *proxyID).Scan(&routeEligible)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Task{}, ErrRouteNotReady
+	}
+	if err != nil {
+		return Task{}, fmt.Errorf("lock proxy task route: %w", err)
+	}
+	if !routeEligible {
+		return Task{}, ErrRouteNotReady
 	}
 	if !roleAllowsTaskKind(role, request.TaskKind) {
 		return Task{}, fmt.Errorf("%w: role %q cannot begin task kind %q", ErrPolicyRejected, role, request.TaskKind)

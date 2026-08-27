@@ -23,6 +23,10 @@ const TRUSTED_PROXY_TLS_SOURCES = new Set([
   "youtubejs_fetch",
 ]);
 
+const TRUSTED_FINGERPRINT_SOURCES = new Set([
+  "fingerprint_gateway",
+]);
+
 function normalizedStatus(value, text) {
   const numeric = Number(value);
   if (Number.isInteger(numeric) && numeric >= 100 && numeric <= 599) return numeric;
@@ -77,6 +81,57 @@ function structuredFailure(error) {
     });
   }
   return null;
+}
+
+function legacyFingerprintProxyTransport(error, { source = "", body = "" } = {}) {
+  const isLegacyTransportText = (value) => (
+    /(?:^|\b)(?:fingerprint[_ ]?)?proxy[_ ]transport\b/i.test(value)
+    || /sslerror[^\n]{0,100}\bcurl[_ ]code\s*=?\s*35\b/i.test(value)
+  );
+  for (const value of failureObjects(error)) {
+    const embedded = value?.youtube_failure_evidence ?? {};
+    const nodeSource = nonEmptyText(embedded.source ?? value.source)?.toLowerCase() ?? "";
+    if (!TRUSTED_FINGERPRINT_SOURCES.has(nodeSource)) continue;
+    const nodeText = [value.message, embedded.body, value.body]
+      .map((part) => nonEmptyText(part))
+      .filter(Boolean)
+      .join("\n");
+    if (isLegacyTransportText(nodeText)) return nodeSource;
+  }
+  const explicitSource = nonEmptyText(source)?.toLowerCase() ?? "";
+  return TRUSTED_FINGERPRINT_SOURCES.has(explicitSource) && isLegacyTransportText(body)
+    ? explicitSource
+    : null;
+}
+
+function trustedProxyTlsTransport(error, { source = "", body = "" } = {}) {
+  const isAmbiguousTlsText = (value) => /wrong[_ ]version[_ ]number|ssl routines/i.test(value);
+  for (const value of failureObjects(error)) {
+    const embedded = value?.youtube_failure_evidence ?? {};
+    const nodeSource = nonEmptyText(embedded.source ?? value.source)?.toLowerCase() ?? "";
+    if (!TRUSTED_PROXY_TLS_SOURCES.has(nodeSource)) continue;
+
+    const lineageParts = [];
+    const lineageSeen = new Set();
+    for (let current = value; current && !lineageSeen.has(current); current = current?.cause) {
+      if (typeof current !== "object" && typeof current !== "function") break;
+      lineageSeen.add(current);
+      const currentEvidence = current?.youtube_failure_evidence ?? {};
+      lineageParts.push(
+        current.message,
+        current.code,
+        currentEvidence.body,
+        current.body,
+      );
+    }
+    if (isAmbiguousTlsText(lineageParts.filter(Boolean).join("\n"))) return nodeSource;
+  }
+
+  const explicitSource = nonEmptyText(source)?.toLowerCase() ?? "";
+  const explicitText = [body, error?.message, error?.code].filter(Boolean).join("\n");
+  return TRUSTED_PROXY_TLS_SOURCES.has(explicitSource) && isAmbiguousTlsText(explicitText)
+    ? explicitSource
+    : null;
 }
 
 export function youtubeFailureText(error) {
@@ -173,6 +228,8 @@ export function decideYoutubeFailure({
   const errorName = String(error?.name || "");
   const errorCode = String(error?.code || error?.cause?.code || "").toUpperCase();
   const structured = structuredFailure(error);
+  const legacyFingerprintSource = legacyFingerprintProxyTransport(error, { source, body });
+  const trustedTlsSource = trustedProxyTlsTransport(error, { source, body });
 
   if (error?.youtube_collection_failure === true) {
     return decision("youtube_challenge", {
@@ -202,6 +259,18 @@ export function decideYoutubeFailure({
       evidence: structured,
     });
   }
+  if (legacyFingerprintSource) {
+    return decision("proxy_transport", {
+      retryMode: "new_identity",
+      proxyAction: "cooldown_network",
+      status: httpStatus,
+      evidence: {
+        failure_kind: "proxy_transport",
+        code: null,
+        source: legacyFingerprintSource,
+      },
+    });
+  }
   if (
     httpStatus === 404
     || /(?:channel|video|playlist)[^\n]{0,100}(?:does not exist|not found)/i.test(text)
@@ -214,7 +283,7 @@ export function decideYoutubeFailure({
     .test(text);
   const ambiguousTlsTransport = /wrong[_ ]version[_ ]number|ssl routines/i.test(text);
   const proxyTransport = explicitProxyTransport
-    || (ambiguousTlsTransport && TRUSTED_PROXY_TLS_SOURCES.has(evidence.source));
+    || Boolean(trustedTlsSource);
   if (proxyTransport) {
     return decision("proxy_transport", {
       retryMode: "new_identity",

@@ -3,7 +3,10 @@ import { randomUUID } from "node:crypto";
 import test from "node:test";
 import pg from "pg";
 
-import { recordChannelCandidateJobFailure } from "../src/managedWorkerJob.js";
+import {
+  markChannelCandidateJobAttemptActive,
+  recordChannelCandidateJobFailure,
+} from "../src/managedWorkerJob.js";
 
 const { Pool } = pg;
 const integrationUrl = process.env.INCREMENTAL_POSTGRES_TEST_URL;
@@ -18,6 +21,7 @@ test("a concurrent terminal write and newer dispatch generation reject a late fa
   const suffix = randomUUID();
   const batchId = `managed-worker-failure-test:${suffix}`;
   let candidateId = null;
+  const jobId = `managed-worker-failure-job:${suffix}`;
 
   try {
     const identity = await setup.query("SELECT current_database() AS database_name");
@@ -37,6 +41,14 @@ test("a concurrent terminal write and newer dispatch generation reject a late fa
       [batchId, `UC${suffix.replaceAll("-", "")}`, `https://www.youtube.com/channel/UC${suffix}`],
     );
     candidateId = Number(candidate.rows[0].candidate_id);
+    assert.equal(await markChannelCandidateJobAttemptActive(
+      setup.query.bind(setup),
+      {
+        id: jobId,
+        attemptsMade: 0,
+        data: { candidate_id: candidateId, dispatch_generation: 5 },
+      },
+    ), true);
 
     await terminalWriter.query("BEGIN");
     await terminalWriter.query(
@@ -47,7 +59,11 @@ test("a concurrent terminal write and newer dispatch generation reject a late fa
     );
     const lateFailure = recordChannelCandidateJobFailure(
       failedListener.query.bind(failedListener),
-      { data: { candidate_id: candidateId, dispatch_generation: 5 } },
+      {
+        id: jobId,
+        attemptsMade: 1,
+        data: { candidate_id: candidateId, dispatch_generation: 5 },
+      },
       { disposition: "queued", message: "late BullMQ failed event" },
     );
     await new Promise((resolve) => setImmediate(resolve));
@@ -68,9 +84,21 @@ test("a concurrent terminal write and newer dispatch generation reject a late fa
        WHERE candidate_id=$1`,
       [candidateId],
     );
+    assert.equal(await markChannelCandidateJobAttemptActive(
+      setup.query.bind(setup),
+      {
+        id: jobId,
+        attemptsMade: 0,
+        data: { candidate_id: candidateId, dispatch_generation: 6 },
+      },
+    ), true);
     assert.equal(await recordChannelCandidateJobFailure(
       setup.query.bind(setup),
-      { data: { candidate_id: candidateId, dispatch_generation: 5 } },
+      {
+        id: jobId,
+        attemptsMade: 1,
+        data: { candidate_id: candidateId, dispatch_generation: 5 },
+      },
       { disposition: "failed", message: "stale generation" },
     ), false);
     assert.deepEqual((await setup.query(
@@ -80,6 +108,40 @@ test("a concurrent terminal write and newer dispatch generation reject a late fa
     )).rows[0], {
       status: "queued",
       snapshot_dispatch_generation: "6",
+      error_message: null,
+    });
+
+    await setup.query(
+      `UPDATE crawler.channel_candidates
+       SET status='validating',snapshot_dispatch_generation=7,error_message=NULL,updated_at=now()
+       WHERE candidate_id=$1`,
+      [candidateId],
+    );
+    assert.equal(await markChannelCandidateJobAttemptActive(
+      setup.query.bind(setup),
+      {
+        id: jobId,
+        attemptsMade: 1,
+        data: { candidate_id: candidateId, dispatch_generation: 7 },
+      },
+    ), true);
+    assert.equal(await recordChannelCandidateJobFailure(
+      setup.query.bind(setup),
+      {
+        id: jobId,
+        queueName: "youtube-channel-crawl",
+        attemptsMade: 1,
+        data: { candidate_id: candidateId, dispatch_generation: 7 },
+      },
+      { disposition: "queued", message: "late attempt one failure" },
+    ), false);
+    assert.deepEqual((await setup.query(
+      `SELECT status,snapshot_dispatch_generation::text,error_message
+       FROM crawler.channel_candidates WHERE candidate_id=$1`,
+      [candidateId],
+    )).rows[0], {
+      status: "validating",
+      snapshot_dispatch_generation: "7",
       error_message: null,
     });
   } finally {
