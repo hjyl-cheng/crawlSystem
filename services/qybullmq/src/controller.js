@@ -15,7 +15,11 @@ import {
   withTransaction,
 } from "./db.js";
 import { createControllerLifecycle } from "./controllerLifecycle.js";
-import { allocateChannelSnapshotDispatch } from "./channelSnapshotDispatch.js";
+import {
+  allocateChannelSnapshotDispatchOutbox,
+  ChannelSnapshotDispatchConflictError,
+} from "./channelSnapshotDispatch.js";
+import { canonicalJsonEqual } from "./canonicalJson.js";
 import { resolveDiscoveryPageQualification } from "./discoveryPagePolicy.js";
 import {
   createCoalescedWakeup,
@@ -198,6 +202,7 @@ const channelSnapshotReconcileLimit = intEnv("CHANNEL_SNAPSHOT_RECONCILE_LIMIT",
 const channelSnapshotMaxAttempts = intEnv("CHANNEL_SNAPSHOT_MAX_ATTEMPTS", 6, 3, 30);
 const channelSnapshotRetrySeconds = intEnv("CHANNEL_SNAPSHOT_RETRY_SECONDS", 60, 10, 3600);
 const channelSnapshotStaleSeconds = intEnv("CHANNEL_SNAPSHOT_STALE_SECONDS", 900, 60, 7200);
+const channelSnapshotMinSubscriberCount = intEnv("MIN_SUBSCRIBER_COUNT", 1000, 1, 100_000_000);
 const channelCandidateDispatchEnabled = booleanEnv("CHANNEL_CANDIDATE_DISPATCH_ENABLED", true);
 const agentMaxBatchesPerTick = intEnv("AGENT_MAX_BATCHES_PER_TICK", 5, 1, 100);
 const agentQueuedStaleSeconds = intEnv("AGENT_QUEUED_STALE_SECONDS", 180, 60, 3600);
@@ -473,6 +478,7 @@ async function reconcileChannelCandidateQueue(actions, dispatchBatchId) {
     `SELECT candidate.candidate_id,candidate.channel_id,candidate.channel_url,
             candidate.pipeline_cycle_id,candidate.priority,candidate.status,
             candidate.snapshot_dispatch_generation,
+            candidate.snapshot_active_job_id,candidate.snapshot_active_job_attempt,
             candidate.source_json->>'source' AS candidate_source,
             source.query_id,source.query_text
      FROM crawler.channel_candidates candidate
@@ -517,51 +523,96 @@ async function reconcileChannelCandidateQueue(actions, dispatchBatchId) {
     const currentJobId = generation > 0
       ? safeJobId("channel-snapshot", dispatchBatchId, row.channel_id, `g${generation}`)
       : legacyJobId;
+    const currentPayload = generation > 0 ? {
+      candidate_id: Number(row.candidate_id),
+      dispatch_generation: generation,
+      dispatch_batch_id: dispatchBatchId,
+      channel_id: row.channel_id,
+      channel_url: row.channel_url,
+      crawl_mode: "full",
+      query_id: row.query_id ?? null,
+      query_text: row.query_text ?? "results.db migration",
+      pipeline_cycle_id: row.pipeline_cycle_id || dispatchBatchId,
+      enforce_min_subscribers: true,
+      min_subscriber_count: channelSnapshotMinSubscriberCount,
+      reject_if_no_recent_content: row.candidate_source === "legacy_results_db",
+    } : null;
     let represented = false;
+    let terminalCurrentJob = null;
     for (const existingJobId of new Set([currentJobId, legacyJobId])) {
       const existing = await queues[queuesByRole.channelCrawl].getJob(existingJobId);
       if (!existing) continue;
       const state = await existing.getState();
+      const currentIdentityMatches = existingJobId === currentJobId && generation > 0
+        ? existing.name === "channel-snapshot" && canonicalJsonEqual(existing.data, currentPayload)
+        : true;
+      if (!currentIdentityMatches) {
+        actions.push({
+          action: "hold-channel-snapshot-job-identity-conflict",
+          candidate_id: Number(row.candidate_id),
+          dispatch_generation: generation,
+          job_id: existingJobId,
+          state,
+        });
+        represented = true;
+        break;
+      }
       if (["waiting", "active", "delayed", "prioritized", "waiting-children"].includes(state)) {
         represented = true;
         break;
       }
-      try {
-        await existing.remove();
-      } catch {
-        represented = true;
-        break;
-      }
+      if (existingJobId === currentJobId) terminalCurrentJob = existing;
     }
     if (represented) continue;
-    const candidate = await allocateChannelSnapshotDispatch(query, {
-      candidateId: row.candidate_id,
-      expectedGeneration: generation,
-    });
-    if (!candidate) continue;
+    const activeJobId = String(row.snapshot_active_job_id ?? "").trim() || null;
+    if (activeJobId && (activeJobId !== currentJobId || !terminalCurrentJob)) {
+      actions.push({
+        action: "hold-channel-snapshot-active-job-fence",
+        candidate_id: Number(row.candidate_id),
+        dispatch_generation: generation,
+        job_id: activeJobId,
+      });
+      continue;
+    }
+    const nextGeneration = generation + 1;
     const jobId = safeJobId(
       "channel-snapshot",
       dispatchBatchId,
       row.channel_id,
-      `g${candidate.snapshot_dispatch_generation}`,
+      `g${nextGeneration}`,
     );
-    await queues[queuesByRole.channelCrawl].add(
-      "channel-snapshot",
-      {
+    const payload = {
+      candidate_id: Number(row.candidate_id),
+      dispatch_generation: nextGeneration,
+      dispatch_batch_id: dispatchBatchId,
+      channel_id: row.channel_id,
+      channel_url: row.channel_url,
+      crawl_mode: "full",
+      query_id: row.query_id ?? null,
+      query_text: row.query_text ?? "results.db migration",
+      pipeline_cycle_id: row.pipeline_cycle_id || dispatchBatchId,
+      enforce_min_subscribers: true,
+      min_subscriber_count: channelSnapshotMinSubscriberCount,
+      reject_if_no_recent_content: row.candidate_source === "legacy_results_db",
+    };
+    try {
+      await withTransaction((client) => allocateChannelSnapshotDispatchOutbox(client, {
+        candidate: { ...row, snapshot_dispatch_generation: nextGeneration },
+        expectedGeneration: generation,
+        previousJobId: activeJobId,
+        payload,
+        jobId,
+      }));
+    } catch (error) {
+      if (!(error instanceof ChannelSnapshotDispatchConflictError)) throw error;
+      actions.push({
+        action: "hold-channel-snapshot-dispatch-conflict",
         candidate_id: Number(row.candidate_id),
-        dispatch_generation: candidate.snapshot_dispatch_generation,
-        dispatch_batch_id: dispatchBatchId,
-        channel_id: row.channel_id,
-        channel_url: row.channel_url,
-        crawl_mode: "full",
-        query_id: row.query_id ?? null,
-        query_text: row.query_text ?? null,
-        pipeline_cycle_id: row.pipeline_cycle_id || dispatchBatchId,
-        enforce_min_subscribers: true,
-        reject_if_no_recent_content: row.candidate_source === "legacy_results_db",
-      },
-      { jobId, priority: Number(row.priority ?? 100) },
-    );
+        dispatch_generation: generation,
+        reason: error.message,
+      });
+      continue;
+    }
     enqueued += 1;
   }
   if (enqueued > 0) {

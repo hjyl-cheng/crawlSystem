@@ -57,34 +57,25 @@ function failureLineage(error) {
   return values;
 }
 
-function structuredFailure(error) {
-  const values = failureLineage(error);
-  for (const value of values) {
-    const failureKind = nonEmptyText(value.failureKind ?? value.failure_kind)?.toLowerCase() ?? null;
-    const code = nonEmptyText(value.code)?.toUpperCase() ?? null;
-    const kindFromField = STRUCTURED_FAILURE_KINDS.has(failureKind) ? failureKind : null;
-    const kindFromCode = STRUCTURED_FAILURE_CODES.get(code) ?? null;
-    if (!kindFromField && !kindFromCode) continue;
-    if (kindFromField && kindFromCode && kindFromField !== kindFromCode) continue;
-    const matchedKind = kindFromCode ?? kindFromField;
-    const source = nonEmptyText(
-      value?.youtube_failure_evidence?.source ?? value?.source,
-    );
-    return Object.freeze({
-      status: normalizedStatus(
-        value?.youtube_failure_evidence?.status ?? value?.status,
-        [value?.message, value?.youtube_failure_evidence?.body, value?.body]
-          .filter(Boolean)
-          .join("\n"),
-      ),
-      evidence: Object.freeze({
-        failure_kind: matchedKind,
-        code: kindFromCode ? code : null,
-        source,
-      }),
-    });
-  }
-  return null;
+function structuredFailure(error, nodeEvidence) {
+  const failureKind = nonEmptyText(error?.failureKind ?? error?.failure_kind)?.toLowerCase() ?? null;
+  const code = nonEmptyText(error?.code)?.toUpperCase() ?? null;
+  const kindFromField = STRUCTURED_FAILURE_KINDS.has(failureKind) ? failureKind : null;
+  const kindFromCode = STRUCTURED_FAILURE_CODES.get(code) ?? null;
+  if (!kindFromField && !kindFromCode) return null;
+  if (kindFromField && kindFromCode && kindFromField !== kindFromCode) return null;
+  const matchedKind = kindFromCode ?? kindFromField;
+  return Object.freeze({
+    status: normalizedStatus(
+      nodeEvidence.status,
+      [error?.message, nodeEvidence.body, error?.body].filter(Boolean).join("\n"),
+    ),
+    evidence: Object.freeze({
+      failure_kind: matchedKind,
+      code: kindFromCode ? code : null,
+      source: nonEmptyText(nodeEvidence.source),
+    }),
+  });
 }
 
 function legacyFingerprintProxyTransport(error, { source = "", body = "" } = {}) {
@@ -92,49 +83,22 @@ function legacyFingerprintProxyTransport(error, { source = "", body = "" } = {})
     /(?:^|\b)(?:fingerprint[_ ]?)?proxy[_ ]transport\b/i.test(value)
     || /sslerror[^\n]{0,100}\bcurl[_ ]code\s*=?\s*35\b/i.test(value)
   );
-  for (const value of failureLineage(error)) {
-    const embedded = value?.youtube_failure_evidence ?? {};
-    const nodeSource = nonEmptyText(embedded.source ?? value.source)?.toLowerCase() ?? "";
-    if (!TRUSTED_FINGERPRINT_SOURCES.has(nodeSource)) continue;
-    const nodeText = [value.message, embedded.body, value.body]
-      .map((part) => nonEmptyText(part))
-      .filter(Boolean)
-      .join("\n");
-    if (isLegacyTransportText(nodeText)) return nodeSource;
-  }
-  const explicitSource = nonEmptyText(source)?.toLowerCase() ?? "";
-  return TRUSTED_FINGERPRINT_SOURCES.has(explicitSource) && isLegacyTransportText(body)
-    ? explicitSource
+  const nodeSource = nonEmptyText(source)?.toLowerCase() ?? "";
+  const nodeText = [error?.message, error?.code, body, error?.body]
+    .map((part) => nonEmptyText(part))
+    .filter(Boolean)
+    .join("\n");
+  return TRUSTED_FINGERPRINT_SOURCES.has(nodeSource) && isLegacyTransportText(nodeText)
+    ? nodeSource
     : null;
 }
 
 function trustedProxyTlsTransport(error, { source = "", body = "" } = {}) {
   const isAmbiguousTlsText = (value) => /wrong[_ ]version[_ ]number|ssl routines/i.test(value);
-  for (const value of failureLineage(error)) {
-    const embedded = value?.youtube_failure_evidence ?? {};
-    const nodeSource = nonEmptyText(embedded.source ?? value.source)?.toLowerCase() ?? "";
-    if (!TRUSTED_PROXY_TLS_SOURCES.has(nodeSource)) continue;
-
-    const lineageParts = [];
-    const lineageSeen = new Set();
-    for (let current = value; current && !lineageSeen.has(current); current = current?.cause) {
-      if (typeof current !== "object" && typeof current !== "function") break;
-      lineageSeen.add(current);
-      const currentEvidence = current?.youtube_failure_evidence ?? {};
-      lineageParts.push(
-        current.message,
-        current.code,
-        currentEvidence.body,
-        current.body,
-      );
-    }
-    if (isAmbiguousTlsText(lineageParts.filter(Boolean).join("\n"))) return nodeSource;
-  }
-
-  const explicitSource = nonEmptyText(source)?.toLowerCase() ?? "";
-  const explicitText = [body, error?.message, error?.code].filter(Boolean).join("\n");
-  return TRUSTED_PROXY_TLS_SOURCES.has(explicitSource) && isAmbiguousTlsText(explicitText)
-    ? explicitSource
+  const nodeSource = nonEmptyText(source)?.toLowerCase() ?? "";
+  const nodeText = [body, error?.message, error?.code, error?.body].filter(Boolean).join("\n");
+  return TRUSTED_PROXY_TLS_SOURCES.has(nodeSource) && isAmbiguousTlsText(nodeText)
+    ? nodeSource
     : null;
 }
 
@@ -158,25 +122,6 @@ export function youtubeFailureText(error) {
     if (code) parts.push(code);
     if (value.cause != null) pending.push(value.cause);
     if (Array.isArray(value.errors)) pending.push(...value.errors);
-  }
-  return boundedText([...new Set(parts)].join(": "), 2000);
-}
-
-function youtubeFailureLineageText(error) {
-  const parts = [];
-  const seen = new Set();
-  for (let value = error; value != null && seen.size < 20; value = value?.cause) {
-    if (typeof value !== "object" && typeof value !== "function") {
-      const normalized = String(value).trim();
-      if (normalized) parts.push(normalized);
-      break;
-    }
-    if (seen.has(value)) break;
-    seen.add(value);
-    const message = String(value.message ?? "").trim();
-    const code = String(value.code ?? "").trim();
-    if (message) parts.push(message);
-    if (code) parts.push(code);
   }
   return boundedText([...new Set(parts)].join(": "), 2000);
 }
@@ -237,22 +182,39 @@ export function annotateYoutubeFailure(error, evidence = {}) {
   return target;
 }
 
+function youtubeFailureNodeEvidence(error, overrides = {}) {
+  const embedded = error?.youtube_failure_evidence ?? {};
+  return {
+    error,
+    status: overrides.status ?? embedded.status ?? error?.status ?? null,
+    body: boundedText(
+      nonEmptyText(overrides.body) ?? nonEmptyText(embedded.body) ?? error?.body ?? "",
+    ),
+    source: nonEmptyText(overrides.source)
+      ?? nonEmptyText(embedded.source ?? error?.source)
+      ?? "",
+    target_url: nonEmptyText(overrides.targetUrl ?? overrides.target_url)
+      ?? nonEmptyText(embedded.target_url),
+    client: nonEmptyText(overrides.client) ?? nonEmptyText(embedded.client),
+  };
+}
+
 function decideYoutubeFailureBranch({
   error = null,
   status = null,
   body = "",
   source = "",
 } = {}) {
-  const evidence = youtubeFailureEvidence(error, { status, body, source });
-  const errorText = youtubeFailureLineageText(error);
+  const evidence = youtubeFailureNodeEvidence(error, { status, body, source });
+  const errorText = [error?.message, error?.code].map(nonEmptyText).filter(Boolean).join(": ");
   const text = [errorText, evidence.body].filter(Boolean).join("\n");
   const lower = text.toLowerCase();
   const httpStatus = normalizedStatus(evidence.status, text);
   const errorName = String(error?.name || "");
-  const errorCode = String(error?.code || error?.cause?.code || "").toUpperCase();
-  const structured = structuredFailure(error);
-  const legacyFingerprintSource = legacyFingerprintProxyTransport(error, { source, body });
-  const trustedTlsSource = trustedProxyTlsTransport(error, { source, body });
+  const errorCode = String(error?.code || "").toUpperCase();
+  const structured = structuredFailure(error, evidence);
+  const legacyFingerprintSource = legacyFingerprintProxyTransport(error, evidence);
+  const trustedTlsSource = trustedProxyTlsTransport(error, evidence);
 
   if (error?.youtube_collection_failure === true) {
     return decision("youtube_challenge", {
@@ -312,6 +274,11 @@ function decideYoutubeFailureBranch({
       retryMode: "new_identity",
       proxyAction: "cooldown_network",
       status: httpStatus,
+      evidence: trustedTlsSource ? {
+        failure_kind: "proxy_transport",
+        code: null,
+        source: trustedTlsSource,
+      } : null,
     });
   }
   if (ambiguousTlsTransport) {
@@ -375,32 +342,35 @@ function aggregateDecisionPriority(value) {
   return 0;
 }
 
-function decideYoutubeFailureInternal(input, visited) {
-  const branchDecision = decideYoutubeFailureBranch(input);
-  const candidates = [branchDecision];
-  for (const value of failureLineage(input.error)) {
-    if (!Array.isArray(value.errors)) continue;
-    for (const child of value.errors) {
-      if (child && (typeof child === "object" || typeof child === "function")) {
-        if (visited.has(child)) continue;
-        visited.add(child);
-      }
-      candidates.push(decideYoutubeFailureInternal({ error: child }, visited));
+function failureNodes(error) {
+  const nodes = [];
+  const pending = [error];
+  const seen = new Set();
+  while (pending.length > 0 && nodes.length < 20) {
+    const value = pending.shift();
+    if (!value || (typeof value !== "object" && typeof value !== "function") || seen.has(value)) {
+      continue;
     }
+    seen.add(value);
+    nodes.push(value);
+    if (value.cause != null) pending.push(value.cause);
+    if (Array.isArray(value.errors)) pending.push(...value.errors);
+  }
+  return nodes;
+}
+
+export function decideYoutubeFailure(input = {}) {
+  const nodes = failureNodes(input.error);
+  const candidates = [decideYoutubeFailureBranch(input)];
+  for (const node of nodes) {
+    if (node === input.error) continue;
+    candidates.push(decideYoutubeFailureBranch({ error: node }));
   }
   return candidates.reduce((selected, candidate) => (
     aggregateDecisionPriority(candidate) > aggregateDecisionPriority(selected)
       ? candidate
       : selected
   ));
-}
-
-export function decideYoutubeFailure(input = {}) {
-  const visited = new Set();
-  if (input.error && (typeof input.error === "object" || typeof input.error === "function")) {
-    visited.add(input.error);
-  }
-  return decideYoutubeFailureInternal(input, visited);
 }
 
 export function shouldReportProxyFailure(value) {

@@ -44,11 +44,26 @@ test("content and PostgreSQL contract failures do not retry", () => {
 });
 
 test("nested transport evidence is retained", () => {
-  const error = annotateYoutubeFailure(new TypeError("fetch failed", {
-    cause: Object.assign(new Error("SSL wrong version number"), { code: "ERR_SSL_WRONG_VERSION_NUMBER" }),
-  }), { source: "youtube_fetch_transport" });
+  const transport = annotateYoutubeFailure(
+    Object.assign(new Error("SSL wrong version number"), { code: "ERR_SSL_WRONG_VERSION_NUMBER" }),
+    { source: "youtube_fetch_transport" },
+  );
+  const error = new TypeError("fetch failed", { cause: transport });
   assert.equal(decideYoutubeFailure({ error }).kind, "proxy_transport");
   assert.match(youtubeFailureText(error), /ERR_SSL_WRONG_VERSION_NUMBER/);
+});
+
+test("trusted source on a wrapper cannot borrow TLS text from its cause", () => {
+  const error = annotateYoutubeFailure(new TypeError("fetch failed", {
+    cause: Object.assign(new Error("SSL wrong version number"), {
+      code: "ERR_SSL_WRONG_VERSION_NUMBER",
+    }),
+  }), { source: "youtube_fetch_transport" });
+  const result = decideYoutubeFailure({ error });
+
+  assert.equal(result.kind, "upstream_transient");
+  assert.equal(result.retry_mode, "same_identity");
+  assert.equal(result.proxy_action, "none");
 });
 
 test("structured adapter evidence survives an outer generic error message", () => {
@@ -195,6 +210,22 @@ test("structured failure evidence does not borrow HTTP status from an AggregateE
   const result = decideYoutubeFailure({
     error: new AggregateError([proxyFailure, missingContent], "parallel failures"),
   });
+
+  assert.equal(result.kind, "proxy_transport");
+  assert.equal(result.status, null);
+  assert.equal(result.evidence.source, "fingerprint_gateway");
+});
+
+test("nested Fingerprint evidence does not borrow an outer YouTube HTTP status", () => {
+  const gatewayFailure = Object.assign(
+    new Error("fingerprint gateway request failed: SSLError curl_code=35"),
+    { youtube_failure_evidence: { source: "fingerprint_gateway" } },
+  );
+  const outerFailure = annotateYoutubeFailure(
+    new Error("YouTube response was not found", { cause: gatewayFailure }),
+    { status: 404, source: "youtubejs_player" },
+  );
+  const result = decideYoutubeFailure({ error: outerFailure });
 
   assert.equal(result.kind, "proxy_transport");
   assert.equal(result.status, null);

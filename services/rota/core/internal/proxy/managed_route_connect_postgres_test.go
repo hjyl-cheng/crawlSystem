@@ -15,6 +15,7 @@ import (
 
 	"github.com/alpkeskin/rota/core/internal/database"
 	"github.com/alpkeskin/rota/core/internal/models"
+	"github.com/alpkeskin/rota/core/internal/proxycontrol"
 	"github.com/alpkeskin/rota/core/internal/repository"
 	"github.com/alpkeskin/rota/core/pkg/logger"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -69,10 +70,19 @@ func TestManagedRouteActivationSwitchesCONNECTAndSurvivesDataPlaneRestart(t *tes
 	}
 	activationCtx, cancelActivation := context.WithTimeout(ctx, 2*time.Second)
 	defer cancelActivation()
-	if err := dataPlane.ActivateProxyUser(
-		activationCtx, oldUsername, newUsername, proxyB,
+	dataPlane.RequireRouteActivationRegistry()
+	if err := dataPlane.RebuildRouteActivationRegistry(ctx, nil); err != nil {
+		t.Fatalf("initialize Route activation registry: %v", err)
+	}
+	if _, err := dataPlane.BeginProxyUserActivation(
+		activationCtx, oldUsername, newUsername, proxyB, "", "claim-route-g2",
 	); err != nil {
 		t.Fatalf("activate replacement route: %v", err)
+	}
+	if err := dataPlane.CommitProxyUserActivation(
+		activationCtx, newUsername, "claim-route-g2",
+	); err != nil {
+		t.Fatalf("commit replacement route: %v", err)
 	}
 	_ = oldTunnel.SetReadDeadline(time.Now().Add(250 * time.Millisecond))
 	if _, err := oldTunnel.Read(make([]byte, 1)); err == nil {
@@ -90,6 +100,13 @@ func TestManagedRouteActivationSwitchesCONNECTAndSurvivesDataPlaneRestart(t *tes
 
 	dataPlane.testServer.Close()
 	restartedDataPlane, restartedAddress := newManagedRouteDataPlane(t, db)
+	restartedDataPlane.RequireRouteActivationRegistry()
+	if err := restartedDataPlane.RebuildRouteActivationRegistry(ctx, []proxycontrol.RouteActivationRegistryEntry{{
+		Username: newUsername,
+		Phase:    proxycontrol.RouteActivationCommitted,
+	}}); err != nil {
+		t.Fatalf("rebuild committed Route after restart: %v", err)
+	}
 	assertCONNECTStatus(t, restartedAddress, oldUsername, password, http.StatusProxyAuthRequired)
 	restartedTunnel := openManagedCONNECT(t, restartedAddress, newUsername, password)
 	assertMarkedTunnel(t, restartedTunnel, "exit-b:", "after-restart")

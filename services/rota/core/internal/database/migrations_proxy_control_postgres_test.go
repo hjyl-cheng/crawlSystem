@@ -28,7 +28,7 @@ func TestProxyControlTaskMigrationPreservesLegacyControlState(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM proxy_control_reports WHERE incident_id='legacy-incident-1'`).Scan(&reportCount); err != nil {
 		t.Fatalf("count preserved reports: %v", err)
 	}
-	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM schema_migrations WHERE version IN (1004,1009)`).Scan(&migrationCount); err != nil {
+	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM schema_migrations WHERE version IN (1004,1009,1010)`).Scan(&migrationCount); err != nil {
 		t.Fatalf("count Proxy Control migrations: %v", err)
 	}
 	if err := pool.QueryRow(ctx, `
@@ -38,12 +38,13 @@ func TestProxyControlTaskMigrationPreservesLegacyControlState(t *testing.T) {
 		  AND column_name IN (
 		    'route_activation_old_username',
 		    'route_activation_claim_id',
-		    'route_activation_claim_until'
+		    'route_activation_claim_until',
+		    'route_activation_previous_claim_id'
 		  )
 	`).Scan(&activationColumns); err != nil {
 		t.Fatalf("count Route activation Fence columns: %v", err)
 	}
-	if slotCount != 1 || reportCount != 1 || migrationCount != 2 || activationColumns != 3 {
+	if slotCount != 1 || reportCount != 1 || migrationCount != 3 || activationColumns != 4 {
 		t.Fatalf(
 			"preserved slots=%d reports=%d migration=%d activation_columns=%d",
 			slotCount, reportCount, migrationCount, activationColumns,
@@ -130,7 +131,7 @@ func newProxyControlMigrationPostgres(t *testing.T) (*DB, *pgxpool.Pool) {
 		t.Fatalf("create migration 1003 fixture: %v", err)
 	}
 	for _, migration := range migrations {
-		if migration.Version == 1004 || migration.Version == 1009 {
+		if migration.Version == 1004 || migration.Version == 1009 || migration.Version == 1010 {
 			continue
 		}
 		if _, err := pool.Exec(ctx, `

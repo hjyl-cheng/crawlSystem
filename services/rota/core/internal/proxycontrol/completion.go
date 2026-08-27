@@ -135,6 +135,7 @@ func (m *Manager) CompleteTask(ctx context.Context, request CompleteTaskRequest)
 					    control_state='pending_new_route',rotation_deadline_at=NULL,
 					    route_activation_old_username=NULLIF($9,''),
 					    route_activation_claim_id=NULL,route_activation_claim_until=NULL,
+					    route_activation_previous_claim_id=NULL,
 					    updated_at=NOW()
 					WHERE slot_name=$1 AND active_task_id=$6 AND current_lease_id=$7
 					  AND assignment_version=$8
@@ -479,7 +480,8 @@ func pauseCompletionWithoutReserve(
 		    network_identity_key=NULL,profile_epoch=0,
 		    control_state='paused_no_reserve',rotation_deadline_at=NULL,
 		    route_activation_old_username=NULL,route_activation_claim_id=NULL,
-		    route_activation_claim_until=NULL,updated_at=NOW()
+		    route_activation_claim_until=NULL,route_activation_previous_claim_id=NULL,
+		    updated_at=NOW()
 		WHERE slot_name=$1 AND active_task_id=$3 AND current_lease_id=$4
 		  AND assignment_version=$5
 	`, request.SlotName, newGeneration, request.TaskID, request.LeaseID, request.RouteGeneration)

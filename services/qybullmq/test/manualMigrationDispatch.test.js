@@ -387,6 +387,79 @@ test("an ambiguous queue delivery is recovered from the persisted deterministic 
   assert.deepEqual(compensation, []);
 });
 
+test("a matching terminal Job for the current exact Outbox is delivery, not another generation", async () => {
+  const snapshot = sourceSnapshot();
+  const jobId = `channel-snapshot__${DEFAULT_MANUAL_MIGRATION_BATCH_ID}__${snapshot.channel_id}__g5`;
+  const payload = {
+    candidate_id: 91,
+    dispatch_generation: 5,
+    dispatch_batch_id: DEFAULT_MANUAL_MIGRATION_BATCH_ID,
+    channel_id: snapshot.channel_id,
+    channel_url: snapshot.channel_url,
+    crawl_mode: "full",
+    query_id: null,
+    query_text: "results.db migration",
+    pipeline_cycle_id: DEFAULT_MANUAL_MIGRATION_BATCH_ID,
+    enforce_min_subscribers: true,
+    min_subscriber_count: 1000,
+    reject_if_no_recent_content: true,
+  };
+  const job = {
+    id: jobId,
+    name: "channel-snapshot",
+    data: payload,
+    async getState() { return "completed"; },
+  };
+  const marked = [];
+
+  const result = await dispatchManualMigrationChannel({
+    channelId: snapshot.channel_id,
+    candidateId: 42,
+    queue: {
+      name: "youtube-channel-crawl",
+      async getJob(candidateJobId) { return candidateJobId === jobId ? job : null; },
+      async add() { assert.fail("the exact persisted Job must be reused"); },
+    },
+    sourceLoader: async () => snapshot,
+    transaction: (action) => action({}),
+    targetPreparer: async () => ({
+      candidate: {
+        candidate_id: 91,
+        channel_id: snapshot.channel_id,
+        channel_url: snapshot.channel_url,
+        priority: 100,
+        status: "queued",
+        snapshot_dispatch_generation: 5,
+      },
+      batchId: DEFAULT_MANUAL_MIGRATION_BATCH_ID,
+      previousStatus: "failed",
+      shouldEnqueue: true,
+      intentId: 7,
+      outbox: {
+        dispatch_id: "channel-snapshot-dispatch:91:g5:test",
+        aggregate_kind: "channel_snapshot",
+        aggregate_id: "91",
+        intent_hash: "sha256:test",
+        queue_registry_key: "youtube-channel-crawl",
+        deterministic_job_id: jobId,
+        payload_json: payload,
+        status: "pending",
+      },
+    }),
+    terminalDispatchAdvancer: async () => assert.fail("current Outbox must not allocate G+1"),
+    dbQuery: async (sql, params) => {
+      marked.push({ sql, params });
+      return { rowCount: 1 };
+    },
+  });
+
+  assert.equal(result.created, false);
+  assert.equal(result.job.id, jobId);
+  assert.equal(result.job.state, "completed");
+  assert.equal(marked.length, 1);
+  assert.match(marked[0].sql, /status='sent'/);
+});
+
 test("all raced deterministic Job reuse paths reject conflicting identity", async (t) => {
   const snapshot = sourceSnapshot();
   const jobId = `channel-snapshot__${DEFAULT_MANUAL_MIGRATION_BATCH_ID}__${snapshot.channel_id}__g1`;
@@ -396,7 +469,7 @@ test("all raced deterministic Job reuse paths reject conflicting identity", asyn
     data: { candidate_id: 999, dispatch_generation: 1 },
     async getState() { return "waiting"; },
   });
-  const dispatch = (queue) => dispatchManualMigrationChannel({
+  const dispatch = (queue, overrides = {}) => dispatchManualMigrationChannel({
     channelId: snapshot.channel_id,
     candidateId: 42,
     queue: { name: "youtube-channel-crawl", ...queue },
@@ -417,6 +490,7 @@ test("all raced deterministic Job reuse paths reject conflicting identity", asyn
       intentId: 7,
     }),
     dbQuery: async () => ({ rowCount: 1 }),
+    ...overrides,
   });
 
   await t.test("a conflicting terminal Job is never removed", async () => {
@@ -441,6 +515,76 @@ test("all raced deterministic Job reuse paths reject conflicting identity", asyn
       );
       assert.equal(removed, false, state);
     }
+  });
+
+  await t.test("a matching terminal G Job is preserved while Target allocates G+1", async () => {
+    const matchingPayload = {
+      candidate_id: 91,
+      dispatch_generation: 1,
+      dispatch_batch_id: DEFAULT_MANUAL_MIGRATION_BATCH_ID,
+      channel_id: snapshot.channel_id,
+      channel_url: snapshot.channel_url,
+      crawl_mode: "full",
+      query_id: null,
+      query_text: "results.db migration",
+      pipeline_cycle_id: DEFAULT_MANUAL_MIGRATION_BATCH_ID,
+      enforce_min_subscribers: true,
+      min_subscriber_count: 1000,
+      reject_if_no_recent_content: true,
+    };
+    let removeCalled = false;
+    const terminalJob = {
+      id: jobId,
+      name: "channel-snapshot",
+      data: matchingPayload,
+      async getState() { return "completed"; },
+      async remove() {
+        removeCalled = true;
+        throw new Error("terminal audit Job must never be removed");
+      },
+    };
+    const jobs = new Map([[jobId, terminalJob]]);
+    const nextPayload = { ...matchingPayload, dispatch_generation: 2 };
+    const nextJobId = `channel-snapshot__${DEFAULT_MANUAL_MIGRATION_BATCH_ID}__${snapshot.channel_id}__g2`;
+
+    const result = await dispatch({
+        async getJob(candidateJobId) { return jobs.get(candidateJobId) ?? null; },
+        async add(name, data, options) {
+          const persisted = {
+            id: options.jobId,
+            name,
+            data,
+            async getState() { return "waiting"; },
+          };
+          jobs.set(options.jobId, persisted);
+          return persisted;
+        },
+      }, {
+        terminalDispatchAdvancer: async (_client, { prepared }) => {
+          assert.equal(prepared.candidate.snapshot_dispatch_generation, 1);
+          return {
+            created: true,
+            candidate: { ...prepared.candidate, snapshot_dispatch_generation: 2 },
+            outbox: {
+              dispatch_id: "channel-snapshot-dispatch:91:g2:test",
+              aggregate_kind: "channel_snapshot",
+              aggregate_id: "91",
+              intent_hash: "sha256:test",
+              queue_registry_key: "youtube-channel-crawl",
+              deterministic_job_id: nextJobId,
+              payload_json: nextPayload,
+              status: "pending",
+            },
+          };
+        },
+      });
+
+    assert.equal(removeCalled, false);
+    assert.equal(result.dispatch_generation, 2);
+    assert.equal(result.job.id, nextJobId);
+    assert.equal(jobs.get(jobId), terminalJob);
+    assert.deepEqual(jobs.get(jobId).data, matchingPayload);
+    assert.deepEqual(jobs.get(nextJobId).data, nextPayload);
   });
 
   await t.test("a Job that wins the remove race", async () => {

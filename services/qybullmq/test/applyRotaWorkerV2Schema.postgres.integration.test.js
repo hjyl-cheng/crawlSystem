@@ -119,6 +119,9 @@ test("Rota Worker V2 schema block applies transactionally and is idempotent", {
            AND conname='channel_candidates_snapshot_active_job_check'
            AND contype='c' AND convalidated
        ) AS candidate_active_job_check,
+       to_regclass(
+         'crawler.ux_crawler_proxy_job_dispatch_outbox_channel_snapshot_generation'
+       ) IS NOT NULL AS channel_snapshot_outbox_key,
        EXISTS (
          SELECT 1 FROM information_schema.columns
          WHERE table_schema='crawler' AND table_name='channel_execution_attempts'
@@ -150,6 +153,7 @@ test("Rota Worker V2 schema block applies transactionally and is idempotent", {
     candidate_active_job_id: true,
     candidate_active_job_attempt: true,
     candidate_active_job_check: true,
+    channel_snapshot_outbox_key: true,
     execution_dispatch_generation: true,
     execution_dispatch_generation_check: true,
     active_retry_intent_key: true,
@@ -204,9 +208,20 @@ test("Rota Worker V2 schema block applies transactionally and is idempotent", {
   await client.query("ROLLBACK");
   await client.query(
     `UPDATE crawler.channel_candidates
-     SET snapshot_active_job_id='job:active',snapshot_active_job_attempt=1
+     SET snapshot_active_job_id='job:allocated',snapshot_active_job_attempt=0
      WHERE channel_id='UCschemaqueued'`,
   );
+
+  await client.query("BEGIN");
+  await assert.rejects(
+    client.query(
+      `UPDATE crawler.channel_candidates
+       SET snapshot_active_job_attempt=-1
+       WHERE channel_id='UCschemaqueued'`,
+    ),
+    /channel_candidates_snapshot_active_job_check/,
+  );
+  await client.query("ROLLBACK");
 
   await client.query("BEGIN");
   await client.query("DROP INDEX crawler.idx_crawler_migration_retry_intents_status");

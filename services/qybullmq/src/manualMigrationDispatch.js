@@ -1,5 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { canonicalJsonEqual } from "./canonicalJson.js";
+import {
+  allocateChannelSnapshotDispatchOutbox,
+  stageChannelSnapshotOutbox,
+} from "./channelSnapshotDispatch.js";
 import { channelSnapshotPayload } from "./migrationDispatchPolicy.js";
 import {
   loadMigrationSourceBatch,
@@ -78,6 +82,41 @@ function assertMatchingMigrationJob(job, { jobId, payload }) {
     );
   }
   return job;
+}
+
+function manualChannelSnapshotIdentity(candidate, batchId, minSubscriberCount) {
+  const dispatchGeneration = positiveCandidateId(candidate?.snapshot_dispatch_generation);
+  if (dispatchGeneration == null) {
+    throw new ManualMigrationDispatchError("snapshot dispatch generation is required", {
+      code: "missing_dispatch_generation",
+    });
+  }
+  return {
+    jobId: safeJobId(
+      "channel-snapshot",
+      batchId,
+      candidate.channel_id,
+      `g${dispatchGeneration}`,
+    ),
+    payload: channelSnapshotPayload(candidate, batchId, { minSubscriberCount }),
+  };
+}
+
+async function stagePreparedManualMigration(client, {
+  candidate,
+  batchId,
+  minSubscriberCount,
+}) {
+  const identity = manualChannelSnapshotIdentity(candidate, batchId, minSubscriberCount);
+  const staged = await stageChannelSnapshotOutbox(client, {
+    candidate,
+    payload: identity.payload,
+    jobId: identity.jobId,
+  });
+  return {
+    candidate: { ...candidate, ...staged.candidate },
+    outbox: staged.outbox,
+  };
 }
 
 async function defaultTargetTransaction(action) {
@@ -434,7 +473,7 @@ async function activateScheduler(client, batchId) {
 function existingCandidate(intent) {
   if (!intent?.target_candidate_id) return null;
   return {
-    candidate_id: intent.target_candidate_id,
+    candidate_id: positiveCandidateId(intent.target_candidate_id),
     dispatch_batch_id: intent.dispatch_batch_id,
     pipeline_cycle_id: intent.pipeline_cycle_id,
     channel_id: intent.channel_id,
@@ -506,6 +545,12 @@ export async function prepareManualMigration(client, {
       batchId: normalizedBatchId,
     });
     candidate = { ...candidate, snapshot_dispatch_generation: dispatchGeneration };
+    const staged = await stagePreparedManualMigration(client, {
+      candidate,
+      batchId: normalizedBatchId,
+      minSubscriberCount,
+    });
+    candidate = staged.candidate;
     await refreshBatchCounts(client, normalizedBatchId);
     await activateScheduler(client, normalizedBatchId);
     return {
@@ -516,6 +561,7 @@ export async function prepareManualMigration(client, {
       alreadyInProgress: false,
       intentId: intent.migration_intent_id,
       sourceChanged: intent.snapshot_sha256 !== snapshot.snapshot_sha256,
+      outbox: staged.outbox,
     };
   }
   if (intent && !candidate) {
@@ -562,6 +608,12 @@ export async function prepareManualMigration(client, {
     batchId: normalizedBatchId,
   });
   candidate = { ...candidate, snapshot_dispatch_generation: dispatchGeneration };
+  const staged = await stagePreparedManualMigration(client, {
+    candidate,
+    batchId: normalizedBatchId,
+    minSubscriberCount,
+  });
+  candidate = staged.candidate;
   await refreshBatchCounts(client, normalizedBatchId);
   await activateScheduler(client, normalizedBatchId);
   return {
@@ -572,6 +624,7 @@ export async function prepareManualMigration(client, {
     alreadyInProgress: false,
     intentId: intent.migration_intent_id,
     sourceChanged: false,
+    outbox: staged.outbox,
   };
 }
 
@@ -722,19 +775,11 @@ export async function dispatchManualMigrationBatch({
 }
 
 async function addOrReuseJob(queue, { candidate, batchId, minSubscriberCount }) {
-  const dispatchGeneration = positiveCandidateId(candidate.snapshot_dispatch_generation);
-  if (dispatchGeneration == null) {
-    throw new ManualMigrationDispatchError("snapshot dispatch generation is required", {
-      code: "missing_dispatch_generation",
-    });
-  }
-  const jobId = safeJobId(
-    "channel-snapshot",
+  const { jobId, payload } = manualChannelSnapshotIdentity(
+    candidate,
     batchId,
-    candidate.channel_id,
-    `g${dispatchGeneration}`,
+    minSubscriberCount,
   );
-  const payload = channelSnapshotPayload(candidate, batchId, { minSubscriberCount });
   const existing = await queue.getJob(jobId);
   if (existing) {
     assertMatchingMigrationJob(existing, { jobId, payload });
@@ -747,25 +792,14 @@ async function addOrReuseJob(queue, { candidate, batchId, minSubscriberCount }) 
         created: false,
       };
     }
-    try {
-      await existing.remove();
-    } catch {
-      const current = await queue.getJob(jobId);
-      const currentState = current ? await current.getState() : null;
-      if (current && REPRESENTED_JOB_STATES.has(currentState)) {
-        return {
-          job: assertMatchingMigrationJob(current, { jobId, payload }),
-          jobId,
-          state: currentState,
-          created: false,
-        };
-      }
-      throw new ManualMigrationDispatchError(`existing migration job cannot be replaced: ${state}`, {
+    throw new ManualMigrationDispatchError(
+      `terminal migration Job requires a new dispatch generation: ${state}`,
+      {
         statusCode: 409,
-        code: "job_not_replaceable",
+        code: "job_terminal_generation_conflict",
         details: { job_id: jobId, state },
-      });
-    }
+      },
+    );
   }
   let job;
   try {
@@ -776,14 +810,25 @@ async function addOrReuseJob(queue, { candidate, batchId, minSubscriberCount }) 
     );
   } catch (error) {
     const persisted = await queue.getJob(jobId).catch(() => null);
-    const persistedState = persisted ? await persisted.getState().catch(() => null) : null;
-    if (persisted && REPRESENTED_JOB_STATES.has(persistedState)) {
-      return {
-        job: assertMatchingMigrationJob(persisted, { jobId, payload }),
-        jobId,
-        state: persistedState,
-        created: false,
-      };
+    if (persisted) {
+      assertMatchingMigrationJob(persisted, { jobId, payload });
+      const persistedState = await persisted.getState().catch(() => null);
+      if (REPRESENTED_JOB_STATES.has(persistedState)) {
+        return {
+          job: persisted,
+          jobId,
+          state: persistedState,
+          created: false,
+        };
+      }
+      throw new ManualMigrationDispatchError(
+        `terminal migration Job requires a new dispatch generation: ${persistedState}`,
+        {
+          statusCode: 409,
+          code: "job_terminal_generation_conflict",
+          details: { job_id: jobId, state: persistedState },
+        },
+      );
     }
     throw error;
   }
@@ -800,7 +845,103 @@ async function addOrReuseJob(queue, { candidate, batchId, minSubscriberCount }) 
   }
   job = assertMatchingMigrationJob(persisted, { jobId, payload });
   const state = await job.getState();
+  if (!REPRESENTED_JOB_STATES.has(state)) {
+    throw new ManualMigrationDispatchError(
+      `terminal migration Job requires a new dispatch generation: ${state}`,
+      {
+        statusCode: 409,
+        code: "job_terminal_generation_conflict",
+        details: { job_id: jobId, state },
+      },
+    );
+  }
   return { job, jobId, state, created: true };
+}
+
+async function markChannelSnapshotOutboxSent(dbQuery, outbox) {
+  const marked = await dbQuery(
+    `UPDATE crawler.proxy_job_dispatch_outbox
+     SET status='sent',sent_at=COALESCE(sent_at,now()),next_attempt_at=NULL,
+         last_error=NULL,updated_at=now()
+     WHERE dispatch_id=$1 AND aggregate_kind='channel_snapshot'
+       AND aggregate_id=$2
+       AND (payload_json->>'dispatch_generation')::bigint=$3
+       AND status IN ('pending','sending','sent')
+     RETURNING dispatch_id`,
+    [
+      outbox.dispatch_id,
+      String(outbox.aggregate_id),
+      Number(outbox.payload_json?.dispatch_generation),
+    ],
+  );
+  if (marked.rowCount !== 1) {
+    throw new ManualMigrationDispatchError("Channel snapshot Outbox lost its delivery fence", {
+      statusCode: 409,
+      code: "channel_snapshot_outbox_fence_lost",
+      details: { dispatch_id: outbox.dispatch_id },
+    });
+  }
+}
+
+export async function deliverExistingChannelSnapshotOutbox(queue, outbox, {
+  priority = 100,
+  dbQuery = defaultTargetQuery,
+} = {}) {
+  const jobId = requiredText(outbox?.deterministic_job_id, "outbox_job_id");
+  const payload = outbox?.payload_json;
+  let persisted = await queue.getJob(jobId);
+  const created = !persisted;
+  if (persisted) assertMatchingMigrationJob(persisted, { jobId, payload });
+  if (!persisted) {
+    try {
+      await queue.add("channel-snapshot", payload, { jobId, priority: Number(priority ?? 100) });
+    } catch (error) {
+      persisted = await queue.getJob(jobId).catch(() => null);
+      if (!persisted) throw error;
+    }
+    persisted = persisted ?? await queue.getJob(jobId);
+  }
+  if (!persisted) {
+    throw new ManualMigrationDispatchError(`migration Job was not persisted for ${jobId}`, {
+      statusCode: 503,
+      code: "job_persistence_unconfirmed",
+      details: { job_id: jobId },
+    });
+  }
+  const job = assertMatchingMigrationJob(persisted, { jobId, payload });
+  const state = await job.getState();
+  await markChannelSnapshotOutboxSent(dbQuery, outbox);
+  return { job, jobId, state, created };
+}
+
+async function advanceTerminalManualMigrationDispatch(client, {
+  prepared,
+  minSubscriberCount,
+}) {
+  const currentGeneration = positiveCandidateId(prepared?.candidate?.snapshot_dispatch_generation);
+  if (currentGeneration == null) {
+    throw new ManualMigrationDispatchError("snapshot dispatch generation is required", {
+      code: "missing_dispatch_generation",
+    });
+  }
+  const previous = manualChannelSnapshotIdentity(
+    prepared.candidate,
+    prepared.batchId,
+    minSubscriberCount,
+  );
+  const candidate = {
+    ...prepared.candidate,
+    snapshot_dispatch_generation: currentGeneration + 1,
+  };
+  const next = manualChannelSnapshotIdentity(candidate, prepared.batchId, minSubscriberCount);
+  return allocateChannelSnapshotDispatchOutbox(client, {
+    candidate,
+    expectedGeneration: currentGeneration,
+    previousJobId: previous.jobId,
+    migrationIntentId: prepared.intentId,
+    payload: next.payload,
+    jobId: next.jobId,
+  });
 }
 
 export async function dispatchManualMigrationChannel({
@@ -812,6 +953,8 @@ export async function dispatchManualMigrationChannel({
   sourceLoader = loadMigrationSourceChannel,
   transaction = defaultTargetTransaction,
   targetPreparer = prepareManualMigration,
+  terminalDispatchAdvancer = advanceTerminalManualMigrationDispatch,
+  outboxDeliverer = deliverExistingChannelSnapshotOutbox,
   dbQuery = defaultTargetQuery,
 } = {}) {
   if (!queue || typeof queue.add !== "function" || typeof queue.getJob !== "function") {
@@ -856,6 +999,20 @@ export async function dispatchManualMigrationChannel({
   }
 
   try {
+    if (prepared.outbox) {
+      const queued = await outboxDeliverer(queue, prepared.outbox, {
+        priority: prepared.candidate.priority,
+        dbQuery,
+      });
+      return {
+        ...responseBase,
+        created: queued.created,
+        already_in_progress: !queued.created,
+        already_terminal: false,
+        previous_status: prepared.previousStatus,
+        job: { queue: queue.name, id: queued.job.id, state: queued.state },
+      };
+    }
     const queued = await addOrReuseJob(queue, {
       candidate: prepared.candidate,
       batchId: prepared.batchId,
@@ -874,6 +1031,26 @@ export async function dispatchManualMigrationChannel({
       },
     };
   } catch (error) {
+    if (error?.code === "job_terminal_generation_conflict") {
+      const advanced = await transaction((client) => terminalDispatchAdvancer(client, {
+        prepared,
+        minSubscriberCount,
+      }));
+      const queued = await outboxDeliverer(queue, advanced.outbox, {
+        priority: advanced.candidate.priority ?? prepared.candidate.priority,
+        dbQuery,
+      });
+      return {
+        ...responseBase,
+        created: queued.created,
+        already_in_progress: !queued.created,
+        already_terminal: false,
+        previous_status: prepared.previousStatus,
+        dispatch_generation: advanced.candidate.snapshot_dispatch_generation,
+        job: { queue: queue.name, id: queued.job.id, state: queued.state },
+      };
+    }
+    if (prepared.outbox) throw error;
     await dbQuery(
       `WITH failed_candidate AS (
          UPDATE crawler.channel_candidates

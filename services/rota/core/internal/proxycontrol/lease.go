@@ -520,7 +520,8 @@ func (m *Manager) Release(ctx context.Context, request ReleaseRequest) (ReleaseR
 		    active_task_started_at=NULL,pending_action=NULL,pending_incident_id=NULL,
 		    control_state='unleased',rotation_deadline_at=NULL,
 		    route_activation_old_username=NULL,route_activation_claim_id=NULL,
-		    route_activation_claim_until=NULL,updated_at=NOW()
+		    route_activation_claim_until=NULL,route_activation_previous_claim_id=NULL,
+		    updated_at=NOW()
 		WHERE slot_name=$1 AND worker_id=$2 AND worker_instance_id=$3
 		  AND lease_id=$4 AND current_lease_id=$4 AND assignment_version=$5
 		  AND active_task_id IS NULL

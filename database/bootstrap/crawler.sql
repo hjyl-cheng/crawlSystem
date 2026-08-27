@@ -1218,7 +1218,7 @@ CREATE TABLE crawler.channel_candidates (
     accepted_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT channel_candidates_snapshot_active_job_check CHECK ((((snapshot_active_job_id IS NULL) AND (snapshot_active_job_attempt IS NULL)) OR ((snapshot_active_job_id IS NOT NULL) AND (snapshot_active_job_attempt IS NOT NULL) AND (snapshot_active_job_attempt > 0)))),
+    CONSTRAINT channel_candidates_snapshot_active_job_check CHECK ((((snapshot_active_job_id IS NULL) AND (snapshot_active_job_attempt IS NULL)) OR ((snapshot_active_job_id IS NOT NULL) AND (snapshot_active_job_attempt IS NOT NULL) AND (snapshot_active_job_attempt >= 0)))),
     CONSTRAINT channel_candidates_snapshot_dispatch_generation_check CHECK ((snapshot_dispatch_generation >= 0)),
     CONSTRAINT channel_candidates_status_check CHECK ((status = ANY (ARRAY['discovered'::text, 'queued'::text, 'validating'::text, 'accepted'::text, 'rejected'::text, 'existing'::text, 'failed'::text])))
 );
@@ -4294,6 +4294,13 @@ CREATE INDEX idx_crawler_outbox_publish ON crawler.crawler_outbox USING btree (s
 --
 
 CREATE INDEX idx_crawler_proxy_job_dispatch_outbox_pending ON crawler.proxy_job_dispatch_outbox USING btree (status, next_attempt_at, created_at);
+
+
+--
+-- Name: ux_crawler_proxy_job_dispatch_outbox_channel_snapshot_generation; Type: INDEX; Schema: crawler; Owner: -
+--
+
+CREATE UNIQUE INDEX ux_crawler_proxy_job_dispatch_outbox_channel_snapshot_generation ON crawler.proxy_job_dispatch_outbox USING btree (aggregate_id, (((payload_json ->> 'dispatch_generation'::text))::bigint)) WHERE (aggregate_kind = 'channel_snapshot'::text);
 
 
 --

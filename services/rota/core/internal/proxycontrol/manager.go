@@ -21,10 +21,39 @@ type HealthChecker interface {
 	CheckProxy(context.Context, *models.Proxy) (*models.ProxyTestResult, error)
 }
 
+type RouteActivationPhase string
+
+const (
+	RouteActivationActivating RouteActivationPhase = "activating"
+	RouteActivationCommitted  RouteActivationPhase = "committed"
+)
+
+type RouteActivationRegistryEntry struct {
+	Username string
+	ClaimID  string
+	Phase    RouteActivationPhase
+	Blocked  bool
+}
+
+type RouteActivationBeginResult struct {
+	AlreadyCommitted bool
+}
+
 type DataPlaneController interface {
 	RefreshProxyUser(string)
 	RetireProxyUser(context.Context, string) error
-	ActivateProxyUser(context.Context, string, string, int) error
+	RequireRouteActivationRegistry()
+	RebuildRouteActivationRegistry(context.Context, []RouteActivationRegistryEntry) error
+	BeginProxyUserActivation(
+		context.Context,
+		string,
+		string,
+		int,
+		string,
+		string,
+	) (RouteActivationBeginResult, error)
+	CommitProxyUserActivation(context.Context, string, string) error
+	RetireProxyUserIfClaim(context.Context, string, string) (bool, error)
 }
 
 type Manager struct {
@@ -112,11 +141,34 @@ func (m *Manager) SetCacheInvalidator(invalidate func(string)) {
 	m.requestReconcile()
 }
 
-func (m *Manager) SetDataPlaneController(dataPlane DataPlaneController) {
+func (m *Manager) SetDataPlaneController(dataPlane DataPlaneController) error {
+	if dataPlane == nil {
+		m.invalidateMu.Lock()
+		m.dataPlane = nil
+		m.invalidateMu.Unlock()
+		return nil
+	}
+	if err := m.requireEnabled(); err != nil {
+		return err
+	}
+	dataPlane.RequireRouteActivationRegistry()
+	ctx, cancel := context.WithTimeout(context.Background(), routeActivationAttemptTimeout)
+	defer cancel()
+	if err := m.syncResources(ctx); err != nil {
+		return fmt.Errorf("initialize Route activation resources: %w", err)
+	}
+	registry, err := m.loadRouteActivationRegistry(ctx)
+	if err != nil {
+		return err
+	}
+	if err := dataPlane.RebuildRouteActivationRegistry(ctx, registry); err != nil {
+		return fmt.Errorf("rebuild Route activation registry: %w", err)
+	}
 	m.invalidateMu.Lock()
 	m.dataPlane = dataPlane
 	m.invalidateMu.Unlock()
 	m.requestReconcile()
+	return nil
 }
 
 func (m *Manager) Run(ctx context.Context) {
@@ -268,11 +320,40 @@ func (m *Manager) retireUser(ctx context.Context, username string) bool {
 	return true
 }
 
-func (m *Manager) activateUser(
+func (m *Manager) beginUserActivation(
 	ctx context.Context,
 	oldUsername string,
 	newUsername string,
 	expectedProxyID int,
+	previousClaimID string,
+	claimID string,
+) (RouteActivationBeginResult, bool) {
+	m.invalidateMu.RLock()
+	dataPlane := m.dataPlane
+	m.invalidateMu.RUnlock()
+	if dataPlane == nil {
+		return RouteActivationBeginResult{}, false
+	}
+	result, err := dataPlane.BeginProxyUserActivation(
+		ctx, oldUsername, newUsername, expectedProxyID, previousClaimID, claimID,
+	)
+	if err != nil {
+		m.logError(
+			"begin proxy user activation failed", err,
+			"old_proxy_user", oldUsername,
+			"new_proxy_user", newUsername,
+			"proxy_id", expectedProxyID,
+			"claim_id", claimID,
+		)
+		return RouteActivationBeginResult{}, false
+	}
+	return result, true
+}
+
+func (m *Manager) commitUserActivation(
+	ctx context.Context,
+	username string,
+	claimID string,
 ) bool {
 	m.invalidateMu.RLock()
 	dataPlane := m.dataPlane
@@ -280,18 +361,38 @@ func (m *Manager) activateUser(
 	if dataPlane == nil {
 		return false
 	}
-	if err := dataPlane.ActivateProxyUser(
-		ctx, oldUsername, newUsername, expectedProxyID,
-	); err != nil {
+	if err := dataPlane.CommitProxyUserActivation(ctx, username, claimID); err != nil {
 		m.logError(
-			"activate proxy user failed", err,
-			"old_proxy_user", oldUsername,
-			"new_proxy_user", newUsername,
-			"proxy_id", expectedProxyID,
+			"commit proxy user activation failed", err,
+			"proxy_user", username,
+			"claim_id", claimID,
 		)
 		return false
 	}
 	return true
+}
+
+func (m *Manager) retireUserIfClaim(
+	ctx context.Context,
+	username string,
+	claimID string,
+) bool {
+	m.invalidateMu.RLock()
+	dataPlane := m.dataPlane
+	m.invalidateMu.RUnlock()
+	if dataPlane == nil {
+		return false
+	}
+	retired, err := dataPlane.RetireProxyUserIfClaim(ctx, username, claimID)
+	if err != nil {
+		m.logError(
+			"conditionally retire proxy user failed", err,
+			"proxy_user", username,
+			"claim_id", claimID,
+		)
+		return false
+	}
+	return retired
 }
 
 func (m *Manager) requireEnabled() error {

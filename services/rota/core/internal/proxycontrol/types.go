@@ -222,54 +222,38 @@ type ReleaseRequest struct {
 	Reason               string `json:"reason"`
 }
 
-type SwapRequest struct {
-	WorkerID          string `json:"worker_id"`
-	LeaseID           string `json:"lease_id"`
-	AssignmentVersion int64  `json:"assignment_version"`
-	FailedProxyID     int    `json:"failed_proxy_id"`
-}
-
 type Assignment struct {
-	OK                    bool         `json:"ok"`
-	Ready                 bool         `json:"ready"`
-	Reason                string       `json:"reason,omitempty"`
-	ReasonCode            string       `json:"reason_code,omitempty"`
-	RetryAfterMS          int64        `json:"retry_after_ms,omitempty"`
-	ControlState          string       `json:"control_state,omitempty"`
-	WorkloadScope         string       `json:"workload_scope,omitempty"`
-	ProtocolVersion       int          `json:"protocol_version,omitempty"`
-	Role                  string       `json:"role"`
-	WorkerID              string       `json:"worker_id"`
-	WorkerInstanceID      string       `json:"worker_instance_id,omitempty"`
-	SlotName              string       `json:"slot_name,omitempty"`
-	ProxyUser             string       `json:"proxy_user,omitempty"`
-	ProxyID               *int         `json:"-"`
-	ProxyAddressHash      string       `json:"-"`
-	LeaseID               string       `json:"lease_id,omitempty"`
-	LeaseUntil            *time.Time   `json:"lease_until,omitempty"`
-	LeaseRemainingMS      int64        `json:"lease_remaining_ms,omitempty"`
-	ServerTime            time.Time    `json:"server_time,omitempty"`
-	AssignmentVersion     int64        `json:"route_generation"`
-	CredentialGeneration  int64        `json:"credential_generation,omitempty"`
-	NetworkIdentityKey    string       `json:"network_identity_key,omitempty"`
-	ProfileEpoch          int64        `json:"profile_epoch"`
-	IdentityPolicyID      string       `json:"identity_policy_id,omitempty"`
-	IdentityPolicyVersion int          `json:"identity_policy_version,omitempty"`
-	IdentityPolicyHash    string       `json:"identity_policy_hash,omitempty"`
-	IdentityAction        string       `json:"identity_action,omitempty"`
-	EgressCountry         string       `json:"egress_country,omitempty"`
-	RouteChanged          bool         `json:"route_changed,omitempty"`
-	RenewSequence         int64        `json:"renew_sequence,omitempty"`
-	ReadyAfter            *time.Time   `json:"-"`
-	Replacement           *Replacement `json:"-"`
-}
-
-type Replacement struct {
-	Swapped            bool `json:"swapped"`
-	FailedProxyID      int  `json:"failed_proxy_id"`
-	FromProxyID        *int `json:"from_proxy_id,omitempty"`
-	ReplacementProxyID *int `json:"replacement_proxy_id,omitempty"`
-	CacheRefreshed     bool `json:"cache_refreshed"`
+	OK                    bool       `json:"ok"`
+	Ready                 bool       `json:"ready"`
+	Reason                string     `json:"reason,omitempty"`
+	ReasonCode            string     `json:"reason_code,omitempty"`
+	RetryAfterMS          int64      `json:"retry_after_ms,omitempty"`
+	ControlState          string     `json:"control_state,omitempty"`
+	WorkloadScope         string     `json:"workload_scope,omitempty"`
+	ProtocolVersion       int        `json:"protocol_version,omitempty"`
+	Role                  string     `json:"role"`
+	WorkerID              string     `json:"worker_id"`
+	WorkerInstanceID      string     `json:"worker_instance_id,omitempty"`
+	SlotName              string     `json:"slot_name,omitempty"`
+	ProxyUser             string     `json:"proxy_user,omitempty"`
+	ProxyID               *int       `json:"-"`
+	ProxyAddressHash      string     `json:"-"`
+	LeaseID               string     `json:"lease_id,omitempty"`
+	LeaseUntil            *time.Time `json:"lease_until,omitempty"`
+	LeaseRemainingMS      int64      `json:"lease_remaining_ms,omitempty"`
+	ServerTime            time.Time  `json:"server_time,omitempty"`
+	AssignmentVersion     int64      `json:"route_generation"`
+	CredentialGeneration  int64      `json:"credential_generation,omitempty"`
+	NetworkIdentityKey    string     `json:"network_identity_key,omitempty"`
+	ProfileEpoch          int64      `json:"profile_epoch"`
+	IdentityPolicyID      string     `json:"identity_policy_id,omitempty"`
+	IdentityPolicyVersion int        `json:"identity_policy_version,omitempty"`
+	IdentityPolicyHash    string     `json:"identity_policy_hash,omitempty"`
+	IdentityAction        string     `json:"identity_action,omitempty"`
+	EgressCountry         string     `json:"egress_country,omitempty"`
+	RouteChanged          bool       `json:"route_changed,omitempty"`
+	RenewSequence         int64      `json:"renew_sequence,omitempty"`
+	ReadyAfter            *time.Time `json:"-"`
 }
 
 type ReleaseResult struct {
@@ -365,7 +349,6 @@ type Interface interface {
 	Observe(context.Context, ObserveRequest) (ObservationResult, error)
 	CompleteTask(context.Context, CompleteTaskRequest) (CompleteTaskResult, error)
 	Report(context.Context, ReportRequest) (ReportResult, error)
-	Swap(context.Context, SwapRequest) (Assignment, error)
 	Release(context.Context, ReleaseRequest) (ReleaseResult, error)
 	Capacity(context.Context) (Capacity, error)
 	BusinessRunBudget(context.Context, string) (BusinessRunBudget, error)

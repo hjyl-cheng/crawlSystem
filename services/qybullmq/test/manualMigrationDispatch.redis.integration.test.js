@@ -7,6 +7,7 @@ import {
   DEFAULT_MANUAL_MIGRATION_BATCH_ID,
   dispatchManualMigrationChannel,
 } from "../src/manualMigrationDispatch.js";
+import { channelSnapshotPayload } from "../src/migrationDispatchPolicy.js";
 import { sourceSnapshotHash } from "../src/migrationSource.js";
 
 const redisUrl = String(process.env.MANAGED_JOB_TEST_REDIS_URL ?? "").trim();
@@ -161,6 +162,92 @@ test("manual migration preserves a conflicting completed Redis Job", {
     assert.equal(await persisted?.getState(), "completed");
     assert.equal(persisted?.name, "unrelated-channel-job");
     assert.deepEqual(persisted?.data, conflictingPayload);
+  } finally {
+    await worker.close().catch(() => {});
+    await events.close().catch(() => {});
+    await queue.obliterate({ force: true }).catch(() => {});
+    await queue.close();
+  }
+});
+
+test("a completed Job for the current Outbox is delivery and never allocates G+2", {
+  skip: redisUrl ? false : "MANAGED_JOB_TEST_REDIS_URL is not configured",
+}, async () => {
+  const url = new URL(redisUrl);
+  const queueName = `manual-migration-outbox-terminal-${randomUUID()}`;
+  const connection = {
+    host: url.hostname,
+    port: Number(url.port),
+    password: url.password || undefined,
+    maxRetriesPerRequest: null,
+  };
+  const queue = new Queue(queueName, { connection, prefix: "rota-fix-review" });
+  const events = new QueueEvents(queueName, { connection, prefix: "rota-fix-review" });
+  const worker = new Worker(queueName, async () => ({ ok: true }), {
+    connection,
+    prefix: "rota-fix-review",
+  });
+  const snapshot = sourceSnapshot();
+  const candidate = {
+    candidate_id: 91,
+    channel_id: snapshot.channel_id,
+    channel_url: snapshot.channel_url,
+    priority: 100,
+    status: "queued",
+    snapshot_dispatch_generation: 1,
+    pipeline_cycle_id: DEFAULT_MANUAL_MIGRATION_BATCH_ID,
+    source_json: snapshot.source_json,
+  };
+  const jobId = `channel-snapshot__${DEFAULT_MANUAL_MIGRATION_BATCH_ID}__${snapshot.channel_id}__g1`;
+  const payload = channelSnapshotPayload(candidate, DEFAULT_MANUAL_MIGRATION_BATCH_ID, {
+    minSubscriberCount: 1000,
+  });
+  const outbox = {
+    dispatch_id: "channel-snapshot-dispatch:91:g1:test",
+    aggregate_id: "91",
+    deterministic_job_id: jobId,
+    payload_json: payload,
+  };
+  let generationAllocations = 0;
+  let outboxMarks = 0;
+
+  try {
+    await Promise.all([queue.waitUntilReady(), events.waitUntilReady(), worker.waitUntilReady()]);
+    const persisted = await queue.add("channel-snapshot", payload, { jobId });
+    await persisted.waitUntilFinished(events, 5_000);
+    await worker.close();
+
+    const result = await dispatchManualMigrationChannel({
+      channelId: snapshot.channel_id,
+      candidateId: 42,
+      queue,
+      sourceLoader: async () => snapshot,
+      transaction: (action) => action({}),
+      targetPreparer: async () => ({
+        candidate,
+        batchId: DEFAULT_MANUAL_MIGRATION_BATCH_ID,
+        previousStatus: "failed",
+        shouldEnqueue: true,
+        intentId: 7,
+        outbox,
+      }),
+      terminalDispatchAdvancer: async () => {
+        generationAllocations += 1;
+        throw new Error("current Outbox terminal Job must not allocate another generation");
+      },
+      dbQuery: async (sql) => {
+        assert.match(sql, /UPDATE crawler\.proxy_job_dispatch_outbox/);
+        outboxMarks += 1;
+        return { rowCount: 1 };
+      },
+    });
+
+    assert.equal(result.created, false);
+    assert.equal(result.job.id, jobId);
+    assert.equal(result.job.state, "completed");
+    assert.equal(generationAllocations, 0);
+    assert.equal(outboxMarks, 1);
+    assert.equal(await (await queue.getJob(jobId))?.getState(), "completed");
   } finally {
     await worker.close().catch(() => {});
     await events.close().catch(() => {});

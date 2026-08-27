@@ -13,6 +13,7 @@ import (
 
 	"github.com/alpkeskin/rota/core/internal/background"
 	"github.com/alpkeskin/rota/core/internal/database"
+	"github.com/alpkeskin/rota/core/internal/proxycontrol"
 	"github.com/alpkeskin/rota/core/internal/repository"
 	"github.com/alpkeskin/rota/core/pkg/logger"
 )
@@ -34,6 +35,10 @@ func (p *proxyRouter) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	r, reject := p.userAuthMw.HandleRequest(r)
 	if reject != nil {
 		writeHTTPResponse(w, reject)
+		return
+	}
+	if username, _ := r.Context().Value(ProxyUserContextKey).(string); !p.upstream.proxyUserReady(username) {
+		http.Error(w, "managed proxy route is not ready", http.StatusServiceUnavailable)
 		return
 	}
 
@@ -279,25 +284,69 @@ func (s *Server) RetireProxyUser(ctx context.Context, username string) error {
 	return s.handler.RetireProxyUser(ctx, username)
 }
 
-// ActivateProxyUser fences the old credential generation and prepares the new
-// generation before the control plane advertises the Route as ready.
-func (s *Server) ActivateProxyUser(
+func (s *Server) RequireRouteActivationRegistry() {
+	if s != nil && s.handler != nil {
+		s.handler.requireRouteActivationRegistry()
+	}
+}
+
+func (s *Server) RebuildRouteActivationRegistry(
+	ctx context.Context,
+	entries []proxycontrol.RouteActivationRegistryEntry,
+) error {
+	if s == nil || s.handler == nil {
+		return fmt.Errorf("proxy data plane is unavailable")
+	}
+	return s.handler.rebuildRouteActivationRegistry(ctx, entries)
+}
+
+// BeginProxyUserActivation installs the Claim Token before preparing the new
+// credential. A committed Claim is monotonic and cannot be downgraded.
+func (s *Server) BeginProxyUserActivation(
 	ctx context.Context,
 	oldUsername string,
 	newUsername string,
 	expectedProxyID int,
-) error {
+	previousClaimID string,
+	claimID string,
+) (proxycontrol.RouteActivationBeginResult, error) {
 	if s == nil || s.userAuthMw == nil || s.handler == nil {
-		return fmt.Errorf("proxy data plane is unavailable")
+		return proxycontrol.RouteActivationBeginResult{}, fmt.Errorf("proxy data plane is unavailable")
+	}
+	result, err := s.handler.beginRouteActivation(newUsername, previousClaimID, claimID)
+	if err != nil || result.AlreadyCommitted {
+		return result, err
 	}
 	if strings.TrimSpace(oldUsername) != "" {
 		if err := s.RetireProxyUser(ctx, oldUsername); err != nil {
-			return fmt.Errorf("retire old proxy user: %w", err)
+			return proxycontrol.RouteActivationBeginResult{}, fmt.Errorf("retire old proxy user: %w", err)
 		}
 	}
 	if err := s.userAuthMw.PrepareManagedUser(ctx, newUsername, expectedProxyID); err != nil {
-		return fmt.Errorf("prepare new proxy user: %w", err)
+		return proxycontrol.RouteActivationBeginResult{}, fmt.Errorf("prepare new proxy user: %w", err)
 	}
-	s.handler.restoreProxyUser(newUsername)
-	return nil
+	return result, nil
+}
+
+func (s *Server) CommitProxyUserActivation(
+	_ context.Context,
+	username string,
+	claimID string,
+) error {
+	if s == nil || s.handler == nil {
+		return fmt.Errorf("proxy data plane is unavailable")
+	}
+	return s.handler.commitRouteActivation(username, claimID)
+}
+
+func (s *Server) RetireProxyUserIfClaim(
+	ctx context.Context,
+	username string,
+	claimID string,
+) (bool, error) {
+	if s == nil || s.handler == nil {
+		return false, fmt.Errorf("proxy data plane is unavailable")
+	}
+	s.userAuthMw.InvalidateUser(username)
+	return s.handler.retireProxyUserIfClaim(ctx, username, claimID)
 }

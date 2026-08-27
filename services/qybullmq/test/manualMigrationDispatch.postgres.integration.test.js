@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import test from "node:test";
 import pg from "pg";
+import { allocateChannelSnapshotDispatchOutbox } from "../src/channelSnapshotDispatch.js";
+import { channelSnapshotPayload } from "../src/migrationDispatchPolicy.js";
 import { prepareManualMigration } from "../src/manualMigrationDispatch.js";
 import { sourceSnapshotHash } from "../src/migrationSource.js";
 
@@ -77,10 +79,19 @@ test("Target SQL materializes one immutable idempotent intent without a Source w
               intent.snapshot_sha256,intent.dispatch_attempts,
               candidate.status,candidate.dispatch_batch_id,
               candidate.snapshot_dispatch_generation::text,
+              candidate.snapshot_active_job_id,candidate.snapshot_active_job_attempt,
+              outbox.dispatch_id AS outbox_dispatch_id,
+              outbox.deterministic_job_id AS outbox_job_id,
+              (outbox.payload_json->>'dispatch_generation')::int AS outbox_generation,
               candidate.source_json#>>'{migration_source,database}' AS source_database_metadata
        FROM crawler.migration_channel_intents intent
        JOIN crawler.channel_candidates candidate
          ON candidate.candidate_id=intent.target_candidate_id
+       JOIN crawler.proxy_job_dispatch_outbox outbox
+         ON outbox.aggregate_kind='channel_snapshot'
+        AND outbox.aggregate_id=candidate.candidate_id::text
+        AND (outbox.payload_json->>'dispatch_generation')::bigint
+              =candidate.snapshot_dispatch_generation
        WHERE intent.migration_intent_id=$1`,
       [first.intentId],
     );
@@ -94,7 +105,63 @@ test("Target SQL materializes one immutable idempotent intent without a Source w
       status: "queued",
       dispatch_batch_id: batchId,
       snapshot_dispatch_generation: "1",
+      snapshot_active_job_id: first.outbox.deterministic_job_id,
+      snapshot_active_job_attempt: 0,
+      outbox_dispatch_id: first.outbox.dispatch_id,
+      outbox_job_id: first.outbox.deterministic_job_id,
+      outbox_generation: 1,
       source_database_metadata: "migration_source_test",
+    });
+
+    const nextCandidate = {
+      ...first.candidate,
+      snapshot_dispatch_generation: 2,
+    };
+    const nextJobId = first.outbox.deterministic_job_id.replace(/__g1$/, "__g2");
+    const nextPayload = channelSnapshotPayload(nextCandidate, batchId, {
+      minSubscriberCount: 1000,
+    });
+    const winner = await allocateChannelSnapshotDispatchOutbox(client, {
+      candidate: nextCandidate,
+      expectedGeneration: 1,
+      previousJobId: first.outbox.deterministic_job_id,
+      migrationIntentId: first.intentId,
+      payload: nextPayload,
+      jobId: nextJobId,
+    });
+    const loser = await allocateChannelSnapshotDispatchOutbox(client, {
+      candidate: nextCandidate,
+      expectedGeneration: 1,
+      previousJobId: first.outbox.deterministic_job_id,
+      migrationIntentId: first.intentId,
+      payload: nextPayload,
+      jobId: nextJobId,
+    });
+    assert.equal(winner.created, true);
+    assert.equal(loser.created, false);
+    assert.equal(loser.outbox.dispatch_id, winner.outbox.dispatch_id);
+
+    const generationState = await client.query(
+      `SELECT intent.dispatch_attempts,candidate.snapshot_dispatch_generation::int AS generation,
+              candidate.snapshot_active_job_id,candidate.snapshot_active_job_attempt,
+              count(outbox.dispatch_id)::int AS outbox_count
+       FROM crawler.migration_channel_intents intent
+       JOIN crawler.channel_candidates candidate
+         ON candidate.candidate_id=intent.target_candidate_id
+       JOIN crawler.proxy_job_dispatch_outbox outbox
+         ON outbox.aggregate_kind='channel_snapshot'
+        AND outbox.aggregate_id=candidate.candidate_id::text
+       WHERE intent.migration_intent_id=$1
+       GROUP BY intent.dispatch_attempts,candidate.snapshot_dispatch_generation,
+                candidate.snapshot_active_job_id,candidate.snapshot_active_job_attempt`,
+      [first.intentId],
+    );
+    assert.deepEqual(generationState.rows[0], {
+      dispatch_attempts: 2,
+      generation: 2,
+      snapshot_active_job_id: nextJobId,
+      snapshot_active_job_attempt: 0,
+      outbox_count: 2,
     });
 
     await assert.rejects(

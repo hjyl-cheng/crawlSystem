@@ -42,6 +42,24 @@ function migrationRecoveryPayload(overrides = {}) {
   };
 }
 
+function channelSnapshotPayload(overrides = {}) {
+  return {
+    candidate_id: 42,
+    dispatch_generation: 4,
+    dispatch_batch_id: "manual-batch",
+    channel_id: "UCtest",
+    channel_url: "https://www.youtube.com/channel/UCtest",
+    crawl_mode: "full",
+    query_id: null,
+    query_text: "results.db migration",
+    pipeline_cycle_id: "manual-batch",
+    enforce_min_subscribers: true,
+    min_subscriber_count: 1000,
+    reject_if_no_recent_content: true,
+    ...overrides,
+  };
+}
+
 function deduplicatingQueue() {
   const jobs = new Map();
   return {
@@ -212,6 +230,33 @@ test("a Migration Recovery Outbox dispatches the whitelisted Channel recovery jo
     dispatch_status: "enqueued",
     dispatched_job_id: "channel-recovery__42__intent-1__g5",
   });
+});
+
+test("replaying a current Channel snapshot Outbox accepts a matching terminal Job", async () => {
+  const row = dispatch({
+    dispatch_id: "channel-snapshot-dispatch:42:g4",
+    aggregate_kind: "channel_snapshot",
+    aggregate_id: "42",
+    queue_registry_key: "youtube-channel-crawl",
+    deterministic_job_id: "channel-snapshot__manual-batch__UCtest__g4",
+    payload_json: channelSnapshotPayload({ query_id: 17, query_text: "creator search" }),
+  });
+  const repository = new InMemoryManagedJobDispatchRepository({ rows: [row] });
+  const queue = deduplicatingQueue();
+  queue.jobs.set(row.deterministic_job_id, {
+    id: row.deterministic_job_id,
+    name: "channel-snapshot",
+    data: row.payload_json,
+    async getState() { return "completed"; },
+  });
+
+  const result = await new ManagedJobOutboxDispatcher({
+    repository,
+    queues: { "youtube-channel-crawl": queue },
+  }).dispatchAvailable({ limit: 1 });
+
+  assert.deepEqual(result, { claimed: 1, sent: 1, failed: 0, dead: 0 });
+  assert.equal(repository.rows.get(row.dispatch_id).status, "sent");
 });
 
 test("a terminal Recovery Outbox update rolls back when the Candidate fence is lost", async () => {

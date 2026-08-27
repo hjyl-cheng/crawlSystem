@@ -80,10 +80,6 @@ func (*proxyControlStub) Report(context.Context, proxycontrol.ReportRequest) (pr
 	return proxycontrol.ReportResult{}, nil
 }
 
-func (*proxyControlStub) Swap(context.Context, proxycontrol.SwapRequest) (proxycontrol.Assignment, error) {
-	return proxycontrol.Assignment{}, nil
-}
-
 func (s *proxyControlStub) Release(_ context.Context, request proxycontrol.ReleaseRequest) (proxycontrol.ReleaseResult, error) {
 	s.release = request
 	return proxycontrol.ReleaseResult{}, nil

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -241,6 +242,40 @@ func uniqueCandidateCount(candidatesByRole map[string][]candidate) int {
 	return len(seen)
 }
 
+func assignedProxyIDs(ctx context.Context, tx pgx.Tx) (map[int]bool, error) {
+	rows, err := tx.Query(ctx, `SELECT proxy_id FROM proxy_running_slots WHERE proxy_id IS NOT NULL`)
+	if err != nil {
+		return nil, fmt.Errorf("load assigned proxy ids: %w", err)
+	}
+	defer rows.Close()
+	assigned := make(map[int]bool)
+	for rows.Next() {
+		var proxyID int
+		if err := rows.Scan(&proxyID); err != nil {
+			return nil, fmt.Errorf("scan assigned proxy id: %w", err)
+		}
+		assigned[proxyID] = true
+	}
+	return assigned, rows.Err()
+}
+
+func availableSlotRoles(ctx context.Context, tx pgx.Tx) (map[string]bool, error) {
+	rows, err := tx.Query(ctx, `SELECT DISTINCT role FROM proxy_running_slots`)
+	if err != nil {
+		return nil, fmt.Errorf("load available proxy roles: %w", err)
+	}
+	defer rows.Close()
+	roles := make(map[string]bool, 4)
+	for rows.Next() {
+		var role string
+		if err := rows.Scan(&role); err != nil {
+			return nil, fmt.Errorf("scan available proxy role: %w", err)
+		}
+		roles[strings.TrimSpace(role)] = true
+	}
+	return roles, rows.Err()
+}
+
 func loadRunningSlots(ctx context.Context, tx pgx.Tx) ([]runningSlot, error) {
 	rows, err := tx.Query(ctx, `
 		SELECT s.slot_name, s.role, s.slot_no, s.pool_id, s.user_id, u.username, s.proxy_id,
@@ -342,9 +377,10 @@ func transitionLeaseOwnedIdleSlot(
 		    rotation_deadline_at=NULL,
 		    route_activation_old_username=CASE
 		      WHEN $2::int IS NULL THEN NULL ELSE NULLIF($8,'')
-		    END,
-		    route_activation_claim_id=NULL,route_activation_claim_until=NULL,
-		    updated_at=NOW()
+			    END,
+			    route_activation_claim_id=NULL,route_activation_claim_until=NULL,
+			    route_activation_previous_claim_id=NULL,
+			    updated_at=NOW()
 		WHERE slot_name=$1 AND current_lease_id=$6 AND active_task_id IS NULL
 		  AND assignment_version=$7
 	`, slot.Name, desired, networkIdentityKey, profileEpoch, controlState,

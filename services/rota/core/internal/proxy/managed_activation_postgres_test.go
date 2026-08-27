@@ -65,6 +65,10 @@ func TestActivateProxyUserRetiresOldTunnelsAndWarmsExactNewRoute(t *testing.T) {
 	)
 	handler := NewUpstreamProxyHandler(nil, nil, &models.RotationSettings{}, log)
 	server := &Server{userAuthMw: middleware, handler: handler}
+	server.RequireRouteActivationRegistry()
+	if err := server.RebuildRouteActivationRegistry(ctx, nil); err != nil {
+		t.Fatalf("initialize Route activation registry: %v", err)
+	}
 
 	oldClient, oldPeer := net.Pipe()
 	oldUpstream, oldUpstreamPeer := net.Pipe()
@@ -84,10 +88,13 @@ func TestActivateProxyUserRetiresOldTunnelsAndWarmsExactNewRoute(t *testing.T) {
 
 	activateCtx, cancel := context.WithTimeout(ctx, time.Second)
 	defer cancel()
-	if err := server.ActivateProxyUser(
-		activateCtx, "managed-old", "managed-new", targetProxyID,
+	if _, err := server.BeginProxyUserActivation(
+		activateCtx, "managed-old", "managed-new", targetProxyID, "", "claim-1",
 	); err != nil {
 		t.Fatalf("activate managed proxy user: %v", err)
+	}
+	if err := server.CommitProxyUserActivation(activateCtx, "managed-new", "claim-1"); err != nil {
+		t.Fatalf("commit managed proxy user activation: %v", err)
 	}
 	select {
 	case <-oldDone:
@@ -104,8 +111,13 @@ func TestActivateProxyUserRetiresOldTunnelsAndWarmsExactNewRoute(t *testing.T) {
 	if err := server.RetireProxyUser(ctx, "managed-new"); err != nil {
 		t.Fatalf("retire new proxy user after uncertain Finalize: %v", err)
 	}
-	if err := server.ActivateProxyUser(ctx, "", "managed-new", targetProxyID); err != nil {
+	if _, err := server.BeginProxyUserActivation(
+		ctx, "", "managed-new", targetProxyID, "", "claim-2",
+	); err != nil {
 		t.Fatalf("reactivate proxy user after transient Finalize failure: %v", err)
+	}
+	if err := server.CommitProxyUserActivation(ctx, "managed-new", "claim-2"); err != nil {
+		t.Fatalf("commit reactivated proxy user: %v", err)
 	}
 	retryClient, retryPeer := net.Pipe()
 	retryUpstream, retryUpstreamPeer := net.Pipe()
@@ -122,7 +134,9 @@ func TestActivateProxyUserRetiresOldTunnelsAndWarmsExactNewRoute(t *testing.T) {
 	if _, err := db.Exec(ctx, `INSERT INTO pool_proxies (pool_id,proxy_id) VALUES ($1,$2)`, poolID, otherProxyID); err != nil {
 		t.Fatalf("add illegal second proxy: %v", err)
 	}
-	if err := server.ActivateProxyUser(ctx, "", "managed-new", targetProxyID); err == nil {
+	if _, err := server.BeginProxyUserActivation(
+		ctx, "", "managed-new", targetProxyID, "claim-2", "claim-3",
+	); err == nil {
 		t.Fatal("activation accepted a managed Pool with more than one route")
 	}
 }

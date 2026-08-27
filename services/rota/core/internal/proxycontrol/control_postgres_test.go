@@ -358,14 +358,16 @@ func TestPostgresProxyControlFullFlow(t *testing.T) {
 		t.Fatalf("duplicate report = %+v, err = %v", duplicate, err)
 	}
 
-	swapped, err := manager.Swap(ctx, SwapRequest{
-		WorkerID:          claim.WorkerID,
-		LeaseID:           claim.LeaseID,
-		AssignmentVersion: claim.AssignmentVersion,
-		FailedProxyID:     firstID,
-	})
+	dataPlane := &idleRouteDataPlaneStub{}
+	if err := manager.SetDataPlaneController(dataPlane); err != nil {
+		t.Fatalf("initialize data plane: %v", err)
+	}
+	if _, err := manager.reconcile(ctx); err != nil {
+		t.Fatalf("reconcile unhealthy idle Route: %v", err)
+	}
+	swapped, err := manager.loadAssignment(ctx, pool, claim.SlotName)
 	if err != nil {
-		t.Fatalf("swap proxy: %v", err)
+		t.Fatalf("load replaced Route: %v", err)
 	}
 	if !swapped.Ready || swapped.ProxyID == nil || *swapped.ProxyID != secondID ||
 		swapped.AssignmentVersion != claim.AssignmentVersion+1 || swapped.ProxyUser == claim.ProxyUser {
@@ -435,6 +437,70 @@ func TestPostgresProxyControlFullFlow(t *testing.T) {
 	defer invalidatedMu.Unlock()
 	if len(invalidated) == 0 {
 		t.Fatal("no proxy user cache invalidations were emitted")
+	}
+}
+
+func TestExecutionLockedRouteCannotChangeDuringReconcile(t *testing.T) {
+	manager, pool := newProxyControlPostgres(t)
+	ctx := context.Background()
+
+	firstProxyID := insertControlProxy(t, pool, "legacy-swap-active.example:8080", 10)
+	_ = insertControlProxy(t, pool, "legacy-swap-reserve.example:8080", 20)
+	manager.SetCacheInvalidator(func(string) {})
+	if err := manager.syncResources(ctx); err != nil {
+		t.Fatalf("sync managed resources: %v", err)
+	}
+	if _, err := manager.reconcile(ctx); err != nil {
+		t.Fatalf("reconcile initial assignment: %v", err)
+	}
+	lease, err := manager.Claim(ctx, testClaimRequest(
+		"claim-legacy-swap-active", "worker-legacy-swap-active", "instance-legacy-swap-active",
+	))
+	if err != nil {
+		t.Fatalf("claim initial Route: %v", err)
+	}
+	task, err := manager.BeginTask(ctx, BeginTaskRequest{
+		SlotName: lease.SlotName, WorkerID: lease.WorkerID,
+		WorkerInstanceID: lease.WorkerInstanceID, LeaseID: lease.LeaseID,
+		RouteGeneration:  lease.AssignmentVersion,
+		AttemptRequestID: "attempt-legacy-swap-active",
+		BusinessRunID:    "business-legacy-swap-active",
+		JobExecutionID:   "youtube-channel-crawl:legacy-swap-active:1:1",
+		TaskKind:         TaskKindChannelFull,
+	})
+	if err != nil {
+		t.Fatalf("begin active Task: %v", err)
+	}
+
+	if _, err := pool.Exec(ctx, `
+		UPDATE proxies
+		SET status='failed',base_health_status='failed',youtube_health_status='not_run',
+		    health_generation=health_generation+1,updated_at=NOW()
+		WHERE id=$1
+	`, firstProxyID); err != nil {
+		t.Fatalf("mark active Route unhealthy: %v", err)
+	}
+	if _, err := manager.reconcile(ctx); err != nil {
+		t.Fatalf("reconcile Execution-Locked Slot: %v", err)
+	}
+
+	var persistedProxyID int
+	var persistedGeneration int64
+	var persistedTaskID string
+	if err := pool.QueryRow(ctx, `
+		SELECT proxy_id,assignment_version,active_task_id
+		FROM proxy_running_slots WHERE slot_name=$1
+	`, lease.SlotName).Scan(
+		&persistedProxyID, &persistedGeneration, &persistedTaskID,
+	); err != nil {
+		t.Fatalf("load Execution-Locked Slot after legacy Swap: %v", err)
+	}
+	if persistedProxyID != firstProxyID || persistedGeneration != lease.AssignmentVersion ||
+		persistedTaskID != task.TaskID {
+		t.Fatalf(
+			"reconciliation changed Execution-Locked Slot: proxy=%d generation=%d task=%q",
+			persistedProxyID, persistedGeneration, persistedTaskID,
+		)
 	}
 }
 
@@ -675,6 +741,7 @@ CREATE TABLE proxy_running_slots (
 	route_activation_old_username TEXT,
 	route_activation_claim_id TEXT,
 	route_activation_claim_until TIMESTAMPTZ,
+	route_activation_previous_claim_id TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   UNIQUE (role, slot_no)

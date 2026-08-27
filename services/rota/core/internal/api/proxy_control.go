@@ -97,16 +97,6 @@ func (h *ProxyControlHandler) Report(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (h *ProxyControlHandler) Swap(w http.ResponseWriter, r *http.Request) {
-	h.command(w, r, func() (any, error) {
-		var request proxycontrol.SwapRequest
-		if err := decodeControlJSON(r, &request); err != nil {
-			return nil, err
-		}
-		return h.control.Swap(r.Context(), request)
-	})
-}
-
 func (h *ProxyControlHandler) Release(w http.ResponseWriter, r *http.Request) {
 	h.command(w, r, func() (any, error) {
 		var request proxycontrol.ReleaseRequest

@@ -22,6 +22,9 @@ test("Rota Worker V2 deployment extracts the complete additive integration schem
   assert.match(block, /ADD COLUMN IF NOT EXISTS snapshot_active_job_id TEXT/);
   assert.match(block, /ADD COLUMN IF NOT EXISTS snapshot_active_job_attempt INTEGER/);
   assert.match(block, /channel_candidates_snapshot_active_job_check/);
+  assert.match(block, /snapshot_active_job_attempt >= 0/);
+  assert.match(block, /ux_crawler_proxy_job_dispatch_outbox_channel_snapshot_generation/);
+  assert.match(block, /payload_json->>'dispatch_generation'/);
   assert.match(block, /MAX\(intent\.dispatch_attempts\)/);
   assert.match(block, /LEFT JOIN crawler\.migration_channel_intents AS intent/);
   assert.match(
@@ -45,6 +48,8 @@ test("Crawler bootstrap includes the Candidate attempt Fence shape", async () =>
   assert.match(bootstrap, /snapshot_active_job_id text/);
   assert.match(bootstrap, /snapshot_active_job_attempt integer/);
   assert.match(bootstrap, /channel_candidates_snapshot_active_job_check/);
+  assert.match(bootstrap, /snapshot_active_job_attempt >= 0/);
+  assert.match(bootstrap, /ux_crawler_proxy_job_dispatch_outbox_channel_snapshot_generation/);
   assert.match(bootstrap, /channel_execution_attempts[\s\S]*dispatch_generation bigint/);
 });
 

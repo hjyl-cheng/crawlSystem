@@ -11,6 +11,7 @@ import {
 import { closeDb, query, withTransaction } from "../src/db.js";
 import { dynamicRotaProxyConfig } from "../src/fixedProxyConfig.js";
 import { resolveWorkerIdentityPolicy } from "../src/identityPolicyCatalog.js";
+import { buildManagedDiagnosticJob } from "../src/managedDiagnosticJob.js";
 import { closeProxyControlClient, proxyControlClient } from "../src/proxyControlClient.js";
 import { RotaSlotAdapter } from "../src/rotaSlotAdapter.js";
 import { closeYoutubeJs } from "../src/youtubeJs.js";
@@ -137,15 +138,11 @@ const targetScope = options.shardCount > 1
 let results = [];
 try {
   await rotaSlot.start();
-  const job = {
-    id: `comment-backfill:${targetScope}:${Date.now()}`,
-    queueName: "youtube-channel-crawl",
-    attemptsMade: 0,
-    data: {
-      channel_id: targets[0]?.channel_id ?? "comment-backfill",
-      run_id: `comment-backfill:${targetScope}`,
-    },
-  };
+  const job = buildManagedDiagnosticJob({
+    kind: "comment_backfill",
+    channelId: targets[0]?.channel_id ?? "comment-backfill",
+    runId: `comment-backfill:${targetScope}`,
+  });
   await rotaSlot.executeJob(job, {
     prepare: async () => ({
       kind: "ready",

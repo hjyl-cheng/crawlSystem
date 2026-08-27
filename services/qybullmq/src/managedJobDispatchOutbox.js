@@ -1,18 +1,34 @@
 import { canonicalJsonEqual } from "./canonicalJson.js";
 
 const JOB_NAMES = Object.freeze({
+  channel_snapshot: "channel-snapshot",
   discover_page: "discover-page",
   migration_retry: "channel-snapshot-recovery",
   query_quality_chunk: "score-query-quality",
 });
 
 const QUEUE_KEYS = Object.freeze({
+  channel_snapshot: "youtube-channel-crawl",
   discover_page: "youtube-discover-page",
   migration_retry: "youtube-channel-crawl",
   query_quality_chunk: "youtube-query-quality",
 });
 
 const PAYLOAD_KEYS = Object.freeze({
+  channel_snapshot: Object.freeze([
+    "candidate_id",
+    "channel_id",
+    "channel_url",
+    "crawl_mode",
+    "dispatch_batch_id",
+    "dispatch_generation",
+    "enforce_min_subscribers",
+    "min_subscriber_count",
+    "pipeline_cycle_id",
+    "query_id",
+    "query_text",
+    "reject_if_no_recent_content",
+  ]),
   discover_page: Object.freeze(["dispatch_generation", "intent_schema_version", "page_id"]),
   query_quality_chunk: Object.freeze([
     "dispatch_generation", "intent_schema_version", "quality_chunk_id",
@@ -90,6 +106,23 @@ function assertDispatchPayload(row) {
       throw new TypeError("managed dispatch query_quality_chunk payload has an unsupported schema version");
     }
     positiveInteger(payload.dispatch_generation, "dispatch_generation");
+    return payload;
+  }
+
+  if (aggregateKind === "channel_snapshot") {
+    if (positiveInteger(payload.candidate_id, "candidate_id") !== Number(row.aggregate_id)) {
+      throw new TypeError("managed dispatch channel_snapshot payload conflicts with aggregate_id");
+    }
+    positiveInteger(payload.dispatch_generation, "dispatch_generation");
+    positiveInteger(payload.min_subscriber_count, "min_subscriber_count");
+    if (payload.query_id !== null) positiveInteger(payload.query_id, "query_id");
+    for (const field of [
+      "channel_id", "channel_url", "dispatch_batch_id", "pipeline_cycle_id", "query_text",
+    ]) requiredText(payload[field], field);
+    if (payload.crawl_mode !== "full" || payload.enforce_min_subscribers !== true
+        || typeof payload.reject_if_no_recent_content !== "boolean") {
+      throw new TypeError("managed dispatch channel_snapshot payload has invalid controls");
+    }
     return payload;
   }
 
@@ -301,6 +334,27 @@ async function updateAggregate(client, row, { status, jobId = null, reason = nul
     }
     return;
   }
+  if (row.aggregate_kind === "channel_snapshot") {
+    if (status !== "terminal") return;
+    const candidate = await client.query(
+      `UPDATE crawler.channel_candidates
+       SET status='failed',error_message=$2,validation_finished_at=now(),
+           snapshot_active_job_id=NULL,snapshot_active_job_attempt=NULL,updated_at=now()
+       WHERE candidate_id=$1 AND snapshot_dispatch_generation=$3
+         AND snapshot_active_job_id=$4 AND snapshot_active_job_attempt=0
+         AND status='queued'`,
+      [
+        Number(row.aggregate_id),
+        reason,
+        Number(row.payload_json?.dispatch_generation),
+        row.deterministic_job_id,
+      ],
+    );
+    if (candidate.rowCount !== 1) {
+      throw new Error(`Channel snapshot dispatch ${row.dispatch_id} lost its Candidate fence`);
+    }
+    return;
+  }
   throw new Error(`unsupported managed aggregate kind: ${row.aggregate_kind}`);
 }
 
@@ -345,6 +399,12 @@ export class PostgresManagedJobDispatchRepository {
            FROM crawler.migration_retry_intents intent
            JOIN crawler.channel_candidates candidate ON candidate.candidate_id=intent.candidate_id
            WHERE intent.retry_intent_id=$1`,
+          [row.aggregate_id],
+        );
+        row.job_priority = candidate.rows[0]?.priority ?? null;
+      } else if (row.aggregate_kind === "channel_snapshot") {
+        const candidate = await client.query(
+          "SELECT priority FROM crawler.channel_candidates WHERE candidate_id=$1",
           [row.aggregate_id],
         );
         row.job_priority = candidate.rows[0]?.priority ?? null;

@@ -247,7 +247,7 @@ CREATE TABLE IF NOT EXISTS crawler.channel_candidates (
     OR (
       snapshot_active_job_id IS NOT NULL
       AND snapshot_active_job_attempt IS NOT NULL
-      AND snapshot_active_job_attempt > 0
+      AND snapshot_active_job_attempt >= 0
     )
   ),
   UNIQUE (dispatch_batch_id, channel_id)
@@ -506,7 +506,7 @@ CHECK (
   OR (
     snapshot_active_job_id IS NOT NULL
     AND snapshot_active_job_attempt IS NOT NULL
-    AND snapshot_active_job_attempt > 0
+    AND snapshot_active_job_attempt >= 0
   )
 );
 
@@ -800,6 +800,12 @@ CREATE TABLE IF NOT EXISTS crawler.proxy_job_dispatch_outbox (
 
 CREATE INDEX IF NOT EXISTS idx_crawler_proxy_job_dispatch_outbox_pending
 ON crawler.proxy_job_dispatch_outbox (status,next_attempt_at,created_at);
+
+CREATE UNIQUE INDEX IF NOT EXISTS ux_crawler_proxy_job_dispatch_outbox_channel_snapshot_generation
+ON crawler.proxy_job_dispatch_outbox (
+  aggregate_id,((payload_json->>'dispatch_generation')::BIGINT)
+)
+WHERE aggregate_kind='channel_snapshot';
 
 CREATE OR REPLACE FUNCTION crawler.guard_managed_query_page_state()
 RETURNS TRIGGER

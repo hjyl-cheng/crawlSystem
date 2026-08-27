@@ -112,7 +112,11 @@ export async function verifyRotaWorkerV2Schema(client) {
          WHERE conrelid=to_regclass('crawler.channel_candidates')
            AND conname='channel_candidates_snapshot_active_job_check'
            AND contype='c' AND convalidated
+           AND pg_get_constraintdef(oid) LIKE '%snapshot_active_job_attempt >= 0%'
        ) AS candidate_snapshot_active_job_check,
+       to_regclass(
+         'crawler.ux_crawler_proxy_job_dispatch_outbox_channel_snapshot_generation'
+       ) IS NOT NULL AS channel_snapshot_outbox_generation_key,
        EXISTS (
          SELECT 1 FROM information_schema.columns
          WHERE table_schema='crawler' AND table_name='channel_execution_attempts'

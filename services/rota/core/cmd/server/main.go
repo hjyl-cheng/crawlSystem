@@ -191,7 +191,9 @@ func run() error {
 	}()
 
 	// Set proxy server reference in API server for reload functionality
-	apiServer.SetProxyServer(proxyServer)
+	if err := apiServer.SetProxyServer(proxyServer); err != nil {
+		return fmt.Errorf("initialize managed proxy data plane: %w", err)
+	}
 
 	// Start servers in goroutines
 	errChan := make(chan error, 2)
