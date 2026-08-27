@@ -12,7 +12,7 @@ import {
   PUBLICATION_TIME_CLASSIFIER_VERSION,
 } from "./publicationTimeEvidence.js";
 
-export const INCREMENTAL_VIDEO_ACTIVITY_POLICY_VERSION = "incremental-video-activity-v4";
+export const INCREMENTAL_VIDEO_ACTIVITY_POLICY_VERSION = "incremental-video-activity-v5";
 
 function boundedPositiveInteger(value, fallback, maximum) {
   const parsed = Number(value);

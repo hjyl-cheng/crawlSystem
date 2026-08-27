@@ -330,7 +330,7 @@ test("Incremental lifecycle can prove dormancy after a complete paginated scan",
   assert.equal(result.evidence_scan_page_count, 2);
   assert.equal(result.evidence_scan_truncated_count, 0);
   assert.equal(result.evidence_scan_stop_reason, "complete");
-  assert.equal(result.policy_version, "incremental-video-activity-v4");
+  assert.equal(result.policy_version, "incremental-video-activity-v5");
   assert.equal(
     fixture.queries.filter(({ sql }) => sql.startsWith("DECLARE video_activity_evidence_cursor"))
       .length,

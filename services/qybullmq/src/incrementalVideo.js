@@ -752,6 +752,19 @@ function scannedVideoDispositionWork(entries, priorByVideoId, observedAt, {
   return { workEntries, pendingDeferredVideoIds };
 }
 
+function videoActivityEvidence(videoIdValue, contentTypeValue, publication, facts = null) {
+  const videoId = text(videoIdValue);
+  if (!videoId) return null;
+  const contentType = text(contentTypeValue);
+  return {
+    source_content_id: videoId,
+    content_type: ["video", "short", "live"].includes(contentType) ? contentType : "video",
+    ...normalizePublicationEvidence(publication),
+    live_ended_at: facts?.live_ended_at ?? null,
+    duration_seconds: facts?.duration_seconds ?? null,
+  };
+}
+
 function currentRunActivityEvidence(
   commandEntries,
   scanEntries,
@@ -762,18 +775,10 @@ function currentRunActivityEvidence(
   for (const entry of Array.isArray(commandEntries) ? commandEntries : []) {
     const videoId = text(entry?.video_id);
     if (!videoId) continue;
-    evidenceByVideoId.set(videoId, {
-      source_content_id: videoId,
-      content_type: ["video", "short", "live"].includes(text(entry?.content_type))
-        ? text(entry.content_type)
-        : "video",
-      published_at: entry?.published_at ?? null,
-      published_at_status: entry?.published_at_status ?? "unresolved",
-      published_at_precision: entry?.published_at_precision ?? "unknown",
-      published_at_source: entry?.published_at_source ?? null,
-      live_ended_at: entry?.live_ended_at ?? null,
-      duration_seconds: entry?.duration_seconds ?? null,
-    });
+    evidenceByVideoId.set(
+      videoId,
+      videoActivityEvidence(videoId, entry?.content_type, entry, entry),
+    );
   }
   for (const evidence of Array.isArray(storedActivityEvidence) ? storedActivityEvidence : []) {
     const videoId = text(evidence?.source_content_id);
@@ -2008,16 +2013,17 @@ async function applyDiscovery({
       published_at_precision: current.publishedAtPrecision,
       published_at_source: current.publishedAtSource,
     });
-    activityEvidence.push({
-      source_content_id: entry.id,
-      content_type: current.contentType,
-      published_at: current.publishedAt,
-      published_at_status: current.publishedAtStatus,
-      published_at_precision: current.publishedAtPrecision,
-      published_at_source: current.publishedAtSource,
-      live_ended_at: current.facts?.live_ended_at ?? null,
-      duration_seconds: current.facts?.duration_seconds ?? null,
-    });
+    activityEvidence.push(videoActivityEvidence(
+      entry.id,
+      current.contentType ?? current.classification?.content_type ?? entry.content_type,
+      {
+        published_at: current.publishedAt,
+        published_at_status: current.publishedAtStatus,
+        published_at_precision: current.publishedAtPrecision,
+        published_at_source: current.publishedAtSource,
+      },
+      current.facts,
+    ));
   }
   for (const entry of firstSeenEntries) {
     const capture = captures.get(entry.id) ?? { detail: null, error: null };
@@ -2034,6 +2040,17 @@ async function applyDiscovery({
     const dispositionSummary = videoDispositionSummary(entry.id, current.disposition);
     if (entry.disposition_recheck) recheckDispositions.push(dispositionSummary);
     else dispositions.push(dispositionSummary);
+    activityEvidence.push(videoActivityEvidence(
+      entry.id,
+      current.contentType ?? current.classification?.content_type ?? entry.content_type,
+      {
+        published_at: current.publishedAt,
+        published_at_status: current.publishedAtStatus,
+        published_at_precision: current.publishedAtPrecision,
+        published_at_source: current.publishedAtSource,
+      },
+      current.facts,
+    ));
     if (current.disposition.kind === "deferred") {
       if (entry.disposition_recheck) recheckDeferredVideoIds.push(entry.id);
       else unresolvedVideoIds.push(entry.id);
@@ -2056,16 +2073,6 @@ async function applyDiscovery({
       published_at_status: current.publishedAtStatus,
       published_at_precision: current.publishedAtPrecision,
       published_at_source: current.publishedAtSource,
-    });
-    activityEvidence.push({
-      source_content_id: entry.id,
-      content_type: current.contentType,
-      published_at: current.publishedAt,
-      published_at_status: current.publishedAtStatus,
-      published_at_precision: current.publishedAtPrecision,
-      published_at_source: current.publishedAtSource,
-      live_ended_at: current.facts?.live_ended_at ?? null,
-      duration_seconds: current.facts?.duration_seconds ?? null,
     });
   }
   const discoveredVideoIds = [...new Set(
@@ -2349,13 +2356,12 @@ export async function applyIncrementalVideoDetail(client, {
     engagementChanged,
     changeProbability,
     accessStatus: facts.access_status,
-    activityEvidence: storageAction.kind === "upsert" ? {
-      source_content_id: row.source_content_id,
-      content_type: storageAction.content_type,
-      ...publication,
-      live_ended_at: facts.live_ended_at,
-      duration_seconds: facts.duration_seconds,
-    } : null,
+    activityEvidence: videoActivityEvidence(
+      row.source_content_id,
+      storageAction.content_type ?? row.content_type,
+      publication,
+      facts,
+    ),
   };
 }
 

@@ -3463,6 +3463,75 @@ test("a page-out due recheck reactivates a dormant channel beyond the history li
   assert.equal(activityEvidence.relation_counts.inside, 1);
 });
 
+test("a page-out deferred detail uses recent publication evidence without storing content", async () => {
+  const fixture = databaseFixture();
+  fixture.state.channelStatus = "dormant";
+  for (const row of fixture.state.contents) {
+    row.published_at = "2026-01-01T00:00:00.000Z";
+    row.published_at_status = "exact";
+    row.published_at_precision = "second";
+    row.published_at_source = "test_existing_detail";
+  }
+  fixture.state.cursorAnchors = ["known-anchor"];
+  const recheckId = "page-out-access-unresolved";
+  fixture.state.candidateRows.push({
+    candidate_id: "1",
+    run_id: "incremental:prior-page-out-access-unresolved",
+    channel_id: "UCvideo",
+    source_content_id: recheckId,
+    disposition: "deferred",
+    next_attempt_at: "2026-07-19T00:00:00.000Z",
+    result_json: {
+      flat: { id: recheckId, title: "Access unresolved" },
+      disposition: { reason_code: "access_login_required" },
+    },
+    first_seen_ledger_status: "not_applicable",
+    first_seen_ledger_observation_id: null,
+  });
+
+  const result = await executeIncrementalVideo({
+    plan: plan(),
+    runId: "incremental:page-out-access-unresolved",
+    startedAt: "2026-07-20T00:00:00.000Z",
+    query: fixture.query,
+    withTransaction: fixture.withTransaction,
+    getChannelSnapshot: async () => ({
+      async scanUploads() {
+        return {
+          playlist_id: "UUvideo",
+          entries: [{ id: "known-anchor", position: 1, content_type: "video", title: "Anchor" }],
+          pages: 1,
+          item_count: 1,
+          parse_gap_count: 0,
+          anchor_matched: true,
+          matched_anchor_id: "known-anchor",
+          stop_reason: "anchor_matched",
+          terminal_reason: "anchor_matched",
+          complete: true,
+          raw: { engine: "youtubei.js@test" },
+        };
+      },
+    }),
+    fetchDetail: async (videoId) => ({
+      ...detail(videoId, 100),
+      access_status: "login_required",
+      availability: "needs_auth",
+      playability_status: "LOGIN_REQUIRED",
+    }),
+  });
+
+  assert.equal(
+    fixture.state.contents.some((row) => row.source_content_id === recheckId),
+    false,
+  );
+  assert.equal(fixture.state.candidateRows[0].disposition, "deferred");
+  assert.equal(result.lifecycle_status, "active");
+  assert.equal(fixture.state.channelStatus, "active");
+  const activityEvidence = fixture.state.outbox[0].payload.activity_evidence;
+  assert.equal(activityEvidence.recent_published_content_count, 1);
+  assert.equal(activityEvidence.relation_counts.inside, 1);
+});
+
 test("a Recent Sampling detail reactivates a dormant channel beyond the history limit", async () => {
   const fixture = databaseFixture();
   fixture.state.channelStatus = "dormant";
@@ -3534,6 +3603,95 @@ test("a Recent Sampling detail reactivates a dormant channel beyond the history 
     fetchDetail: async (videoId) => detail(videoId, 100),
   });
 
+  assert.equal(result.lifecycle_status, "active");
+  assert.equal(fixture.state.channelStatus, "active");
+  const activityEvidence = fixture.state.outbox[0].payload.activity_evidence;
+  assert.equal(activityEvidence.evidence_scan_stop_reason, "row_limit");
+  assert.equal(activityEvidence.recent_published_content_count, 1);
+  assert.equal(activityEvidence.relation_counts.inside, 1);
+});
+
+test("a Recent Sampling access-only update still contributes recent publication evidence", async () => {
+  const fixture = databaseFixture();
+  fixture.state.channelStatus = "dormant";
+  fixture.state.contents = Array.from({ length: 1001 }, (_, index) => ({
+    content_key: `UCvideo:video:old-${String(index).padStart(4, "0")}`,
+    channel_id: "UCvideo",
+    source_content_id: `old-${String(index).padStart(4, "0")}`,
+    content_type: "video",
+    content_type_source: "test_existing_detail",
+    published_at: "2026-01-01T00:00:00.000Z",
+    published_at_status: "exact",
+    published_at_precision: "second",
+    published_at_source: "test_existing_detail",
+    last_seen_at: "2026-07-20T00:00:00.000Z",
+    view_count: 1,
+    player_last_observed_at: "2026-07-20T00:00:00.000Z",
+    next_last_observed_at: null,
+    video_change_probability: 0,
+    like_count: null,
+    comment_count: null,
+  }));
+  fixture.state.cursorAnchors = ["old-0000"];
+  const sampledId = "zz-recent-access-only";
+  const sampledContentKey = `UCvideo:video:${sampledId}`;
+  fixture.state.contents.push({
+    content_key: sampledContentKey,
+    channel_id: "UCvideo",
+    source_content_id: sampledId,
+    content_type: "video",
+    content_type_source: "test_existing_detail",
+    published_at: null,
+    published_at_status: "unresolved",
+    published_at_precision: "unknown",
+    published_at_source: null,
+    last_seen_at: "2026-07-20T00:00:00.000Z",
+    view_count: null,
+    player_last_observed_at: null,
+    next_last_observed_at: null,
+    video_change_probability: null,
+    like_count: null,
+    comment_count: null,
+  });
+  fixture.state.enrichPending.add(sampledContentKey);
+
+  const result = await executeIncrementalVideo({
+    plan: {
+      ...plan(),
+      capacity: { ...plan().capacity, player_cap: 1, next_cap: 0 },
+    },
+    runId: "incremental:recent-sampling-access-only",
+    startedAt: "2026-07-20T00:00:00.000Z",
+    query: fixture.query,
+    withTransaction: fixture.withTransaction,
+    getChannelSnapshot: async () => ({
+      async scanUploads() {
+        return {
+          playlist_id: "UUvideo",
+          entries: [{ id: "old-0000", position: 1, content_type: "video", title: "Anchor" }],
+          pages: 1,
+          item_count: 1,
+          parse_gap_count: 0,
+          anchor_matched: true,
+          matched_anchor_id: "old-0000",
+          stop_reason: "anchor_matched",
+          terminal_reason: "anchor_matched",
+          complete: true,
+          raw: { engine: "youtubei.js@test" },
+        };
+      },
+    }),
+    fetchDetail: async (videoId) => ({
+      ...detail(videoId, 100),
+      access_status: "private",
+      availability: "private",
+    }),
+  });
+
+  assert.equal(
+    fixture.state.contents.find((row) => row.source_content_id === sampledId).access_status,
+    "private",
+  );
   assert.equal(result.lifecycle_status, "active");
   assert.equal(fixture.state.channelStatus, "active");
   const activityEvidence = fixture.state.outbox[0].payload.activity_evidence;

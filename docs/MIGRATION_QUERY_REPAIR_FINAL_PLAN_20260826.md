@@ -472,6 +472,7 @@ Publication 继续拥有自己的 `video-window-v1`。Migration 使用独立 pol
 25. 每次游标声明和 `FETCH` 都按剩余墙钟预算设置事务局部 `statement_timeout`；`57014` 通过 SAVEPOINT 恢复为不完整证据，禁止休眠，同时保持外围 Incremental 事务可继续使用。慢速末页即使已经返回全部行，也不能在预算耗尽后被标成完整。
 26. 当前轮 Detail 证据保留 `live_ended_at` 与 `duration_seconds`，已结束直播按回放参与发布时间判断；页外 Candidate 重试和 Recent Sampling 成功取得的 Detail 也直接进入本轮生命周期证据，历史扫描截断时不会遗漏明确近期内容。
 27. 隔离 PostgreSQL 16.14 已实际验证参数化游标、`READ COMMITTED` 跨 `FETCH` 一致快照、锁等待触发 `statement_timeout`、SAVEPOINT 恢复以及恢复后同一事务继续查询；对应集成测试不依赖生产数据库。
+28. `incremental-video-activity-v5` 将 Activity Evidence 与 Content disposition/storage action 解耦：页外 Candidate Detail 即使仍为 `deferred/terminal_excluded`，Recent Sampling 即使只能 `update_access/classified_only`，有效的发布时间四元组仍进入生命周期分类。视频能否入库不再决定它能否证明频道近期活跃。
 
 复审后的本地验证结果：聚焦逻辑与链路测试全部通过；完整 `npm test` 共 256 个测试文件，252 个通过，4 个既有环境失败。失败原因分别为 sandbox 禁止 `spawnSync git`、两个本地监听 `EPERM`、以及当前 Python 环境缺少 `yt_dlp`，与本轮改动无关。隔离 PostgreSQL 16.14 已实际执行 Video Activity 游标快照与数据库超时恢复集成测试，结果 2/2 通过、无跳过；复审方此前另行执行的 Full Video SQL 与 Migration Gate 集成测试也均为 1/1 通过、无跳过。
 
