@@ -63,6 +63,7 @@ func TestRouteActivationRegistryRebuildIsAConnectionBarrier(t *testing.T) {
 	const (
 		readyUsername   = "bullmq-channel-01-g7-ready"
 		pendingUsername = "bullmq-channel-02-g8-pending"
+		expiredUsername = "bullmq-channel-03-g4-expired"
 	)
 
 	handler.requireRouteActivationRegistry()
@@ -80,6 +81,7 @@ func TestRouteActivationRegistryRebuildIsAConnectionBarrier(t *testing.T) {
 			Phase:    proxycontrol.RouteActivationActivating,
 			Blocked:  true,
 		},
+		{Username: expiredUsername},
 	}); err != nil {
 		t.Fatalf("rebuild activation registry: %v", err)
 	}
@@ -88,6 +90,12 @@ func TestRouteActivationRegistryRebuildIsAConnectionBarrier(t *testing.T) {
 	}
 	if handler.proxyUserReady(pendingUsername) {
 		t.Fatal("pending Route was exposed after registry rebuild")
+	}
+	if handler.proxyUserReady(expiredUsername) {
+		t.Fatal("expired or unleased managed Route was exposed after registry rebuild")
+	}
+	if handler.proxyUserReady("bullmq-channel-04-g1-unknown") {
+		t.Fatal("managed identity absent from the authoritative registry was exposed")
 	}
 
 	begin, err := handler.beginRouteActivation(pendingUsername, "", "T-pending")

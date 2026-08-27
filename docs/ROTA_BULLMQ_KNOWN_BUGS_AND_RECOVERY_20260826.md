@@ -13,8 +13,11 @@ Intent/Candidate 原子终态，以及 Dashboard 超预算证据显示。第二�
 审计的 `dispatch_generation`，并会跨 `AggregateError` 兄弟错误拼接失败证据。第三次阻断
 修订提交为 `6613fce`。2026-08-27 第四次独立复审确认 `6613fce` 仍存在 Route 补偿退休
 竞态、公开 `/swap` 绕过状态机、终态 Redis Job 的删除/升代竞态、三个诊断脚本缺少
-generation，以及 cause 链跨节点拼接证据。第四次阻断修订已随本文所在提交完成本地实现和
-隔离环境回归；尚未形成镜像 digest。
+generation，以及 cause 链跨节点拼接证据。第四次阻断修订提交为 `37a6dea`。2026-08-27
+第五次独立复审确认 `37a6dea` 的启动 Registry 仍会放行过期或未租用的 managed identity，
+Controller 会用 Candidate Source 文案重建迁移 Job payload 且 G+1 分配遗漏 Migration
+Intent Fence，`youtubeFailureEvidence()` 仍会跨 cause 节点拼接状态与来源。第五次阻断修订
+已随本文所在提交完成本地实现和隔离环境回归；尚未形成镜像 digest。
 
 文档状态：故障、解决方案和实施边界冻结基线。本文同时保留 `a8e07f1` 的原始故障行为，
 并记录 2026-08-27 当前分支中的实现。源码提交不等于已构建、已部署或已完成
@@ -44,7 +47,8 @@ generation，以及 cause 链跨节点拼接证据。第四次阻断修订已随
 
 ### 1.1 当前分支实施记录
 
-`5bcb3dd`、`3fc32ab`、`f1e0583` 和随本文提交的阻断修订已覆盖以下代码边界：
+`5bcb3dd`、`3fc32ab`、`f1e0583`、`6613fce`、`37a6dea` 和随本文提交的阻断修订已覆盖以下
+代码边界：
 
 - BUG-1：Worker 三类错误分派、materialized/reserved Business Run 原子终止、failed
   listener 终态门禁、Rota Business Run 预算优先检查；
@@ -76,7 +80,11 @@ generation，以及 cause 链跨节点拼接证据。第四次阻断修订已随
   Diagnostic Job Builder，生产 Runtime 继续拒绝缺失 generation；Channel
   Execution 审计从 Job Runtime 到 PostgreSQL 持久化 `dispatch_generation`，生产 Schema
   marker 和 postflight 同时覆盖该列；Failure Policy 按 cause 分支独立分类 Aggregate，所选
-  kind/source/status 不再跨兄弟错误或 cause 节点拼接。
+  kind/source/status 不再跨兄弟错误或 cause 节点拼接；Activation Registry 只授权 live Lease
+  上已经 ready/committed 的 managed identity，未租用、Lease 过期和 Registry 外身份均
+  fail-closed；Controller 对迁移 Candidate 使用唯一的 `channelSnapshotPayload()` 合同重建
+  当前和 G+1 身份，并把同一 `migration_intent_id` 传入 generation 分配事务；失败审计从分类
+  胜出的同一个 Error 节点读取整组 status/body/source/target/client。
 
 当前仍未完成：固定和核对运行镜像 digest、构建镜像、部署、生产冒烟，以及任何真实频道
 恢复。Dashboard 预算诊断已在源码中实现，但未构建或部署。两个卡住频道和 18 个历史
@@ -96,6 +104,9 @@ Fingerprint 失败频道均未被重试或修改。
 9. `channel_execution_attempts` 已部署 generation 列并通过 postflight。
 10. Activation Registry 启动屏障、Claim predecessor CAS 和未过期 TTL Fence 已部署验证；
 11. 终态 Job 不删除，且 G+1 精确 Outbox 的投递回放不会误升 G+2。
+12. Registry 已验证未租用、Lease 过期和未登记的 managed identity 均不能建立 CONNECT；
+13. Controller 已验证迁移 Job 当前身份与共享 Builder 完全一致，G+1 同时推进 Candidate 和
+    Migration Intent generation。
 
 ## 2. 关键术语和预算边界
 
@@ -431,6 +442,13 @@ BullMQ 终态，并使用 Intent ID、Job ID、dispatch generation 三重 Fence 
 Outbox，校验 name、canonical payload 和 Intent 后复用胜者的 Job ID。不得读取 Candidate 的
 “最新 Job”或再次递增 generation；`queue.add()` 回执不确定时也只能回查这个 G+1 Job ID。
 
+Controller 周期重派必须先通过 `migration_channel_intents.target_candidate_id` 识别迁移
+Candidate。迁移 Job 的当前身份和 G+1 payload 都必须调用共享的
+`channelSnapshotPayload()`；`channel_candidate_sources.query_text` 中的
+`Migration PostgreSQL controlled canary` 只是来源审计文案，不能进入 Job identity。分配
+G+1 时必须把同一 `migration_intent_id` 传入 Target 事务，使 Intent `dispatch_attempts` 与
+Candidate `snapshot_dispatch_generation` 使用同一个 CAS；不得只升 Candidate generation。
+
 恢复 Job Data 必须从字段白名单重新构造，不能展开并复制旧 Job Data。当前 Candidate 分支
 会忽略旧 `run_id`，但旧 `business_run_key` 会在 cached-key 检查中与新 key 冲突；
 `full_intent_id`、Job name、Policy 和 Intent JSON 的变化还可能在检查 terminal 之前触发
@@ -694,6 +712,11 @@ Fingerprint Gateway 提供结构化 proxy_transport
 必须保留结构化错误所在 cause 节点的 `source=fingerprint_gateway`。只修 kind、不修 source
 会让审计退化成 `youtube_managed_request`。
 
+`youtubeFailureEvidence()` 必须使用与 Decision 相同的逐节点优先级，从胜出的单个 Error
+节点一次性读取 status、body、source、target URL 和 client。不得先从内层取 429、再从外层
+Wrapper 取无关 source。调用点显式传入的 override 视为一个完整的合成证据输入，也不能再从
+cause 补齐其他字段。
+
 文本兜底只能覆盖有限兼容格式：
 
 - `proxy_transport` / `fingerprint_proxy_transport`；
@@ -886,8 +909,10 @@ T1；延迟的 T1 Begin/Commit/条件退休在 T2 生效后全部失败或 no-op
 
 Rota 启动时 Activation Registry 是强制屏障：完整 DB Fence 中 ready 的 live Route 重建为
 committed，pending 且未 ready 的 Route 重建为 activating/blocked；重建失败则 fail-closed，
-不得以空 Registry 启动 Reconcile 或接受 managed CONNECT。当前实现以单数据面实例为部署
-约束；多副本前必须把 Registry 放入共享持久化或提供可靠同步。
+未租用、Lease 已过期、状态不是 ready/committed，以及 Registry 中不存在的 managed identity
+全部保持 blocked，不得因为 `Phase=""` 而解除 retired。不得以空 Registry 启动 Reconcile
+或接受 managed CONNECT。当前实现以单数据面实例为部署约束；多副本前必须把 Registry 放入
+共享持久化或提供可靠同步。
 
 没有 Reserve 时，事务清除不可用 Proxy/identity，轮换凭据、递增 Route generation 并进入
 `paused_no_reserve`；增加 Reserve 后同一 Lease 幂等恢复。重复 Health 通知或 Reconcile
@@ -973,6 +998,9 @@ Observation，Rota 也不在 active Task 中途静默改写 endpoint。
 | T36 | Diagnostic tools | 三个探测脚本使用受限 Builder；生产 Runtime 缺 generation 仍拒绝 |
 | T37 | Execution audit | Runtime、Store、Schema marker、bootstrap 和 postflight 均携带正数 dispatch generation |
 | T38 | Failure policy | Aggregate/cause 每个节点独立分类，结构化代理错误不借用其他节点的 HTTP 状态或来源 |
+| T39 | Route startup | 未租用、Lease 过期和 Registry 外 managed identity 均 blocked；只有 live+ready 重建 committed |
+| T40 | Controller dispatch | 迁移当前/G+1 payload 与共享 Builder 相同，G+1 透传同一 Migration Intent Fence |
+| T41 | Failure evidence | 外层无关 source 包装内层 429 时，Observation 使用内层完整节点，不跨 cause 拼字段 |
 
 计划执行的静态和定向命令至少包括：
 
@@ -1087,6 +1115,28 @@ Rota 需要在 `services/rota/core` 下执行相关 Go 单元测试和 PostgreSQ
   Feature Dispatch 6/6 和 `scripts/verify.sh` 同样通过。剩余两个仍只是上述宿主 Python 依赖；
 - 上述验证仅使用独立 PostgreSQL、独立 Redis 和临时容器；未合并、推送、构建或部署镜像，
   未写生产数据，也未恢复任何频道。
+
+2026-08-27 第五次阻断修订新增的隔离回归如下：
+
+- 数据面红测先稳定复现 Registry 重建后过期/未租用 managed identity 被放行；修复后 Unit
+  回归同时证明 committed live Route 可用、pending/过期/未登记身份不可用。独立 PostgreSQL
+  三态回归证明未租用为 blocked、live+ready 为 committed、Lease 过期后重新 blocked；
+- Controller 红测使用带 `Migration PostgreSQL controlled canary`、非空 query ID 和错误
+  pipeline cycle 的迁移 Candidate，修复后当前及 G+1 canonical payload 均与共享
+  `channelSnapshotPayload()` 完全一致，G+1 allocation 携带原 `migration_intent_id`；
+- cause 红测先复现内层 429 被记录为 `youtube_rate_limited + unrelated_wrapper`；修复后
+  `youtubeFailureEvidence()`、Managed Observation、Aggregate sibling、外层 404 + 内层
+  Fingerprint 全部只使用分类胜出节点的完整证据；
+- 分支工作树中 Rota `internal/proxy`、`internal/proxycontrol` 和固定
+  `golang:1.25.3` 的 `go test ./... -count=1` 全部通过。QYBullMQ 全量 257 个文件中 253 个
+  直接通过；两个权限型文件授权单跑 5/5 通过，宿主缺少 `aiohttp`/`yt_dlp` 的两个文件在
+  现有 QYBullMQ 镜像中只读挂载当前源码后 2/2 通过；
+- 将当前工作树机械同步到独立 `/tmp` 克隆，与本机 `main@f31bbed` 执行 `--no-commit`
+  临时 merge，无文本冲突且 `git diff --check` 通过。合并态 Rota 全量通过；QYBullMQ 268 个
+  文件中 264 个直接通过，两个权限型文件授权单跑 5/5 通过，两个 Python 依赖文件在现有
+  QYBullMQ 镜像中 2/2 通过；
+- 上述验证只使用独立 PostgreSQL 和临时容器；未合并、推送、构建或部署镜像，未写生产
+  数据，也未恢复任何频道。
 
 ## 9. 实施与部署顺序
 
@@ -1254,6 +1304,7 @@ PostgreSQL Outbox；该 CLI 不导入 BullMQ Queue，也不直接 Retry 旧 Job�
 - 无 Reserve 时 delayed 且不消耗 BullMQ attempt；
 - cause 包装不丢失 `source=fingerprint_gateway`；
 - Aggregate 只选择一个完整错误分支，不跨兄弟错误拼接 kind/source/status；
+- `youtubeFailureEvidence()` 和 Rota Observation 使用分类胜出节点的整组证据；
 - 不把普通 TLS 错误误判为代理失效。
 
 ### 11.4 BUG-4
@@ -1271,6 +1322,7 @@ PostgreSQL Outbox；该 CLI 不导入 BullMQ Queue，也不直接 Retry 旧 Job�
   不产生 `ready + retired`；
 - Rota 重启先按 DB Fence 重建 Activation Registry，屏障失败时 managed CONNECT 和
   Reconcile fail-closed；
+- 未租用、Lease 过期和 Registry 外 managed identity 在重建成功后仍 fail-closed；
 - 旧 `/swap` 协议不存在，所有 Route 迁移经过统一状态机；
 - 并发和重复事件保持幂等且无双重代理绑定。
 
@@ -1282,6 +1334,8 @@ PostgreSQL Outbox；该 CLI 不导入 BullMQ Queue，也不直接 Retry 旧 Job�
 - 普通迁移和 Recovery Outbox 均拒绝同 ID 但 name/data 不一致的 Redis Job；
 - 冲突的 completed/failed Redis Job 不会被删除或替换；
 - 旧 G 终态只分配一个精确 G+1 Outbox；当前 G+1 Outbox 快速终态只确认投递，不升 G+2；
+- 迁移 Controller 重建的 Job payload 与共享 Builder 完全一致，G+1 同时推进 Intent 和
+  Candidate generation；
 - 每条新 Channel Execution 审计记录都保存正数 dispatch generation；
 - Candidate Fence 丢失时 Recovery Intent 保持可协调，active/completed Job 能被重放收尾；
 - Dashboard 在 used 超过 limit 时仍显示真实预算并标记 `over_budget`；

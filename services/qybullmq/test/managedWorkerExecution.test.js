@@ -147,6 +147,26 @@ test("a structured Route failure without a local source uses the managed default
   });
 });
 
+test("a nested rate limit Observation does not borrow its wrapper source", () => {
+  const rateLimit = Object.assign(new Error("HTTP 429"), {
+    youtube_failure_evidence: {
+      status: 429,
+      source: "youtubejs_player",
+    },
+  });
+  const error = Object.assign(new Error("snapshot failed", { cause: rateLimit }), {
+    youtube_failure_evidence: {
+      status: null,
+      source: "unrelated_wrapper",
+    },
+  });
+
+  assert.deepEqual(retryableRotaFailure(error), {
+    observation: "youtube_rate_limited",
+    source: "youtubejs_player",
+  });
+});
+
 test("Discover search can finish while downstream qualification remains open", async () => {
   const result = await executeManagedWorkerAttempt({
     job: { queueName: "youtube-discover-page" },

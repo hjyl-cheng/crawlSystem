@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { canonicalJsonEqual, canonicalJsonString } from "./canonicalJson.js";
+import { channelSnapshotPayload } from "./migrationDispatchPolicy.js";
 import { queuesByRole } from "./queues.js";
 
 export const CHANNEL_SNAPSHOT_AGGREGATE_KIND = "channel_snapshot";
@@ -46,6 +47,59 @@ function normalizedCandidate(row) {
       ? null
       : nonNegativeInteger(row.snapshot_active_job_attempt, "snapshot_active_job_attempt"),
   };
+}
+
+export function channelSnapshotRedispatchPayload(candidate, batchId, {
+  minSubscriberCount = 1000,
+} = {}) {
+  const generation = positiveInteger(
+    candidate?.snapshot_dispatch_generation,
+    "candidate.snapshot_dispatch_generation",
+  );
+  const normalizedBatchId = requiredText(batchId, "batchId");
+  const migrationIntentId = candidate?.migration_intent_id == null
+    ? null
+    : positiveInteger(candidate.migration_intent_id, "candidate.migration_intent_id");
+  if (migrationIntentId != null) {
+    return channelSnapshotPayload(candidate, normalizedBatchId, { minSubscriberCount });
+  }
+  return {
+    candidate_id: positiveInteger(candidate?.candidate_id, "candidate.candidate_id"),
+    dispatch_generation: generation,
+    dispatch_batch_id: normalizedBatchId,
+    channel_id: requiredText(candidate?.channel_id, "candidate.channel_id"),
+    channel_url: requiredText(candidate?.channel_url, "candidate.channel_url"),
+    crawl_mode: "full",
+    query_id: candidate?.query_id ?? null,
+    query_text: candidate?.query_text ?? "results.db migration",
+    pipeline_cycle_id: candidate?.pipeline_cycle_id || normalizedBatchId,
+    enforce_min_subscribers: true,
+    min_subscriber_count: Number(minSubscriberCount),
+    reject_if_no_recent_content: candidate?.candidate_source === "legacy_results_db",
+  };
+}
+
+export function buildChannelSnapshotRedispatchAllocation(candidate, batchId, {
+  expectedGeneration,
+  previousJobId = null,
+  jobId,
+  minSubscriberCount = 1000,
+} = {}) {
+  const normalizedExpected = nonNegativeInteger(expectedGeneration, "expectedGeneration");
+  const nextCandidate = {
+    ...candidate,
+    snapshot_dispatch_generation: normalizedExpected + 1,
+  };
+  return Object.freeze({
+    candidate: nextCandidate,
+    expectedGeneration: normalizedExpected,
+    previousJobId: previousJobId == null ? null : requiredText(previousJobId, "previousJobId"),
+    migrationIntentId: candidate?.migration_intent_id == null
+      ? null
+      : positiveInteger(candidate.migration_intent_id, "candidate.migration_intent_id"),
+    payload: channelSnapshotRedispatchPayload(nextCandidate, batchId, { minSubscriberCount }),
+    jobId: requiredText(jobId, "jobId"),
+  });
 }
 
 export function buildChannelSnapshotOutbox({ candidate, payload, jobId } = {}) {

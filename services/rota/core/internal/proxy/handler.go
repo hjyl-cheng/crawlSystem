@@ -119,14 +119,7 @@ func (h *UpstreamProxyHandler) proxyUserReady(username string) bool {
 	}
 	h.tunnelMu.Lock()
 	defer h.tunnelMu.Unlock()
-	if h.registryGate && !h.registryReady && isManagedProxyUsername(username) {
-		return false
-	}
-	if _, retired := h.retiredUsers[username]; retired {
-		return false
-	}
-	activation, found := h.activations[username]
-	return !found || activation.phase == proxycontrol.RouteActivationCommitted
+	return h.proxyUserReadyLocked(username)
 }
 
 func isManagedProxyUsername(username string) bool {
@@ -159,13 +152,22 @@ func (h *UpstreamProxyHandler) proxyUserReadyLocked(username string) bool {
 	if username == "" {
 		return true
 	}
-	if h.registryGate && !h.registryReady && isManagedProxyUsername(username) {
-		return false
+	managed := isManagedProxyUsername(username)
+	if h.registryGate && managed {
+		if !h.registryReady {
+			return false
+		}
+		if _, registered := h.managedUsers[username]; !registered {
+			return false
+		}
 	}
 	if _, retired := h.retiredUsers[username]; retired {
 		return false
 	}
 	activation, found := h.activations[username]
+	if h.registryGate && managed {
+		return found && activation.phase == proxycontrol.RouteActivationCommitted
+	}
 	return !found || activation.phase == proxycontrol.RouteActivationCommitted
 }
 
@@ -232,7 +234,7 @@ func (h *UpstreamProxyHandler) rebuildRouteActivationRegistry(
 				phase:   entry.Phase,
 			}
 		}
-		if entry.Blocked || entry.Phase == proxycontrol.RouteActivationActivating {
+		if entry.Blocked || entry.Phase != proxycontrol.RouteActivationCommitted {
 			h.retiredUsers[username] = struct{}{}
 			blocked[username] = struct{}{}
 		} else {
@@ -286,6 +288,12 @@ func (h *UpstreamProxyHandler) beginRouteActivation(
 	h.activations[username] = routeActivationRecord{
 		claimID: claimID,
 		phase:   proxycontrol.RouteActivationActivating,
+	}
+	if h.registryGate && isManagedProxyUsername(username) {
+		if h.managedUsers == nil {
+			h.managedUsers = make(map[string]struct{})
+		}
+		h.managedUsers[username] = struct{}{}
 	}
 	h.retiredUsers[username] = struct{}{}
 	return proxycontrol.RouteActivationBeginResult{}, nil

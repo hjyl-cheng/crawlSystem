@@ -17,6 +17,8 @@ import {
 import { createControllerLifecycle } from "./controllerLifecycle.js";
 import {
   allocateChannelSnapshotDispatchOutbox,
+  buildChannelSnapshotRedispatchAllocation,
+  channelSnapshotRedispatchPayload,
   ChannelSnapshotDispatchConflictError,
 } from "./channelSnapshotDispatch.js";
 import { canonicalJsonEqual } from "./canonicalJson.js";
@@ -480,8 +482,11 @@ async function reconcileChannelCandidateQueue(actions, dispatchBatchId) {
             candidate.snapshot_dispatch_generation,
             candidate.snapshot_active_job_id,candidate.snapshot_active_job_attempt,
             candidate.source_json->>'source' AS candidate_source,
-            source.query_id,source.query_text
+            source.query_id,source.query_text,
+            migration_intent.migration_intent_id
      FROM crawler.channel_candidates candidate
+     LEFT JOIN crawler.migration_channel_intents migration_intent
+       ON migration_intent.target_candidate_id=candidate.candidate_id
      LEFT JOIN LATERAL (
        SELECT candidate_source.query_id,candidate_source.query_text
        FROM crawler.channel_candidate_sources candidate_source
@@ -523,20 +528,12 @@ async function reconcileChannelCandidateQueue(actions, dispatchBatchId) {
     const currentJobId = generation > 0
       ? safeJobId("channel-snapshot", dispatchBatchId, row.channel_id, `g${generation}`)
       : legacyJobId;
-    const currentPayload = generation > 0 ? {
-      candidate_id: Number(row.candidate_id),
-      dispatch_generation: generation,
-      dispatch_batch_id: dispatchBatchId,
-      channel_id: row.channel_id,
-      channel_url: row.channel_url,
-      crawl_mode: "full",
-      query_id: row.query_id ?? null,
-      query_text: row.query_text ?? "results.db migration",
-      pipeline_cycle_id: row.pipeline_cycle_id || dispatchBatchId,
-      enforce_min_subscribers: true,
-      min_subscriber_count: channelSnapshotMinSubscriberCount,
-      reject_if_no_recent_content: row.candidate_source === "legacy_results_db",
-    } : null;
+    const currentPayload = generation > 0
+      ? channelSnapshotRedispatchPayload({
+        ...row,
+        snapshot_dispatch_generation: generation,
+      }, dispatchBatchId, { minSubscriberCount: channelSnapshotMinSubscriberCount })
+      : null;
     let represented = false;
     let terminalCurrentJob = null;
     for (const existingJobId of new Set([currentJobId, legacyJobId])) {
@@ -581,28 +578,14 @@ async function reconcileChannelCandidateQueue(actions, dispatchBatchId) {
       row.channel_id,
       `g${nextGeneration}`,
     );
-    const payload = {
-      candidate_id: Number(row.candidate_id),
-      dispatch_generation: nextGeneration,
-      dispatch_batch_id: dispatchBatchId,
-      channel_id: row.channel_id,
-      channel_url: row.channel_url,
-      crawl_mode: "full",
-      query_id: row.query_id ?? null,
-      query_text: row.query_text ?? "results.db migration",
-      pipeline_cycle_id: row.pipeline_cycle_id || dispatchBatchId,
-      enforce_min_subscribers: true,
-      min_subscriber_count: channelSnapshotMinSubscriberCount,
-      reject_if_no_recent_content: row.candidate_source === "legacy_results_db",
-    };
+    const allocation = buildChannelSnapshotRedispatchAllocation(row, dispatchBatchId, {
+      expectedGeneration: generation,
+      previousJobId: activeJobId,
+      jobId,
+      minSubscriberCount: channelSnapshotMinSubscriberCount,
+    });
     try {
-      await withTransaction((client) => allocateChannelSnapshotDispatchOutbox(client, {
-        candidate: { ...row, snapshot_dispatch_generation: nextGeneration },
-        expectedGeneration: generation,
-        previousJobId: activeJobId,
-        payload,
-        jobId,
-      }));
+      await withTransaction((client) => allocateChannelSnapshotDispatchOutbox(client, allocation));
     } catch (error) {
       if (!(error instanceof ChannelSnapshotDispatchConflictError)) throw error;
       actions.push({

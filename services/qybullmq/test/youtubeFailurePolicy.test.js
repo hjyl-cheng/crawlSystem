@@ -4,6 +4,7 @@ import {
   annotateYoutubeFailure,
   decideYoutubeFailure,
   shouldReportProxyFailure,
+  youtubeFailureEvidence,
   youtubeFailureText,
 } from "../src/youtubeFailurePolicy.js";
 
@@ -207,13 +208,15 @@ test("structured failure evidence does not borrow HTTP status from an AggregateE
     status: 404,
     source: "youtubejs_player",
   });
-  const result = decideYoutubeFailure({
-    error: new AggregateError([proxyFailure, missingContent], "parallel failures"),
-  });
+  const aggregate = new AggregateError([proxyFailure, missingContent], "parallel failures");
+  const result = decideYoutubeFailure({ error: aggregate });
 
   assert.equal(result.kind, "proxy_transport");
   assert.equal(result.status, null);
   assert.equal(result.evidence.source, "fingerprint_gateway");
+  const evidence = youtubeFailureEvidence(aggregate);
+  assert.equal(evidence.status, null);
+  assert.equal(evidence.source, "fingerprint_gateway");
 });
 
 test("nested Fingerprint evidence does not borrow an outer YouTube HTTP status", () => {
@@ -230,4 +233,27 @@ test("nested Fingerprint evidence does not borrow an outer YouTube HTTP status",
   assert.equal(result.kind, "proxy_transport");
   assert.equal(result.status, null);
   assert.equal(result.evidence.source, "fingerprint_gateway");
+  const evidence = youtubeFailureEvidence(outerFailure);
+  assert.equal(evidence.status, null);
+  assert.equal(evidence.source, "fingerprint_gateway");
+});
+
+test("failure evidence selects one complete cause node", () => {
+  const rateLimit = annotateYoutubeFailure(new Error("Too many requests"), {
+    status: 429,
+    body: "YouTube rate limit",
+    source: "youtubejs_player",
+    targetUrl: "https://www.youtube.com/youtubei/v1/player",
+  });
+  const wrapper = annotateYoutubeFailure(
+    new Error("snapshot failed", { cause: rateLimit }),
+    { source: "unrelated_wrapper" },
+  );
+
+  const evidence = youtubeFailureEvidence(wrapper);
+  assert.equal(evidence.error, wrapper);
+  assert.equal(evidence.status, 429);
+  assert.equal(evidence.body, "YouTube rate limit");
+  assert.equal(evidence.source, "youtubejs_player");
+  assert.equal(evidence.target_url, "https://www.youtube.com/youtubei/v1/player");
 });

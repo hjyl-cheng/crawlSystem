@@ -282,12 +282,13 @@ func (m *Manager) loadRouteActivationRegistry(
 		); err != nil {
 			return nil, fmt.Errorf("scan Route activation registry: %w", err)
 		}
+		entry.Blocked = true
 		switch {
 		case liveLease && ready &&
 			(controlState == "leased_idle" || controlState == "active_task"):
 			entry.Phase = RouteActivationCommitted
+			entry.Blocked = false
 		case liveLease && !ready && controlState == "pending_new_route":
-			entry.Blocked = true
 			if entry.ClaimID != "" {
 				entry.Phase = RouteActivationActivating
 			}

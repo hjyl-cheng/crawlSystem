@@ -44,19 +44,6 @@ function nonEmptyText(value) {
   return output || null;
 }
 
-function failureLineage(error) {
-  const values = [];
-  const seen = new Set();
-  for (let value = error; value != null && seen.size < 20; value = value?.cause) {
-    if (!value || (typeof value !== "object" && typeof value !== "function") || seen.has(value)) {
-      break;
-    }
-    seen.add(value);
-    values.push(value);
-  }
-  return values;
-}
-
 function structuredFailure(error, nodeEvidence) {
   const failureKind = nonEmptyText(error?.failureKind ?? error?.failure_kind)?.toLowerCase() ?? null;
   const code = nonEmptyText(error?.code)?.toUpperCase() ?? null;
@@ -146,25 +133,36 @@ function decision(kind, {
 }
 
 export function youtubeFailureEvidence(error, overrides = {}) {
-  const values = failureLineage(error);
-  const embeddedValues = values.map((value) => value?.youtube_failure_evidence ?? {});
-  const embeddedStatus = embeddedValues.find((value) => value.status != null)?.status ?? null;
-  const embeddedBody = embeddedValues.map((value) => nonEmptyText(value.body)).find(Boolean) ?? "";
-  const embeddedSource = embeddedValues.map((value) => nonEmptyText(value.source)).find(Boolean)
-    ?? values.map((value) => nonEmptyText(value.source)).find(Boolean)
-    ?? "";
-  const embeddedTargetUrl = embeddedValues
-    .map((value) => nonEmptyText(value.target_url))
-    .find(Boolean) ?? "";
-  const embeddedClient = embeddedValues.map((value) => nonEmptyText(value.client)).find(Boolean) ?? "";
+  const explicitOverride = overrides.status != null
+    || nonEmptyText(overrides.body) != null
+    || nonEmptyText(overrides.source) != null
+    || nonEmptyText(overrides.targetUrl ?? overrides.target_url) != null
+    || nonEmptyText(overrides.client) != null;
+  if (explicitOverride) return youtubeFailureNodeEvidence(error, overrides);
+
+  const candidates = failureNodes(error).map((node) => {
+    const evidence = youtubeFailureNodeEvidence(node);
+    const score = (evidence.status != null ? 16 : 0)
+      + (nonEmptyText(evidence.body) != null ? 8 : 0)
+      + (nonEmptyText(evidence.source) != null ? 4 : 0)
+      + (nonEmptyText(evidence.target_url) != null ? 2 : 0)
+      + (nonEmptyText(evidence.client) != null ? 1 : 0);
+    return {
+      evidence,
+      priority: aggregateDecisionPriority(decideYoutubeFailureBranch({ error: node })),
+      score,
+    };
+  });
+  const selected = candidates.reduce((best, candidate) => (
+    !best
+      || candidate.priority > best.priority
+      || (candidate.priority === best.priority && candidate.score > best.score)
+      ? candidate
+      : best
+  ), null);
   return {
+    ...(selected?.evidence ?? youtubeFailureNodeEvidence(error)),
     error,
-    status: overrides.status ?? embeddedStatus ?? error?.status ?? null,
-    body: boundedText(nonEmptyText(overrides.body) ?? embeddedBody ?? error?.body ?? ""),
-    source: nonEmptyText(overrides.source) ?? embeddedSource,
-    target_url: nonEmptyText(overrides.targetUrl ?? overrides.target_url)
-      ?? nonEmptyText(embeddedTargetUrl),
-    client: nonEmptyText(overrides.client) ?? nonEmptyText(embeddedClient),
   };
 }
 
@@ -191,7 +189,8 @@ function youtubeFailureNodeEvidence(error, overrides = {}) {
       nonEmptyText(overrides.body) ?? nonEmptyText(embedded.body) ?? error?.body ?? "",
     ),
     source: nonEmptyText(overrides.source)
-      ?? nonEmptyText(embedded.source ?? error?.source)
+      ?? nonEmptyText(embedded.source)
+      ?? nonEmptyText(error?.source)
       ?? "",
     target_url: nonEmptyText(overrides.targetUrl ?? overrides.target_url)
       ?? nonEmptyText(embedded.target_url),

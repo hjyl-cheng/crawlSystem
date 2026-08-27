@@ -78,6 +78,65 @@ func TestClaimV2IsIdempotentAndFencesWorkerInstances(t *testing.T) {
 	}
 }
 
+func TestRouteActivationRegistryOnlyCommitsLiveReadyLeases(t *testing.T) {
+	manager, pool := newProxyControlPostgres(t)
+	ctx := context.Background()
+
+	_ = insertControlProxy(t, pool, "registry-fence.example:8080", 10)
+	manager.SetCacheInvalidator(func(string) {})
+	if err := manager.syncResources(ctx); err != nil {
+		t.Fatalf("sync managed resources: %v", err)
+	}
+	if _, err := manager.reconcile(ctx); err != nil {
+		t.Fatalf("reconcile initial assignment: %v", err)
+	}
+
+	registry, err := manager.loadRouteActivationRegistry(ctx)
+	if err != nil {
+		t.Fatalf("load unleased registry: %v", err)
+	}
+	if len(registry) != 1 || !registry[0].Blocked || registry[0].Phase != "" {
+		t.Fatalf("unleased registry = %+v, want blocked without a phase", registry)
+	}
+
+	claim, err := manager.Claim(ctx, testClaimRequest(
+		"claim-registry-fence", "worker-registry-fence", "instance-registry-fence",
+	))
+	if err != nil {
+		t.Fatalf("claim ready Route: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		UPDATE proxy_running_slots
+		SET ready_after=NOW(),control_state='leased_idle'
+		WHERE slot_name=$1 AND current_lease_id=$2
+	`, claim.SlotName, claim.LeaseID); err != nil {
+		t.Fatalf("finalize ready Route fixture: %v", err)
+	}
+	registry, err = manager.loadRouteActivationRegistry(ctx)
+	if err != nil {
+		t.Fatalf("load live registry: %v", err)
+	}
+	if len(registry) != 1 || registry[0].Blocked ||
+		registry[0].Phase != RouteActivationCommitted {
+		t.Fatalf("live ready registry = %+v, want committed", registry)
+	}
+
+	if _, err := pool.Exec(ctx, `
+		UPDATE proxy_running_slots
+		SET lease_until=NOW()-interval '1 second'
+		WHERE slot_name=$1 AND current_lease_id=$2
+	`, claim.SlotName, claim.LeaseID); err != nil {
+		t.Fatalf("expire Slot Lease: %v", err)
+	}
+	registry, err = manager.loadRouteActivationRegistry(ctx)
+	if err != nil {
+		t.Fatalf("load expired registry: %v", err)
+	}
+	if len(registry) != 1 || !registry[0].Blocked || registry[0].Phase != "" {
+		t.Fatalf("expired registry = %+v, want blocked without a phase", registry)
+	}
+}
+
 func TestQueryQualitySlotCanBeProvisionedClaimedAndReportedInCapacity(t *testing.T) {
 	manager, pool := newProxyControlPostgresWithOptions(t, func(options *Options) {
 		options.ChannelSlots = 0

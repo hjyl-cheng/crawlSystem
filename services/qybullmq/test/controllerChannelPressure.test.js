@@ -22,8 +22,10 @@ test("Controller persists a Channel generation and exact Outbox without deleting
   const reconcile = source.slice(start, end);
 
   assert.match(reconcile, /withTransaction\(\(client\) => allocateChannelSnapshotDispatchOutbox/);
+  assert.match(reconcile, /migration_intent\.migration_intent_id/);
+  assert.match(reconcile, /channelSnapshotRedispatchPayload/);
+  assert.match(reconcile, /buildChannelSnapshotRedispatchAllocation/);
   assert.match(reconcile, /expectedGeneration: generation/);
-  assert.match(reconcile, /dispatch_generation: nextGeneration/);
   assert.match(reconcile, /`g\$\{nextGeneration\}`/);
   assert.doesNotMatch(reconcile, /\.remove\(/);
   assert.doesNotMatch(reconcile, /queues\[queuesByRole\.channelCrawl\]\.add/);

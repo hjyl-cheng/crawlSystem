@@ -4,9 +4,12 @@ import test from "node:test";
 import {
   allocateChannelSnapshotDispatchOutbox,
   allocateDiscoveredChannelSnapshotDispatches,
+  buildChannelSnapshotRedispatchAllocation,
   buildChannelSnapshotOutbox,
+  channelSnapshotRedispatchPayload,
   stageChannelSnapshotOutbox,
 } from "../src/channelSnapshotDispatch.js";
+import { channelSnapshotPayload } from "../src/migrationDispatchPolicy.js";
 
 test("Discover persists first generations before bulk queue delivery", async () => {
   const candidates = await allocateDiscoveredChannelSnapshotDispatches(async (sql, params) => {
@@ -55,6 +58,39 @@ function snapshotPayload(generation = 4) {
     reject_if_no_recent_content: true,
   };
 }
+
+test("Controller migration redispatch preserves the shared payload and Intent generation fence", () => {
+  const candidate = {
+    ...snapshotCandidate(3),
+    migration_intent_id: "7",
+    query_id: "91",
+    query_text: "Migration PostgreSQL controlled canary",
+    pipeline_cycle_id: "misleading-cycle",
+    candidate_source: "legacy_results_db",
+  };
+  const expectedCurrent = channelSnapshotPayload(candidate, "manual-batch", {
+    minSubscriberCount: 1000,
+  });
+  assert.deepEqual(
+    channelSnapshotRedispatchPayload(candidate, "manual-batch", { minSubscriberCount: 1000 }),
+    expectedCurrent,
+  );
+
+  const allocation = buildChannelSnapshotRedispatchAllocation(candidate, "manual-batch", {
+    expectedGeneration: 3,
+    previousJobId: "channel-snapshot__manual-batch__UCsnapshot__g3",
+    jobId: "channel-snapshot__manual-batch__UCsnapshot__g4",
+    minSubscriberCount: 1000,
+  });
+  assert.equal(allocation.migrationIntentId, 7);
+  assert.deepEqual(
+    allocation.payload,
+    channelSnapshotPayload({
+      ...candidate,
+      snapshot_dispatch_generation: 4,
+    }, "manual-batch", { minSubscriberCount: 1000 }),
+  );
+});
 
 test("a prepared generation and its exact Outbox identity share the Candidate fence", async () => {
   const calls = [];
