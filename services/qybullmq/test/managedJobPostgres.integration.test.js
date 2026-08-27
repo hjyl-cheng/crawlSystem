@@ -114,9 +114,9 @@ test("PostgreSQL persists managed Intents, replays Outbox, and freezes Chunk mem
   const queueCalls = [];
   const queues = {
     "youtube-discover-page": {
-      add: async (_name, _payload, options) => {
+      add: async (name, payload, options) => {
         queueCalls.push(options.jobId);
-        return { id: options.jobId };
+        return { id: options.jobId, name, data: payload };
       },
     },
   };

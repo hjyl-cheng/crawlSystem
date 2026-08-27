@@ -72,6 +72,74 @@ test("replaying the queue-add/mark-sent crash window cannot create a second Bull
   assert.equal(repository.rows.get("dispatch-1").status, "sent");
 });
 
+test("an ambiguous queue.add failure is accepted when the deterministic Job already exists", async () => {
+  const repository = new InMemoryManagedJobDispatchRepository({ rows: [dispatch()] });
+  const queue = deduplicatingQueue();
+  const acceptedAdd = queue.add.bind(queue);
+  queue.getJob = async (jobId) => queue.jobs.get(jobId) ?? null;
+  queue.add = async (...args) => {
+    await acceptedAdd(...args);
+    throw new Error("connection closed before Redis reply");
+  };
+  const dispatcher = new ManagedJobOutboxDispatcher({
+    repository,
+    queues: { "youtube-discover-page": queue },
+    maxAttempts: 1,
+  });
+
+  const result = await dispatcher.dispatchAvailable({ limit: 1 });
+
+  assert.deepEqual(result, { claimed: 1, sent: 1, failed: 0, dead: 0 });
+  assert.equal(queue.jobs.size, 1);
+  assert.equal(repository.rows.get("dispatch-1").status, "sent");
+});
+
+test("an ambiguous queue.add failure is not accepted when the deterministic Job conflicts", async () => {
+  const repository = new InMemoryManagedJobDispatchRepository({ rows: [dispatch()] });
+  const queue = deduplicatingQueue();
+  queue.jobs.set("discover-page__page-1", {
+    id: "discover-page__page-1",
+    name: "discover-page",
+    data: { page_id: "different-page", intent_schema_version: 1 },
+  });
+  queue.getJob = async (jobId) => queue.jobs.get(jobId) ?? null;
+  queue.add = async () => { throw new Error("connection closed before Redis reply"); };
+  const dispatcher = new ManagedJobOutboxDispatcher({
+    repository,
+    queues: { "youtube-discover-page": queue },
+    maxAttempts: 1,
+  });
+
+  const result = await dispatcher.dispatchAvailable({ limit: 1 });
+
+  assert.deepEqual(result, { claimed: 1, sent: 0, failed: 0, dead: 1 });
+  const persisted = repository.rows.get("dispatch-1");
+  assert.equal(persisted.status, "dead");
+  assert.match(persisted.last_error, /deterministic BullMQ Job conflicts/);
+});
+
+test("a duplicate queue.add result is not accepted when the deterministic Job conflicts", async () => {
+  const repository = new InMemoryManagedJobDispatchRepository({ rows: [dispatch()] });
+  const queue = deduplicatingQueue();
+  queue.jobs.set("discover-page__page-1", {
+    id: "discover-page__page-1",
+    name: "discover-page",
+    data: { page_id: "different-page", intent_schema_version: 1 },
+  });
+  const dispatcher = new ManagedJobOutboxDispatcher({
+    repository,
+    queues: { "youtube-discover-page": queue },
+    maxAttempts: 1,
+  });
+
+  const result = await dispatcher.dispatchAvailable({ limit: 1 });
+
+  assert.deepEqual(result, { claimed: 1, sent: 0, failed: 0, dead: 1 });
+  const persisted = repository.rows.get("dispatch-1");
+  assert.equal(persisted.status, "dead");
+  assert.match(persisted.last_error, /deterministic BullMQ Job conflicts/);
+});
+
 test("a repeatedly rejected dispatch becomes dead and its aggregate becomes terminal", async () => {
   const repository = new InMemoryManagedJobDispatchRepository({ rows: [dispatch()] });
   const dispatcher = new ManagedJobOutboxDispatcher({
@@ -92,4 +160,31 @@ test("a repeatedly rejected dispatch becomes dead and its aggregate becomes term
   assert.equal(second.dead, 1);
   assert.equal(repository.rows.get("dispatch-1").status, "dead");
   assert.equal(repository.aggregates.get("discover_page:page-1").dispatch_status, "terminal");
+});
+
+test("a Migration Recovery Outbox dispatches the whitelisted Channel recovery job", async () => {
+  const repository = new InMemoryManagedJobDispatchRepository({
+    rows: [dispatch({
+      dispatch_id: "migration-retry-dispatch:intent-1",
+      aggregate_kind: "migration_retry",
+      aggregate_id: "intent-1",
+      queue_registry_key: "youtube-channel-crawl",
+      deterministic_job_id: "channel-recovery__42__intent-1__g5",
+      payload_json: { candidate_id: 42, retry_intent_id: "intent-1", dispatch_generation: 5 },
+    })],
+  });
+  const queue = deduplicatingQueue();
+  const dispatcher = new ManagedJobOutboxDispatcher({
+    repository,
+    queues: { "youtube-channel-crawl": queue },
+  });
+
+  const result = await dispatcher.dispatchAvailable({ limit: 1 });
+
+  assert.equal(result.sent, 1);
+  assert.equal(queue.jobs.values().next().value.name, "channel-snapshot-recovery");
+  assert.deepEqual(repository.aggregates.get("migration_retry:intent-1"), {
+    dispatch_status: "enqueued",
+    dispatched_job_id: "channel-recovery__42__intent-1__g5",
+  });
 });

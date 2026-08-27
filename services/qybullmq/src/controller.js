@@ -15,6 +15,7 @@ import {
   withTransaction,
 } from "./db.js";
 import { createControllerLifecycle } from "./controllerLifecycle.js";
+import { allocateChannelSnapshotDispatch } from "./channelSnapshotDispatch.js";
 import { resolveDiscoveryPageQualification } from "./discoveryPagePolicy.js";
 import {
   createCoalescedWakeup,
@@ -56,6 +57,10 @@ import {
   ManagedJobIntentStore,
   PostgresManagedJobIntentRepository,
 } from "./managedJobIntentStore.js";
+import {
+  MigrationRetryIntentJobReconciler,
+  PostgresMigrationRetryIntentRepository,
+} from "./migrationRetryIntent.js";
 import { ManagedPolicyUnavailableError } from "./managedJobIntents.js";
 import { loadIdentityPolicyCatalog } from "./identityPolicyCatalog.js";
 import { closeProxyControlClient, proxyControlClient } from "./proxyControlClient.js";
@@ -116,6 +121,10 @@ const managedJobIntentStore = new ManagedJobIntentStore({
 const managedJobOutboxDispatcher = new ManagedJobOutboxDispatcher({
   repository: new PostgresManagedJobDispatchRepository({ withTransaction }),
   queues,
+});
+const migrationRetryIntentJobReconciler = new MigrationRetryIntentJobReconciler({
+  repository: new PostgresMigrationRetryIntentRepository({ withTransaction }),
+  queue: queues[queuesByRole.channelCrawl],
 });
 
 function intEnv(name, fallback, min = 0, max = Number.MAX_SAFE_INTEGER) {
@@ -463,6 +472,7 @@ async function reconcileChannelCandidateQueue(actions, dispatchBatchId) {
   const rows = await query(
     `SELECT candidate.candidate_id,candidate.channel_id,candidate.channel_url,
             candidate.pipeline_cycle_id,candidate.priority,candidate.status,
+            candidate.snapshot_dispatch_generation,
             candidate.source_json->>'source' AS candidate_source,
             source.query_id,source.query_text
      FROM crawler.channel_candidates candidate
@@ -502,29 +512,44 @@ async function reconcileChannelCandidateQueue(actions, dispatchBatchId) {
   );
   let enqueued = 0;
   for (const row of rows.rows) {
-    const jobId = safeJobId("channel-snapshot", dispatchBatchId, row.channel_id);
-    const existing = await queues[queuesByRole.channelCrawl].getJob(jobId);
-    if (existing) {
+    const generation = Number(row.snapshot_dispatch_generation ?? 0);
+    const legacyJobId = safeJobId("channel-snapshot", dispatchBatchId, row.channel_id);
+    const currentJobId = generation > 0
+      ? safeJobId("channel-snapshot", dispatchBatchId, row.channel_id, `g${generation}`)
+      : legacyJobId;
+    let represented = false;
+    for (const existingJobId of new Set([currentJobId, legacyJobId])) {
+      const existing = await queues[queuesByRole.channelCrawl].getJob(existingJobId);
+      if (!existing) continue;
       const state = await existing.getState();
-      if (["waiting", "active", "delayed", "prioritized", "waiting-children"].includes(state)) continue;
+      if (["waiting", "active", "delayed", "prioritized", "waiting-children"].includes(state)) {
+        represented = true;
+        break;
+      }
       try {
         await existing.remove();
       } catch {
-        continue;
+        represented = true;
+        break;
       }
     }
-    await query(
-      `UPDATE crawler.channel_candidates
-       SET status='queued',next_retry_at=NULL,validation_finished_at=NULL,updated_at=now()
-       WHERE candidate_id=$1
-         AND NOT (snapshot_json ? 'parser_contract_error')
-         AND status IN ('discovered','queued','validating','failed')`,
-      [row.candidate_id],
+    if (represented) continue;
+    const candidate = await allocateChannelSnapshotDispatch(query, {
+      candidateId: row.candidate_id,
+      expectedGeneration: generation,
+    });
+    if (!candidate) continue;
+    const jobId = safeJobId(
+      "channel-snapshot",
+      dispatchBatchId,
+      row.channel_id,
+      `g${candidate.snapshot_dispatch_generation}`,
     );
     await queues[queuesByRole.channelCrawl].add(
       "channel-snapshot",
       {
         candidate_id: Number(row.candidate_id),
+        dispatch_generation: candidate.snapshot_dispatch_generation,
         dispatch_batch_id: dispatchBatchId,
         channel_id: row.channel_id,
         channel_url: row.channel_url,
@@ -2768,6 +2793,15 @@ async function tick() {
   });
   if (finalManagedDispatch.claimed > 0) {
     actions.push({ action: "flush-managed-job-outbox", dispatch: finalManagedDispatch });
+  }
+  const recoveryIntentReconcile = await migrationRetryIntentJobReconciler.reconcileAvailable({
+    limit: 100,
+  });
+  if (recoveryIntentReconcile.scanned > 0) {
+    actions.push({
+      action: "reconcile-migration-retry-intents",
+      ...recoveryIntentReconcile,
+    });
   }
 
   const tickStored = await persistControllerTick(stats, actions, queryScheduler);

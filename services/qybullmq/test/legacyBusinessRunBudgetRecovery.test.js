@@ -46,12 +46,40 @@ function databaseQuery({ alreadyRecorded = false } = {}) {
         }],
       };
     }
+    if (/SELECT business_run_key/.test(sql)) {
+      return {
+        rowCount: 1,
+        rows: [{
+          business_run_key: "full-channel:legacy-budget",
+          business_run_id: runId,
+          status: "materialized",
+          terminal_reason: null,
+          channel_id: null,
+          candidate_id: null,
+        }],
+      };
+    }
     if (/UPDATE crawler\.channel_runs/.test(sql)) {
       return { rowCount: 1, rows: [{ run_id: params[0] }] };
     }
+    if (/UPDATE crawler\.business_run_bindings/.test(sql)) {
+      return {
+        rowCount: 1,
+        rows: [{
+          business_run_key: params[0],
+          business_run_id: params[1],
+          status: "terminal",
+          terminal_reason: params[2],
+        }],
+      };
+    }
     throw new Error(`unexpected SQL: ${sql}`);
   };
-  return { calls, query };
+  return {
+    calls,
+    query,
+    withTransaction: (action) => action({ query }),
+  };
 }
 
 test("legacy budget evidence dry-run validates without changing the Run", async () => {
@@ -73,6 +101,7 @@ test("legacy budget evidence is persisted only after exact validation", async ()
   const db = databaseQuery();
   const result = await recoverLegacyBusinessRunBudgetEvidence({
     query: db.query,
+    withTransaction: db.withTransaction,
     queue: { async getJob() { return failedJob(); } },
     runId,
     jobId,
@@ -81,11 +110,16 @@ test("legacy budget evidence is persisted only after exact validation", async ()
 
   assert.equal(result.action, "recorded_budget_exhaustion");
   assert.equal(result.applied, true);
-  assert.equal(db.calls.length, 2);
-  assert.match(db.calls[1].sql, /UPDATE crawler\.channel_runs/);
+  assert.equal(db.calls.length, 5);
+  const runUpdate = db.calls.find(({ sql }) => /UPDATE crawler\.channel_runs/.test(sql));
+  assert.ok(runUpdate);
   assert.equal(
-    JSON.parse(db.calls[1].params[1]).source,
+    JSON.parse(runUpdate.params[1]).source,
     "bullmq_failed_job_reconciliation",
+  );
+  assert.equal(
+    db.calls.some(({ sql }) => /UPDATE crawler\.business_run_bindings/.test(sql)),
+    true,
   );
 });
 

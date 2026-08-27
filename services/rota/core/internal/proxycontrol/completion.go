@@ -205,6 +205,9 @@ func (m *Manager) CompleteTask(ctx context.Context, request CompleteTaskRequest)
 	} else {
 		m.invalidateCredentials(credentialRotations)
 	}
+	if (state.pendingAction == "" || state.pendingAction == PendingActionNone) && !state.routeEligible {
+		m.requestReconcile()
+	}
 	return result, nil
 }
 
@@ -225,6 +228,7 @@ type completionTaskState struct {
 	role                string
 	poolID              int
 	proxyID             *int
+	routeEligible       bool
 	networkIdentityKey  string
 	identityPolicyID    string
 	identityPolicyVer   int
@@ -243,10 +247,20 @@ func lockCompletionTask(
 		       t.worker_instance_id,t.lease_id,t.route_generation,t.business_run_id,
 		       COALESCE(s.active_task_id,''),COALESCE(s.current_lease_id,''),s.lease_until,
 		       s.assignment_version,COALESCE(s.pending_action,''),s.role,s.pool_id,s.proxy_id,
+		       COALESCE(
+		         p.status='active' AND p.revalidation_required=false
+		         AND (p.cooldown_until IS NULL OR p.cooldown_until <= NOW())
+		         AND (
+		           (p.base_health_status='passed' AND p.youtube_health_status='passed')
+		           OR (p.last_youtube_status=200 AND p.last_rota_youtube_status=200)
+		         ),
+		         false
+		       ),
 		       COALESCE(s.network_identity_key,''),t.identity_policy_id,
 		       t.identity_policy_version,t.identity_policy_hash
 		FROM proxy_control_tasks t
 		JOIN proxy_running_slots s ON s.slot_name=t.slot_name
+		LEFT JOIN proxies p ON p.id=s.proxy_id
 		WHERE t.workload_scope=$1 AND t.task_id=$2
 		FOR UPDATE OF t,s
 	`, workloadScope, taskID).Scan(
@@ -254,7 +268,7 @@ func lockCompletionTask(
 		&state.workerInstanceID, &state.leaseID, &state.routeGeneration,
 		&state.businessRunID, &state.activeTaskID, &state.currentLeaseID,
 		&state.leaseUntil, &state.slotRouteGeneration, &state.pendingAction,
-		&state.role, &state.poolID, &state.proxyID, &state.networkIdentityKey,
+		&state.role, &state.poolID, &state.proxyID, &state.routeEligible, &state.networkIdentityKey,
 		&state.identityPolicyID, &state.identityPolicyVer, &state.identityPolicyHash,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {

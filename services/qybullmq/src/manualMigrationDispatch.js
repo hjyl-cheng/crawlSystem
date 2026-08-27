@@ -233,7 +233,8 @@ async function loadIntentForUpdate(client, snapshot) {
             intent.target_candidate_id,intent.first_dispatch_batch_id,
             candidate.dispatch_batch_id,candidate.pipeline_cycle_id,
             candidate.channel_url,candidate.priority,candidate.status,
-            candidate.snapshot_attempts,candidate.source_json
+            candidate.snapshot_attempts,candidate.snapshot_dispatch_generation,
+            candidate.source_json
      FROM crawler.migration_channel_intents intent
      LEFT JOIN crawler.channel_candidates candidate
        ON candidate.candidate_id=intent.target_candidate_id
@@ -298,7 +299,8 @@ async function createTargetCandidate(client, snapshot, batchId, status) {
        $1,$1,$2,$3,$4,$5,$6,$7,$8::bigint,$9,$10,$11,$12,'{}'::jsonb,$13::jsonb,now()
      )
      RETURNING candidate_id,dispatch_batch_id,pipeline_cycle_id,channel_id,
-               channel_url,priority,status,snapshot_attempts,source_json`,
+               channel_url,priority,status,snapshot_attempts,
+               snapshot_dispatch_generation,source_json`,
     [
       batchId,
       snapshot.channel_id,
@@ -324,13 +326,30 @@ async function attachIntentAndSource(client, {
   snapshot,
   batchId,
 }) {
-  await client.query(
-    `UPDATE crawler.migration_channel_intents
-     SET target_candidate_id=$2,dispatch_attempts=dispatch_attempts+1,
-         last_dispatch_at=now(),updated_at=now()
-     WHERE migration_intent_id=$1`,
+  const dispatched = await client.query(
+    `WITH bumped AS (
+       UPDATE crawler.migration_channel_intents
+       SET target_candidate_id=$2,dispatch_attempts=dispatch_attempts+1,
+           last_dispatch_at=now(),updated_at=now()
+       WHERE migration_intent_id=$1
+         AND (target_candidate_id IS NULL OR target_candidate_id=$2)
+       RETURNING dispatch_attempts
+     )
+     UPDATE crawler.channel_candidates candidate
+     SET snapshot_dispatch_generation=bumped.dispatch_attempts,updated_at=now()
+     FROM bumped
+     WHERE candidate.candidate_id=$2
+       AND candidate.snapshot_dispatch_generation<=bumped.dispatch_attempts
+     RETURNING candidate.snapshot_dispatch_generation`,
     [intentId, candidate.candidate_id],
   );
+  if (dispatched.rowCount !== 1) {
+    throw new ManualMigrationDispatchError("Migration dispatch generation could not be allocated", {
+      statusCode: 409,
+      code: "dispatch_generation_conflict",
+      details: { migration_intent_id: intentId, candidate_id: candidate.candidate_id },
+    });
+  }
   await client.query(
     `INSERT INTO crawler.channel_candidate_sources (
        candidate_id,page_id,query_text,discovery_strategy,source_json
@@ -346,6 +365,7 @@ async function attachIntentAndSource(client, {
       }),
     ],
   );
+  return Number(dispatched.rows[0].snapshot_dispatch_generation);
 }
 
 async function refreshBatchCounts(client, batchId) {
@@ -403,6 +423,7 @@ function existingCandidate(intent) {
     priority: intent.priority,
     status: intent.status,
     snapshot_attempts: intent.snapshot_attempts,
+    snapshot_dispatch_generation: Number(intent.snapshot_dispatch_generation ?? 0),
     source_json: intent.source_json,
   };
 }
@@ -459,12 +480,13 @@ export async function prepareManualMigration(client, {
       [candidate.candidate_id, normalizedBatchId],
     );
     candidate = retried.rows[0];
-    await attachIntentAndSource(client, {
+    const dispatchGeneration = await attachIntentAndSource(client, {
       intentId: intent.migration_intent_id,
       candidate,
       snapshot,
       batchId: normalizedBatchId,
     });
+    candidate = { ...candidate, snapshot_dispatch_generation: dispatchGeneration };
     await refreshBatchCounts(client, normalizedBatchId);
     await activateScheduler(client, normalizedBatchId);
     return {
@@ -514,12 +536,13 @@ export async function prepareManualMigration(client, {
     };
   }
   candidate = await createTargetCandidate(client, snapshot, normalizedBatchId, "queued");
-  await attachIntentAndSource(client, {
+  const dispatchGeneration = await attachIntentAndSource(client, {
     intentId: intent.migration_intent_id,
     candidate,
     snapshot,
     batchId: normalizedBatchId,
   });
+  candidate = { ...candidate, snapshot_dispatch_generation: dispatchGeneration };
   await refreshBatchCounts(client, normalizedBatchId);
   await activateScheduler(client, normalizedBatchId);
   return {
@@ -680,7 +703,18 @@ export async function dispatchManualMigrationBatch({
 }
 
 async function addOrReuseJob(queue, { candidate, batchId, minSubscriberCount }) {
-  const jobId = safeJobId("channel-snapshot", batchId, candidate.channel_id);
+  const dispatchGeneration = positiveCandidateId(candidate.snapshot_dispatch_generation);
+  if (dispatchGeneration == null) {
+    throw new ManualMigrationDispatchError("snapshot dispatch generation is required", {
+      code: "missing_dispatch_generation",
+    });
+  }
+  const jobId = safeJobId(
+    "channel-snapshot",
+    batchId,
+    candidate.channel_id,
+    `g${dispatchGeneration}`,
+  );
   const existing = await queue.getJob(jobId);
   if (existing) {
     const state = await existing.getState();

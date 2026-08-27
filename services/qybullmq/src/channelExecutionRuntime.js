@@ -79,13 +79,20 @@ function failureDecisions(metrics, attemptError = null) {
       body: item.body,
       source: item.source,
     });
-    const key = [disposition.kind, item.source, item.status, item.error_message].join(":");
+    const structuredEvidence = Object.hasOwn(disposition, "evidence")
+      ? disposition.evidence
+      : null;
+    const decisionSource = structuredEvidence
+      ? structuredEvidence.source
+      : item.source;
+    const key = [disposition.kind, decisionSource, item.status, item.error_message].join(":");
     if (seen.has(key)) continue;
     seen.add(key);
     output.push({
       ...disposition,
       evidence: {
-        source: item.source || null,
+        ...(structuredEvidence ?? {}),
+        source: decisionSource || null,
         target_url: item.target_url || null,
         client: item.client || null,
         status: item.status ?? disposition.status ?? null,

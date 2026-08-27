@@ -160,6 +160,35 @@ test("channel runtime aborts and skips cookie checkpoint when proxy identity dri
   assert.equal(calls.finishes[0].value.result.failure_decisions[0].kind, "unknown");
 });
 
+test("channel runtime preserves the source attached to a nested structured failure", async () => {
+  const currentProxy = { value: { ...proxy } };
+  const { runtime, calls } = runtimeFixture();
+  const gatewayError = Object.assign(new Error("gateway request failed"), {
+    failureKind: "proxy_transport",
+    code: "FINGERPRINT_PROXY_TRANSPORT",
+    youtube_failure_evidence: { source: "fingerprint_gateway" },
+  });
+
+  let failure = null;
+  try {
+    await runtime.run(context(currentProxy), async () => {
+      throw new Error("channel snapshot failed", { cause: gatewayError });
+    });
+  } catch (error) {
+    failure = error;
+  }
+
+  assert.ok(failure);
+  const decision = failure.channel_execution_attempt.failure_decisions.find(
+    (item) => item.kind === "proxy_transport",
+  );
+  assert.equal(decision.evidence.source, "fingerprint_gateway");
+  assert.equal(
+    calls.finishes[0].value.result.failure_decisions[0].evidence.source,
+    "fingerprint_gateway",
+  );
+});
+
 test("channel runtime rejects a second attempt while the first is still preparing", async () => {
   let releaseLoad;
   const loading = new Promise((resolve) => { releaseLoad = resolve; });

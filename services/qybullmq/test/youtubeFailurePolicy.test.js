@@ -61,3 +61,65 @@ test("structured adapter evidence survives an outer generic error message", () =
   assert.equal(result.kind, "youtube_rate_limited");
   assert.equal(error.youtube_failure_evidence.source, "youtubejs_player");
 });
+
+test("a nested structured Fingerprint proxy failure does not depend on error text", () => {
+  const gatewayError = Object.assign(new Error("gateway request failed"), {
+    failureKind: "proxy_transport",
+    code: "FINGERPRINT_PROXY_TRANSPORT",
+    curlCode: 35,
+    youtube_failure_evidence: {
+      source: "fingerprint_gateway",
+      status: null,
+      body: "opaque gateway failure",
+    },
+  });
+  const error = new Error("channel snapshot failed", { cause: gatewayError });
+  const result = decideYoutubeFailure({ error });
+  assert.deepEqual(result, {
+    kind: "proxy_transport",
+    retry_mode: "new_identity",
+    proxy_action: "cooldown_network",
+    client_action: "none",
+    terminal: false,
+    status: null,
+    evidence: {
+      failure_kind: "proxy_transport",
+      code: "FINGERPRINT_PROXY_TRANSPORT",
+      source: "fingerprint_gateway",
+    },
+  });
+});
+
+test("structured Fingerprint upstream failures keep the same identity", () => {
+  const error = Object.assign(new Error("gateway request failed"), {
+    failure_kind: "upstream_transient",
+    code: "FINGERPRINT_UPSTREAM_TRANSIENT",
+    youtube_failure_evidence: { source: "fingerprint_gateway" },
+  });
+  const result = decideYoutubeFailure({ error });
+  assert.equal(result.kind, "upstream_transient");
+  assert.equal(result.retry_mode, "same_identity");
+  assert.equal(result.proxy_action, "none");
+  assert.equal(result.evidence.source, "fingerprint_gateway");
+});
+
+test("structured failure evidence never borrows source from a wrapper", () => {
+  const gatewayError = Object.assign(new Error("gateway request failed"), {
+    failureKind: "proxy_transport",
+    code: "FINGERPRINT_PROXY_TRANSPORT",
+  });
+  const error = Object.assign(new Error("unrelated wrapper"), {
+    cause: gatewayError,
+    youtube_failure_evidence: { source: "unrelated_wrapper" },
+  });
+
+  assert.equal(decideYoutubeFailure({ error }).evidence.source, null);
+});
+
+test("an unmarked generic TLS error is not blamed on the proxy", () => {
+  const result = decideYoutubeFailure({
+    error: new Error("SSLError curl_code=35"),
+  });
+  assert.notEqual(result.kind, "proxy_transport");
+  assert.equal(result.proxy_action, "none");
+});

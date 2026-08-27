@@ -1,5 +1,8 @@
 import { queuesByRole } from "./queues.js";
-import { decideYoutubeFailure } from "./youtubeFailurePolicy.js";
+import {
+  decideYoutubeFailure,
+  youtubeFailureEvidence,
+} from "./youtubeFailurePolicy.js";
 
 const RETRYABLE_ROUTE_FAILURES = new Set([
   "proxy_transport",
@@ -84,12 +87,14 @@ export function retryableRotaFailure(error) {
     .filter((decision) => RETRYABLE_ROUTE_FAILURES.has(decision?.kind))
     .sort((left, right) => decisionPriority(right) - decisionPriority(left))[0] ?? null;
   if (!selected) return null;
+  const evidence = youtubeFailureEvidence(error);
+  const source = Object.hasOwn(selected, "evidence")
+    ? selected?.evidence?.source
+    : evidence.source;
   return Object.freeze({
     observation: selected.kind,
     source: String(
-      selected?.evidence?.source
-        ?? error?.youtube_failure_evidence?.source
-        ?? "youtube_managed_request",
+      source || "youtube_managed_request",
     ),
   });
 }

@@ -175,6 +175,12 @@ func (m *Manager) requestReconcile() {
 	}
 }
 
+func (m *Manager) NotifyHealthIncident(proxyID int) {
+	if proxyID > 0 {
+		m.requestReconcile()
+	}
+}
+
 func (m *Manager) requestHealthCheck(proxyID int) bool {
 	if proxyID <= 0 || m.healthChecker == nil || m.proxyStore == nil {
 		return false

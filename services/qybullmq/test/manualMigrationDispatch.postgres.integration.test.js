@@ -65,6 +65,7 @@ test("Target SQL materializes one immutable idempotent intent without a Source w
 
     assert.equal(first.shouldEnqueue, true);
     assert.equal(first.previousStatus, null);
+    assert.equal(first.candidate.snapshot_dispatch_generation, 1);
     assert.equal(repeated.shouldEnqueue, false);
     assert.equal(repeated.alreadyInProgress, true);
     assert.equal(repeated.intentId, first.intentId);
@@ -75,6 +76,7 @@ test("Target SQL materializes one immutable idempotent intent without a Source w
               intent.source_candidate_id::text,intent.channel_id,
               intent.snapshot_sha256,intent.dispatch_attempts,
               candidate.status,candidate.dispatch_batch_id,
+              candidate.snapshot_dispatch_generation::text,
               candidate.source_json#>>'{migration_source,database}' AS source_database_metadata
        FROM crawler.migration_channel_intents intent
        JOIN crawler.channel_candidates candidate
@@ -91,6 +93,7 @@ test("Target SQL materializes one immutable idempotent intent without a Source w
       dispatch_attempts: 1,
       status: "queued",
       dispatch_batch_id: batchId,
+      snapshot_dispatch_generation: "1",
       source_database_metadata: "migration_source_test",
     });
 

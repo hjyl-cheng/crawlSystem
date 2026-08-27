@@ -231,6 +231,8 @@ type Assignment struct {
 	OK                    bool         `json:"ok"`
 	Ready                 bool         `json:"ready"`
 	Reason                string       `json:"reason,omitempty"`
+	ReasonCode            string       `json:"reason_code,omitempty"`
+	RetryAfterMS          int64        `json:"retry_after_ms,omitempty"`
 	ControlState          string       `json:"control_state,omitempty"`
 	WorkloadScope         string       `json:"workload_scope,omitempty"`
 	ProtocolVersion       int          `json:"protocol_version,omitempty"`

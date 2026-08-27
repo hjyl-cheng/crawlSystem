@@ -1,0 +1,329 @@
+package proxycontrol
+
+import (
+	"context"
+	"testing"
+	"time"
+)
+
+type idleRouteDataPlaneStub struct {
+	oldUsername     string
+	newUsername     string
+	expectedProxyID int
+	activationCalls int
+	retiredUsers    []string
+}
+
+func TestFailedProxyOnExecutionLockedSlotFinishesBeforeIdleTransition(t *testing.T) {
+	manager, pool := newProxyControlPostgres(t)
+	ctx := context.Background()
+
+	failedProxyID := insertControlProxy(t, pool, "active-route-failed.example:8080", 10)
+	reserveProxyID := insertControlProxy(t, pool, "active-route-reserve.example:8080", 20)
+	dataPlane := &idleRouteDataPlaneStub{}
+	manager.SetDataPlaneController(dataPlane)
+	if err := manager.syncResources(ctx); err != nil {
+		t.Fatalf("sync managed resources: %v", err)
+	}
+	if _, err := manager.reconcile(ctx); err != nil {
+		t.Fatalf("reconcile initial assignment: %v", err)
+	}
+	claim, err := manager.Claim(ctx, testClaimRequest(
+		"claim-active-health", "worker-active-health", "instance-active-health",
+	))
+	if err != nil {
+		t.Fatalf("claim initial route: %v", err)
+	}
+	task, err := manager.BeginTask(ctx, BeginTaskRequest{
+		SlotName: claim.SlotName, WorkerID: claim.WorkerID,
+		WorkerInstanceID: claim.WorkerInstanceID, LeaseID: claim.LeaseID,
+		RouteGeneration:  claim.AssignmentVersion,
+		AttemptRequestID: "attempt-active-health",
+		BusinessRunID:    "business-active-health",
+		JobExecutionID:   "youtube-channel-crawl:active-health:1:1",
+		TaskKind:         TaskKindChannelFull,
+	})
+	if err != nil {
+		t.Fatalf("begin active task: %v", err)
+	}
+
+	if _, err := pool.Exec(ctx, `
+		UPDATE proxies
+		SET status='failed',base_health_status='failed',youtube_health_status='not_run',
+		    health_generation=health_generation+1,updated_at=NOW()
+		WHERE id=$1
+	`, failedProxyID); err != nil {
+		t.Fatalf("apply failed health state: %v", err)
+	}
+	if _, err := manager.reconcile(ctx); err != nil {
+		t.Fatalf("reconcile execution-locked route: %v", err)
+	}
+	select {
+	case <-manager.reconcileRequests:
+	default:
+	}
+
+	renewed, err := manager.Renew(ctx, RenewRequest{
+		RenewRequestID:       "renew-active-health",
+		SlotName:             claim.SlotName,
+		WorkerID:             claim.WorkerID,
+		WorkerInstanceID:     claim.WorkerInstanceID,
+		LeaseID:              claim.LeaseID,
+		KnownRouteGeneration: claim.AssignmentVersion,
+	})
+	if err != nil {
+		t.Fatalf("renew execution-locked route: %v", err)
+	}
+	if !renewed.Ready || renewed.RouteChanged || renewed.ProxyID == nil ||
+		*renewed.ProxyID != failedProxyID ||
+		renewed.AssignmentVersion != claim.AssignmentVersion ||
+		renewed.CredentialGeneration != claim.CredentialGeneration ||
+		dataPlane.activationCalls != 0 {
+		t.Fatalf("execution-locked assignment = %+v", renewed)
+	}
+
+	completion, err := manager.CompleteTask(ctx, CompleteTaskRequest{
+		CompletionRequestID: "complete-active-health",
+		SlotName:            claim.SlotName, WorkerID: claim.WorkerID,
+		WorkerInstanceID: claim.WorkerInstanceID, LeaseID: claim.LeaseID,
+		RouteGeneration: claim.AssignmentVersion,
+		TaskID:          task.TaskID, BusinessRunID: task.BusinessRunID,
+		Outcome: TaskOutcomeSuccess, DurationMS: int64(time.Second / time.Millisecond),
+		BusinessComplete: true, ObservationIDs: []string{},
+		AttemptQuiesced: true, ActiveManagedRequests: 0,
+	})
+	if err != nil {
+		t.Fatalf("complete active task after health incident: %v", err)
+	}
+	if completion.ControlState != CompletionReadyKeepRoute || !completion.Ready {
+		t.Fatalf("active task completion = %+v", completion)
+	}
+	select {
+	case <-manager.reconcileRequests:
+	default:
+		t.Fatal("completion on an ineligible active Route did not request idle reconciliation")
+	}
+	if _, err := manager.reconcile(ctx); err != nil {
+		t.Fatalf("reconcile newly idle route: %v", err)
+	}
+
+	replaced, err := manager.Renew(ctx, RenewRequest{
+		RenewRequestID:       "renew-after-active-health",
+		SlotName:             claim.SlotName,
+		WorkerID:             claim.WorkerID,
+		WorkerInstanceID:     claim.WorkerInstanceID,
+		LeaseID:              claim.LeaseID,
+		KnownRouteGeneration: claim.AssignmentVersion,
+	})
+	if err != nil {
+		t.Fatalf("renew post-completion route: %v", err)
+	}
+	if !replaced.Ready || !replaced.RouteChanged || replaced.ProxyID == nil ||
+		*replaced.ProxyID != reserveProxyID ||
+		replaced.AssignmentVersion != claim.AssignmentVersion+1 ||
+		dataPlane.activationCalls != 1 {
+		t.Fatalf("post-completion replacement = %+v", replaced)
+	}
+}
+
+func (*idleRouteDataPlaneStub) RefreshProxyUser(string) {}
+
+func (s *idleRouteDataPlaneStub) RetireProxyUser(_ context.Context, username string) error {
+	s.retiredUsers = append(s.retiredUsers, username)
+	return nil
+}
+
+func (s *idleRouteDataPlaneStub) ActivateProxyUser(
+	_ context.Context,
+	oldUsername string,
+	newUsername string,
+	expectedProxyID int,
+) error {
+	s.activationCalls++
+	s.oldUsername = oldUsername
+	s.newUsername = newUsername
+	s.expectedProxyID = expectedProxyID
+	return nil
+}
+
+func TestFailedProxyOnLeaseOwnedIdleSlotRotatesToHealthyReserve(t *testing.T) {
+	manager, pool := newProxyControlPostgres(t)
+	ctx := context.Background()
+
+	failedProxyID := insertControlProxy(t, pool, "idle-route-failed.example:8080", 10)
+	reserveProxyID := insertControlProxy(t, pool, "idle-route-reserve.example:8080", 20)
+	dataPlane := &idleRouteDataPlaneStub{}
+	manager.SetDataPlaneController(dataPlane)
+	if err := manager.syncResources(ctx); err != nil {
+		t.Fatalf("sync managed resources: %v", err)
+	}
+	if _, err := manager.reconcile(ctx); err != nil {
+		t.Fatalf("reconcile initial assignment: %v", err)
+	}
+	claim, err := manager.Claim(ctx, testClaimRequest(
+		"claim-idle-route", "worker-idle-route", "instance-idle-route",
+	))
+	if err != nil {
+		t.Fatalf("claim initial route: %v", err)
+	}
+	if claim.ProxyID == nil || *claim.ProxyID != failedProxyID || !claim.Ready {
+		t.Fatalf("initial assignment = %+v", claim)
+	}
+
+	if _, err := pool.Exec(ctx, `
+		UPDATE proxies
+		SET status='failed',base_health_status='failed',youtube_health_status='not_run',
+		    health_generation=health_generation+1,updated_at=NOW()
+		WHERE id=$1
+	`, failedProxyID); err != nil {
+		t.Fatalf("apply failed health state: %v", err)
+	}
+	if _, err := manager.reconcile(ctx); err != nil {
+		t.Fatalf("reconcile failed idle route: %v", err)
+	}
+
+	renewed, err := manager.Renew(ctx, RenewRequest{
+		RenewRequestID:       "renew-idle-route-after-health",
+		SlotName:             claim.SlotName,
+		WorkerID:             claim.WorkerID,
+		WorkerInstanceID:     claim.WorkerInstanceID,
+		LeaseID:              claim.LeaseID,
+		KnownRouteGeneration: claim.AssignmentVersion,
+	})
+	if err != nil {
+		t.Fatalf("renew rotated idle route: %v", err)
+	}
+	if !renewed.Ready || !renewed.RouteChanged || renewed.LeaseID != claim.LeaseID ||
+		renewed.ProxyID == nil || *renewed.ProxyID != reserveProxyID ||
+		renewed.AssignmentVersion != claim.AssignmentVersion+1 ||
+		renewed.CredentialGeneration != claim.CredentialGeneration+1 ||
+		renewed.ProxyUser == claim.ProxyUser || renewed.ControlState != "leased_idle" {
+		t.Fatalf("rotated idle assignment = %+v, initial = %+v", renewed, claim)
+	}
+	if dataPlane.activationCalls != 1 || dataPlane.oldUsername != claim.ProxyUser ||
+		dataPlane.newUsername != renewed.ProxyUser || dataPlane.expectedProxyID != reserveProxyID {
+		t.Fatalf("data-plane activation = %+v", dataPlane)
+	}
+
+	if _, err := manager.reconcile(ctx); err != nil {
+		t.Fatalf("repeat idle reconciliation: %v", err)
+	}
+	stable, err := manager.Renew(ctx, RenewRequest{
+		RenewRequestID:       "renew-idle-route-stable",
+		SlotName:             renewed.SlotName,
+		WorkerID:             renewed.WorkerID,
+		WorkerInstanceID:     renewed.WorkerInstanceID,
+		LeaseID:              renewed.LeaseID,
+		KnownRouteGeneration: renewed.AssignmentVersion,
+	})
+	if err != nil {
+		t.Fatalf("renew stable idle route: %v", err)
+	}
+	if !stable.Ready || stable.RouteChanged ||
+		stable.AssignmentVersion != renewed.AssignmentVersion ||
+		stable.CredentialGeneration != renewed.CredentialGeneration ||
+		dataPlane.activationCalls != 1 {
+		t.Fatalf("stable assignment = %+v, activation calls = %d", stable, dataPlane.activationCalls)
+	}
+}
+
+func TestFailedProxyOnLeaseOwnedIdleSlotPausesAndRecoversWhenReserveArrives(t *testing.T) {
+	manager, pool := newProxyControlPostgres(t)
+	ctx := context.Background()
+
+	failedProxyID := insertControlProxy(t, pool, "idle-no-reserve-failed.example:8080", 10)
+	dataPlane := &idleRouteDataPlaneStub{}
+	manager.SetDataPlaneController(dataPlane)
+	if err := manager.syncResources(ctx); err != nil {
+		t.Fatalf("sync managed resources: %v", err)
+	}
+	if _, err := manager.reconcile(ctx); err != nil {
+		t.Fatalf("reconcile initial assignment: %v", err)
+	}
+	claim, err := manager.Claim(ctx, testClaimRequest(
+		"claim-idle-no-reserve", "worker-idle-no-reserve", "instance-idle-no-reserve",
+	))
+	if err != nil {
+		t.Fatalf("claim initial route: %v", err)
+	}
+
+	if _, err := pool.Exec(ctx, `
+		UPDATE proxies
+		SET status='failed',base_health_status='failed',youtube_health_status='not_run',
+		    health_generation=health_generation+1,updated_at=NOW()
+		WHERE id=$1
+	`, failedProxyID); err != nil {
+		t.Fatalf("apply failed health state: %v", err)
+	}
+	if _, err := manager.reconcile(ctx); err != nil {
+		t.Fatalf("reconcile idle route without reserve: %v", err)
+	}
+
+	paused, err := manager.Renew(ctx, RenewRequest{
+		RenewRequestID:       "renew-idle-no-reserve-paused",
+		SlotName:             claim.SlotName,
+		WorkerID:             claim.WorkerID,
+		WorkerInstanceID:     claim.WorkerInstanceID,
+		LeaseID:              claim.LeaseID,
+		KnownRouteGeneration: claim.AssignmentVersion,
+	})
+	if err != nil {
+		t.Fatalf("renew paused idle route: %v", err)
+	}
+	if paused.Ready || !paused.RouteChanged || paused.LeaseID != claim.LeaseID ||
+		paused.ProxyID != nil || paused.ControlState != "paused_no_reserve" ||
+		paused.AssignmentVersion != claim.AssignmentVersion+1 ||
+		paused.CredentialGeneration != claim.CredentialGeneration+1 ||
+		paused.ReasonCode != "NO_POLICY_ELIGIBLE_RESERVE" || paused.RetryAfterMS <= 0 {
+		t.Fatalf("paused idle assignment = %+v", paused)
+	}
+	if len(dataPlane.retiredUsers) != 1 || dataPlane.retiredUsers[0] != claim.ProxyUser {
+		t.Fatalf("retired proxy users = %v, want %q", dataPlane.retiredUsers, claim.ProxyUser)
+	}
+
+	if _, err := manager.reconcile(ctx); err != nil {
+		t.Fatalf("repeat paused reconciliation: %v", err)
+	}
+	stillPaused, err := manager.Renew(ctx, RenewRequest{
+		RenewRequestID:       "renew-idle-no-reserve-stable",
+		SlotName:             paused.SlotName,
+		WorkerID:             paused.WorkerID,
+		WorkerInstanceID:     paused.WorkerInstanceID,
+		LeaseID:              paused.LeaseID,
+		KnownRouteGeneration: paused.AssignmentVersion,
+	})
+	if err != nil {
+		t.Fatalf("renew stable paused route: %v", err)
+	}
+	if stillPaused.Ready || stillPaused.RouteChanged ||
+		stillPaused.AssignmentVersion != paused.AssignmentVersion ||
+		stillPaused.CredentialGeneration != paused.CredentialGeneration ||
+		len(dataPlane.retiredUsers) != 1 {
+		t.Fatalf("stable paused assignment = %+v, retired users = %v", stillPaused, dataPlane.retiredUsers)
+	}
+
+	reserveProxyID := insertControlProxy(t, pool, "idle-no-reserve-recovered.example:8080", 20)
+	if _, err := manager.reconcile(ctx); err != nil {
+		t.Fatalf("reconcile newly available reserve: %v", err)
+	}
+	recovered, err := manager.Renew(ctx, RenewRequest{
+		RenewRequestID:       "renew-idle-no-reserve-recovered",
+		SlotName:             paused.SlotName,
+		WorkerID:             paused.WorkerID,
+		WorkerInstanceID:     paused.WorkerInstanceID,
+		LeaseID:              paused.LeaseID,
+		KnownRouteGeneration: paused.AssignmentVersion,
+	})
+	if err != nil {
+		t.Fatalf("renew recovered idle route: %v", err)
+	}
+	if !recovered.Ready || !recovered.RouteChanged || recovered.LeaseID != claim.LeaseID ||
+		recovered.ProxyID == nil || *recovered.ProxyID != reserveProxyID ||
+		recovered.ControlState != "leased_idle" ||
+		recovered.AssignmentVersion != paused.AssignmentVersion+1 ||
+		recovered.CredentialGeneration != paused.CredentialGeneration+1 ||
+		dataPlane.activationCalls != 1 || dataPlane.oldUsername != paused.ProxyUser ||
+		dataPlane.newUsername != recovered.ProxyUser {
+		t.Fatalf("recovered idle assignment = %+v, data plane = %+v", recovered, dataPlane)
+	}
+}

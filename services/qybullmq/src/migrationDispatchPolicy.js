@@ -30,8 +30,13 @@ export function migrationBatchHasOpenWork(batch = {}) {
 }
 
 export function channelSnapshotPayload(candidate, batchId, { minSubscriberCount = 1000 } = {}) {
+  const dispatchGeneration = Number(candidate?.snapshot_dispatch_generation);
+  if (!Number.isSafeInteger(dispatchGeneration) || dispatchGeneration <= 0) {
+    throw new TypeError("candidate.snapshot_dispatch_generation must be a positive integer");
+  }
   return {
     candidate_id: Number(candidate.candidate_id),
+    dispatch_generation: dispatchGeneration,
     dispatch_batch_id: batchId,
     channel_id: candidate.channel_id,
     channel_url: candidate.channel_url,

@@ -86,10 +86,11 @@ func (r *ProxyRepository) ApplyHealthVerdict(
 			    archive_reason = NULLIF($14, ''),
 			    last_check = $8,
 			    last_error = NULLIF($15, ''),
-			    last_rota_youtube_status = CASE WHEN $9 THEN 200 ELSE $16 END,
-			    last_rota_youtube_error = CASE WHEN $9 THEN NULL ELSE NULLIF($15, '') END,
-			    last_rota_youtube_check = $8,
-			    updated_at = NOW()
+				    last_rota_youtube_status = CASE WHEN $9 THEN 200 ELSE $16 END,
+				    last_rota_youtube_error = CASE WHEN $9 THEN NULL ELSE NULLIF($15, '') END,
+				    last_rota_youtube_check = $8,
+				    health_generation = health_generation + 1,
+				    updated_at = NOW()
 			WHERE id = $1
 		`, proxyID, string(decision.Status), decision.FailedSince, decision.ContinuousFailedSince,
 			string(decision.FailureKind), decision.NextHealthCheckAt, decision.RevalidationRequired,

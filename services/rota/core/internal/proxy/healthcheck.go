@@ -53,6 +53,14 @@ type controlCacheEntry struct {
 	expiresAt time.Time
 }
 
+type HealthVerdictEvent struct {
+	ProxyID         int
+	ResultingStatus string
+	FailureKind     string
+	Conclusive      bool
+	CheckedAt       time.Time
+}
+
 // HealthChecker performs a base-connectivity probe followed by a YouTube
 // probe, then submits one structured verdict to the lifecycle repository.
 type HealthChecker struct {
@@ -63,6 +71,23 @@ type HealthChecker struct {
 
 	controlMu    sync.Mutex
 	controlCache map[string]controlCacheEntry
+	verdictMu    sync.RWMutex
+	onVerdict    func(HealthVerdictEvent)
+}
+
+func (h *HealthChecker) SetOnVerdictApplied(callback func(HealthVerdictEvent)) {
+	h.verdictMu.Lock()
+	h.onVerdict = callback
+	h.verdictMu.Unlock()
+}
+
+func (h *HealthChecker) notifyVerdictApplied(event HealthVerdictEvent) {
+	h.verdictMu.RLock()
+	callback := h.onVerdict
+	h.verdictMu.RUnlock()
+	if callback != nil {
+		callback(event)
+	}
 }
 
 func NewHealthChecker(
@@ -227,9 +252,18 @@ func (h *HealthChecker) applyEvidence(
 		lifecycleSettings.SoftUnreachableAfterHours,
 		lifecycleSettings.YouTubeUnusableAfterHours,
 	)
-	decision, _, err := h.proxyStore.ApplyHealthVerdict(ctx, p.ID, evidence, policy)
+	decision, applied, err := h.proxyStore.ApplyHealthVerdict(ctx, p.ID, evidence, policy)
 	if err != nil {
 		return nil, fmt.Errorf("record health verdict: %w", err)
+	}
+	if applied {
+		h.notifyVerdictApplied(HealthVerdictEvent{
+			ProxyID:         p.ID,
+			ResultingStatus: string(decision.Status),
+			FailureKind:     string(evidence.Verdict.Kind),
+			Conclusive:      evidence.Verdict.Conclusive,
+			CheckedAt:       evidence.CheckedAt,
+		})
 	}
 
 	result := &models.ProxyTestResult{

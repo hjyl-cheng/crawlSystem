@@ -150,6 +150,9 @@ func New(
 		},
 		log,
 	)
+	healthChecker.SetOnVerdictApplied(func(event proxy.HealthVerdictEvent) {
+		control.NotifyHealthIncident(event.ProxyID)
+	})
 
 	// Initialize handlers
 	authHandler := handlers.NewAuthHandler(settingsRepo, adminRepo, log, jwtSecret, cfg.AdminUser, cfg.AdminPass)

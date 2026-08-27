@@ -44,6 +44,7 @@ async function validatedJob(queue, { runId, jobId }) {
 
 export async function recoverLegacyBusinessRunBudgetEvidence({
   query,
+  withTransaction,
   queue,
   runId,
   jobId,
@@ -87,9 +88,14 @@ export async function recoverLegacyBusinessRunBudgetEvidence({
       job_id: normalizedJobId,
     };
   }
-  const recorded = await recordBusinessRunBudgetExhaustion(query, job, {
-    source: "bullmq_failed_job_reconciliation",
-  });
+  if (typeof withTransaction !== "function") {
+    throw new TypeError("withTransaction is required when apply=true");
+  }
+  const recorded = await withTransaction((client) => (
+    recordBusinessRunBudgetExhaustion(client, job, {
+      source: "bullmq_failed_job_reconciliation",
+    })
+  ));
   if (!recorded.recorded || recorded.execution_run_id !== normalizedRunId) {
     fail("Run evidence update did not match the requested Run");
   }

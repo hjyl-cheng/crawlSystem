@@ -228,6 +228,8 @@ CREATE TABLE IF NOT EXISTS crawler.channel_candidates (
   status TEXT NOT NULL DEFAULT 'discovered'
     CHECK (status IN ('discovered', 'queued', 'validating', 'accepted', 'rejected', 'existing', 'failed')),
   snapshot_attempts INTEGER NOT NULL DEFAULT 0,
+  snapshot_dispatch_generation BIGINT NOT NULL DEFAULT 0
+    CHECK (snapshot_dispatch_generation >= 0),
   snapshot_json JSONB NOT NULL DEFAULT '{}'::jsonb,
   source_json JSONB NOT NULL DEFAULT '{}'::jsonb,
   reject_reason TEXT,
@@ -240,6 +242,16 @@ CREATE TABLE IF NOT EXISTS crawler.channel_candidates (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   UNIQUE (dispatch_batch_id, channel_id)
 );
+
+ALTER TABLE crawler.channel_candidates
+ADD COLUMN IF NOT EXISTS snapshot_dispatch_generation BIGINT NOT NULL DEFAULT 0;
+
+ALTER TABLE crawler.channel_candidates
+DROP CONSTRAINT IF EXISTS channel_candidates_snapshot_dispatch_generation_check;
+
+ALTER TABLE crawler.channel_candidates
+ADD CONSTRAINT channel_candidates_snapshot_dispatch_generation_check
+CHECK (snapshot_dispatch_generation >= 0);
 
 CREATE INDEX IF NOT EXISTS idx_crawler_channel_candidates_claim
 ON crawler.channel_candidates (dispatch_batch_id, status, priority DESC, created_at ASC);
@@ -474,6 +486,39 @@ CREATE TABLE IF NOT EXISTS crawler.business_run_bindings (
 
 CREATE INDEX IF NOT EXISTS idx_crawler_business_run_bindings_status
 ON crawler.business_run_bindings (status,created_at);
+
+CREATE TABLE IF NOT EXISTS crawler.migration_retry_intents (
+  retry_intent_id TEXT PRIMARY KEY,
+  request_key TEXT NOT NULL UNIQUE,
+  candidate_id BIGINT NOT NULL
+    REFERENCES crawler.channel_candidates(candidate_id) ON DELETE RESTRICT,
+  previous_business_run_id TEXT NOT NULL
+    REFERENCES crawler.business_run_bindings(business_run_id) ON DELETE RESTRICT,
+  new_business_run_id TEXT NOT NULL UNIQUE,
+  new_business_run_key TEXT NOT NULL UNIQUE,
+  new_job_id TEXT NOT NULL UNIQUE,
+  dispatch_generation BIGINT NOT NULL CHECK (dispatch_generation > 0),
+  reason TEXT NOT NULL,
+  intent_hash TEXT NOT NULL,
+  job_payload_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  status TEXT NOT NULL DEFAULT 'requested'
+    CHECK (status IN ('requested','dispatched','running','finished','failed')),
+  dispatch_status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (dispatch_status IN ('pending','deferred','enqueued','terminal')),
+  requested_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  dispatched_at TIMESTAMPTZ,
+  finished_at TIMESTAMPTZ,
+  last_error TEXT,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (candidate_id,dispatch_generation)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS ux_crawler_migration_retry_intents_active_candidate
+ON crawler.migration_retry_intents (candidate_id)
+WHERE status IN ('requested','dispatched','running');
+
+CREATE INDEX IF NOT EXISTS idx_crawler_migration_retry_intents_status
+ON crawler.migration_retry_intents (status,requested_at);
 
 ALTER TABLE crawler.channel_runs ADD COLUMN IF NOT EXISTS identity_policy_id TEXT;
 ALTER TABLE crawler.channel_runs ADD COLUMN IF NOT EXISTS identity_policy_version INTEGER;

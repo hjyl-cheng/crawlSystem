@@ -21,10 +21,14 @@ type runningSlot struct {
 	ReadyAfter        *time.Time
 	WorkerID          *string
 	LeaseUntil        *time.Time
+	CurrentLeaseID    *string
+	ActiveTaskID      *string
 	ControlState      string
+	IdentityPolicyID  string
 }
 
 type bindingRefresh struct {
+	OldProxyUser      string
 	ProxyUser         string
 	ProxyID           *int
 	AssignmentVersion int64
@@ -70,19 +74,23 @@ func (m *Manager) reconcile(ctx context.Context) (reconcileSummary, error) {
 
 	states := make([]slotState, 0, len(slots))
 	for _, slot := range slots {
+		leaseOwned := slotLeaseOwned(slot)
+		executionLocked := leaseOwned && slot.ActiveTaskID != nil
+		idleRouteStable := leaseOwned && slot.ActiveTaskID == nil &&
+			proxyEligibleForRole(slot.ProxyID, candidatesByRole[slot.Role])
 		states = append(states, slotState{
 			Name:    slot.Name,
 			Role:    slot.Role,
 			Number:  slot.Number,
 			ProxyID: slot.ProxyID,
-			Locked:  slot.WorkerID != nil && slot.LeaseUntil != nil && slot.LeaseUntil.After(time.Now()),
+			Locked:  executionLocked || idleRouteStable,
 		})
 	}
 	plan := planPolicyAssignments(states, candidatesByRole)
 	refreshes := make([]bindingRefresh, 0)
 	assignmentChanges := make(map[string]bool)
 	for _, slot := range slots {
-		if slot.WorkerID != nil && slot.LeaseUntil != nil && slot.LeaseUntil.After(time.Now()) {
+		if slotLeaseOwned(slot) && slot.ActiveTaskID != nil {
 			continue
 		}
 		desired := plan.BySlot[slot.Name]
@@ -112,6 +120,7 @@ func (m *Manager) reconcile(ctx context.Context) (reconcileSummary, error) {
 	for _, slot := range slots {
 		desired := plan.BySlot[slot.Name]
 		changed := assignmentChanges[slot.Name]
+		oldProxyUser := ""
 		if changed {
 			if _, err := tx.Exec(ctx, `DELETE FROM pool_proxies WHERE pool_id=$1`, slot.PoolID); err != nil {
 				return reconcileSummary{}, fmt.Errorf("clear slot pool %s: %w", slot.Name, err)
@@ -127,23 +136,38 @@ func (m *Manager) reconcile(ctx context.Context) (reconcileSummary, error) {
 			if _, err := tx.Exec(ctx, `UPDATE proxy_pools SET updated_at=NOW() WHERE id=$1`, slot.PoolID); err != nil {
 				return reconcileSummary{}, fmt.Errorf("touch slot pool %s: %w", slot.Name, err)
 			}
-			if _, err := tx.Exec(ctx, `
-				UPDATE proxy_running_slots
-				SET proxy_id=$2,
-				    assignment_version=assignment_version+1,
-				    assigned_at=CASE WHEN $2::int IS NULL THEN NULL ELSE NOW() END,
-				    ready_after=NULL,
-				    updated_at=NOW()
-				WHERE slot_name=$1
-			`, slot.Name, desired); err != nil {
-				return reconcileSummary{}, fmt.Errorf("persist slot assignment %s: %w", slot.Name, err)
+			if slotLeaseOwned(slot) && slot.ActiveTaskID == nil {
+				rotation, controlState, err :=
+					transitionLeaseOwnedIdleSlot(ctx, tx, slot, desired)
+				if err != nil {
+					return reconcileSummary{}, err
+				}
+				oldProxyUser = rotation.OldUsername
+				slot.ProxyUser = rotation.NewUsername
+				slot.AssignmentVersion++
+				slot.ProxyID = desired
+				slot.ReadyAfter = nil
+				slot.ControlState = controlState
+			} else {
+				if _, err := tx.Exec(ctx, `
+					UPDATE proxy_running_slots
+					SET proxy_id=$2,
+					    assignment_version=assignment_version+1,
+					    assigned_at=CASE WHEN $2::int IS NULL THEN NULL ELSE NOW() END,
+					    ready_after=NULL,
+					    updated_at=NOW()
+					WHERE slot_name=$1
+				`, slot.Name, desired); err != nil {
+					return reconcileSummary{}, fmt.Errorf("persist slot assignment %s: %w", slot.Name, err)
+				}
+				slot.AssignmentVersion++
+				slot.ProxyID = desired
+				slot.ReadyAfter = nil
 			}
-			slot.AssignmentVersion++
-			slot.ProxyID = desired
-			slot.ReadyAfter = nil
 		}
 		if desired != nil && slot.ReadyAfter == nil {
 			refreshes = append(refreshes, bindingRefresh{
+				OldProxyUser:      oldProxyUser,
 				ProxyUser:         slot.ProxyUser,
 				ProxyID:           desired,
 				AssignmentVersion: slot.AssignmentVersion,
@@ -151,6 +175,7 @@ func (m *Manager) reconcile(ctx context.Context) (reconcileSummary, error) {
 			})
 		} else if changed {
 			refreshes = append(refreshes, bindingRefresh{
+				OldProxyUser:      oldProxyUser,
 				ProxyUser:         slot.ProxyUser,
 				AssignmentVersion: slot.AssignmentVersion,
 				ControlState:      slot.ControlState,
@@ -205,7 +230,8 @@ func uniqueCandidateCount(candidatesByRole map[string][]candidate) int {
 func loadRunningSlots(ctx context.Context, tx pgx.Tx) ([]runningSlot, error) {
 	rows, err := tx.Query(ctx, `
 		SELECT s.slot_name, s.role, s.slot_no, s.pool_id, s.user_id, u.username, s.proxy_id,
-		       assignment_version, ready_after, worker_id, lease_until, s.control_state
+		       assignment_version, ready_after, worker_id, lease_until, current_lease_id,
+		       active_task_id, s.control_state, COALESCE(s.identity_policy_id,'')
 		FROM proxy_running_slots s
 		JOIN proxy_users u ON u.id=s.user_id
 		ORDER BY CASE role
@@ -228,13 +254,91 @@ func loadRunningSlots(ctx context.Context, tx pgx.Tx) ([]runningSlot, error) {
 			&slot.Name, &slot.Role, &slot.Number, &slot.PoolID, &slot.UserID,
 			&slot.ProxyUser, &slot.ProxyID,
 			&slot.AssignmentVersion, &slot.ReadyAfter, &slot.WorkerID, &slot.LeaseUntil,
-			&slot.ControlState,
+			&slot.CurrentLeaseID, &slot.ActiveTaskID, &slot.ControlState, &slot.IdentityPolicyID,
 		); err != nil {
 			return nil, fmt.Errorf("scan running slot: %w", err)
 		}
 		slots = append(slots, slot)
 	}
 	return slots, rows.Err()
+}
+
+func slotLeaseOwned(slot runningSlot) bool {
+	return slot.WorkerID != nil && slot.CurrentLeaseID != nil && slot.LeaseUntil != nil &&
+		slot.LeaseUntil.After(time.Now())
+}
+
+func proxyEligibleForRole(proxyID *int, candidates []candidate) bool {
+	if proxyID == nil {
+		return false
+	}
+	for _, item := range candidates {
+		if item.ID == *proxyID {
+			return true
+		}
+	}
+	return false
+}
+
+func transitionLeaseOwnedIdleSlot(
+	ctx context.Context,
+	tx pgx.Tx,
+	slot runningSlot,
+	desired *int,
+) (credentialRotation, string, error) {
+	rotation, err := rotateSlotCredential(ctx, tx, slot.Name)
+	if err != nil {
+		return credentialRotation{}, "", err
+	}
+
+	var networkIdentityKey *string
+	profileEpoch := int64(0)
+	controlState := "paused_no_reserve"
+	if desired != nil {
+		var key string
+		if err := tx.QueryRow(ctx, `
+			SELECT network_identity_key FROM proxies WHERE id=$1
+		`, *desired).Scan(&key); err != nil {
+			return credentialRotation{}, "", fmt.Errorf(
+				"load idle replacement network identity for slot %s: %w", slot.Name, err,
+			)
+		}
+		networkIdentityKey = &key
+		if err := tx.QueryRow(ctx, `
+			INSERT INTO proxy_identity_profile_epochs (
+			  identity_policy_id,network_identity_key,profile_epoch,status
+			) VALUES ($1,$2,0,'active')
+			ON CONFLICT (identity_policy_id,network_identity_key) DO UPDATE
+			SET status='active',retired_at=NULL,updated_at=NOW()
+			RETURNING profile_epoch
+		`, slot.IdentityPolicyID, key).Scan(&profileEpoch); err != nil {
+			return credentialRotation{}, "", fmt.Errorf(
+				"prepare idle replacement identity for slot %s: %w", slot.Name, err,
+			)
+		}
+		controlState = "pending_new_route"
+	}
+
+	tag, err := tx.Exec(ctx, `
+		UPDATE proxy_running_slots
+		SET proxy_id=$2,assignment_version=assignment_version+1,
+		    assigned_at=CASE WHEN $2::int IS NULL THEN NULL ELSE NOW() END,
+		    ready_after=NULL,network_identity_key=$3,profile_epoch=$4,
+		    pending_action=NULL,pending_incident_id=NULL,control_state=$5,
+		    rotation_deadline_at=NULL,updated_at=NOW()
+		WHERE slot_name=$1 AND current_lease_id=$6 AND active_task_id IS NULL
+		  AND assignment_version=$7
+	`, slot.Name, desired, networkIdentityKey, profileEpoch, controlState,
+		*slot.CurrentLeaseID, slot.AssignmentVersion)
+	if err != nil {
+		return credentialRotation{}, "", fmt.Errorf(
+			"transition lease-owned idle slot %s: %w", slot.Name, err,
+		)
+	}
+	if tag.RowsAffected() != 1 {
+		return credentialRotation{}, "", ErrLeaseConflict
+	}
+	return rotation, controlState, nil
 }
 
 func loadEligibleCandidates(
@@ -380,18 +484,22 @@ func (m *Manager) finalizeBindings(ctx context.Context, bindings []bindingRefres
 		return 0
 	})
 	bindings = slices.CompactFunc(bindings, func(left, right bindingRefresh) bool {
-		return left.ProxyUser == right.ProxyUser &&
+		return left.OldProxyUser == right.OldProxyUser &&
+			left.ProxyUser == right.ProxyUser &&
 			left.AssignmentVersion == right.AssignmentVersion &&
 			equalOptionalInt(left.ProxyID, right.ProxyID) &&
 			left.ControlState == right.ControlState
 	})
 	for _, binding := range bindings {
 		if binding.ProxyID == nil {
+			if binding.OldProxyUser != "" {
+				m.retireUser(ctx, binding.OldProxyUser)
+			}
 			m.invalidateUser(binding.ProxyUser)
 			continue
 		}
 		if binding.ControlState == "pending_new_route" {
-			if !m.activateUser(ctx, "", binding.ProxyUser, *binding.ProxyID) {
+			if !m.activateUser(ctx, binding.OldProxyUser, binding.ProxyUser, *binding.ProxyID) {
 				continue
 			}
 			if _, err := m.db.Pool.Exec(ctx, `

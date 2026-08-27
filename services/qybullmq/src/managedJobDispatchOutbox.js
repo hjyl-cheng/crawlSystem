@@ -1,5 +1,6 @@
 const JOB_NAMES = Object.freeze({
   discover_page: "discover-page",
+  migration_retry: "channel-snapshot-recovery",
   query_quality_chunk: "score-query-quality",
 });
 
@@ -9,6 +10,32 @@ function errorMessage(error) {
 
 function defaultRetryDelay(attempt) {
   return Math.min(300_000, 1000 * (2 ** Math.max(0, Number(attempt) - 1)));
+}
+
+function canonical(value) {
+  if (Array.isArray(value)) return value.map(canonical);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonical(value[key])]));
+}
+
+function samePayload(left, right) {
+  return JSON.stringify(canonical(left)) === JSON.stringify(canonical(right));
+}
+
+function assertMatchingQueueJob(job, row, jobName) {
+  if (String(job?.id ?? "") !== String(row.deterministic_job_id)
+      || job?.name !== jobName
+      || !samePayload(job?.data, row.payload_json)) {
+    throw new Error(`deterministic BullMQ Job conflicts with managed dispatch ${row.dispatch_id}`);
+  }
+  return job;
+}
+
+async function recoverAmbiguousQueueAdd(queue, row, jobName) {
+  if (typeof queue?.getJob !== "function") return null;
+  const existing = await queue.getJob(row.deterministic_job_id);
+  if (!existing) return null;
+  return assertMatchingQueueJob(existing, row, jobName);
 }
 
 export class ManagedJobOutboxDispatcher {
@@ -51,8 +78,26 @@ export class ManagedJobOutboxDispatcher {
         if (Number.isFinite(Number(row.job_priority))) {
           options.priority = Number(row.job_priority);
         }
-        job = await queue.add(jobName, row.payload_json, options);
+        job = assertMatchingQueueJob(
+          await queue.add(jobName, row.payload_json, options),
+          row,
+          jobName,
+        );
       } catch (error) {
+        try {
+          job = await recoverAmbiguousQueueAdd(queue, row, jobName);
+        } catch (lookupError) {
+          error = lookupError;
+        }
+        if (job) {
+          await this.repository.markSent({
+            dispatchId: row.dispatch_id,
+            attempt: Number(row.attempts),
+            jobId: String(job.id),
+          });
+          summary.sent += 1;
+          continue;
+        }
         const terminal = Number(row.attempts) >= this.maxAttempts;
         const delayMs = Math.max(0, Number(this.retryDelayMs(row.attempts, error)) || 0);
         await this.repository.markFailed({
@@ -106,6 +151,39 @@ async function updateAggregate(client, row, { status, jobId = null, reason = nul
     );
     return;
   }
+  if (row.aggregate_kind === "migration_retry") {
+    const updated = await client.query(
+      `UPDATE crawler.migration_retry_intents
+       SET dispatch_status=$2,
+           status=CASE
+             WHEN $2='enqueued' AND status IN ('requested','dispatched') THEN 'dispatched'
+             WHEN $2='terminal' AND status NOT IN ('finished','failed') THEN 'failed'
+             ELSE status
+           END,
+           dispatched_at=CASE
+             WHEN $2='enqueued' THEN COALESCE(dispatched_at,now())
+             ELSE dispatched_at
+           END,
+           finished_at=CASE WHEN $2='terminal' THEN COALESCE(finished_at,now()) ELSE finished_at END,
+           last_error=$3,updated_at=now()
+       WHERE retry_intent_id=$1 AND intent_hash=$4
+         AND status NOT IN ('finished','failed')
+       RETURNING candidate_id`,
+      [row.aggregate_id, status, reason, row.intent_hash],
+    );
+    if (status === "terminal" && updated.rows[0]) {
+      await client.query(
+        `UPDATE crawler.channel_candidates
+         SET status=CASE WHEN status='queued' THEN 'failed' ELSE status END,
+             error_message=CASE WHEN status='queued' THEN $2 ELSE error_message END,
+             validation_finished_at=CASE WHEN status='queued' THEN now() ELSE validation_finished_at END,
+             updated_at=now()
+         WHERE candidate_id=$1`,
+        [updated.rows[0].candidate_id, reason],
+      );
+    }
+    return;
+  }
   throw new Error(`unsupported managed aggregate kind: ${row.aggregate_kind}`);
 }
 
@@ -144,6 +222,15 @@ export class PostgresManagedJobDispatchRepository {
           [row.aggregate_id],
         );
         row.job_priority = page.rows[0]?.priority ?? null;
+      } else if (row.aggregate_kind === "migration_retry") {
+        const candidate = await client.query(
+          `SELECT candidate.priority
+           FROM crawler.migration_retry_intents intent
+           JOIN crawler.channel_candidates candidate ON candidate.candidate_id=intent.candidate_id
+           WHERE intent.retry_intent_id=$1`,
+          [row.aggregate_id],
+        );
+        row.job_priority = candidate.rows[0]?.priority ?? null;
       }
       return row;
     });

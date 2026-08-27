@@ -761,6 +761,14 @@ func scanAssignment(row scanner) (Assignment, error) {
 	}
 	if !assignment.Ready {
 		switch {
+		case assignment.ControlState == "paused_no_reserve":
+			assignment.Reason = "waiting_for_healthy_proxy"
+			assignment.ReasonCode = "NO_POLICY_ELIGIBLE_RESERVE"
+			assignment.RetryAfterMS = 1000
+		case assignment.ControlState == "pending_new_route":
+			assignment.Reason = "waiting_for_rota_refresh"
+			assignment.ReasonCode = "WAITING_FOR_ROUTE_REFRESH"
+			assignment.RetryAfterMS = 250
 		case assignment.ProxyID == nil:
 			assignment.Reason = "waiting_for_healthy_proxy"
 		case assignment.ReadyAfter == nil || assignment.ReadyAfter.After(time.Now()):
@@ -777,17 +785,22 @@ func assignmentSQL() string {
 		SELECT s.slot_name, s.role, COALESCE(s.worker_id,''), COALESCE(s.worker_instance_id,''), s.proxy_id,
 		       p.address, p.protocol, s.ready_after, COALESCE(s.lease_id,''),
 		       s.lease_until, s.assignment_version, s.credential_generation, u.username,
-		       (
-		         s.proxy_id IS NOT NULL AND s.ready_after IS NOT NULL
-		         AND s.current_lease_id IS NOT NULL AND s.lease_until > NOW()
-		         AND s.ready_after <= NOW() AND p.status='active'
-		         AND p.revalidation_required=false
-		         AND (p.cooldown_until IS NULL OR p.cooldown_until <= NOW())
-		         AND (
-		           (p.base_health_status='passed' AND p.youtube_health_status='passed')
-		           OR (p.last_youtube_status=200 AND p.last_rota_youtube_status=200)
-		         )
-		       ) AS ready,
+			       (
+			         s.proxy_id IS NOT NULL AND s.ready_after IS NOT NULL
+			         AND s.current_lease_id IS NOT NULL AND s.lease_until > NOW()
+			         AND s.ready_after <= NOW()
+			         AND (
+			           s.active_task_id IS NOT NULL
+			           OR (
+			             p.status='active' AND p.revalidation_required=false
+			             AND (p.cooldown_until IS NULL OR p.cooldown_until <= NOW())
+			             AND (
+			               (p.base_health_status='passed' AND p.youtube_health_status='passed')
+			               OR (p.last_youtube_status=200 AND p.last_rota_youtube_status=200)
+			             )
+			           )
+			         )
+			       ) AS ready,
 		       s.control_state, COALESCE(s.identity_policy_id,''),
 		       COALESCE(s.identity_policy_version,0), COALESCE(s.identity_policy_hash,''),
 		       COALESCE(s.network_identity_key,''), s.profile_epoch,

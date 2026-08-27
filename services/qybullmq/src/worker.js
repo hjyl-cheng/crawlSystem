@@ -2,6 +2,7 @@ import { Worker } from "bullmq";
 import { nanoid } from "nanoid";
 import { ensureDefaultAgentConfig } from "./agentConfig.js";
 import { ChannelExecutionRuntimeAdapter } from "./channelExecutionRuntimeAdapter.js";
+import { allocateDiscoveredChannelSnapshotDispatches } from "./channelSnapshotDispatch.js";
 import { deferJobForSlotPause } from "./channelJobDeferral.js";
 import { DiscoverExecutionRuntimeAdapter } from "./discoverExecutionRuntimeAdapter.js";
 import { evaluateDiscoveryChannelQualification } from "./channelQualification.js";
@@ -54,6 +55,14 @@ import {
   validateWorkerQueueConfiguration,
 } from "./managedWorkerExecution.js";
 import {
+  channelCandidateFailureDisposition,
+  processManagedWorkerJob,
+} from "./managedWorkerJob.js";
+import {
+  finishMigrationRetryIntent,
+  markMigrationRetryIntentRunning,
+} from "./migrationRetryIntent.js";
+import {
   applyFailureRetryDecision,
   closeQueues,
   createQueues,
@@ -63,7 +72,7 @@ import {
   safeJobId,
 } from "./queues.js";
 import { closeStorage, putRawObject } from "./storage.js";
-import { RotaSlotAdapter, RotaSlotDeferredError } from "./rotaSlotAdapter.js";
+import { RotaSlotAdapter } from "./rotaSlotAdapter.js";
 import { warmPersistentYtDlp } from "./ytdlpSession.js";
 import { closeYoutubeJs, warmYoutubeJs } from "./youtubeJs.js";
 import { annotateYoutubeFailure, decideYoutubeFailure } from "./youtubeFailurePolicy.js";
@@ -637,10 +646,21 @@ async function processDiscoverPage(job, preparedPage) {
       .map((candidate) => ({ spec: candidate, row: candidateByChannel.get(candidate.channel_id) }))
       .filter(({ row }) => row && ["discovered", "queued", "validating", "accepted"].includes(row.status));
     if (snapshotCandidates.length > 0) {
-      await queues[queuesByRole.channelCrawl].addBulk(snapshotCandidates.map(({ spec, row }) => ({
+      const allocations = await allocateDiscoveredChannelSnapshotDispatches(
+        query,
+        snapshotCandidates.map(({ row }) => Number(row.candidate_id)),
+      );
+      const generationByCandidate = new Map(
+        allocations.map((allocation) => [allocation.candidate_id, allocation.snapshot_dispatch_generation]),
+      );
+      const dispatches = snapshotCandidates.filter(({ row }) => (
+        generationByCandidate.has(Number(row.candidate_id))
+      ));
+      await queues[queuesByRole.channelCrawl].addBulk(dispatches.map(({ spec, row }) => ({
         name: "channel-snapshot",
         data: {
           candidate_id: Number(row.candidate_id),
+          dispatch_generation: generationByCandidate.get(Number(row.candidate_id)),
           dispatch_batch_id: dispatchBatchId,
           channel_id: spec.channel_id,
           channel_url: spec.channel_url,
@@ -651,14 +671,15 @@ async function processDiscoverPage(job, preparedPage) {
           enforce_min_subscribers: true,
           min_subscriber_count: minSubscriberCount,
         },
-        opts: { jobId: safeJobId("channel-snapshot", dispatchBatchId, spec.channel_id) },
+        opts: {
+          jobId: safeJobId(
+            "channel-snapshot",
+            dispatchBatchId,
+            spec.channel_id,
+            `g${generationByCandidate.get(Number(row.candidate_id))}`,
+          ),
+        },
       })));
-      await query(
-        `UPDATE crawler.channel_candidates
-         SET status='queued',updated_at=now()
-         WHERE candidate_id=ANY($1::bigint[]) AND status='discovered'`,
-        [snapshotCandidates.map(({ row }) => Number(row.candidate_id))],
-      );
     }
 
     await refreshDispatchCandidateCounts(dispatchBatchId);
@@ -1462,9 +1483,15 @@ async function persistManagedRetryCheckpoint({ job, prepared, error, failure }) 
 }
 
 async function processJob(job, token) {
+  if (job?.data?.retry_intent_id) {
+    const marked = await markMigrationRetryIntentRunning(query, job);
+    if (!marked) throw new Error(`Recovery Intent fence rejected Job: ${job.id}`);
+  }
   if (!configuredForProxySlot()) return processJobInner(job);
-  try {
-    return await rotaSlot.executeJob(job, {
+  return processManagedWorkerJob({
+    job,
+    token,
+    execute: () => rotaSlot.executeJob(job, {
       prepare: () => prepareManagedBusinessRun(job),
       executeAttempt: (prepared, attempt) => executeManagedWorkerAttempt({
         job,
@@ -1473,22 +1500,14 @@ async function processJob(job, token) {
         execute: ({ resumeMode }) => processJobInner(job, { resumeMode, prepared }),
         persistRetryableCheckpoint: persistManagedRetryCheckpoint,
       }),
-    });
-  } catch (error) {
-    if (!(error instanceof RotaSlotDeferredError)) throw error;
-    if (job.queueName === queuesByRole.channelCrawl && isBusinessRunBudgetExhausted(error)) {
-      return terminateExhaustedBusinessRun(query, job, error);
-    }
-    const delayMs = Math.max(1000, Number(error.retryAfterMs) || proxySlotPollMs);
-    console.log(JSON.stringify({
-      event: "rota_job_deferred",
-      queue: job.queueName,
-      job_id: job.id,
-      reason: error.reason,
-      delay_ms: delayMs,
-    }));
-    return deferJobForSlotPause(job, token, { delayMs });
-  }
+    }),
+    terminateBusinessRun: (currentJob, error) => (
+      terminateExhaustedBusinessRun(withTransaction, currentJob, error)
+    ),
+    deferForSlotPause: deferJobForSlotPause,
+    defaultDelayMs: proxySlotPollMs,
+    onDeferred: (event) => console.log(JSON.stringify({ event: "rota_job_deferred", ...event })),
+  });
 }
 
 const enabledQueues = String(process.env.WORKER_QUEUES || queueNames.join(","))
@@ -1574,14 +1593,26 @@ async function startWorkerRuntime() {
       concurrency: concurrencyFor(queueName),
     });
 
-    worker.on("completed", (job) => {
+    worker.on("completed", async (job) => {
       console.log(JSON.stringify({ event: "completed", queue: queueName, job_id: job.id, name: job.name }));
+      if (job?.data?.retry_intent_id) {
+        try {
+          await finishMigrationRetryIntent(query, job, { outcome: "finished" });
+        } catch (eventError) {
+          console.error(JSON.stringify({
+            event: "migration_retry_intent_finish_failed",
+            job_id: job.id,
+            error: eventError?.message || String(eventError),
+          }));
+        }
+      }
     });
 
     worker.on("failed", async (job, error) => {
       const message = youtubeErrorText(error);
       const parserFailure = isParserContractError(error);
       const terminalChannel = classifyTerminalChannelError(error);
+      const businessRunBudgetTerminal = isBusinessRunBudgetExhausted(error);
       const parserDetails = parserContractDetails(error);
       const failureDecision = error?.youtube_failure_decision ?? decideYoutubeFailure({ error });
       const permanentFailure = failureDecision.retry_mode === "none";
@@ -1690,8 +1721,14 @@ async function startWorkerRuntime() {
           }
         }
         if (queueName === queuesByRole.channelCrawl && job?.data?.candidate_id) {
-          if (!terminalChannel) {
-            const terminal = permanentFailure || attemptsMade >= maxAttempts;
+          const disposition = channelCandidateFailureDisposition({
+            error,
+            terminalChannel,
+            permanentFailure,
+            attemptsMade,
+            maxAttempts,
+          });
+          if (disposition !== "preserve") {
             await query(
               `UPDATE crawler.channel_candidates
                SET status=CASE WHEN status IN ('accepted','rejected') THEN status ELSE $2 END,
@@ -1710,7 +1747,7 @@ async function startWorkerRuntime() {
                WHERE candidate_id=$1`,
               [
                 Number(job.data.candidate_id),
-                terminal ? "failed" : "queued",
+                disposition,
                 message,
                 JSON.stringify(parserDetails ? { parser_contract_error: parserDetails } : {}),
               ],
@@ -1722,11 +1759,22 @@ async function startWorkerRuntime() {
           await signalReadyDiscoveryPageQualifications({
             candidateId: Number(job.data.candidate_id),
           });
+          if (job?.data?.retry_intent_id
+              && (businessRunBudgetTerminal
+                || permanentFailure
+                || terminalChannel !== null
+                || attemptsMade >= maxAttempts)) {
+            await finishMigrationRetryIntent(query, job, {
+              outcome: "failed",
+              error,
+            });
+          }
         }
         if (
           queueName === queuesByRole.channelCrawl
           && job?.data?.run_id
           && !terminalChannel
+          && !businessRunBudgetTerminal
           && (permanentFailure || attemptsMade >= maxAttempts)
         ) {
           await query(

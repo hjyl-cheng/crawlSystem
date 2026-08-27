@@ -114,6 +114,7 @@ test("one-channel dispatch closes Source before opening the independent Target t
           channel_url: snapshot.channel_url,
           priority: 100,
           status: "queued",
+          snapshot_dispatch_generation: 4,
         },
         batchId: DEFAULT_MANUAL_MIGRATION_BATCH_ID,
         previousStatus: null,
@@ -137,6 +138,8 @@ test("one-channel dispatch closes Source before opening the independent Target t
   assert.equal(result.migration_intent_id, 7);
   assert.equal(queueAdds.length, 1);
   assert.equal(queueAdds[0].data.crawl_mode, "full");
+  assert.equal(queueAdds[0].data.dispatch_generation, 4);
+  assert.match(queueAdds[0].options.jobId, /__g4$/);
 });
 
 test("a repeated click reuses the Target intent and does not duplicate the queue job", async () => {
@@ -244,6 +247,7 @@ test("a Redis delivery failure records compensation only in the Target database"
           channel_url: snapshot.channel_url,
           priority: 100,
           status: "queued",
+          snapshot_dispatch_generation: 1,
         },
         batchId: DEFAULT_MANUAL_MIGRATION_BATCH_ID,
         previousStatus: null,

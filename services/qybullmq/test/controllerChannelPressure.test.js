@@ -14,3 +14,12 @@ test("Controller expires stale Channel terminal samples from pressure metrics", 
     /\[queuesByRole\.channelCrawl, channelPressureSampleSize, channelPressureWindowSeconds\]/,
   );
 });
+
+test("Controller persists a Channel dispatch generation before enqueueing", async () => {
+  const source = await readFile(new URL("../src/controller.js", import.meta.url), "utf8");
+
+  assert.match(source, /allocateChannelSnapshotDispatch\(query/);
+  assert.match(source, /expectedGeneration: generation/);
+  assert.match(source, /dispatch_generation: candidate\.snapshot_dispatch_generation/);
+  assert.match(source, /`g\$\{candidate\.snapshot_dispatch_generation\}`/);
+});

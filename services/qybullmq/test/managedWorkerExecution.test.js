@@ -104,6 +104,49 @@ test("a managed failure is returned only after its durable checkpoint", async ()
   });
 });
 
+test("a nested Fingerprint proxy failure becomes a sourced Rota Observation", async () => {
+  const calls = [];
+  const gatewayError = Object.assign(new Error("gateway request failed"), {
+    failureKind: "proxy_transport",
+    code: "FINGERPRINT_PROXY_TRANSPORT",
+    youtube_failure_evidence: { source: "fingerprint_gateway" },
+  });
+  const result = await executeManagedWorkerAttempt({
+    job: { queueName: "youtube-channel-crawl" },
+    prepared: { initialResumeMode: "initial" },
+    attempt: { resumeMode: "initial" },
+    execute: async () => { throw new Error("snapshot failed", { cause: gatewayError }); },
+    persistRetryableCheckpoint: async () => {
+      calls.push("checkpoint");
+      return true;
+    },
+  });
+  assert.deepEqual(calls, ["checkpoint"]);
+  assert.deepEqual(result, {
+    kind: "retryable_network_failure",
+    observation: "proxy_transport",
+    source: "fingerprint_gateway",
+    failedStage: "channel_full",
+    checkpointPersisted: true,
+  });
+});
+
+test("a structured Route failure without a local source uses the managed default", () => {
+  const gatewayError = Object.assign(new Error("gateway request failed"), {
+    failureKind: "proxy_transport",
+    code: "FINGERPRINT_PROXY_TRANSPORT",
+  });
+  const error = Object.assign(new Error("unrelated wrapper"), {
+    cause: gatewayError,
+    youtube_failure_evidence: { source: "unrelated_wrapper" },
+  });
+
+  assert.deepEqual(retryableRotaFailure(error), {
+    observation: "proxy_transport",
+    source: "youtube_managed_request",
+  });
+});
+
 test("Discover search can finish while downstream qualification remains open", async () => {
   const result = await executeManagedWorkerAttempt({
     job: { queueName: "youtube-discover-page" },

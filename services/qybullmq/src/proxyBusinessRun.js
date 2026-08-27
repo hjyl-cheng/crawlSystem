@@ -140,6 +140,23 @@ function bindingIdentity(job) {
   const repairParentRunId = String(data.repair_parent_run_id ?? "").trim() || null;
   const repairRound = Number(data.repair_round ?? 0);
   const fullIntentId = String(data.full_intent_id ?? "").trim() || null;
+  const retryIntentId = String(data.retry_intent_id ?? "").trim() || null;
+  const recoveryBusinessRunId = String(data.recovery_business_run_id ?? "").trim() || null;
+
+  if (retryIntentId) {
+    if (candidateId == null) throw new TypeError("Recovery Intent requires candidate_id");
+    if (!recoveryBusinessRunId) {
+      throw new TypeError("Recovery Intent requires recovery_business_run_id");
+    }
+    return {
+      businessRunKey: `full-candidate:${candidateId}:recovery:${retryIntentId}`,
+      runKind: "full",
+      explicitRunId: recoveryBusinessRunId,
+      candidateId,
+      fullIntentId: retryIntentId,
+      retryIntentId,
+    };
+  }
 
   if (job.name === "channel-full-repair") {
     if (!repairBatchId) throw new TypeError("channel-full-repair requires repair_batch_id");
@@ -275,6 +292,26 @@ export class ProxyBusinessRunPreparer {
     const publicationGapIntent = publicationGapRepairJobIntent(job.data);
     const channelId = required(job.data?.channel_id, "job.data.channel_id");
     const cachedBusinessRunKey = String(job.data?.business_run_key ?? "").trim();
+    if (identity.retryIntentId) {
+      const recovery = await this.query(
+        `SELECT retry_intent_id,candidate_id,new_business_run_id,new_business_run_key,
+                new_job_id,dispatch_generation,status
+         FROM crawler.migration_retry_intents
+         WHERE retry_intent_id=$1
+         LIMIT 1`,
+        [identity.retryIntentId],
+      );
+      const row = recovery.rows[0];
+      if (!row
+          || Number(row.candidate_id) !== identity.candidateId
+          || row.new_business_run_id !== identity.explicitRunId
+          || row.new_business_run_key !== identity.businessRunKey
+          || row.new_job_id !== String(job.id)
+          || Number(row.dispatch_generation) !== Number(job.data?.dispatch_generation)
+          || !["requested", "dispatched", "running"].includes(row.status)) {
+        throw new TypeError(`Recovery Intent identity mismatch: ${identity.retryIntentId}`);
+      }
+    }
     const lifecycle = await this.query(
       `SELECT channel.status AS channel_status,channel.removed_reason,
               channel.registry_promotion_run_id,channel.registry_promotion_candidate_id,
@@ -335,7 +372,7 @@ export class ProxyBusinessRunPreparer {
         )
       : { rows: [] };
     if (identity.explicitRunId && explicitExists.rows.length === 0
-        && job.name !== "channel-full-repair") {
+        && job.name !== "channel-full-repair" && !identity.retryIntentId) {
       throw new TypeError(`explicit Channel Run does not exist: ${identity.explicitRunId}`);
     }
     const attached = explicitExists.rows[0]?.business_run_key
