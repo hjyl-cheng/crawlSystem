@@ -509,7 +509,8 @@ test("an Incremental Plan reuses the existing Run and freezes its Policy", async
 test("managed Incremental preparation preserves the frozen Plan contract", async () => {
   const store = bindingStore();
   const plan = {
-    schema_version: 4,
+    schema_version: 5,
+    dispatch_generation: 1,
     job_id: "incremental__UCtest__20260814__agent_v5_canary__905c961593d7",
     plan_id: "905c9615-93d7-41dc-9c99-3ca33abd0aa6",
     plan_mode: "standard",
@@ -589,7 +590,8 @@ test("managed Content Enrich uses a stable Business Run identity and a real task
 test("managed Incremental preparation repairs only matching legacy runtime metadata", async () => {
   const store = bindingStore();
   const plan = {
-    schema_version: 4,
+    schema_version: 5,
+    dispatch_generation: 1,
     job_id: "incremental__UCtest__20260814__clock_16__905c961593d7",
     plan_id: "905c9615-93d7-41dc-9c99-3ca33abd0aa6",
     plan_mode: "standard",

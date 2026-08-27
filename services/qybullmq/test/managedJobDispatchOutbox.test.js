@@ -13,9 +13,30 @@ function dispatch(overrides = {}) {
     intent_hash: "sha256:intent",
     queue_registry_key: "youtube-discover-page",
     deterministic_job_id: "discover-page__page-1",
-    payload_json: { page_id: "page-1", intent_schema_version: 1 },
+    payload_json: { page_id: "page-1", intent_schema_version: 1, dispatch_generation: 1 },
     status: "pending",
     attempts: 0,
+    ...overrides,
+  };
+}
+
+function migrationRecoveryPayload(overrides = {}) {
+  return {
+    candidate_id: 42,
+    retry_intent_id: "intent-1",
+    recovery_business_run_id: "run:recovery-1",
+    dispatch_generation: 5,
+    dispatch_batch_id: "legacy-results-manual-v1",
+    channel_id: "UCtest",
+    channel_url: "https://www.youtube.com/channel/UCtest",
+    crawl_mode: "full",
+    query_id: null,
+    query_text: "controlled migration recovery",
+    pipeline_cycle_id: "legacy-results-manual-v1",
+    enforce_min_subscribers: true,
+    min_subscriber_count: 1000,
+    reject_if_no_recent_content: true,
+    recovery_reason: "recover exhausted Business Run",
     ...overrides,
   };
 }
@@ -24,6 +45,9 @@ function deduplicatingQueue() {
   const jobs = new Map();
   return {
     jobs,
+    async getJob(jobId) {
+      return jobs.get(jobId) ?? null;
+    },
     async add(name, data, options) {
       const existing = jobs.get(options.jobId);
       if (existing) return existing;
@@ -170,7 +194,7 @@ test("a Migration Recovery Outbox dispatches the whitelisted Channel recovery jo
       aggregate_id: "intent-1",
       queue_registry_key: "youtube-channel-crawl",
       deterministic_job_id: "channel-recovery__42__intent-1__g5",
-      payload_json: { candidate_id: 42, retry_intent_id: "intent-1", dispatch_generation: 5 },
+      payload_json: migrationRecoveryPayload(),
     })],
   });
   const queue = deduplicatingQueue();
@@ -187,4 +211,126 @@ test("a Migration Recovery Outbox dispatches the whitelisted Channel recovery jo
     dispatch_status: "enqueued",
     dispatched_job_id: "channel-recovery__42__intent-1__g5",
   });
+});
+
+test("a Migration Recovery Outbox rejects an incomplete payload before BullMQ delivery", async () => {
+  const repository = new InMemoryManagedJobDispatchRepository({
+    rows: [dispatch({
+      dispatch_id: "migration-retry-dispatch:intent-1",
+      aggregate_kind: "migration_retry",
+      aggregate_id: "intent-1",
+      queue_registry_key: "youtube-channel-crawl",
+      deterministic_job_id: "channel-recovery__42__intent-1__g5",
+      payload_json: { candidate_id: 42, retry_intent_id: "intent-1", dispatch_generation: 5 },
+    })],
+  });
+  let addCalled = false;
+  const invalidPayload = { candidate_id: 42, retry_intent_id: "intent-1", dispatch_generation: 5 };
+  const dispatcher = new ManagedJobOutboxDispatcher({
+    repository,
+    queues: {
+      "youtube-channel-crawl": {
+        async getJob() {
+          return {
+            id: "channel-recovery__42__intent-1__g5",
+            name: "channel-snapshot-recovery",
+            data: invalidPayload,
+          };
+        },
+        async add() {
+          addCalled = true;
+          assert.fail("invalid payload must not reach BullMQ");
+        },
+      },
+    },
+    maxAttempts: 1,
+  });
+
+  const result = await dispatcher.dispatchAvailable({ limit: 1 });
+
+  assert.deepEqual(result, { claimed: 1, sent: 0, failed: 0, dead: 1 });
+  assert.equal(addCalled, false);
+  assert.match(repository.rows.get("migration-retry-dispatch:intent-1").last_error, /payload/i);
+});
+
+test("a Discover Outbox rejects payload fields outside its aggregate contract", async () => {
+  const repository = new InMemoryManagedJobDispatchRepository({
+    rows: [dispatch({
+      payload_json: {
+        page_id: "page-1",
+        intent_schema_version: 1,
+        dispatch_generation: 1,
+        business_run_key: "stale-runtime-field",
+      },
+    })],
+  });
+  let addCalled = false;
+  const dispatcher = new ManagedJobOutboxDispatcher({
+    repository,
+    queues: {
+      "youtube-discover-page": {
+        async add() { addCalled = true; },
+      },
+    },
+    maxAttempts: 1,
+  });
+
+  const result = await dispatcher.dispatchAvailable({ limit: 1 });
+
+  assert.deepEqual(result, { claimed: 1, sent: 0, failed: 0, dead: 1 });
+  assert.equal(addCalled, false);
+});
+
+test("a Query Quality Outbox validates its aggregate identity before BullMQ delivery", async () => {
+  const repository = new InMemoryManagedJobDispatchRepository({
+    rows: [dispatch({
+      aggregate_kind: "query_quality_chunk",
+      aggregate_id: "quality-chunk-1",
+      queue_registry_key: "youtube-query-quality",
+      deterministic_job_id: "query-quality__quality-chunk-1",
+      payload_json: {
+        quality_chunk_id: "different-quality-chunk",
+        intent_schema_version: 1,
+        dispatch_generation: 1,
+      },
+    })],
+  });
+  let addCalled = false;
+  const dispatcher = new ManagedJobOutboxDispatcher({
+    repository,
+    queues: {
+      "youtube-query-quality": {
+        async add() { addCalled = true; },
+      },
+    },
+    maxAttempts: 1,
+  });
+
+  const result = await dispatcher.dispatchAvailable({ limit: 1 });
+
+  assert.deepEqual(result, { claimed: 1, sent: 0, failed: 0, dead: 1 });
+  assert.equal(addCalled, false);
+  assert.match(repository.rows.get("dispatch-1").last_error, /aggregate_id/);
+});
+
+test("an aggregate cannot dispatch through another managed queue", async () => {
+  const repository = new InMemoryManagedJobDispatchRepository({
+    rows: [dispatch({ queue_registry_key: "youtube-query-quality" })],
+  });
+  let addCalled = false;
+  const dispatcher = new ManagedJobOutboxDispatcher({
+    repository,
+    queues: {
+      "youtube-query-quality": {
+        async add() { addCalled = true; },
+      },
+    },
+    maxAttempts: 1,
+  });
+
+  const result = await dispatcher.dispatchAvailable({ limit: 1 });
+
+  assert.deepEqual(result, { claimed: 1, sent: 0, failed: 0, dead: 1 });
+  assert.equal(addCalled, false);
+  assert.match(repository.rows.get("dispatch-1").last_error, /queue registry key/);
 });

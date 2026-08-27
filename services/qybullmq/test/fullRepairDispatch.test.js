@@ -238,6 +238,9 @@ test("preparing a Full Repair batch atomically records its manifest and activate
     completed: false,
     prepared_at: "2026-07-27T14:00:00.000Z",
     batch_id: "repair-20260727-v1",
+    dispatch_generation: 1,
+    dispatch_mode: "initial",
+    dispatch_cursor: 0,
   });
   const batchInsert = calls.find(({ sql }) => sql.includes("INSERT INTO crawler.query_dispatch_batches"));
   assert.ok(batchInsert);
@@ -248,6 +251,8 @@ test("preparing a Full Repair batch atomically records its manifest and activate
   assert.equal(batchMetadata.full_repair_dispatch.content_limit, 100);
   assert.equal(batchMetadata.full_repair_dispatch.content_max_age_days, 90);
   assert.equal(batchMetadata.full_repair_dispatch.status, "dispatching");
+  assert.equal(batchMetadata.full_repair_dispatch.dispatch_generation, 1);
+  assert.equal(batchMetadata.full_repair_dispatch.dispatch_mode, "initial");
   const schedulerUpdate = calls.find(({ sql }) => sql.includes("UPDATE crawler.settings"));
   assert.ok(schedulerUpdate);
   assert.match(schedulerUpdate.sql, /'status','repairing'/);
@@ -315,6 +320,69 @@ test("re-preparing the same Full Repair batch preserves its persisted dispatch p
   assert.equal(persisted.last_dispatch_at, "2026-07-27T14:01:00.000Z");
 });
 
+test("an interrupted explicit Full Repair retry reuses its persisted dispatch generation", async () => {
+  const manifest = buildFullRepairManifest({
+    batchId: "repair-20260727-v1",
+    channelIds: ["UC1234567890123456789012"],
+  });
+  let storedRepair = {
+    ...manifest,
+    status: "dispatched",
+    dispatch_cursor: 1,
+    dispatch_generation: 1,
+    dispatch_mode: "initial",
+    prepared_at: "2026-07-27T14:00:00.000Z",
+    last_dispatch_at: "2026-07-27T14:01:00.000Z",
+    dispatched_at: "2026-07-27T14:01:00.000Z",
+  };
+  const client = {
+    async query(sql, params = []) {
+      if (sql.includes("FROM crawler.settings") && sql.includes("FOR UPDATE")) {
+        return {
+          rows: [{
+            value_json: {
+              status: "repairing",
+              pipeline_cycle_id: manifest.batch_id,
+            },
+          }],
+        };
+      }
+      if (sql.includes("FROM crawler.query_dispatch_batches") && sql.includes("FOR UPDATE")) {
+        return {
+          rows: [{
+            status: "finishing",
+            result_json: { full_repair_dispatch: storedRepair },
+          }],
+        };
+      }
+      if (sql.includes("UPDATE crawler.query_dispatch_batches")) {
+        storedRepair = JSON.parse(params[1]);
+      }
+      return { rows: [], rowCount: 1 };
+    },
+  };
+
+  const started = await prepareFullRepairBatch(client, {
+    manifest,
+    retryFailed: true,
+    preparedAt: "2026-07-27T14:05:00.000Z",
+  });
+  assert.equal(started.dispatch_generation, 2);
+  assert.equal(started.dispatch_mode, "retry_failed");
+  assert.equal(started.dispatch_cursor, 0);
+  assert.equal(storedRepair.dispatch_generation, 2);
+  assert.equal(storedRepair.status, "dispatching");
+
+  const replayed = await prepareFullRepairBatch(client, {
+    manifest,
+    retryFailed: true,
+    preparedAt: "2026-07-27T14:06:00.000Z",
+  });
+  assert.equal(replayed.dispatch_generation, 2);
+  assert.equal(replayed.dispatch_mode, "retry_failed");
+  assert.equal(replayed.dispatch_cursor, 0);
+});
+
 test("a Full Repair pass respects global queue pressure and persists a resumable dispatch cursor", async () => {
   const manifest = buildFullRepairManifest({
     batchId: "repair-20260727-v1",
@@ -356,6 +424,7 @@ test("a Full Repair pass respects global queue pressure and persists a resumable
     targets,
     preparedAt: "2026-07-27T14:00:00.000Z",
     dispatchCursor: 0,
+    dispatchGeneration: 1,
     highWater: 5,
     refill: 2,
     now: "2026-07-27T14:01:00.000Z",
@@ -374,7 +443,7 @@ test("a Full Repair pass respects global queue pressure and persists a resumable
   assert.equal(JSON.parse(progress.params[1]).dispatch_cursor, 1);
 });
 
-test("Full Repair only replaces a terminal failed job during an explicit retry pass", async () => {
+test("Full Repair retries a terminal failure under a new persisted Job generation", async () => {
   const manifest = buildFullRepairManifest({
     batchId: "repair-20260727-v1",
     channelIds: ["UC1234567890123456789012"],
@@ -386,6 +455,19 @@ test("Full Repair only replaces a terminal failed job during an explicit retry p
     priority: 75,
     status: "accepted",
   };
+  const jobInput = {
+    batchId: manifest.batch_id,
+    manifestHash: manifest.manifest_hash,
+    scanPolicyVersion: manifest.scan_policy_version,
+    contentLimit: manifest.content_limit,
+    contentMaxAgeDays: manifest.content_max_age_days,
+    preparedAt: "2026-07-27T14:00:00.000Z",
+    candidate: target,
+  };
+  const oldJobId = fullRepairChannelJob({
+    ...jobInput,
+    dispatchGeneration: 1,
+  }).options.jobId;
   let removed = false;
   const added = [];
   const failedJob = {
@@ -395,7 +477,7 @@ test("Full Repair only replaces a terminal failed job during an explicit retry p
   const queue = {
     async getJobCounts() { return {}; },
     async isPaused() { return false; },
-    async getJob() { return failedJob; },
+    async getJob(jobId) { return jobId === oldJobId ? failedJob : null; },
     async add(name, data, options) {
       added.push({ name, data, options });
       return { id: options.jobId };
@@ -420,11 +502,14 @@ test("Full Repair only replaces a terminal failed job during an explicit retry p
     targets: [target],
     preparedAt: "2026-07-27T14:00:00.000Z",
     dispatchCursor: 0,
+    dispatchGeneration: 2,
     retryFailed: true,
   });
 
-  assert.equal(removed, true);
+  assert.equal(removed, false);
   assert.equal(added.length, 1);
+  assert.equal(added[0].data.dispatch_generation, 2);
+  assert.notEqual(added[0].options.jobId, oldJobId);
   assert.equal(result.dispatched, 1);
   assert.equal(result.dispatch_cursor, 1);
 });
@@ -564,6 +649,8 @@ test("Full Repair resumes from the persisted cursor and original preparation tim
     batch_status: "finishing",
     dispatch_status: "dispatching",
     dispatch_cursor: 1,
+    dispatch_generation: 1,
+    dispatch_mode: "initial",
     prepared_at: "2026-07-27T14:00:00.000Z",
   });
 });
@@ -576,6 +663,7 @@ test("a Full Repair job reuses an accepted Candidate without re-running admissio
     contentLimit: 100,
     contentMaxAgeDays: 90,
     preparedAt: "2026-07-27T14:00:00.000Z",
+    dispatchGeneration: 1,
     candidate: {
       candidate_id: "42",
       channel_id: "UC1234567890123456789012",
@@ -588,6 +676,7 @@ test("a Full Repair job reuses an accepted Candidate without re-running admissio
   assert.deepEqual(job, {
     name: "channel-full-repair",
     data: {
+      dispatch_generation: 1,
       candidate_id: 42,
       dispatch_batch_id: "publication-readiness-repair-20260727-v1",
       pipeline_cycle_id: "publication-readiness-repair-20260727-v1",
@@ -609,7 +698,7 @@ test("a Full Repair job reuses an accepted Candidate without re-running admissio
       run_id: "full-repair:publication-readiness-repair-20260727-v1:UC1234567890123456789012",
     },
     options: {
-      jobId: "channel-full-repair__publication-readiness-repair-20260727-v1__UC1234567890123456789012",
+      jobId: "channel-full-repair__publication-readiness-repair-20260727-v1__g1__UC1234567890123456789012",
       priority: 75,
     },
   });

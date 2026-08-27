@@ -154,7 +154,7 @@ async function main() {
     const targets = await loadFullRepairTargets(dbQuery, manifest);
     const prepared = await transaction(client, (transactionClient) => prepareFullRepairBatch(
       transactionClient,
-      { manifest },
+      { manifest, retryFailed: options.retryFailed },
     ));
     if (prepared.completed) return;
     queue = new Queue(queuesByRole.channelCrawl, {
@@ -162,25 +162,22 @@ async function main() {
       defaultJobOptions,
     });
 
-    let retryMode = options.retryFailed;
-    let resetRetryCursor = options.retryFailed;
     do {
       const state = await loadFullRepairDispatchState(dbQuery, manifest);
       let dispatch = null;
-      if (state.dispatch_status !== "dispatched" || retryMode) {
+      if (state.dispatch_status !== "dispatched") {
         dispatch = await dispatchFullRepairPass({
           dbQuery,
           queue,
           manifest,
           targets,
           preparedAt: state.prepared_at,
-          dispatchCursor: resetRetryCursor ? 0 : state.dispatch_cursor,
+          dispatchCursor: state.dispatch_cursor,
+          dispatchGeneration: state.dispatch_generation,
           highWater: options.highWater,
           refill: options.refill,
-          retryFailed: retryMode,
+          retryFailed: state.dispatch_mode === "retry_failed",
         });
-        resetRetryCursor = false;
-        if (dispatch.status === "dispatched") retryMode = false;
       }
       const completion = await loadFullRepairCompletionState(dbQuery, manifest.batch_id);
       const currentScheduler = await schedulerState(dbQuery);

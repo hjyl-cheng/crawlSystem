@@ -285,9 +285,27 @@ function fullRepairMetadata(manifest, preparedAt, status = "dispatching") {
     content_limit: manifest.content_limit,
     content_max_age_days: manifest.content_max_age_days,
     status,
+    dispatch_generation: 1,
+    dispatch_mode: "initial",
+    dispatch_cursor: 0,
     prepared_at: preparedAt,
     dispatched_at: null,
   };
+}
+
+function fullRepairDispatchGeneration(stored) {
+  return positiveInteger(
+    stored?.dispatch_generation ?? 1,
+    "stored Full Repair dispatch_generation",
+  );
+}
+
+function fullRepairDispatchMode(stored) {
+  const mode = String(stored?.dispatch_mode ?? "initial");
+  if (!["initial", "retry_failed"].includes(mode)) {
+    throw new TypeError(`unsupported Full Repair dispatch mode: ${mode}`);
+  }
+  return mode;
 }
 
 function assertMatchingStoredManifest(stored, manifest) {
@@ -310,6 +328,7 @@ function assertMatchingStoredManifest(stored, manifest) {
 export async function prepareFullRepairBatch(client, {
   manifest,
   preparedAt = new Date().toISOString(),
+  retryFailed = false,
 } = {}) {
   if (!client || typeof client.query !== "function") throw new TypeError("database client is required");
   const normalizedPreparedAt = isoTimestamp(preparedAt, "preparedAt");
@@ -341,24 +360,54 @@ export async function prepareFullRepairBatch(client, {
   );
   const existing = batchRows.rows[0] ?? null;
   const stored = existing?.result_json?.full_repair_dispatch ?? null;
+  let metadata;
   if (existing) {
     assertMatchingStoredManifest(stored, manifest);
     const stablePreparedAt = isoTimestamp(stored.prepared_at, "stored prepared_at");
+    const storedGeneration = fullRepairDispatchGeneration(stored);
+    const storedMode = fullRepairDispatchMode(stored);
     if (existing.status === "completed" || stored.status === "completed") {
       return {
         created: false,
         completed: true,
         prepared_at: stablePreparedAt,
         batch_id: manifest.batch_id,
+        dispatch_generation: storedGeneration,
+        dispatch_mode: storedMode,
+        dispatch_cursor: Number(stored.dispatch_cursor ?? manifest.target_count),
       };
     }
-    const metadata = {
+    metadata = {
       ...stored,
       ...fullRepairMetadata(manifest, stablePreparedAt, stored.status || "dispatching"),
       dispatch_cursor: Number(stored.dispatch_cursor ?? 0),
+      dispatch_generation: storedGeneration,
+      dispatch_mode: storedMode,
       last_dispatch_at: stored.last_dispatch_at ?? null,
       dispatched_at: stored.dispatched_at ?? null,
     };
+    if (retryFailed && !(storedMode === "retry_failed" && stored.status === "dispatching")) {
+      if (stored.status !== "dispatched") {
+        const error = new Error(
+          `Full Repair batch ${manifest.batch_id} must finish its current dispatch before retry`,
+        );
+        error.code = "full_repair_retry_conflict";
+        throw error;
+      }
+      metadata = {
+        ...metadata,
+        status: "dispatching",
+        dispatch_generation: positiveInteger(
+          storedGeneration + 1,
+          "next Full Repair dispatch_generation",
+        ),
+        dispatch_mode: "retry_failed",
+        dispatch_cursor: 0,
+        retry_started_at: normalizedPreparedAt,
+        last_dispatch_at: null,
+        dispatched_at: null,
+      };
+    }
     await client.query(
       `UPDATE crawler.query_dispatch_batches
        SET status='finishing',finished_at=NULL,
@@ -368,7 +417,7 @@ export async function prepareFullRepairBatch(client, {
       [manifest.batch_id, JSON.stringify(metadata)],
     );
   } else {
-    const metadata = fullRepairMetadata(manifest, normalizedPreparedAt);
+    metadata = fullRepairMetadata(manifest, normalizedPreparedAt);
     await client.query(
       `INSERT INTO crawler.query_dispatch_batches (
          dispatch_batch_id,pipeline_cycle_id,status,discovery_closed_at,
@@ -417,6 +466,9 @@ export async function prepareFullRepairBatch(client, {
     completed: false,
     prepared_at: stablePreparedAt,
     batch_id: manifest.batch_id,
+    dispatch_generation: metadata.dispatch_generation,
+    dispatch_mode: metadata.dispatch_mode,
+    dispatch_cursor: metadata.dispatch_cursor,
   };
 }
 
@@ -433,6 +485,7 @@ export async function dispatchFullRepairPass({
   targets,
   preparedAt,
   dispatchCursor = 0,
+  dispatchGeneration,
   highWater = 5,
   refill = 2,
   retryFailed = false,
@@ -447,6 +500,11 @@ export async function dispatchFullRepairPass({
   }
   const stablePreparedAt = isoTimestamp(preparedAt, "preparedAt");
   const observedAt = isoTimestamp(now, "now");
+  const normalizedDispatchGeneration = positiveInteger(
+    dispatchGeneration,
+    "dispatchGeneration",
+  );
+  const dispatchMode = retryFailed ? "retry_failed" : "initial";
   let cursor = Number(dispatchCursor);
   if (!Number.isSafeInteger(cursor) || cursor < 0 || cursor > targets.length) {
     throw new TypeError("dispatchCursor is outside the Full Repair manifest");
@@ -481,6 +539,7 @@ export async function dispatchFullRepairPass({
       contentLimit: manifest.content_limit,
       contentMaxAgeDays: manifest.content_max_age_days,
       preparedAt: stablePreparedAt,
+      dispatchGeneration: normalizedDispatchGeneration,
       candidate: target,
     });
     const run = runs.get(spec.data.run_id) ?? null;
@@ -493,19 +552,6 @@ export async function dispatchFullRepairPass({
     const existing = await queue.getJob(spec.options.jobId);
     if (existing) {
       const state = await existing.getState();
-      if (
-        ["completed", "failed"].includes(state)
-        && retryFailed
-        && (!run || run.status === "failed")
-      ) {
-        if (capacity <= 0) break;
-        await existing.remove();
-        await queue.add(spec.name, spec.data, spec.options);
-        capacity -= 1;
-        dispatched += 1;
-        cursor += 1;
-        continue;
-      }
       if (!REPRESENTED_JOB_STATES.has(state)) {
         throw new Error(`Full Repair job ${spec.options.jobId} has unsupported state: ${state}`);
       }
@@ -524,6 +570,8 @@ export async function dispatchFullRepairPass({
   const status = cursor === targets.length ? "dispatched" : "dispatching";
   const progress = {
     dispatch_cursor: cursor,
+    dispatch_generation: normalizedDispatchGeneration,
+    dispatch_mode: dispatchMode,
     status,
     last_dispatch_at: observedAt,
     ...(status === "dispatched" ? { dispatched_at: observedAt } : {}),
@@ -538,8 +586,22 @@ export async function dispatchFullRepairPass({
          ),updated_at=now()
      WHERE dispatch_batch_id=$1
        AND result_json#>>'{full_repair_dispatch,manifest_hash}'=$3
+       AND COALESCE(
+             (result_json#>>'{full_repair_dispatch,dispatch_generation}')::int,
+             1
+           )=$4
+       AND COALESCE(
+             result_json#>>'{full_repair_dispatch,dispatch_mode}',
+             'initial'
+           )=$5
      RETURNING dispatch_batch_id`,
-    [manifest.batch_id, JSON.stringify(progress), manifest.manifest_hash],
+    [
+      manifest.batch_id,
+      JSON.stringify(progress),
+      manifest.manifest_hash,
+      normalizedDispatchGeneration,
+      dispatchMode,
+    ],
   );
   if (stored.rowCount !== 1) throw new Error("Full Repair batch progress could not be persisted");
   return {
@@ -550,6 +612,8 @@ export async function dispatchFullRepairPass({
     dispatched,
     represented,
     failed,
+    dispatch_generation: normalizedDispatchGeneration,
+    dispatch_mode: dispatchMode,
     pressure: channelQueuePressure(counts),
     paused,
     counts,
@@ -651,6 +715,8 @@ export async function loadFullRepairDispatchState(dbQuery, manifest) {
       batch_status: null,
       dispatch_status: null,
       dispatch_cursor: 0,
+      dispatch_generation: null,
+      dispatch_mode: null,
       prepared_at: null,
     };
   }
@@ -666,6 +732,8 @@ export async function loadFullRepairDispatchState(dbQuery, manifest) {
     batch_status: batch.status,
     dispatch_status: stored.status ?? "dispatching",
     dispatch_cursor: cursor,
+    dispatch_generation: fullRepairDispatchGeneration(stored),
+    dispatch_mode: fullRepairDispatchMode(stored),
     prepared_at: isoTimestamp(stored.prepared_at, "stored prepared_at"),
   };
 }
@@ -714,6 +782,7 @@ export function fullRepairChannelJob({
   contentLimit,
   contentMaxAgeDays,
   preparedAt,
+  dispatchGeneration,
   candidate,
 } = {}) {
   const normalizedBatchId = repairBatchId(batchId);
@@ -737,6 +806,10 @@ export function fullRepairChannelJob({
     );
   }
   const normalizedPreparedAt = requiredText(preparedAt, "preparedAt");
+  const normalizedDispatchGeneration = positiveInteger(
+    dispatchGeneration,
+    "dispatchGeneration",
+  );
   if (candidate?.status !== "accepted") {
     throw new TypeError("Full Repair requires an accepted Candidate");
   }
@@ -750,6 +823,7 @@ export function fullRepairChannelJob({
   return {
     name: "channel-full-repair",
     data: {
+      dispatch_generation: normalizedDispatchGeneration,
       candidate_id: candidateId,
       dispatch_batch_id: normalizedBatchId,
       pipeline_cycle_id: normalizedBatchId,
@@ -771,7 +845,12 @@ export function fullRepairChannelJob({
       run_id: `full-repair:${normalizedBatchId}:${channelId}`,
     },
     options: {
-      jobId: safeJobId("channel-full-repair", normalizedBatchId, channelId),
+      jobId: safeJobId(
+        "channel-full-repair",
+        normalizedBatchId,
+        `g${normalizedDispatchGeneration}`,
+        channelId,
+      ),
       priority: Number(candidate.priority ?? 100),
     },
   };

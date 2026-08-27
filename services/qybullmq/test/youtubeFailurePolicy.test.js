@@ -44,9 +44,9 @@ test("content and PostgreSQL contract failures do not retry", () => {
 });
 
 test("nested transport evidence is retained", () => {
-  const error = new TypeError("fetch failed", {
+  const error = annotateYoutubeFailure(new TypeError("fetch failed", {
     cause: Object.assign(new Error("SSL wrong version number"), { code: "ERR_SSL_WRONG_VERSION_NUMBER" }),
-  });
+  }), { source: "youtube_fetch_transport" });
   assert.equal(decideYoutubeFailure({ error }).kind, "proxy_transport");
   assert.match(youtubeFailureText(error), /ERR_SSL_WRONG_VERSION_NUMBER/);
 });
@@ -119,6 +119,14 @@ test("structured failure evidence never borrows source from a wrapper", () => {
 test("an unmarked generic TLS error is not blamed on the proxy", () => {
   const result = decideYoutubeFailure({
     error: new Error("SSLError curl_code=35"),
+  });
+  assert.notEqual(result.kind, "proxy_transport");
+  assert.equal(result.proxy_action, "none");
+});
+
+test("plain SSL routines text without trusted transport evidence does not rotate the proxy", () => {
+  const result = decideYoutubeFailure({
+    error: new Error("error:0A00010B:SSL routines::wrong version number"),
   });
   assert.notEqual(result.kind, "proxy_transport");
   assert.equal(result.proxy_action, "none");

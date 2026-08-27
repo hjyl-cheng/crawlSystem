@@ -2,12 +2,14 @@
 
 记录日期：2026-08-26
 
-冻结源码基线：`agent/rota-fix`，`a8e07f1bd51f766d96c173590940c213c36efc1d`
+冻结故障源码基线：`agent/rota-fix`，`a8e07f1bd51f766d96c173590940c213c36efc1d`
 
-实现工作树：`agent/rota-fix` 基于上述提交的未提交改动，尚无实现 commit 或镜像 digest。
+首次实现提交：`5bcb3dd8fc7483db94f5ab29ad94bdc6f0d77514`。2026-08-27 独立复审发现
+Outbox、Completion 和迟到 failed 事件三个高优先级阻断；阻断修订已随本文所在的
+`agent/rota-fix` 本地提交完成，尚未形成镜像 digest，也未整合 `main@4ada615`。
 
 文档状态：故障、解决方案和实施边界冻结基线。本文同时保留 `a8e07f1` 的原始故障行为，
-并记录 2026-08-26 当前工作树中的实现。工作树实现不等于已提交、已构建、已部署或已完成
+并记录 2026-08-27 当前分支中的实现。源码提交不等于已构建、已部署或已完成
 数据恢复，本文不能作为部署证明。
 
 适用范围：
@@ -25,35 +27,36 @@
 
 当前确认四个相互关联但可以独立触发的缺陷：
 
-| 编号 | 优先级 | 问题 | 冻结基线 / 当前工作树状态 |
+| 编号 | 优先级 | 问题 | 冻结基线 / 当前分支状态 |
 | --- | --- | --- | --- |
-| BUG-1 | P0 | Execution 预算错误被无限 delayed，Business Run 终态被掩盖 | 基线未修复；工作树已实现并测试，未提交/部署 |
-| BUG-2 | P0 | 活动 Task 的 Lease 确定消失后，Worker 不会自动重新 Claim | 基线未修复；工作树已重做并测试，未提交/部署 |
-| BUG-3 | P1 | Fingerprint `proxy_transport` 结构化错误被分类为 `unknown` | 基线未修复；工作树已实现并测试，未提交/部署 |
-| BUG-4 | P1 | failed Proxy 仍绑定 leased-idle Slot，Lease 永久续期但不换路 | 基线未修复；ADR 已接受，工作树已实现并测试，未提交/部署 |
+| BUG-1 | P0 | Execution 预算错误被无限 delayed，Business Run 终态被掩盖 | 基线未修复；`5bcb3dd` 和阻断修订已实现，未部署 |
+| BUG-2 | P0 | 活动 Task 的 Lease 确定消失后，Worker 不会自动重新 Claim | 基线未修复；`5bcb3dd` 和 Completion liveness 修订已实现，未部署 |
+| BUG-3 | P1 | Fingerprint `proxy_transport` 结构化错误被分类为 `unknown` | 基线未修复；`5bcb3dd` 和 TLS 来源门禁修订已实现，未部署 |
+| BUG-4 | P1 | failed Proxy 仍绑定 leased-idle Slot，Lease 永久续期但不换路 | 基线未修复；ADR 和实现位于 `5bcb3dd`，未部署 |
 
-### 1.1 当前工作树实施记录
+### 1.1 当前分支实施记录
 
-当前未提交工作树已完成以下代码边界：
+`5bcb3dd` 和随本文提交的阻断修订已覆盖以下代码边界：
 
 - BUG-1：Worker 三类错误分派、materialized/reserved Business Run 原子终止、failed
   listener 终态门禁、Rota Business Run 预算优先检查；
 - BUG-2：只对确定性 `LEASE_GONE` 清理失去服务端权威的 Task/Completion/Runtime，并自动
-  Claim 新 Lease；不确定 Completion 会持续 Fence，即使后续 Renew 成功也不能重新开放
-  Slot；
+  Claim 新 Lease；不确定 Completion 持续 Fence，成功 Renew 后使用原
+  `completion_request_id` 补发，只有权威 Completion 回执成功才重新开放 Slot；
 - BUG-3：沿受限 cause 链提取结构化 kind/code/source，识别 Fingerprint proxy transport，
   保留普通非 Fingerprint TLS 分类；
 - BUG-4：已接受 `docs/adr/0002-health-driven-slot-route-transitions.md`；idle Slot 使用同
   Lease Route Transition，active Task 允许当前 Attempt 收尾，Health Incident 不冒充 Task
   Observation，BeginTask 执行最终 Proxy eligibility 检查；
-- 跨问题边界：有界 Execution ID、持久 dispatch generation、Recovery Intent、PostgreSQL
-  Outbox、白名单恢复 Job Data 和默认只读的受控 Recovery Intent CLI；Outbox 对
-  `queue.add()` 直接返回或模糊成功都校验确定性 Job ID、name 和 data，Controller 周期补偿
-  Recovery Intent 遗失的异步终态事件。
+- 跨问题边界：`exec:v1:<sha256>` Execution ID、强制持久 dispatch generation、Recovery
+  Intent、PostgreSQL Outbox、白名单恢复 Job Data 和默认只读的受控 Recovery Intent CLI；
+  Outbox 按 aggregate 校验 payload，并在每次 `queue.add()` 后用 `getJob()` 回读 Redis 中
+  实际持久化的 Job ID、name 和 data；Controller 周期补偿 Recovery Intent 遗失的异步终态
+  事件。
 
-当前仍未完成：创建实现 commit、固定和核对运行镜像 digest、构建镜像、部署、生产冒烟、
-Dashboard 预算展示，以及任何真实频道恢复。两个卡住频道和 18 个历史 Fingerprint 失败频道
-均未被重试或修改。
+当前仍未完成：基于 `main@4ada615` 整合并回归取消链路、固定和核对运行镜像 digest、
+构建镜像、部署、生产冒烟、Dashboard 预算展示，以及任何真实频道恢复。两个卡住频道和
+18 个历史 Fingerprint 失败频道均未被重试或修改。
 
 在以下条件全部满足前，不恢复两个卡住的频道，也不批量重试 18 个 Fingerprint 历史失败
 频道：
@@ -522,7 +525,7 @@ BullMQ Lock 也可能在休眠期间过期，出现 `could not renew lock` 或 `
 - CompleteTask 结果不确定但 Lease 仍可能有效；
 - 无法证明错误属于当前 frozen Assignment。
 
-工作树使用独立的 `completionUncertain` 本地状态记录“CompleteTask 请求可能已经在服务端
+当前实现使用独立的 `completionUncertain` 本地状态记录“CompleteTask 请求可能已经在服务端
 生效，但 Worker 没拿到确定回执”。该状态存在时，周期 Renew 仍可延长同一 Lease，避免
 服务端过早回收，但 Renew 的 `ready=true` 不能重新开放 Slot：Adapter 接收续租结果后必须
 立即恢复 `COMPLETE_UNCERTAIN` Fence，后续 Job 不得 BeginTask。只有以下两个确定性结果
@@ -685,7 +688,7 @@ Rota 现有 Observation/CompleteTask 原则上无需为 BUG-3 单独修改：有
 
 ## 7. BUG-4：健康检查判定 failed 后 Leased-Idle Slot 不换路
 
-优先级：P1。冻结基线存在协议设计阻断；当前工作树 ADR 已接受并实现，尚未部署。
+优先级：P1。冻结基线存在协议设计阻断；当前分支 ADR 已接受并实现，尚未部署。
 
 ### 7.1 现场现象
 
@@ -761,7 +764,7 @@ assignment_version 不变
 
 #### 7.5.1 持久 Health Event 和 Reconcile 触发
 
-当前工作树让已应用 Health Verdict 在数据库中递增 `health_generation`；过期 Evidence 不
+当前分支让已应用 Health Verdict 在数据库中递增 `health_generation`；过期 Evidence 不
 递增。Repository 目前不返回该 generation。事务提交后，HealthChecker 产生进程内
 `HealthVerdictEvent`，字段只有：
 
@@ -809,7 +812,7 @@ Health Verdict 提交后、下一次 Renew 前，BeginTask 也不得在 failed P
 
 #### 7.5.4 leased-idle Route Transition
 
-当前工作树实现同 Lease Rotation：
+当前分支实现同 Lease Rotation：
 
 1. 锁定 Slot、Lease 和候选 Proxy；
 2. 再次确认 `active_task_id IS NULL`；
@@ -862,13 +865,13 @@ Observation，Rota 也不在 active Task 中途静默改写 endpoint。
 | T05 | Worker boundary | capacity/no-reserve 仍 delayed |
 | T06 | Crawler PostgreSQL | materialized Run 的 Candidate/Binding/Run 原子终止 |
 | T07 | Crawler PostgreSQL | reserved Binding 且无 Run 的原子终止 |
-| T08 | Worker failure | failed listener 不覆盖预算终态 |
-| T09 | Identity | 最长 Job ID 的 Execution digest 不超过 255 字节 |
+| T08 | Worker failure | failed listener 不覆盖预算终态或更新旧 dispatch generation |
+| T09 | Identity | 所有 Job 使用 `exec:v1:<digest>`，缺 generation 在 BeginTask 前失败 |
 | T10 | Dispatch | 新 generation 不复用旧 Execution |
 | T11 | Recovery | 重复 Recovery Intent/投递保持一个新 Run 和 Job |
 | T12 | Adapter | active Lease 确定 gone 后自动第二次 Claim |
-| T13 | Adapter | 不确定 CompleteTask 继续 fail-closed |
-| T14 | Failure policy | Fingerprint structured kind/code/cause/source 分类 |
+| T13 | Adapter | 不确定 CompleteTask 保持 Fence，并用同一请求 ID 在 Renew 后持续补发 |
+| T14 | Failure policy | Fingerprint structured kind/code/cause/source 分类，普通 TLS 不换路 |
 | T15 | Managed Worker | Checkpoint 先于 retryable network failure |
 | T16 | Rota Observation | proxy transport 进入新 Route 或 no-reserve |
 | T17 | Proxy Control | failed Proxy 的 leased-idle Route Transition |
@@ -877,8 +880,11 @@ Observation，Rota 也不在 active Task 中途静默改写 endpoint。
 | T20 | Concurrency | Renew/Verdict/Reconcile/BeginTask 并发幂等 |
 | T21 | 端到端 | 每 Execution 最多 3 Task，每 Run 最多 9 Task，第 10 次终止 |
 | T22 | 重启 | 终态、generation 和 Recovery 进度不回退 |
-| T23 | Outbox | `queue.add()` 模糊成功只接受 name/data 一致的确定性 Job |
+| T23 | Outbox | 每次 `queue.add()` 后回读 Redis，冲突 Job 不得标记 sent |
 | T24 | Recovery | Controller 重放丢失的 Recovery Intent completed/failed 终态 |
+| T25 | Outbox | 三种 aggregate 在 Redis 前校验固定队列和 payload 合同 |
+| T26 | Worker PostgreSQL | 终态事务与迟到 failed 事件并发时 Candidate 不回退 |
+| T27 | Dispatch identity | Content/Full/Demo 新调度不复用旧 Job Execution；Full retry 崩溃重放保持同一 generation |
 
 计划执行的静态和定向命令至少包括：
 
@@ -895,7 +901,8 @@ git diff --check
 Rota 需要在 `services/rota/core` 下执行相关 Go 单元测试和 PostgreSQL 集成测试。测试名称
 和 package 以最终实现为准，不能用单纯编译成功代替状态机断言。
 
-当前工作树验证记录：
+`5bcb3dd` 提交者报告的历史验证记录如下；2026-08-27 阻断修订必须重新执行，不能沿用这些
+数字作为当前结论：
 
 - `npm test` 共运行 251 个 Node 测试文件，247 个直接通过；其中 `buildImages.test.js` 和
   `businessPublicationIngress.test.js` 仅受文件系统/Docker或本地监听沙箱限制，授权后分别
@@ -912,7 +919,26 @@ Rota 需要在 `services/rota/core` 下执行相关 Go 单元测试和 PostgreSQ
 - 新增 CLI 的 plan/execute 单元测试已通过，`git diff --check` 和敏感信息扫描仍需在最终
   静态检查后保持通过。
 
-上述是工作树测试证据，不是镜像构建、部署或生产冒烟证据。
+上述是历史源码测试报告，不是当前修订、镜像构建、部署或生产冒烟证据。
+
+2026-08-27 阻断修订重新验证如下：
+
+- QYBullMQ 全量运行 254 个 Node 测试文件，250 个在默认沙箱直接通过；
+  `buildImages.test.js` 和 `businessPublicationIngress.test.js` 在授权环境下共 5 个测试全部
+  通过；剩余两个集成测试仅因宿主 Python 缺少 `aiohttp` 和 `yt_dlp` 无法执行；
+- Feature Dispatch 的 6 个测试文件全部通过，Incremental Job 合同提升为含持久
+  `dispatch_generation` 的 schema v5；
+- Content Repair 新 batch、Full Repair 持久 retry generation/崩溃重放，以及同一 Channel
+  的多次 Demo Page 均通过独立 Job Execution 身份回归；
+- `services/qybullmq/src`、`scripts` 和 `test` 下 513 个 JavaScript/MJS 文件全部通过
+  `node --check`；
+- 真实 Redis 中的重复 BullMQ `jobId` 回归通过，确认 Outbox 校验的是 `getJob()` 回读的
+  持久 Job，而不是 `queue.add()` 返回对象；
+- 从当前 `services/qybullmq/src/schema.sql` 初始化的独立 PostgreSQL 中，Candidate 终态事务
+  与迟到 failed 事件并发回归通过；测试库和临时容器已删除；
+- 固定 `golang:1.25.3` 容器中 `go test ./... -count=1` 全部通过；源码只读挂载，未构建或
+  部署应用镜像；
+- 上述验证不包含与 `main@4ada615` 整合后的取消链路回归，也不是镜像或生产验证。
 
 ## 9. 实施与部署顺序
 

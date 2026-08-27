@@ -53,9 +53,11 @@ test("a Discover producer transaction creates one immutable Page and one dispatc
   assert.equal(repository.outbox.size, 1);
   assert.equal([...repository.outbox.values()][0].payload_json.page_id, first.page.page_id);
   assert.deepEqual(Object.keys([...repository.outbox.values()][0].payload_json).sort(), [
+    "dispatch_generation",
     "intent_schema_version",
     "page_id",
   ]);
+  assert.equal([...repository.outbox.values()][0].payload_json.dispatch_generation, 1);
 });
 
 test("a reused Discover page_id cannot overwrite a different immutable Intent", async () => {
@@ -106,4 +108,7 @@ test("a Query Quality producer freezes each Task into exactly one persistent Chu
   );
   assert.equal(repository.qualityMembers.size, 4);
   assert.equal(repository.outbox.size, 2);
+  assert.ok([...repository.outbox.values()].every(
+    (outbox) => outbox.payload_json.dispatch_generation === 1,
+  ));
 });

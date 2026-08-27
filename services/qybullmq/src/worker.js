@@ -5,6 +5,7 @@ import { ChannelExecutionRuntimeAdapter } from "./channelExecutionRuntimeAdapter
 import { allocateDiscoveredChannelSnapshotDispatches } from "./channelSnapshotDispatch.js";
 import { deferJobForSlotPause } from "./channelJobDeferral.js";
 import { DiscoverExecutionRuntimeAdapter } from "./discoverExecutionRuntimeAdapter.js";
+import { buildDemoChannelCrawlJob } from "./demoChannelDispatch.js";
 import { evaluateDiscoveryChannelQualification } from "./channelQualification.js";
 import {
   classifyTerminalChannelError,
@@ -57,6 +58,7 @@ import {
 import {
   channelCandidateFailureDisposition,
   processManagedWorkerJob,
+  recordChannelCandidateJobFailure,
 } from "./managedWorkerJob.js";
 import {
   finishMigrationRetryIntent,
@@ -417,6 +419,7 @@ async function processDiscoverPage(job, preparedPage) {
   if (demo) {
     const channelId = managedIntent.channel_id || `UCdemo${nanoid(8)}`;
     const channelUrl = `https://www.youtube.com/channel/${channelId}`;
+    const demoJob = buildDemoChannelCrawlJob({ pageId, channelId, pipelineCycleId });
     await query(
       `INSERT INTO crawler.channels (
          channel_id, channel_url, handle, title, subscriber_count, subscriber_count_text,
@@ -430,16 +433,9 @@ async function processDiscoverPage(job, preparedPage) {
       [channelId, channelUrl, "@demo", "Demo Channel", JSON.stringify({ source: "demo", query_text: queryText })],
     );
     await queues[queuesByRole.channelCrawl].add(
-      "channel-crawl",
-      {
-        demo: true,
-        channel_id: channelId,
-        channel_url: channelUrl,
-        crawl_mode: "full",
-        full_intent_id: `discover-demo:${pageId}:${channelId}`,
-        pipeline_cycle_id: pipelineCycleId,
-      },
-      { jobId: safeJobId("channel-crawl", channelId) },
+      demoJob.name,
+      demoJob.data,
+      demoJob.options,
     );
   } else {
     let fetched;
@@ -1729,29 +1725,11 @@ async function startWorkerRuntime() {
             maxAttempts,
           });
           if (disposition !== "preserve") {
-            await query(
-              `UPDATE crawler.channel_candidates
-               SET status=CASE WHEN status IN ('accepted','rejected') THEN status ELSE $2 END,
-                   error_message=CASE WHEN status IN ('accepted','rejected') THEN error_message ELSE $3 END,
-                   snapshot_json=snapshot_json || $4::jsonb,
-                   next_retry_at=CASE
-                     WHEN status IN ('accepted','rejected') OR $2='failed' THEN NULL
-                     ELSE now()+interval '30 seconds'
-                   END,
-                   validation_finished_at=CASE
-                     WHEN status IN ('accepted','rejected') THEN validation_finished_at
-                     WHEN $2='failed' THEN now()
-                     ELSE validation_finished_at
-                   END,
-                   updated_at=now()
-               WHERE candidate_id=$1`,
-              [
-                Number(job.data.candidate_id),
-                disposition,
-                message,
-                JSON.stringify(parserDetails ? { parser_contract_error: parserDetails } : {}),
-              ],
-            );
+            await recordChannelCandidateJobFailure(query, job, {
+              disposition,
+              message,
+              snapshotPatch: parserDetails ? { parser_contract_error: parserDetails } : {},
+            });
           }
           if (job.data?.dispatch_batch_id) {
             await refreshDispatchCandidateCounts(String(job.data.dispatch_batch_id));

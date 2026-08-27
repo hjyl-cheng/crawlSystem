@@ -96,15 +96,14 @@ function jobExecutionId(job) {
   const queue = requiredString(job?.queueName, "job.queueName");
   const id = requiredString(job?.id, "job.id");
   const generation = positiveInteger(
-    job?.data?.dispatch_generation ?? 1,
+    job?.data?.dispatch_generation,
     "job.data.dispatch_generation",
   );
-  const attempt = Math.max(1, Number(job?.attemptsMade ?? 0) + 1);
-  const raw = `${queue}:${id}:${generation}:${attempt}`;
-  if (Buffer.byteLength(raw, "utf8") <= 255) return raw;
-
-  const digest = createHash("sha256").update(raw).digest("hex");
-  return `job-execution:sha256:${digest}:${generation}:${attempt}`;
+  const attempt = nonNegativeInteger(job?.attemptsMade ?? 0, "job.attemptsMade") + 1;
+  const digest = createHash("sha256")
+    .update(JSON.stringify([queue, id, generation, attempt]))
+    .digest("hex");
+  return `exec:v1:${digest}`;
 }
 
 function completionOutcome(result) {
@@ -202,6 +201,7 @@ export class RotaSlotAdapter {
     this.activeAttemptController = null;
     this.pendingCompletion = null;
     this.completionUncertain = false;
+    this.completionRecoveryPromise = null;
     this.idleRuntime = null;
     this.renewTimer = null;
     this.renewPromise = null;
@@ -414,15 +414,17 @@ export class RotaSlotAdapter {
       this.activeAttemptController.abort(new RotaSlotDeferredError("adapter_closing"));
     }
     if (activeJob) await activeJob;
+    if (this.completionRecoveryPromise) {
+      await this.completionRecoveryPromise.catch(() => {});
+    }
     if (this.reclaimPromise) await this.reclaimPromise.catch(() => {});
     let releaseSafe = this.activeTask === null;
     if (this.pendingCompletion) {
       try {
-        await this.#sendCompletionRequest(this.pendingCompletion);
-        this.pendingCompletion = null;
-        this.completionUncertain = false;
-        this.activeTask = null;
-        releaseSafe = true;
+        releaseSafe = await this.#recoverPendingCompletion(
+          this.pendingCompletion,
+          this.assignment,
+        );
       } catch {
         releaseSafe = false;
       }
@@ -592,7 +594,8 @@ export class RotaSlotAdapter {
     let lastError = null;
     for (let attempt = 1; attempt <= this.maxCompletionAttempts; attempt += 1) {
       try {
-        return await this.lane.enqueue("complete", () => this.client.completeTask(request));
+        const receipt = await this.lane.enqueue("complete", () => this.client.completeTask(request));
+        return this.#validateCompletionReceipt(request, receipt);
       } catch (error) {
         lastError = error;
         if (error?.retryable !== true || attempt >= this.maxCompletionAttempts) throw error;
@@ -600,6 +603,78 @@ export class RotaSlotAdapter {
       }
     }
     throw lastError;
+  }
+
+  #validateCompletionReceipt(request, receipt) {
+    if (receipt?.ok !== true || receipt?.task_completed !== true
+        || receipt.completion_request_id !== request.completion_request_id
+        || receipt.task_id !== request.task_id
+        || receipt.slot_name !== request.slot_name
+        || receipt.lease_id !== request.lease_id
+        || Number(receipt.completed_task_route_generation) !== request.route_generation) {
+      throw new RotaSlotContractError("CompleteTask returned a mismatched completion receipt");
+    }
+    const readyState = receipt.control_state === READY_KEEP_ROUTE
+      || receipt.control_state === READY_NEW_ROUTE;
+    const waitingState = receipt.control_state === PENDING_NEW_ROUTE
+      || receipt.control_state === PAUSED_NO_RESERVE;
+    if ((!readyState && !waitingState) || Boolean(receipt.ready) !== readyState) {
+      throw new RotaSlotContractError("CompleteTask returned an inconsistent control state");
+    }
+    return receipt;
+  }
+
+  #scheduleCompletionRecovery(frozen) {
+    if (this.closing || !this.completionUncertain || !this.pendingCompletion) return null;
+    if (this.completionRecoveryPromise) return this.completionRecoveryPromise;
+    const request = this.pendingCompletion;
+    const recovery = this.#recoverPendingCompletion(request, frozen).catch(async (error) => {
+      if (this.pendingCompletion !== request) return false;
+      if (isLeaseGone(error)) {
+        this.completionUncertain = false;
+        this.#fenceSlot("LEASE_GONE", error);
+        await this.#reclaimAssignment(frozen);
+      } else if (this.assignment?.slot_name === frozen.slot_name
+          && this.assignment?.lease_id === frozen.lease_id) {
+        this.completionUncertain = true;
+        this.#fenceSlot("COMPLETE_UNCERTAIN", error, { preserveLeaseSafety: true });
+      }
+      return false;
+    });
+    const shared = recovery.finally(() => {
+      if (this.completionRecoveryPromise === shared) this.completionRecoveryPromise = null;
+    });
+    this.completionRecoveryPromise = shared;
+    return shared;
+  }
+
+  async #recoverPendingCompletion(request, frozen) {
+    const activeJob = this.activeJobCompletion?.promise ?? null;
+    if (activeJob) await activeJob;
+    if (this.pendingCompletion !== request || !frozen
+        || this.assignment?.slot_name !== frozen.slot_name
+        || this.assignment?.lease_id !== frozen.lease_id) return false;
+
+    const receipt = await this.#sendCompletionRequest(request);
+    if (this.pendingCompletion !== request) return false;
+    const runtime = this.activeRuntime;
+    if (runtime) await this.identityRuntime.retire(runtime, frozen);
+    if (this.activeRuntime === runtime) this.activeRuntime = null;
+    this.activeAttemptController = null;
+    this.activeTask = null;
+    this.pendingCompletion = null;
+    this.completionUncertain = false;
+
+    if (this.assignment?.slot_name === frozen.slot_name
+        && this.assignment?.lease_id === frozen.lease_id) {
+      const canReopen = receipt.control_state === READY_KEEP_ROUTE
+        && receipt.ready === true
+        && Number(this.assignment.route_generation) === request.route_generation
+        && this.monotonicNow() < this.leaseSafeUntil;
+      this.slotReady = canReopen;
+      this.controlState = receipt.control_state;
+    }
+    return true;
   }
 
   async #waitForNewRoute(completion, frozen) {
@@ -677,10 +752,14 @@ export class RotaSlotAdapter {
     return true;
   }
 
-  #fenceSlot(controlState, reason = new RotaSlotDeferredError("slot_not_ready")) {
+  #fenceSlot(
+    controlState,
+    reason = new RotaSlotDeferredError("slot_not_ready"),
+    { preserveLeaseSafety = false } = {},
+  ) {
     this.slotReady = false;
     this.controlState = controlState;
-    this.leaseSafeUntil = 0;
+    if (!preserveLeaseSafety) this.leaseSafeUntil = 0;
     if (this.activeAttemptController && !this.activeAttemptController.signal.aborted) {
       this.activeAttemptController.abort(reason);
     }
@@ -728,11 +807,22 @@ export class RotaSlotAdapter {
         expectedGeneration: frozen.route_generation,
       });
       if (this.completionUncertain) {
-        this.#fenceSlot("COMPLETE_UNCERTAIN", new RotaSlotDeferredError("completion_uncertain"));
+        this.#fenceSlot(
+          "COMPLETE_UNCERTAIN",
+          new RotaSlotDeferredError("completion_uncertain"),
+          { preserveLeaseSafety: true },
+        );
       }
       return renewed;
     });
-    const shared = command.finally(() => {
+    const recovered = command.then((renewed) => {
+      if (this.completionUncertain && this.pendingCompletion) {
+        const recovery = this.#scheduleCompletionRecovery(frozen);
+        if (recovery) void recovery.catch(() => {});
+      }
+      return renewed;
+    });
+    const shared = recovered.finally(() => {
       if (this.renewPromise === shared) this.renewPromise = null;
     });
     this.renewPromise = shared;

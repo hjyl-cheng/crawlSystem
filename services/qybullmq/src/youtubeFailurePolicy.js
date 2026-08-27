@@ -18,6 +18,11 @@ const STRUCTURED_FAILURE_CODES = new Map([
   ["FINGERPRINT_UPSTREAM_TRANSIENT", "upstream_transient"],
 ]);
 
+const TRUSTED_PROXY_TLS_SOURCES = new Set([
+  "youtube_fetch_transport",
+  "youtubejs_fetch",
+]);
+
 function normalizedStatus(value, text) {
   const numeric = Number(value);
   if (Number.isInteger(numeric) && numeric >= 100 && numeric <= 599) return numeric;
@@ -205,14 +210,20 @@ export function decideYoutubeFailure({
     return decision("content_terminal", { retryMode: "none", terminal: true, status: httpStatus });
   }
 
-  const proxyTransport = /proxyerror|proxy[_ ]unavailable|proxy connection|tunnel connection|socks(?:4|5)? connection|wrong[_ ]version[_ ]number|ssl routines|proxy authentication|\b407\b/i
+  const explicitProxyTransport = /proxyerror|proxy[_ ]unavailable|proxy connection|tunnel connection|socks(?:4|5)? connection|proxy authentication|\b407\b/i
     .test(text);
+  const ambiguousTlsTransport = /wrong[_ ]version[_ ]number|ssl routines/i.test(text);
+  const proxyTransport = explicitProxyTransport
+    || (ambiguousTlsTransport && TRUSTED_PROXY_TLS_SOURCES.has(evidence.source));
   if (proxyTransport) {
     return decision("proxy_transport", {
       retryMode: "new_identity",
       proxyAction: "cooldown_network",
       status: httpStatus,
     });
+  }
+  if (ambiguousTlsTransport) {
+    return decision("upstream_transient", { retryMode: "same_identity", status: httpStatus });
   }
   if (httpStatus === 429 || /too many requests|rate limit(?:ed)?/i.test(text)) {
     return decision("youtube_rate_limited", {

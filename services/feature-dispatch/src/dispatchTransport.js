@@ -126,6 +126,7 @@ export function validateDispatchOutboxRow(row) {
   const payload = payloadObject(row?.payload_json);
   const baseKeys = [
     "schema_version",
+    "dispatch_generation",
     "job_id",
     "plan_id",
     "plan_mode",
@@ -139,9 +140,10 @@ export function validateDispatchOutboxRow(row) {
     "planner_config_version",
   ];
   exactKeys(payload, baseKeys, "payload");
-  if (payload.schema_version !== 4) {
-    throw new DispatchEnvelopeConflict("schema_version must be 4");
+  if (payload.schema_version !== 5) {
+    throw new DispatchEnvelopeConflict("schema_version must be 5");
   }
+  positiveInteger(payload.dispatch_generation, "payload.dispatch_generation");
   uuid(row?.dispatch_event_id, "row.dispatch_event_id");
   const planId = uuid(row?.plan_id, "row.plan_id");
   if (uuid(payload.plan_id, "payload.plan_id") !== planId) {

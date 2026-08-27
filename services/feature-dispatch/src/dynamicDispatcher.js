@@ -242,7 +242,8 @@ export function buildDispatchEnvelope(plan, releasedAt) {
     throw new Error("Plan has no active About, Video, or Agent task");
   }
   const payload = {
-    schema_version: 4,
+    schema_version: 5,
+    dispatch_generation: 1,
     job_id: jobId,
     plan_id: planId,
     plan_mode: String(plan.plan_mode || "standard"),

@@ -9,6 +9,7 @@ import {
 import {
   channelCandidateFailureDisposition,
   processManagedWorkerJob,
+  recordChannelCandidateJobFailure,
 } from "../src/managedWorkerJob.js";
 
 function channelJob() {
@@ -97,4 +98,30 @@ test("the failed listener preserves only a Business Run terminal budget state", 
     attemptsMade: 3,
     maxAttempts: 3,
   }), "failed");
+});
+
+test("a Candidate failed event is fenced by terminal state and dispatch generation", async () => {
+  let statement = null;
+  const updated = await recordChannelCandidateJobFailure(async (sql, params) => {
+    statement = { sql, params };
+    return { rowCount: 0, rows: [] };
+  }, {
+    id: "channel-job-01",
+    data: { candidate_id: 42, dispatch_generation: 7 },
+  }, {
+    disposition: "queued",
+    message: "late failure",
+    snapshotPatch: { failure_kind: "unknown" },
+  });
+
+  assert.equal(updated, false);
+  assert.match(statement.sql, /snapshot_dispatch_generation=\$5/);
+  assert.match(statement.sql, /status IN \('discovered','queued','validating'\)/);
+  assert.deepEqual(statement.params, [
+    42,
+    "queued",
+    "late failure",
+    JSON.stringify({ failure_kind: "unknown" }),
+    7,
+  ]);
 });

@@ -2412,6 +2412,7 @@ async function maybeRepairFailedChannelRuns(actions, stats, queryScheduler, prox
       {
         name,
         data: {
+          dispatch_generation: round,
           channel_id: row.channel_id,
           channel_url: detailOnly ? row.channel_url : `https://www.youtube.com/channel/${row.channel_id}`,
           ...repairReference,

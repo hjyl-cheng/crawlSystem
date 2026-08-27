@@ -219,7 +219,10 @@ test("a normal managed job uses one fenced Rota task", async () => {
   assert.deepEqual(result, { channel_id: "UCtest" });
   assert.equal(attempts.length, 1);
   assert.equal(attempts[0].businessRunId, "run-01");
-  assert.equal(attempts[0].jobExecutionId, "youtube-channel-crawl:job-01:1:1");
+  assert.equal(
+    attempts[0].jobExecutionId,
+    "exec:v1:50c74cc206cb2310fa7eef46d312c15937263bbd8d14907325077d5d154783e5",
+  );
   assert.equal(attempts[0].number, 1);
   assert.equal(attempts[0].resumeMode, "initial");
   assert.deepEqual(calls.map((call) => call.command), ["claim", "begin", "complete", "release"]);
@@ -309,7 +312,10 @@ test("the local Route switch limit ends the current BullMQ attempt", async () =>
   assert.deepEqual(result, { recovered: true });
   const beginRequests = calls.filter((call) => call.command === "begin");
   assert.equal(beginRequests.at(-1).request.route_generation, 2);
-  assert.match(beginRequests.at(-1).request.job_execution_id, /:1:2$/);
+  assert.equal(
+    beginRequests.at(-1).request.job_execution_id,
+    "exec:v1:536cbead3094086cee6d12d60ed26c28e13faac3834078e19bc7db9deab83225",
+  );
   await adapter.close();
 });
 
@@ -344,8 +350,8 @@ test("a challenge rotates the same Slot and resumes the same business run", asyn
   assert.deepEqual(attempts.map((value) => value.routeGeneration), [1, 2]);
   assert.deepEqual(attempts.map((value) => value.businessRunId), ["run-01", "run-01"]);
   assert.deepEqual(attempts.map((value) => value.jobExecutionId), [
-    "youtube-channel-crawl:job-01:1:1",
-    "youtube-channel-crawl:job-01:1:1",
+    "exec:v1:50c74cc206cb2310fa7eef46d312c15937263bbd8d14907325077d5d154783e5",
+    "exec:v1:50c74cc206cb2310fa7eef46d312c15937263bbd8d14907325077d5d154783e5",
   ]);
   assert.deepEqual(calls.map((call) => call.command), [
     "claim", "begin", "observe", "complete", "renew", "begin", "complete", "release",
@@ -385,6 +391,23 @@ test("Execution IDs are bounded and distinct across dispatch generations", async
   assert.equal(executionIDs.length, 2);
   assert.ok(executionIDs.every((value) => Buffer.byteLength(value, "utf8") <= 255));
   assert.notEqual(executionIDs[0], executionIDs[1]);
+});
+
+test("a managed Job without a persisted dispatch generation fails before BeginTask", async () => {
+  const { adapter, calls } = createFixture();
+  await adapter.start();
+  const missingGeneration = job();
+  delete missingGeneration.data.dispatch_generation;
+
+  await assert.rejects(
+    adapter.executeJob(missingGeneration, {
+      prepare: async () => prepared(),
+      executeAttempt: async () => assert.fail("Attempt must not start"),
+    }),
+    /job\.data\.dispatch_generation must be a positive integer/,
+  );
+  assert.equal(calls.some((call) => call.command === "begin"), false);
+  await adapter.close();
 });
 
 test("no policy-eligible warm standby returns a bounded defer without reusing the failed route", async () => {
@@ -865,15 +888,33 @@ test("an unresolved CompleteTask fences the Slot and close does not release an a
   assert.equal(calls.some((call) => call.command === "release"), false);
 });
 
-test("a successful Renew cannot reopen a Slot with an unresolved CompleteTask", async () => {
+test("a successful Renew retries an unresolved Completion before reopening the Slot", async () => {
   let scheduledRenew = null;
-  const { adapter, calls } = createFixture({
+  let completionAttempts = 0;
+  let recoveredCompletion;
+  const completionRecovered = new Promise((resolve) => { recoveredCompletion = resolve; });
+  const { adapter, calls, runtimeCalls } = createFixture({
     clientOverrides: {
       async completeTask(request) {
         calls.push({ command: "complete", request });
-        const error = new Error("complete outcome remains uncertain");
-        error.retryable = true;
-        throw error;
+        completionAttempts += 1;
+        if (completionAttempts === 1) {
+          const error = new Error("complete outcome remains uncertain");
+          error.retryable = true;
+          throw error;
+        }
+        recoveredCompletion();
+        return {
+          ok: true,
+          task_completed: true,
+          completion_request_id: request.completion_request_id,
+          task_id: request.task_id,
+          slot_name: request.slot_name,
+          lease_id: request.lease_id,
+          control_state: "READY_KEEP_ROUTE",
+          ready: true,
+          completed_task_route_generation: request.route_generation,
+        };
       },
     },
     adapterOverrides: {
@@ -899,16 +940,111 @@ test("a successful Renew cannot reopen a Slot with an unresolved CompleteTask", 
 
   assert.equal(adapter.status().assignment.ready, false);
   scheduledRenew();
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(adapter.status().assignment.ready, false);
-  await assert.rejects(
-    adapter.executeJob({ ...job(), id: "job-after-uncertain-completion" }, {
+  try {
+    await Promise.race([
+      completionRecovered,
+      new Promise((_, reject) => setTimeout(
+        () => reject(new Error("Renew did not retry the unresolved Completion")),
+        100,
+      )),
+    ]);
+    await new Promise((resolve) => setImmediate(resolve));
+    const completions = calls.filter((call) => call.command === "complete");
+    assert.equal(completions.length, 2);
+    assert.equal(
+      completions[0].request.completion_request_id,
+      completions[1].request.completion_request_id,
+    );
+    assert.equal(adapter.status().assignment.ready, true);
+    assert.deepEqual(runtimeCalls.map((call) => call.action), ["acquire", "quiesce", "retire"]);
+    const recovered = await adapter.executeJob({ ...job(), id: "job-after-uncertain-completion" }, {
       prepare: async () => prepared(),
-      executeAttempt: async () => assert.fail("a new Attempt must not start"),
+      executeAttempt: async () => ({
+        kind: "managed_work_complete",
+        businessState: "terminal",
+        result: { recovered: true },
+      }),
+    });
+    assert.deepEqual(recovered, { recovered: true });
+  } finally {
+    await adapter.close();
+  }
+});
+
+test("a failed Completion replay stays fenced until a later Renew replays the same request", async () => {
+  const scheduledRenews = [];
+  let completionAttempts = 0;
+  let recoveredCompletion;
+  const completionRecovered = new Promise((resolve) => { recoveredCompletion = resolve; });
+  const { adapter, calls } = createFixture({
+    clientOverrides: {
+      async completeTask(request) {
+        calls.push({ command: "complete", request });
+        completionAttempts += 1;
+        if (completionAttempts < 3) {
+          const error = new Error("complete outcome remains uncertain");
+          error.retryable = true;
+          throw error;
+        }
+        recoveredCompletion();
+        return {
+          ok: true,
+          task_completed: true,
+          completion_request_id: request.completion_request_id,
+          task_id: request.task_id,
+          slot_name: request.slot_name,
+          lease_id: request.lease_id,
+          control_state: "READY_KEEP_ROUTE",
+          ready: true,
+          completed_task_route_generation: request.route_generation,
+        };
+      },
+    },
+    adapterOverrides: {
+      maxCompletionAttempts: 1,
+      setTimeoutImpl(callback) {
+        scheduledRenews.push(callback);
+        return { unref() {} };
+      },
+      clearTimeoutImpl() {},
+    },
+  });
+  await adapter.start();
+  await assert.rejects(
+    adapter.executeJob(job(), {
+      prepare: async () => prepared(),
+      executeAttempt: async () => ({
+        kind: "managed_work_complete",
+        businessState: "terminal",
+      }),
     }),
-    (error) => error instanceof RotaSlotDeferredError && error.reason === "slot_not_ready",
+    /complete outcome remains uncertain/,
   );
-  await adapter.close();
+
+  try {
+    scheduledRenews.shift()();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(completionAttempts, 2);
+    assert.equal(adapter.status().assignment.ready, false);
+
+    scheduledRenews.shift()();
+    await Promise.race([
+      completionRecovered,
+      new Promise((_, reject) => setTimeout(
+        () => reject(new Error("later Renew did not replay Completion")),
+        100,
+      )),
+    ]);
+    await new Promise((resolve) => setImmediate(resolve));
+    const completionIDs = calls
+      .filter((call) => call.command === "complete")
+      .map((call) => call.request.completion_request_id);
+    assert.equal(completionIDs.length, 3);
+    assert.equal(new Set(completionIDs).size, 1);
+    assert.equal(adapter.status().assignment.ready, true);
+  } finally {
+    await adapter.close();
+  }
 });
 
 test("a periodic Renew and route-ready poll share one coalesced control request", async () => {

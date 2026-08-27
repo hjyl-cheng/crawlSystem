@@ -57,6 +57,7 @@ export function contentEnrichJobId({ channelId, tasks } = {}) {
 function batchJobData(batch) {
   const tasks = normalizedTaskReferences(batch.tasks);
   return {
+    dispatch_generation: Math.max(...tasks.map((task) => task.dispatch_generation)),
     channel_id: requiredText(batch.channel_id, "batch.channel_id"),
     task_ids: tasks.map((task) => task.task_id),
     tasks,

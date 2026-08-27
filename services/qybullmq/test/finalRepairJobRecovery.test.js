@@ -6,6 +6,7 @@ import { finalRepairDispatchDecision } from "../src/repairPolicy.js";
 const spec = {
   name: "channel-crawl-repair",
   data: {
+    dispatch_generation: 3,
     channel_id: "UCrepair",
     repair_parent_run_id: "run:parent",
     repair_round: 3,

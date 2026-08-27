@@ -1,8 +1,115 @@
+import { canonicalJsonEqual } from "./canonicalJson.js";
+
 const JOB_NAMES = Object.freeze({
   discover_page: "discover-page",
   migration_retry: "channel-snapshot-recovery",
   query_quality_chunk: "score-query-quality",
 });
+
+const QUEUE_KEYS = Object.freeze({
+  discover_page: "youtube-discover-page",
+  migration_retry: "youtube-channel-crawl",
+  query_quality_chunk: "youtube-query-quality",
+});
+
+const PAYLOAD_KEYS = Object.freeze({
+  discover_page: Object.freeze(["dispatch_generation", "intent_schema_version", "page_id"]),
+  query_quality_chunk: Object.freeze([
+    "dispatch_generation", "intent_schema_version", "quality_chunk_id",
+  ]),
+  migration_retry: Object.freeze([
+    "candidate_id",
+    "channel_id",
+    "channel_url",
+    "crawl_mode",
+    "dispatch_batch_id",
+    "dispatch_generation",
+    "enforce_min_subscribers",
+    "min_subscriber_count",
+    "pipeline_cycle_id",
+    "query_id",
+    "query_text",
+    "recovery_business_run_id",
+    "recovery_reason",
+    "reject_if_no_recent_content",
+    "retry_intent_id",
+  ]),
+});
+
+function requiredText(value, field) {
+  const normalized = String(value ?? "").trim();
+  if (!normalized) throw new TypeError(`managed dispatch payload ${field} is required`);
+  return normalized;
+}
+
+function positiveInteger(value, field) {
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+    throw new TypeError(`managed dispatch payload ${field} must be a positive integer`);
+  }
+  return parsed;
+}
+
+function assertExactPayloadKeys(payload, aggregateKind) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new TypeError(`managed dispatch ${aggregateKind} payload must be an object`);
+  }
+  const actual = Object.keys(payload).sort();
+  const expected = PAYLOAD_KEYS[aggregateKind];
+  if (!expected || actual.length !== expected.length
+      || actual.some((key, index) => key !== expected[index])) {
+    throw new TypeError(`managed dispatch ${aggregateKind} payload has invalid fields`);
+  }
+}
+
+function assertDispatchPayload(row) {
+  const aggregateKind = String(row?.aggregate_kind ?? "");
+  const expectedQueue = QUEUE_KEYS[aggregateKind];
+  if (!expectedQueue) throw new TypeError(`unsupported managed aggregate kind: ${aggregateKind}`);
+  if (row.queue_registry_key !== expectedQueue) {
+    throw new TypeError(`managed dispatch ${aggregateKind} has an invalid queue registry key`);
+  }
+  const payload = row.payload_json;
+  assertExactPayloadKeys(payload, aggregateKind);
+
+  if (aggregateKind === "discover_page") {
+    if (requiredText(payload.page_id, "page_id") !== String(row.aggregate_id)) {
+      throw new TypeError("managed dispatch discover_page payload conflicts with aggregate_id");
+    }
+    if (positiveInteger(payload.intent_schema_version, "intent_schema_version") !== 1) {
+      throw new TypeError("managed dispatch discover_page payload has an unsupported schema version");
+    }
+    positiveInteger(payload.dispatch_generation, "dispatch_generation");
+    return payload;
+  }
+  if (aggregateKind === "query_quality_chunk") {
+    if (requiredText(payload.quality_chunk_id, "quality_chunk_id") !== String(row.aggregate_id)) {
+      throw new TypeError("managed dispatch query_quality_chunk payload conflicts with aggregate_id");
+    }
+    if (positiveInteger(payload.intent_schema_version, "intent_schema_version") !== 1) {
+      throw new TypeError("managed dispatch query_quality_chunk payload has an unsupported schema version");
+    }
+    positiveInteger(payload.dispatch_generation, "dispatch_generation");
+    return payload;
+  }
+
+  if (requiredText(payload.retry_intent_id, "retry_intent_id") !== String(row.aggregate_id)) {
+    throw new TypeError("managed dispatch migration_retry payload conflicts with aggregate_id");
+  }
+  positiveInteger(payload.candidate_id, "candidate_id");
+  positiveInteger(payload.dispatch_generation, "dispatch_generation");
+  positiveInteger(payload.min_subscriber_count, "min_subscriber_count");
+  for (const field of [
+    "channel_id", "channel_url", "dispatch_batch_id", "pipeline_cycle_id", "query_text",
+    "recovery_business_run_id", "recovery_reason",
+  ]) requiredText(payload[field], field);
+  if (payload.crawl_mode !== "full" || payload.query_id !== null
+      || payload.enforce_min_subscribers !== true
+      || typeof payload.reject_if_no_recent_content !== "boolean") {
+    throw new TypeError("managed dispatch migration_retry payload has invalid recovery controls");
+  }
+  return payload;
+}
 
 function errorMessage(error) {
   return String(error?.message ?? error ?? "unknown dispatch error").slice(0, 2000);
@@ -12,14 +119,8 @@ function defaultRetryDelay(attempt) {
   return Math.min(300_000, 1000 * (2 ** Math.max(0, Number(attempt) - 1)));
 }
 
-function canonical(value) {
-  if (Array.isArray(value)) return value.map(canonical);
-  if (!value || typeof value !== "object") return value;
-  return Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonical(value[key])]));
-}
-
 function samePayload(left, right) {
-  return JSON.stringify(canonical(left)) === JSON.stringify(canonical(right));
+  return canonicalJsonEqual(left, right);
 }
 
 function assertMatchingQueueJob(job, row, jobName) {
@@ -36,6 +137,17 @@ async function recoverAmbiguousQueueAdd(queue, row, jobName) {
   const existing = await queue.getJob(row.deterministic_job_id);
   if (!existing) return null;
   return assertMatchingQueueJob(existing, row, jobName);
+}
+
+async function persistedQueueJob(queue, row, jobName) {
+  if (typeof queue?.getJob !== "function") {
+    throw new TypeError("managed BullMQ queue.getJob is required");
+  }
+  const persisted = await queue.getJob(row.deterministic_job_id);
+  if (!persisted) {
+    throw new Error(`managed BullMQ Job was not persisted for dispatch ${row.dispatch_id}`);
+  }
+  return assertMatchingQueueJob(persisted, row, jobName);
 }
 
 export class ManagedJobOutboxDispatcher {
@@ -69,25 +181,27 @@ export class ManagedJobOutboxDispatcher {
       const queue = this.queues[row.queue_registry_key];
       const jobName = JOB_NAMES[row.aggregate_kind];
       let job;
+      let addAttempted = false;
       try {
         if (!queue || typeof queue.add !== "function") {
           throw new Error(`unknown managed queue registry key: ${row.queue_registry_key}`);
         }
         if (!jobName) throw new Error(`unsupported managed aggregate kind: ${row.aggregate_kind}`);
+        assertDispatchPayload(row);
         const options = { jobId: row.deterministic_job_id };
         if (Number.isFinite(Number(row.job_priority))) {
           options.priority = Number(row.job_priority);
         }
-        job = assertMatchingQueueJob(
-          await queue.add(jobName, row.payload_json, options),
-          row,
-          jobName,
-        );
+        addAttempted = true;
+        await queue.add(jobName, row.payload_json, options);
+        job = await persistedQueueJob(queue, row, jobName);
       } catch (error) {
-        try {
-          job = await recoverAmbiguousQueueAdd(queue, row, jobName);
-        } catch (lookupError) {
-          error = lookupError;
+        if (addAttempted) {
+          try {
+            job = await recoverAmbiguousQueueAdd(queue, row, jobName);
+          } catch (lookupError) {
+            error = lookupError;
+          }
         }
         if (job) {
           await this.repository.markSent({

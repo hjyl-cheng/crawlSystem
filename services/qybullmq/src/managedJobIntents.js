@@ -1,7 +1,9 @@
 import { createHash } from "node:crypto";
+import { canonicalJsonValue } from "./canonicalJson.js";
 
 export const MANAGED_JOB_INTENT_SCHEMA_VERSION = 1;
 export const QUERY_QUALITY_SCORING_SCHEMA_VERSION = 1;
+const INITIAL_MANAGED_DISPATCH_GENERATION = 1;
 
 export class ManagedPolicyUnavailableError extends Error {
   constructor({ role, language, country }) {
@@ -33,20 +35,12 @@ function optionalText(value) {
   return normalized || null;
 }
 
-function canonicalValue(value) {
-  if (Array.isArray(value)) return value.map(canonicalValue);
-  if (!value || typeof value !== "object") return value;
-  return Object.fromEntries(
-    Object.keys(value).sort().map((key) => [key, canonicalValue(value[key])]),
-  );
-}
-
 function sha256(value) {
   return createHash("sha256").update(String(value)).digest("hex");
 }
 
 export function managedJobIntentHash(value) {
-  return `sha256:${sha256(JSON.stringify(canonicalValue(value)))}`;
+  return `sha256:${sha256(JSON.stringify(canonicalJsonValue(value)))}`;
 }
 
 function normalizedLanguage(value) {
@@ -99,7 +93,7 @@ export function buildDiscoverPageIntent(input = {}, options = {}) {
   }, options);
   const continuationToken = optionalText(input.continuationToken);
   const continuationTokenHash = continuationToken ? `sha256:${sha256(continuationToken)}` : null;
-  const immutableIntent = canonicalValue({
+  const immutableIntent = canonicalJsonValue({
     schema_version: MANAGED_JOB_INTENT_SCHEMA_VERSION,
     page_id: pageId,
     query_id: queryId,
@@ -149,6 +143,7 @@ export function buildDiscoverPageIntent(input = {}, options = {}) {
     jobPayload: Object.freeze({
       page_id: pageId,
       intent_schema_version: MANAGED_JOB_INTENT_SCHEMA_VERSION,
+      dispatch_generation: INITIAL_MANAGED_DISPATCH_GENERATION,
     }),
   });
 }
@@ -156,7 +151,7 @@ export function buildDiscoverPageIntent(input = {}, options = {}) {
 function normalizedScoringOptions(options = {}) {
   const minSubscriberCount = Number(options.min_subscriber_count ?? 1000);
   const topVideos = Number(options.top_videos ?? 20);
-  return canonicalValue({
+  return canonicalJsonValue({
     min_subscriber_count: Number.isFinite(minSubscriberCount) && minSubscriberCount >= 0
       ? Math.floor(minSubscriberCount)
       : 1000,
@@ -238,7 +233,7 @@ export function buildQueryQualityChunkIntents(input = {}, options = {}) {
       const members = group.tasks.slice(offset, offset + chunkSize);
       const qualityTaskIds = members.map((member) => member.qualityTaskId);
       const qualityChunkId = chunkId(qualityBatchId, group.groupKey, qualityTaskIds);
-      const immutableIntent = canonicalValue({
+      const immutableIntent = canonicalJsonValue({
         schema_version: MANAGED_JOB_INTENT_SCHEMA_VERSION,
         quality_batch_id: qualityBatchId,
         quality_chunk_id: qualityChunkId,
@@ -266,6 +261,7 @@ export function buildQueryQualityChunkIntents(input = {}, options = {}) {
         jobPayload: Object.freeze({
           quality_chunk_id: qualityChunkId,
           intent_schema_version: MANAGED_JOB_INTENT_SCHEMA_VERSION,
+          dispatch_generation: INITIAL_MANAGED_DISPATCH_GENERATION,
         }),
       }));
     }

@@ -1,4 +1,5 @@
 import { createHash, randomUUID as nodeRandomUUID } from "node:crypto";
+import { canonicalJsonString } from "./canonicalJson.js";
 import { queuesByRole, safeJobId } from "./queues.js";
 
 export class MigrationRetryIntentConflictError extends Error {
@@ -24,15 +25,9 @@ function positiveInteger(value, field) {
   return parsed;
 }
 
-function canonical(value) {
-  if (Array.isArray(value)) return value.map(canonical);
-  if (!value || typeof value !== "object") return value;
-  return Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonical(value[key])]));
-}
-
 function intentHash(value) {
   return `sha256:${createHash("sha256")
-    .update(JSON.stringify(canonical(value)))
+    .update(canonicalJsonString(value))
     .digest("hex")}`;
 }
 
