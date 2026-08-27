@@ -73,6 +73,8 @@ function databaseFixture({
   failPublication = false,
 } = {}) {
   let transactionCount = 0;
+  let activityCursorRows = [];
+  let activityCursorOffset = 0;
   const state = {
     candidates: new Set(["candidate-only"]),
     candidateRows: [],
@@ -170,6 +172,29 @@ function databaseFixture({
       if (sql.includes("UPDATE crawler.channels") && sql.includes("SET status='dormant'")) {
         state.channelStatus = "dormant";
         return { rowCount: 1, rows: [] };
+      }
+      if (sql.includes("current_setting('statement_timeout')")) {
+        return { rows: [{ statement_timeout: "0" }] };
+      }
+      if (sql.startsWith("DECLARE video_activity_evidence_cursor")) {
+        activityCursorRows = state.contents
+          .filter((row) => row.channel_id === params[0])
+          .filter((row) => ["video", "short", "live"].includes(row.content_type))
+          .sort((left, right) => left.source_content_id.localeCompare(right.source_content_id))
+          .map((row) => ({ ...row }));
+        activityCursorOffset = 0;
+        return { rowCount: 0, rows: [] };
+      }
+      if (sql.startsWith("FETCH FORWARD")) {
+        const limit = Number(sql.match(/^FETCH FORWARD (\d+)/)?.[1] ?? 0);
+        const rows = activityCursorRows.slice(activityCursorOffset, activityCursorOffset + limit);
+        activityCursorOffset += rows.length;
+        return { rowCount: rows.length, rows };
+      }
+      if (sql.startsWith("CLOSE video_activity_evidence_cursor")) {
+        activityCursorRows = [];
+        activityCursorOffset = 0;
+        return { rowCount: 0, rows: [] };
       }
       if (sql.includes("UPDATE crawler.channel_domain_cursors")) {
         state.cursorUpdates.push({
@@ -3294,6 +3319,227 @@ test("Video discovery does not persist a live broadcast while it is in progress"
     fixture.state.observationSummaries[0].activity.evidence_scan_rows,
     activityEvidence.evidence_scan_rows,
   );
+});
+
+test("a current-run ended live replay reactivates a dormant channel beyond the history limit", async () => {
+  const fixture = databaseFixture();
+  fixture.state.channelStatus = "dormant";
+  fixture.state.contents = Array.from({ length: 1001 }, (_, index) => ({
+    content_key: `UCvideo:video:old-${String(index).padStart(4, "0")}`,
+    channel_id: "UCvideo",
+    source_content_id: `old-${String(index).padStart(4, "0")}`,
+    content_type: "video",
+    published_at: "2026-01-01T00:00:00.000Z",
+    published_at_status: "exact",
+    published_at_precision: "second",
+    published_at_source: "test_existing_detail",
+    last_seen_at: "2026-07-20T00:00:00.000Z",
+    view_count: 1,
+    player_last_observed_at: "2026-07-20T00:00:00.000Z",
+    next_last_observed_at: null,
+    video_change_probability: 0,
+    like_count: null,
+    comment_count: null,
+  }));
+  fixture.state.cursorAnchors = ["old-0000"];
+  const replayId = "zz-ended-live-replay";
+
+  const result = await executeIncrementalVideo({
+    plan: plan(),
+    runId: "incremental:ended-live-replay",
+    startedAt: "2026-07-20T00:00:00.000Z",
+    query: fixture.query,
+    withTransaction: fixture.withTransaction,
+    getChannelSnapshot: async () => ({
+      async scanUploads() {
+        return {
+          playlist_id: "UUvideo",
+          entries: [
+            {
+              id: replayId,
+              position: 1,
+              content_type: "live",
+              title: "Ended live replay",
+              published_day: "2026-07-19",
+            },
+            { id: "old-0000", position: 2, content_type: "video", title: "Anchor" },
+          ],
+          pages: 1,
+          item_count: 2,
+          parse_gap_count: 0,
+          anchor_matched: true,
+          matched_anchor_id: "old-0000",
+          stop_reason: "anchor_matched",
+          terminal_reason: "anchor_matched",
+          complete: true,
+          raw: { engine: "youtubei.js@test" },
+        };
+      },
+    }),
+    fetchDetail: async (videoId) => ({
+      ...detail(videoId, 100, { contentType: videoId === replayId ? "live" : "video" }),
+      ...(videoId === replayId ? {
+        live_ended_at: "2026-07-19T01:30:00.000Z",
+      } : {}),
+    }),
+  });
+
+  assert.equal(result.lifecycle_status, "active");
+  assert.equal(fixture.state.channelStatus, "active");
+  const activityEvidence = fixture.state.outbox[0].payload.activity_evidence;
+  assert.equal(activityEvidence.evidence_scan_stop_reason, "row_limit");
+  assert.equal(activityEvidence.recent_published_content_count, 1);
+  assert.equal(activityEvidence.relation_counts.inside, 1);
+});
+
+test("a page-out due recheck reactivates a dormant channel beyond the history limit", async () => {
+  const fixture = databaseFixture();
+  fixture.state.channelStatus = "dormant";
+  fixture.state.contents = Array.from({ length: 1001 }, (_, index) => ({
+    content_key: `UCvideo:video:old-${String(index).padStart(4, "0")}`,
+    channel_id: "UCvideo",
+    source_content_id: `old-${String(index).padStart(4, "0")}`,
+    content_type: "video",
+    published_at: "2026-01-01T00:00:00.000Z",
+    published_at_status: "exact",
+    published_at_precision: "second",
+    published_at_source: "test_existing_detail",
+    last_seen_at: "2026-07-20T00:00:00.000Z",
+    view_count: 1,
+    player_last_observed_at: "2026-07-20T00:00:00.000Z",
+    next_last_observed_at: null,
+    video_change_probability: 0,
+    like_count: null,
+    comment_count: null,
+  }));
+  fixture.state.cursorAnchors = ["old-0000"];
+  const recheckId = "zz-page-out-recheck";
+  fixture.state.candidateRows.push({
+    candidate_id: "1",
+    run_id: "incremental:prior-page-out-recheck",
+    channel_id: "UCvideo",
+    source_content_id: recheckId,
+    disposition: "terminal_excluded",
+    next_attempt_at: "2026-07-19T00:00:00.000Z",
+    result_json: {
+      flat: { id: recheckId, title: "Previously private" },
+      disposition: { reason_code: "access_private" },
+    },
+    first_seen_ledger_status: "not_applicable",
+    first_seen_ledger_observation_id: null,
+  });
+
+  const result = await executeIncrementalVideo({
+    plan: plan(),
+    runId: "incremental:page-out-recheck",
+    startedAt: "2026-07-20T00:00:00.000Z",
+    query: fixture.query,
+    withTransaction: fixture.withTransaction,
+    getChannelSnapshot: async () => ({
+      async scanUploads() {
+        return {
+          playlist_id: "UUvideo",
+          entries: [{ id: "old-0000", position: 1, content_type: "video", title: "Anchor" }],
+          pages: 1,
+          item_count: 1,
+          parse_gap_count: 0,
+          anchor_matched: true,
+          matched_anchor_id: "old-0000",
+          stop_reason: "anchor_matched",
+          terminal_reason: "anchor_matched",
+          complete: true,
+          raw: { engine: "youtubei.js@test" },
+        };
+      },
+    }),
+    fetchDetail: async (videoId) => detail(videoId, 100),
+  });
+
+  assert.equal(result.lifecycle_status, "active");
+  assert.equal(fixture.state.channelStatus, "active");
+  const activityEvidence = fixture.state.outbox[0].payload.activity_evidence;
+  assert.equal(activityEvidence.evidence_scan_stop_reason, "row_limit");
+  assert.equal(activityEvidence.recent_published_content_count, 1);
+  assert.equal(activityEvidence.relation_counts.inside, 1);
+});
+
+test("a Recent Sampling detail reactivates a dormant channel beyond the history limit", async () => {
+  const fixture = databaseFixture();
+  fixture.state.channelStatus = "dormant";
+  fixture.state.contents = Array.from({ length: 1001 }, (_, index) => ({
+    content_key: `UCvideo:video:old-${String(index).padStart(4, "0")}`,
+    channel_id: "UCvideo",
+    source_content_id: `old-${String(index).padStart(4, "0")}`,
+    content_type: "video",
+    published_at: "2026-01-01T00:00:00.000Z",
+    published_at_status: "exact",
+    published_at_precision: "second",
+    published_at_source: "test_existing_detail",
+    last_seen_at: "2026-07-20T00:00:00.000Z",
+    view_count: 1,
+    player_last_observed_at: "2026-07-20T00:00:00.000Z",
+    next_last_observed_at: null,
+    video_change_probability: 0,
+    like_count: null,
+    comment_count: null,
+  }));
+  fixture.state.cursorAnchors = ["old-0000"];
+  const sampledId = "zz-recent-sampling";
+  const sampledContentKey = `UCvideo:video:${sampledId}`;
+  fixture.state.contents.push({
+    content_key: sampledContentKey,
+    channel_id: "UCvideo",
+    source_content_id: sampledId,
+    content_type: "video",
+    published_at: null,
+    published_at_status: "unresolved",
+    published_at_precision: "unknown",
+    published_at_source: null,
+    last_seen_at: "2026-07-20T00:00:00.000Z",
+    view_count: null,
+    player_last_observed_at: null,
+    next_last_observed_at: null,
+    video_change_probability: null,
+    like_count: null,
+    comment_count: null,
+  });
+  fixture.state.enrichPending.add(sampledContentKey);
+
+  const result = await executeIncrementalVideo({
+    plan: {
+      ...plan(),
+      capacity: { ...plan().capacity, player_cap: 1, next_cap: 0 },
+    },
+    runId: "incremental:recent-sampling-activity",
+    startedAt: "2026-07-20T00:00:00.000Z",
+    query: fixture.query,
+    withTransaction: fixture.withTransaction,
+    getChannelSnapshot: async () => ({
+      async scanUploads() {
+        return {
+          playlist_id: "UUvideo",
+          entries: [{ id: "old-0000", position: 1, content_type: "video", title: "Anchor" }],
+          pages: 1,
+          item_count: 1,
+          parse_gap_count: 0,
+          anchor_matched: true,
+          matched_anchor_id: "old-0000",
+          stop_reason: "anchor_matched",
+          terminal_reason: "anchor_matched",
+          complete: true,
+          raw: { engine: "youtubei.js@test" },
+        };
+      },
+    }),
+    fetchDetail: async (videoId) => detail(videoId, 100),
+  });
+
+  assert.equal(result.lifecycle_status, "active");
+  assert.equal(fixture.state.channelStatus, "active");
+  const activityEvidence = fixture.state.outbox[0].payload.activity_evidence;
+  assert.equal(activityEvidence.evidence_scan_stop_reason, "row_limit");
+  assert.equal(activityEvidence.recent_published_content_count, 1);
+  assert.equal(activityEvidence.relation_counts.inside, 1);
 });
 
 test("a throttled live Candidate still blocks Incremental dormancy from current Uploads", async () => {

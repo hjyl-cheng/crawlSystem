@@ -468,8 +468,12 @@ Publication 继续拥有自己的 `video-window-v1`。Migration 使用独立 pol
 21. Incremental 历史 Video Activity 证据改为按 `(channel_id, source_content_id)` 现有唯一索引做键集分页，策略版本升级为 `incremental-video-activity-v3`。默认最多读取 1000 行、每页 200 行、分页墙钟预算 500ms；可分别通过 `INCREMENTAL_VIDEO_ACTIVITY_EVIDENCE_ROW_LIMIT`、`INCREMENTAL_VIDEO_ACTIVITY_EVIDENCE_PAGE_SIZE`、`INCREMENTAL_VIDEO_ACTIVITY_EVIDENCE_TIME_BUDGET_MS` 调整。超过任一预算即令 `evidence_complete=false`，禁止据此判 dormant。
 22. Incremental Observation 的 `result_summary_json.activity` 与 Payload `activity_evidence` 同步保存扫描完整性、行数、页数、耗时、停止原因和预算值。`evidence_scan_truncated_count` 是通过多取一条哨兵行确认的已观测截断下界，并由 `evidence_scan_truncated_count_is_lower_bound=true` 明示，不执行会抵消性能收益的全量 `COUNT(*)`。
 23. 本轮已经抓到的 Uploads/Detail 发布时间四元组直接并入生命周期证据；因此大频道历史扫描被截断时，明确的近期证据仍可恢复 active，未结束 Live 仍可阻止错误休眠。
+24. `incremental-video-activity-v4` 用单个 PostgreSQL `NO SCROLL` 游标替代 v3 的多语句键集分页；外围事务继续使用 `READ COMMITTED`，游标在声明时固定证据快照，避免并发 Worker 更新导致不同页读取不同版本。
+25. 每次游标声明和 `FETCH` 都按剩余墙钟预算设置事务局部 `statement_timeout`；`57014` 通过 SAVEPOINT 恢复为不完整证据，禁止休眠，同时保持外围 Incremental 事务可继续使用。慢速末页即使已经返回全部行，也不能在预算耗尽后被标成完整。
+26. 当前轮 Detail 证据保留 `live_ended_at` 与 `duration_seconds`，已结束直播按回放参与发布时间判断；页外 Candidate 重试和 Recent Sampling 成功取得的 Detail 也直接进入本轮生命周期证据，历史扫描截断时不会遗漏明确近期内容。
+27. 隔离 PostgreSQL 16.14 已实际验证参数化游标、`READ COMMITTED` 跨 `FETCH` 一致快照、锁等待触发 `statement_timeout`、SAVEPOINT 恢复以及恢复后同一事务继续查询；对应集成测试不依赖生产数据库。
 
-复审后的本地验证结果：聚焦逻辑与链路测试全部通过；完整 `npm test` 共 255 个测试文件，251 个通过，4 个既有环境失败。失败原因分别为 sandbox 禁止 `spawnSync git`、两个本地监听 `EPERM`、以及当前 Python 环境缺少 `yt_dlp`，与本轮改动无关。复审方另行在 PostgreSQL 16 实际执行 Full Video SQL 与 Migration Gate 集成测试，结果均为 1/1 通过、无跳过。
+复审后的本地验证结果：聚焦逻辑与链路测试全部通过；完整 `npm test` 共 256 个测试文件，252 个通过，4 个既有环境失败。失败原因分别为 sandbox 禁止 `spawnSync git`、两个本地监听 `EPERM`、以及当前 Python 环境缺少 `yt_dlp`，与本轮改动无关。隔离 PostgreSQL 16.14 已实际执行 Video Activity 游标快照与数据库超时恢复集成测试，结果 2/2 通过、无跳过；复审方此前另行执行的 Full Video SQL 与 Migration Gate 集成测试也均为 1/1 通过、无跳过。
 
 尚未声称完成的数据工作：
 

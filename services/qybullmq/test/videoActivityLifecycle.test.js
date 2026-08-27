@@ -4,22 +4,33 @@ import { applyVideoActivityLifecycle } from "../src/videoActivityLifecycle.js";
 
 function lifecycleFixture(contents, channel = { status: "active", dormant_cycle: 0 }) {
   const queries = [];
+  let cursorRows = [];
+  let cursorOffset = 0;
   const client = {
     async query(sql, params = []) {
       queries.push({ sql, params });
       if (sql.includes("FROM crawler.channels")) {
         return { rows: [channel] };
       }
-      if (sql.includes("FROM crawler.contents")) {
-        const cursor = String(params[1] ?? "");
-        const limit = Number(params[2] ?? contents.length);
+      if (sql.includes("current_setting('statement_timeout')")) {
+        return { rows: [{ statement_timeout: "0" }] };
+      }
+      if (sql.startsWith("DECLARE video_activity_evidence_cursor")) {
+        cursorRows = [...contents]
+          .sort((left, right) => String(left.source_content_id)
+            .localeCompare(String(right.source_content_id)));
+        cursorOffset = 0;
+        return { rows: [] };
+      }
+      if (sql.startsWith("FETCH FORWARD")) {
+        const limit = Number(sql.match(/^FETCH FORWARD (\d+)/)?.[1] ?? 0);
+        const rows = cursorRows.slice(cursorOffset, cursorOffset + limit);
+        cursorOffset += rows.length;
         return {
-          rows: contents
-            .filter((row) => String(row.source_content_id) > cursor)
-            .sort((left, right) => String(left.source_content_id).localeCompare(String(right.source_content_id)))
-            .slice(0, limit),
+          rows,
         };
       }
+      if (sql.startsWith("CLOSE video_activity_evidence_cursor")) return { rows: [] };
       return { rows: [], rowCount: 1 };
     },
   };
@@ -187,7 +198,7 @@ test("Incremental lifecycle stops historical evidence pagination at its time bud
       published_at_source: "youtubejs_player_microformat",
     },
   ]);
-  const clock = [10, 111];
+  const clock = [10, 10, 111];
 
   const result = await applyVideoActivityLifecycle(fixture.client, {
     channelId: "UCscantime",
@@ -206,6 +217,82 @@ test("Incremental lifecycle stops historical evidence pagination at its time bud
   assert.equal(result.evidence_scan_elapsed_ms, 101);
   assert.equal(result.evidence_scan_truncated_count, 1);
   assert.equal(result.evidence_scan_stop_reason, "time_budget");
+});
+
+test("Incremental lifecycle does not call a slow terminal page complete", async () => {
+  const fixture = lifecycleFixture([{
+    source_content_id: "only-old-video",
+    content_type: "video",
+    published_at: "2026-04-01T10:00:00.000Z",
+    published_at_status: "exact",
+    published_at_precision: "second",
+    published_at_source: "youtubejs_player_microformat",
+  }]);
+  const clock = [10, 10, 611];
+
+  const result = await applyVideoActivityLifecycle(fixture.client, {
+    channelId: "UCslowterminalpage",
+    observedAt: "2026-07-23T12:00:00.000Z",
+    discoveryComplete: true,
+    evidenceScanRowLimit: 10,
+    evidenceScanPageSize: 10,
+    evidenceScanTimeBudgetMs: 500,
+    monotonicNow: () => clock.shift() ?? 611,
+  });
+
+  assert.equal(result.lifecycle_status, "active");
+  assert.equal(result.conclusive, false);
+  assert.equal(result.evidence_complete, false);
+  assert.equal(result.evidence_scan_rows, 1);
+  assert.equal(result.evidence_scan_elapsed_ms, 601);
+  assert.equal(result.evidence_scan_stop_reason, "time_budget");
+  assert.equal(
+    fixture.queries.some(({ sql }) => sql.includes("SET status='dormant'")),
+    false,
+  );
+});
+
+test("Incremental lifecycle recovers a PostgreSQL evidence query timeout as incomplete", async () => {
+  const queries = [];
+  const client = {
+    async query(sql, params = []) {
+      queries.push({ sql, params });
+      if (sql.includes("FROM crawler.channels")) {
+        return { rows: [{ status: "active", dormant_cycle: 0 }] };
+      }
+      if (sql.startsWith("FETCH FORWARD")) {
+        const error = new Error("canceling statement due to statement timeout");
+        error.code = "57014";
+        throw error;
+      }
+      return { rows: [], rowCount: 1 };
+    },
+  };
+
+  const result = await applyVideoActivityLifecycle(client, {
+    channelId: "UCquerytimeout",
+    observedAt: "2026-07-23T12:00:00.000Z",
+    discoveryComplete: true,
+    evidenceScanTimeBudgetMs: 500,
+  });
+
+  assert.equal(result.lifecycle_status, "active");
+  assert.equal(result.conclusive, false);
+  assert.equal(result.evidence_complete, false);
+  assert.equal(result.evidence_scan_rows, 0);
+  assert.equal(result.evidence_scan_stop_reason, "time_budget");
+  assert.equal(
+    queries.some(({ sql }) => sql.includes("set_config('statement_timeout'")),
+    true,
+  );
+  assert.equal(
+    queries.some(({ sql }) => sql.includes("ROLLBACK TO SAVEPOINT")),
+    true,
+  );
+  assert.equal(
+    queries.some(({ sql }) => sql.startsWith("CLOSE video_activity_evidence_cursor")),
+    true,
+  );
 });
 
 test("Incremental lifecycle can prove dormancy after a complete paginated scan", async () => {
@@ -243,6 +330,16 @@ test("Incremental lifecycle can prove dormancy after a complete paginated scan",
   assert.equal(result.evidence_scan_page_count, 2);
   assert.equal(result.evidence_scan_truncated_count, 0);
   assert.equal(result.evidence_scan_stop_reason, "complete");
+  assert.equal(result.policy_version, "incremental-video-activity-v4");
+  assert.equal(
+    fixture.queries.filter(({ sql }) => sql.startsWith("DECLARE video_activity_evidence_cursor"))
+      .length,
+    1,
+  );
+  assert.equal(
+    fixture.queries.filter(({ sql }) => sql.startsWith("FETCH FORWARD")).length,
+    2,
+  );
 });
 
 test("current-run recent evidence reactivates a channel when history is truncated", async () => {

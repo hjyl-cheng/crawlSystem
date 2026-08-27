@@ -752,7 +752,12 @@ function scannedVideoDispositionWork(entries, priorByVideoId, observedAt, {
   return { workEntries, pendingDeferredVideoIds };
 }
 
-function currentRunActivityEvidence(commandEntries, scanEntries, dispositions) {
+function currentRunActivityEvidence(
+  commandEntries,
+  scanEntries,
+  dispositions,
+  storedActivityEvidence = [],
+) {
   const evidenceByVideoId = new Map();
   for (const entry of Array.isArray(commandEntries) ? commandEntries : []) {
     const videoId = text(entry?.video_id);
@@ -766,7 +771,14 @@ function currentRunActivityEvidence(commandEntries, scanEntries, dispositions) {
       published_at_status: entry?.published_at_status ?? "unresolved",
       published_at_precision: entry?.published_at_precision ?? "unknown",
       published_at_source: entry?.published_at_source ?? null,
+      live_ended_at: entry?.live_ended_at ?? null,
+      duration_seconds: entry?.duration_seconds ?? null,
     });
+  }
+  for (const evidence of Array.isArray(storedActivityEvidence) ? storedActivityEvidence : []) {
+    const videoId = text(evidence?.source_content_id);
+    if (!videoId) continue;
+    evidenceByVideoId.set(videoId, evidence);
   }
   for (const entry of Array.isArray(scanEntries) ? scanEntries : []) {
     if (unfinishedLiveReason(entry) === "live_in_progress" && text(entry?.id)) {
@@ -1973,6 +1985,7 @@ async function applyDiscovery({
   );
   const firstSeenEntries = candidateEntries.filter((entry) => !alreadyKnown.has(entry.id));
   const firstSeen = [];
+  const activityEvidence = [];
   const dispositions = [];
   const recheckDispositions = [];
   const unresolvedVideoIds = [...new Set(pendingDeferredVideoIds)];
@@ -1994,6 +2007,16 @@ async function applyDiscovery({
       published_at_status: current.publishedAtStatus,
       published_at_precision: current.publishedAtPrecision,
       published_at_source: current.publishedAtSource,
+    });
+    activityEvidence.push({
+      source_content_id: entry.id,
+      content_type: current.contentType,
+      published_at: current.publishedAt,
+      published_at_status: current.publishedAtStatus,
+      published_at_precision: current.publishedAtPrecision,
+      published_at_source: current.publishedAtSource,
+      live_ended_at: current.facts?.live_ended_at ?? null,
+      duration_seconds: current.facts?.duration_seconds ?? null,
     });
   }
   for (const entry of firstSeenEntries) {
@@ -2033,6 +2056,16 @@ async function applyDiscovery({
       published_at_status: current.publishedAtStatus,
       published_at_precision: current.publishedAtPrecision,
       published_at_source: current.publishedAtSource,
+    });
+    activityEvidence.push({
+      source_content_id: entry.id,
+      content_type: current.contentType,
+      published_at: current.publishedAt,
+      published_at_status: current.publishedAtStatus,
+      published_at_precision: current.publishedAtPrecision,
+      published_at_source: current.publishedAtSource,
+      live_ended_at: current.facts?.live_ended_at ?? null,
+      duration_seconds: current.facts?.duration_seconds ?? null,
     });
   }
   const discoveredVideoIds = [...new Set(
@@ -2134,6 +2167,7 @@ async function applyDiscovery({
     },
     firstSeen,
     claimedFirstSeen,
+    activityEvidence,
   };
 }
 
@@ -2315,6 +2349,13 @@ export async function applyIncrementalVideoDetail(client, {
     engagementChanged,
     changeProbability,
     accessStatus: facts.access_status,
+    activityEvidence: storageAction.kind === "upsert" ? {
+      source_content_id: row.source_content_id,
+      content_type: storageAction.content_type,
+      ...publication,
+      live_ended_at: facts.live_ended_at,
+      duration_seconds: facts.duration_seconds,
+    } : null,
   };
 }
 
@@ -2529,6 +2570,7 @@ async function applyRecentSampling({
   let viewDeltaTotal = 0;
   let comparableViewCount = 0;
   let engagementChangedCount = 0;
+  const activityEvidence = [];
   for (const row of locked.rows) {
     const spec = planned.get(row.content_key);
     const prepared = preparedCaptures.get(row.content_key);
@@ -2568,6 +2610,7 @@ async function applyRecentSampling({
       continue;
     }
     successCount += 1;
+    if (applied.activityEvidence) activityEvidence.push(applied.activityEvidence);
     if (applied.viewDelta != null) {
       comparableViewCount += 1;
       viewDeltaTotal += applied.viewDelta;
@@ -2594,6 +2637,7 @@ async function applyRecentSampling({
   return {
     outcome,
     payload,
+    activityEvidence,
     summary: {
       recent_count: payload.recent_count,
       candidate_count: samplePlan.candidate_count,
@@ -2623,15 +2667,18 @@ async function recordVideoCycle({
   executionAttemptId,
 }) {
   const commandEntries = scan.entries.map((entry) => {
+    const facts = detailFacts(discoveryCaptures.get(entry.id)?.detail);
     const publicationSelection = selectPublicationEvidence(
       uploadsPublishedFacts(entry),
-      detailFacts(discoveryCaptures.get(entry.id)?.detail),
+      facts,
     );
     const publicationConflict = publicationEvidenceConflictRecord(publicationSelection);
     return {
       video_id: entry.id,
       position: entry.position,
       content_type: entry.content_type,
+      live_ended_at: facts?.live_ended_at ?? null,
+      duration_seconds: facts?.duration_seconds ?? null,
       ...publicationSelection.evidence,
       ...(publicationConflict ? { publication_evidence_conflict: publicationConflict } : {}),
     };
@@ -2795,10 +2842,18 @@ async function recordVideoCycle({
             channelId: plan.channel_id,
             observedAt,
             discoveryComplete: scan.complete === true,
-            runActivityEvidence: currentRunActivityEvidence(commandEntries, scan.entries, [
-              ...discovery.payload.dispositions,
-              ...discovery.payload.recheck_dispositions,
-            ]),
+            runActivityEvidence: currentRunActivityEvidence(
+              commandEntries,
+              scan.entries,
+              [
+                ...discovery.payload.dispositions,
+                ...discovery.payload.recheck_dispositions,
+              ],
+              [
+                ...discovery.activityEvidence,
+                ...recentSampling.activityEvidence,
+              ],
+            ),
           });
           const lifecycleEvidenceMetrics = {
             evidence_complete: lifecycle.evidence_complete,

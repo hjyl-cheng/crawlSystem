@@ -12,7 +12,7 @@ import {
   PUBLICATION_TIME_CLASSIFIER_VERSION,
 } from "./publicationTimeEvidence.js";
 
-export const INCREMENTAL_VIDEO_ACTIVITY_POLICY_VERSION = "incremental-video-activity-v3";
+export const INCREMENTAL_VIDEO_ACTIVITY_POLICY_VERSION = "incremental-video-activity-v4";
 
 function boundedPositiveInteger(value, fallback, maximum) {
   const parsed = Number(value);
@@ -37,6 +37,31 @@ export const INCREMENTAL_VIDEO_ACTIVITY_EVIDENCE_SCAN_DEFAULTS = Object.freeze({
     5000,
   ),
 });
+
+const EVIDENCE_PAGE_SAVEPOINT = "video_activity_evidence_page";
+const EVIDENCE_CURSOR = "video_activity_evidence_cursor";
+
+async function queryEvidenceStatement(client, sql, params, timeoutMs, originalTimeout) {
+  await client.query(`SAVEPOINT ${EVIDENCE_PAGE_SAVEPOINT}`);
+  try {
+    await client.query(
+      "SELECT set_config('statement_timeout',$1,true)",
+      [`${Math.max(1, Math.ceil(timeoutMs))}ms`],
+    );
+    const result = await client.query(sql, params);
+    await client.query(
+      "SELECT set_config('statement_timeout',$1,true)",
+      [originalTimeout],
+    );
+    await client.query(`RELEASE SAVEPOINT ${EVIDENCE_PAGE_SAVEPOINT}`);
+    return { result, timedOut: false };
+  } catch (error) {
+    await client.query(`ROLLBACK TO SAVEPOINT ${EVIDENCE_PAGE_SAVEPOINT}`);
+    await client.query(`RELEASE SAVEPOINT ${EVIDENCE_PAGE_SAVEPOINT}`);
+    if (error?.code === "57014") return { result: null, timedOut: true };
+    throw error;
+  }
+}
 
 function canonicalStatus(row) {
   if (row?.status === "rejected" && row?.reject_reason === DORMANT_REASON) return "dormant";
@@ -130,58 +155,93 @@ async function loadStoredVideoActivityEvidence(client, {
   const clock = typeof monotonicNow === "function" ? monotonicNow : () => performance.now();
   const startedAt = Number(clock());
   const rows = [];
-  let cursor = "";
+  let bufferedRows = [];
   let pageCount = 0;
   let elapsedMs = 0;
   let complete = false;
   let stopReason = "complete";
   let truncatedCount = 0;
+  const timeoutResult = await client.query(
+    "SELECT current_setting('statement_timeout') AS statement_timeout",
+  );
+  const originalTimeout = String(timeoutResult.rows?.[0]?.statement_timeout ?? "0");
+  let cursorOpen = false;
 
-  while (rows.length < effectiveRowLimit) {
-    const acceptedLimit = Math.min(effectivePageSize, effectiveRowLimit - rows.length);
-    const pageResult = await client.query(
-      `SELECT source_content_id,content_type,live_ended_at,duration_seconds,
+  try {
+    const declaration = await queryEvidenceStatement(
+      client,
+      `DECLARE ${EVIDENCE_CURSOR} NO SCROLL CURSOR FOR
+       SELECT source_content_id,content_type,live_ended_at,duration_seconds,
               published_at,published_at_status,published_at_precision,published_at_source
        FROM crawler.contents
        WHERE channel_id=$1
          AND content_type IN ('video','short','live')
-         AND source_content_id>$2
-       ORDER BY source_content_id
-       LIMIT $3`,
-      [channelId, cursor, acceptedLimit + 1],
+       ORDER BY source_content_id`,
+      [channelId],
+      effectiveTimeBudgetMs,
+      originalTimeout,
     );
-    pageCount += 1;
-    const pageRows = Array.isArray(pageResult.rows) ? pageResult.rows : [];
-    const acceptedRows = pageRows.slice(0, acceptedLimit);
-    rows.push(...acceptedRows);
-    const observedNow = Number(clock());
+    let observedNow = Number(clock());
     elapsedMs = Number.isFinite(startedAt) && Number.isFinite(observedNow)
       ? Math.max(0, observedNow - startedAt)
       : 0;
-
-    if (pageRows.length <= acceptedLimit) {
-      complete = true;
-      stopReason = "complete";
-      break;
-    }
-
-    if (rows.length >= effectiveRowLimit) {
-      truncatedCount = pageRows.length - acceptedRows.length;
-      stopReason = "row_limit";
-      break;
-    }
-    if (elapsedMs >= effectiveTimeBudgetMs) {
-      truncatedCount = pageRows.length - acceptedRows.length;
+    if (declaration.timedOut) {
+      elapsedMs = Math.max(elapsedMs, effectiveTimeBudgetMs);
       stopReason = "time_budget";
-      break;
-    }
+    } else {
+      cursorOpen = true;
+      while (rows.length < effectiveRowLimit) {
+        const remainingBudgetMs = effectiveTimeBudgetMs - elapsedMs;
+        if (remainingBudgetMs <= 0) {
+          truncatedCount = bufferedRows.length;
+          stopReason = "time_budget";
+          break;
+        }
+        const acceptedLimit = Math.min(effectivePageSize, effectiveRowLimit - rows.length);
+        const fetchCount = Math.max(1, acceptedLimit + 1 - bufferedRows.length);
+        const page = await queryEvidenceStatement(
+          client,
+          `FETCH FORWARD ${fetchCount} FROM ${EVIDENCE_CURSOR}`,
+          [],
+          remainingBudgetMs,
+          originalTimeout,
+        );
+        pageCount += 1;
+        observedNow = Number(clock());
+        elapsedMs = Number.isFinite(startedAt) && Number.isFinite(observedNow)
+          ? Math.max(0, observedNow - startedAt)
+          : 0;
+        if (page.timedOut) {
+          elapsedMs = Math.max(elapsedMs, effectiveTimeBudgetMs);
+          truncatedCount = bufferedRows.length;
+          stopReason = "time_budget";
+          break;
+        }
+        const fetchedRows = Array.isArray(page.result?.rows) ? page.result.rows : [];
+        const pageRows = [...bufferedRows, ...fetchedRows];
+        const acceptedRows = pageRows.slice(0, acceptedLimit);
+        bufferedRows = pageRows.slice(acceptedLimit);
+        rows.push(...acceptedRows);
 
-    cursor = String(acceptedRows.at(-1)?.source_content_id ?? "");
-    if (!cursor) {
-      truncatedCount = pageRows.length - acceptedRows.length;
-      stopReason = "invalid_cursor";
-      break;
+        if (elapsedMs >= effectiveTimeBudgetMs) {
+          truncatedCount = bufferedRows.length;
+          stopReason = "time_budget";
+          break;
+        }
+        if (pageRows.length <= acceptedLimit) {
+          complete = true;
+          stopReason = "complete";
+          break;
+        }
+        if (rows.length >= effectiveRowLimit) {
+          truncatedCount = bufferedRows.length;
+          stopReason = "row_limit";
+          break;
+        }
+      }
     }
+  } finally {
+    if (cursorOpen) await client.query(`CLOSE ${EVIDENCE_CURSOR}`);
   }
 
   return {
