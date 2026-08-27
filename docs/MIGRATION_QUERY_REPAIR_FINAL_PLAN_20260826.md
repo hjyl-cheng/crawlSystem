@@ -313,7 +313,7 @@ Publication 继续拥有自己的 `video-window-v1`。Migration 使用独立 pol
 
 只读审计应使用单连接或低并发，避免再次触发只读角色连接上限。
 
-## 11. 历史数据三分类
+## 11. 历史数据四分类
 
 历史修复必须按证据可恢复性分组：
 
@@ -322,6 +322,7 @@ Publication 继续拥有自己的 `video-window-v1`。Migration 使用独立 pol
 | A. 原始 timestamp 可用 | 全量迁移 Run 有可读 raw object，且包含 yt-dlp timestamp | 离线恢复 `exact/second`，不重抓 |
 | B. 明确为 YouTubeJS 相对时间 | raw/lineage 能证明 `youtube_uploads_relative_time` | 改为 `relative/date_only`；窗口需要时抓详情 |
 | C. yt-dlp 或来源未知且 raw 已丢 | 当前仅剩通用 `youtube_uploads/date_only`，无法恢复原始证据 | 不猜测，安排重抓 |
+| D. raw 可读但没有发布时间 | Extractor lineage 可验证，但 raw entry 没有 timestamp、upload date、relative date 或 published text | 归 `unresolved/unknown`，抓详情；不得伪装成 B 或 C |
 
 禁止执行：
 
@@ -427,7 +428,7 @@ Publication 继续拥有自己的 `video-window-v1`。Migration 使用独立 pol
 8. Publication 的 `video-window-v1` 既有测试保持通过；
 9. Unlisted、Private、members-only 回归无变化；
 10. 上线前 raw 覆盖率和 unresolved 增量已经 dry-run 量化；
-11. 历史数据按 A/B/C 三类分批处理，没有整体降级 exact/date-only；
+11. 历史数据按 A/B/C/D 四类分批处理，没有整体降级 exact/date-only；
 12. 每次重放均记录 classifier version、policy version 和 repair kind；
 13. 国家门禁代码和数据模型本轮没有变化；
 14. 生产 Apply 前在只读副本完成行数与样本比对。
@@ -476,11 +477,19 @@ Publication 继续拥有自己的 `video-window-v1`。Migration 使用独立 pol
 
 复审后的本地验证结果：聚焦逻辑与链路测试全部通过；完整 `npm test` 共 256 个测试文件，252 个通过，4 个既有环境失败。失败原因分别为 sandbox 禁止 `spawnSync git`、两个本地监听 `EPERM`、以及当前 Python 环境缺少 `yt_dlp`，与本轮改动无关。隔离 PostgreSQL 16.14 已实际执行 Video Activity 游标快照与数据库超时恢复集成测试，结果 2/2 通过、无跳过；复审方此前另行执行的 Full Video SQL 与 Migration Gate 集成测试也均为 1/1 通过、无跳过。
 
+2026-08-27 生产只读审计：
+
+1. 已锁定 `legacy-results-canary-1787722516493-b0c4f370` 的 100 个频道/Run；稳定清单为 `docs/MIGRATION_QUERY_AUDIT_MANIFEST_20260826_100_RUNS.tsv`，SHA-256 为 `b59bb133092f50d15928f3bd88173b7c4fda6468247d4ba50ae9ac4744de713c`。
+2. `youtube_channel_uploads_flat_json` metadata、MinIO stat/get、gzip、payload SHA-256、JSON 和 channel identity 均为 100/100。
+3. 100 个 raw object 全部来自 YouTubeJS；2,985 条 entry 全部没有发布时间。该生产形态不属于原 A/B/C，已补为 D：raw 可读但时间缺失，统一归 `unresolved/unknown` 并抓 Detail。
+4. 新分类器 dry-run 从旧生产的 `70 passed / 30 dormant` 变为 `71 passed / 29 inconclusive / 0 dormant`。ITDP 明确应 passed；29 个 inconclusive 频道缺 826 条 Detail。全部 100 Run 合计缺 1,727 条 Detail，必须按稳定清单分批重抓并复核视频完整性。
+5. 完整方法、计数、真实样本和待重抓链接见 `docs/MIGRATION_QUERY_PRODUCTION_READONLY_AUDIT_20260827.md`。
+
 尚未声称完成的数据工作：
 
-1. 当前工作树没有生产只读数据库和 S3 凭据，因此尚未统计 `youtube_channel_uploads_flat_json` 的实际可读覆盖率，也未对 100 个 Run 执行 raw-object dry-run 重分类。
-2. 尚未生成 A/B/C 历史修复清单，未执行 `evidence_correction` 或 `policy_reclassification` Apply。
-3. 上述数据步骤必须继续遵守第 10-12 节：单连接或低并发、先只读副本、稳定清单/哈希、小批次、正常 Crawler/Publication 传播。
-4. 在 raw object 可读覆盖率、A/B/C 历史清单和只读 dry-run 完成前，本分支不得合并或部署；经明确批准可以创建本地 checkpoint commit，但不得据此宣称生产门禁完成。
+1. 尚未执行任何 `evidence_correction`、`policy_reclassification` 或 Detail 重抓 Apply。
+2. 必须先在受控 canary 按稳定清单处理 ITDP 和 29 个 inconclusive 频道，再补齐其余 70 个 Run 的未决 Detail，并重放 MATRIA 样本，随后重新运行五态与视频完整性审计。
+3. 上述数据步骤必须继续遵守第 10-12 节：单连接或低并发、重新验证清单哈希、小批次、正常 Crawler/Publication 传播。
+4. 当前代码分支可以交由主 Agent 合并并安排上线；但在 29 个频道取得终态证据、全部 1,727 条未决候选完成处置并完成样本比对前，不得宣称生产历史数据修复完成，也不得扩大 canary 范围。
 
 本轮复审新增的回归覆盖包括：空时间不变 1970、Incremental 当前直播与节流期直播均阻止休眠、不完整扫描不能休眠但近期详情仍可通过、年龄排除项计入 outside、同质量冲突双向保留当前值并生成冲突记录、非法 yt-dlp timestamp 回退、非法 Upload Date 归 unresolved、历史证据完整分页、行数/时间预算截断、截断时本轮近期证据恢复 active，以及扫描指标写入 Observation。PostgreSQL 冲突集成用例仍要求生产前在可控只读测试库执行。
