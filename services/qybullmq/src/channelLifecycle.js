@@ -1,5 +1,6 @@
 import { retractPublicationChannel } from "./publicationReconciler.js";
 import { normalizeChannelCandidateAttemptFence } from "./channelCandidateAttemptFence.js";
+import { StaleChannelCandidateAttemptError } from "./channelCandidateAttemptMutations.js";
 
 const TERMINAL_EVIDENCE_MAX_LENGTH = 2000;
 
@@ -184,6 +185,9 @@ export async function markChannelRemoved(client, {
         attemptFence?.bullmqAttempt ?? null,
       ],
     );
+    if (attemptFence != null && Number(candidate.rowCount || 0) !== 1) {
+      throw new StaleChannelCandidateAttemptError("mark Channel removed", normalizedCandidateId);
+    }
   }
 
   await client.query(

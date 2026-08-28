@@ -354,6 +354,81 @@ func TestClaimAfterLeaseExpiryRetiresTheExpiredWorkersRoute(t *testing.T) {
 	}
 }
 
+func TestExpiredClaimReplayCommitsExpiryAndRetiresItsRoute(t *testing.T) {
+	manager, pool := newProxyControlPostgres(t)
+	ctx := context.Background()
+
+	_ = insertControlProxy(t, pool, "claim-expired-replay.example:8080", 10)
+	dataPlane := &claimedRouteDataPlane{}
+	if err := manager.SetDataPlaneController(dataPlane); err != nil {
+		t.Fatalf("set Claim data plane: %v", err)
+	}
+	if _, err := manager.reconcile(ctx); err != nil {
+		t.Fatalf("reconcile Claim route: %v", err)
+	}
+
+	request := testClaimRequest(
+		"claim-expired-replay-request",
+		"claim-expired-replay-worker",
+		"claim-expired-replay-instance",
+	)
+	claimed, err := manager.Claim(ctx, request)
+	if err != nil {
+		t.Fatalf("initial Claim: %v", err)
+	}
+	activationClaimID := "lease:" + claimed.LeaseID
+	if !dataPlane.ready(claimed.ProxyUser, activationClaimID) {
+		t.Fatalf("initial Claim route was not committed: assignment=%+v data_plane=%+v", claimed, dataPlane)
+	}
+	if _, err := pool.Exec(ctx, `
+		UPDATE proxy_control_leases SET lease_until=NOW()-interval '1 second'
+		WHERE lease_id=$1
+	`, claimed.LeaseID); err != nil {
+		t.Fatalf("expire Claim Lease history: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		UPDATE proxy_running_slots SET lease_until=NOW()-interval '1 second'
+		WHERE current_lease_id=$1
+	`, claimed.LeaseID); err != nil {
+		t.Fatalf("expire Claim Slot Lease: %v", err)
+	}
+
+	if replayed, err := manager.Claim(ctx, request); !errors.Is(err, ErrLeaseGone) {
+		t.Fatalf("expired Claim replay: assignment=%+v err=%v", replayed, err)
+	}
+	if dataPlane.ready(claimed.ProxyUser, activationClaimID) {
+		t.Fatalf("expired Claim replay left Route %q committed", claimed.ProxyUser)
+	}
+
+	var leaseStatus string
+	if err := pool.QueryRow(ctx, `
+		SELECT status FROM proxy_control_leases WHERE lease_id=$1
+	`, claimed.LeaseID).Scan(&leaseStatus); err != nil {
+		t.Fatalf("load expired Claim Lease: %v", err)
+	}
+	if leaseStatus != "expired" {
+		t.Fatalf("expired Claim replay left Lease status %q", leaseStatus)
+	}
+
+	var currentLeaseID *string
+	var workerID *string
+	var rotatedUsername string
+	if err := pool.QueryRow(ctx, `
+		SELECT slot.current_lease_id,slot.worker_id,proxy_user.username
+		FROM proxy_running_slots AS slot
+		JOIN proxy_users AS proxy_user ON proxy_user.id=slot.user_id
+		WHERE slot.slot_name=$1
+	`, claimed.SlotName).Scan(&currentLeaseID, &workerID, &rotatedUsername); err != nil {
+		t.Fatalf("load expired Claim Slot: %v", err)
+	}
+	if currentLeaseID != nil || workerID != nil {
+		t.Fatalf("expired Claim replay left Slot leased: lease=%v worker=%v", currentLeaseID, workerID)
+	}
+	if rotatedUsername == claimed.ProxyUser {
+		t.Fatalf("expired Claim replay did not rotate credential %q", claimed.ProxyUser)
+	}
+}
+
 func TestClaimAfterLeaseExpiryFailsClosedUntilTheExpiredRouteIsRetired(t *testing.T) {
 	manager, pool := newProxyControlPostgres(t)
 	ctx := context.Background()

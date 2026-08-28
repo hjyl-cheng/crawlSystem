@@ -71,7 +71,7 @@ func (m *Manager) activatePendingRoute(
 		if m.resolveUncertainRouteActivation(ctx, claim) {
 			return true
 		}
-		m.logError("mark pending proxy binding ready failed", err, "slot", fence.SlotName)
+		m.logError("mark pending Route activation ready failed", err, "slot", fence.SlotName)
 		return false
 	}
 	if !finalized {

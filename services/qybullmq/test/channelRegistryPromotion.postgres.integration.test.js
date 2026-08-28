@@ -119,22 +119,27 @@ test("terminal Channel evidence does not overwrite a newer Candidate attempt", {
     );
     const candidateId = Number(inserted.rows[0].candidate_id);
 
-    await markChannelRemoved(client, {
-      channelId,
-      candidateId,
-      candidateAttemptFence: {
+    await client.query("SAVEPOINT stale_channel_removal");
+    await assert.rejects(
+      markChannelRemoved(client, {
+        channelId,
         candidateId,
-        dispatchGeneration: 1,
-        jobId: "channel-snapshot:g1",
-        bullmqAttempt: 1,
-      },
-      terminal: {
-        failure_kind: "channel_removed",
-        removed_reason: "channel_not_found",
-        removed_source: "integration_test",
-        evidence: "This channel does not exist.",
-      },
-    });
+        candidateAttemptFence: {
+          candidateId,
+          dispatchGeneration: 1,
+          jobId: "channel-snapshot:g1",
+          bullmqAttempt: 1,
+        },
+        terminal: {
+          failure_kind: "channel_removed",
+          removed_reason: "channel_not_found",
+          removed_source: "integration_test",
+          evidence: "This channel does not exist.",
+        },
+      }),
+      /Candidate attempt Fence is stale/,
+    );
+    await client.query("ROLLBACK TO SAVEPOINT stale_channel_removal");
 
     const state = await client.query(
       `SELECT channel.status AS channel_status,candidate.status AS candidate_status
@@ -144,7 +149,7 @@ test("terminal Channel evidence does not overwrite a newer Candidate attempt", {
       [channelId, candidateId],
     );
     assert.deepEqual(state.rows[0], {
-      channel_status: "removed",
+      channel_status: "active",
       candidate_status: "validating",
     });
   } finally {

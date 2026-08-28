@@ -58,6 +58,13 @@ func (m *Manager) Claim(ctx context.Context, request ClaimRequest) (Assignment, 
 			return Assignment{}, fmt.Errorf("%w: claim_request_id %q", ErrIdempotencyConflict, request.ClaimRequestID)
 		}
 		if replayed.Status != "active" || !replayed.LeaseUntil.After(time.Now()) {
+			if err := m.retireExpiredCredentialUsers(ctx, expiredCredentialRotations); err != nil {
+				return Assignment{}, err
+			}
+			if err := tx.Commit(ctx); err != nil {
+				return Assignment{}, fmt.Errorf("commit expired proxy claim replay: %w", err)
+			}
+			m.invalidateCredentials(credentialRotations)
 			return Assignment{}, ErrLeaseGone
 		}
 		assignment, err := m.loadAssignment(ctx, tx, replayed.SlotName)
