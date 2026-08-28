@@ -273,6 +273,24 @@ func (m *Manager) loadOrClaimPendingRouteActivation(
 		return routeActivationClaim{}, false, fmt.Errorf("lock pending Route activation Lease history: %w", err)
 	}
 
+	// Lock Slot before reading Claim expiry. statement_timestamp() is fixed
+	// at statement start, so a combined SELECT ... FOR UPDATE can treat a
+	// Claim that expired while waiting as still live.
+	var slotName string
+	err = tx.QueryRow(ctx, `
+		SELECT slot.slot_name
+		FROM proxy_running_slots slot
+		JOIN proxy_users proxy_user ON proxy_user.id=slot.user_id
+		WHERE slot.slot_name=$1
+		FOR UPDATE OF slot,proxy_user
+	`, fence.SlotName).Scan(&slotName)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return routeActivationClaim{}, false, nil
+	}
+	if err != nil {
+		return routeActivationClaim{}, false, fmt.Errorf("lock pending Route activation Slot: %w", err)
+	}
+
 	claim := routeActivationClaim{Fence: fence}
 	var persistedClaimID, persistedPreviousClaimID string
 	var persistedClaimUntil *time.Time
@@ -289,7 +307,6 @@ func (m *Manager) loadOrClaimPendingRouteActivation(
 		  AND slot.proxy_id=$3 AND slot.assignment_version=$4
 		  AND slot.ready_after IS NULL AND slot.active_task_id IS NULL
 		  AND slot.control_state='pending_new_route'
-		FOR UPDATE OF slot,proxy_user
 	`, fence.SlotName, fence.LeaseID, fence.ProxyID, fence.RouteGeneration,
 		m.options.WorkloadScope).Scan(
 		&claim.OldUsername,
@@ -377,6 +394,28 @@ func (m *Manager) renewRouteActivationClaim(ctx context.Context, claim routeActi
 				"claim_id", claim.ClaimID,
 			)
 		}
+		return false
+	}
+
+	// Lock Slot before the expiry check. statement_timestamp() is fixed at
+	// statement start, so a combined UPDATE ... FOR UPDATE can revive a
+	// Claim that expired while waiting on the row.
+	var slotName string
+	err = tx.QueryRow(ctx, `
+		SELECT slot_name
+		FROM proxy_running_slots
+		WHERE slot_name=$1
+		FOR UPDATE
+	`, claim.Fence.SlotName).Scan(&slotName)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false
+	}
+	if err != nil {
+		m.logError(
+			"renew pending Route activation claim failed", err,
+			"slot", claim.Fence.SlotName,
+			"claim_id", claim.ClaimID,
+		)
 		return false
 	}
 

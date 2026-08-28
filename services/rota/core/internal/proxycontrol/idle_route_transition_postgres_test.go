@@ -1759,11 +1759,123 @@ func TestRenewWaitingOnAdvisoryCannotReviveExpiredClaim(t *testing.T) {
 	}
 }
 
-func waitForFinalizeBlockedOnLeaseHistoryRow(
+func TestRenewWaitingOnSlotCannotReviveExpiredClaim(t *testing.T) {
+	manager, pool := newProxyControlPostgres(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	proxyID := insertControlProxy(t, pool, "renew-slot.example:8080", 10)
+	manager.SetDataPlaneController(&idleRouteDataPlaneStub{})
+	if _, err := manager.reconcile(ctx); err != nil {
+		t.Fatalf("reconcile renew-slot Route: %v", err)
+	}
+	assignment, err := manager.Claim(ctx, testClaimRequest(
+		"claim-renew-slot", "worker-renew-slot", "instance-renew-slot",
+	))
+	if err != nil {
+		t.Fatalf("Claim Route: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		UPDATE proxy_running_slots
+		SET ready_after=NULL,control_state='pending_new_route',
+		    route_activation_old_username='retired-proxy-user'
+		WHERE slot_name=$1 AND current_lease_id=$2
+	`, assignment.SlotName, assignment.LeaseID); err != nil {
+		t.Fatalf("prepare pending Route: %v", err)
+	}
+	fence := routeActivationFence{
+		SlotName: assignment.SlotName, LeaseID: assignment.LeaseID, ProxyID: proxyID,
+		RouteGeneration: assignment.AssignmentVersion,
+	}
+	claim, found, err := manager.loadOrClaimPendingRouteActivation(ctx, fence)
+	if err != nil || !found {
+		t.Fatalf("claim pending Route activation: claim=%+v found=%v err=%v", claim, found, err)
+	}
+	if _, err := pool.Exec(ctx, `
+		UPDATE proxy_running_slots
+		SET route_activation_claim_until=clock_timestamp() + interval '1.2 seconds'
+		WHERE slot_name=$1 AND route_activation_claim_id=$2
+	`, assignment.SlotName, claim.ClaimID); err != nil {
+		t.Fatalf("shorten T1 Claim: %v", err)
+	}
+
+	gate, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin Slot row lock: %v", err)
+	}
+	defer func() { _ = gate.Rollback(ctx) }()
+	var lockedSlot string
+	var blockerPID int32
+	if err := gate.QueryRow(ctx, `
+		SELECT slot_name, pg_backend_pid()
+		FROM proxy_running_slots
+		WHERE slot_name=$1
+		FOR UPDATE
+	`, assignment.SlotName).Scan(&lockedSlot, &blockerPID); err != nil {
+		t.Fatalf("lock Slot row: %v", err)
+	}
+	var gateHoldsAdvisory bool
+	if err := gate.QueryRow(ctx, `
+		SELECT EXISTS (
+		  SELECT 1
+		  FROM pg_locks
+		  WHERE pid = pg_backend_pid()
+		    AND locktype = 'advisory'
+		    AND granted
+		)
+	`).Scan(&gateHoldsAdvisory); err != nil {
+		t.Fatalf("inspect Slot lock backend: %v", err)
+	}
+	if gateHoldsAdvisory {
+		t.Fatal("test fixture must lock only the Slot row, not the control advisory lock")
+	}
+
+	renewed := make(chan bool, 1)
+	go func() {
+		renewed <- manager.renewRouteActivationClaim(ctx, claim)
+	}()
+	waitForControlSessionBlockedOnRelation(t, ctx, pool, blockerPID, "proxy_running_slots")
+
+	expireDeadline := time.Now().Add(3 * time.Second)
+	for {
+		var expired bool
+		if err := pool.QueryRow(ctx, `
+			SELECT route_activation_claim_until <= clock_timestamp()
+			FROM proxy_running_slots
+			WHERE slot_name=$1 AND route_activation_claim_id=$2
+		`, assignment.SlotName, claim.ClaimID).Scan(&expired); err != nil {
+			t.Fatalf("observe Claim expiry while Renew waits on Slot: %v", err)
+		}
+		if expired {
+			break
+		}
+		if time.Now().After(expireDeadline) {
+			t.Fatal("T1 did not expire while Renew waited on the Slot row")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if err := gate.Commit(ctx); err != nil {
+		t.Fatalf("release Slot row: %v", err)
+	}
+	if <-renewed {
+		t.Fatal("renew revived an expired T1 after waiting on the Slot row")
+	}
+
+	next, found, err := manager.loadOrClaimPendingRouteActivation(ctx, fence)
+	if err != nil || !found {
+		t.Fatalf("take over expired T1: claim=%+v found=%v err=%v", next, found, err)
+	}
+	if next.ClaimID == claim.ClaimID || next.PreviousClaimID != claim.ClaimID {
+		t.Fatalf("takeover claim=%+v, want previous=%q", next, claim.ClaimID)
+	}
+}
+
+func waitForControlSessionBlockedOnRelation(
 	t *testing.T,
 	ctx context.Context,
 	pool *pgxpool.Pool,
 	blockerPID int32,
+	relation string,
 ) {
 	t.Helper()
 	advisoryClassID := int64(uint64(controlAdvisoryLock) >> 32)
@@ -1797,19 +1909,19 @@ func waitForFinalizeBlockedOnLeaseHistoryRow(
 			    JOIN pg_namespace nsp ON nsp.oid = rel.relnamespace
 			    WHERE blocker_lock.pid = $1
 			      AND blocker_lock.granted
-			      AND rel.relname = 'proxy_control_leases'
+			      AND rel.relname = $4
 			      AND nsp.nspname = current_schema()
 			  )
 			LIMIT 1
-		`, blockerPID, advisoryClassID, advisoryObjID).Scan(&waiterPID, &waitEvent)
+		`, blockerPID, advisoryClassID, advisoryObjID, relation).Scan(&waiterPID, &waitEvent)
 		if err == nil {
 			if waitEvent == "advisory" {
-				t.Fatalf("pid %d waited on the control advisory lock instead of the Lease history row", waiterPID)
+				t.Fatalf("pid %d waited on the control advisory lock instead of %s", waiterPID, relation)
 			}
 			return
 		}
 		if !errors.Is(err, pgx.ErrNoRows) {
-			t.Fatalf("observe Finalize waiting on Lease history row lock: %v", err)
+			t.Fatalf("observe wait on %s row lock: %v", relation, err)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -1828,7 +1940,8 @@ func waitForFinalizeBlockedOnLeaseHistoryRow(
 		dump = err.Error()
 	}
 	t.Fatalf(
-		"Finalize did not wait on the Lease history row lock after taking the control advisory lock; activity:\n%s",
+		"control session did not wait on %s after taking the control advisory lock; activity:\n%s",
+		relation,
 		dump,
 	)
 }
@@ -1906,7 +2019,24 @@ func TestFinalizeWaitingOnLeaseHistoryCannotCommitStaleState(t *testing.T) {
 		ok, finalizeErr := manager.finalizeRouteActivationClaim(ctx, claim)
 		done <- finalizeResult{ok: ok, err: finalizeErr}
 	}()
-	waitForFinalizeBlockedOnLeaseHistoryRow(t, ctx, pool, blockerPID)
+	waitForControlSessionBlockedOnRelation(t, ctx, pool, blockerPID, "proxy_control_leases")
+	probe, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin Slot lock-order probe: %v", err)
+	}
+	var probedSlot string
+	if err := probe.QueryRow(ctx, `
+		SELECT slot_name
+		FROM proxy_running_slots
+		WHERE slot_name=$1
+		FOR UPDATE NOWAIT
+	`, assignment.SlotName).Scan(&probedSlot); err != nil {
+		_ = probe.Rollback(ctx)
+		t.Fatalf("Finalize held the Slot row while waiting on Lease history: %v", err)
+	}
+	if err := probe.Rollback(ctx); err != nil {
+		t.Fatalf("release Slot lock-order probe: %v", err)
+	}
 	if _, err := gate.Exec(ctx, `
 		UPDATE proxy_control_leases
 		SET status='released',released_at=statement_timestamp(),
