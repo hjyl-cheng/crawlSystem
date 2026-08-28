@@ -19,17 +19,40 @@ func (*completionDataPlaneStub) RefreshProxyUser(string) {}
 
 func (*completionDataPlaneStub) RetireProxyUser(context.Context, string) error { return nil }
 
-func (s *completionDataPlaneStub) ActivateProxyUser(
+func (*completionDataPlaneStub) RequireRouteActivationRegistry() {}
+
+func (*completionDataPlaneStub) RebuildRouteActivationRegistry(
+	context.Context,
+	[]RouteActivationRegistryEntry,
+) error {
+	return nil
+}
+
+func (s *completionDataPlaneStub) BeginProxyUserActivation(
 	_ context.Context,
 	oldUsername string,
 	newUsername string,
 	expectedProxyID int,
-) error {
+	_ string,
+	_ string,
+) (RouteActivationBeginResult, error) {
 	s.activationCalls++
 	s.oldUsername = oldUsername
 	s.newUsername = newUsername
 	s.expectedProxy = expectedProxyID
-	return s.activationErr
+	return RouteActivationBeginResult{}, s.activationErr
+}
+
+func (*completionDataPlaneStub) CommitProxyUserActivation(context.Context, string, string) error {
+	return nil
+}
+
+func (*completionDataPlaneStub) RetireProxyUserIfClaim(
+	context.Context,
+	string,
+	string,
+) (bool, error) {
+	return false, nil
 }
 
 func TestCompleteTaskKeepsHealthyRouteAndIsIdempotent(t *testing.T) {
@@ -608,7 +631,7 @@ func TestCompleteTaskRetriesDataPlaneActivationAndDoesNotLeakActionIntoNextTask(
 	); err != nil {
 		t.Fatalf("load reconciled replacement: %v", err)
 	}
-	if dataPlane.activationCalls != 2 || dataPlane.oldUsername != "" ||
+	if dataPlane.activationCalls != 2 || dataPlane.oldUsername != claim.ProxyUser ||
 		dataPlane.newUsername != newUsername || dataPlane.expectedProxy != warmStandbyID {
 		t.Fatalf("retried data-plane activation = %+v, new username = %q", dataPlane, newUsername)
 	}

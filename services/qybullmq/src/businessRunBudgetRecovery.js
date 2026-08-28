@@ -5,6 +5,23 @@ function text(value) {
   return output || null;
 }
 
+function optionalPositiveInteger(value, field) {
+  if (value === null || value === undefined || value === "") return null;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+    throw new TypeError(`${field} must be a positive integer`);
+  }
+  return parsed;
+}
+
+export class BusinessRunBudgetRecoveryError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "BusinessRunBudgetRecoveryError";
+    this.code = "BUSINESS_RUN_BUDGET_RECOVERY_FAILED";
+  }
+}
+
 export function isBusinessRunBudgetExhausted(error) {
   for (let current = error; current; current = current?.cause) {
     const code = text(current?.code)?.toUpperCase();
@@ -18,16 +35,115 @@ export function isBusinessRunBudgetExhausted(error) {
   return false;
 }
 
-export async function recordBusinessRunBudgetExhaustion(query, job, {
+export async function recordBusinessRunBudgetExhaustion(client, job, {
   source = "rota_begin_task",
 } = {}) {
-  if (typeof query !== "function") throw new TypeError("query is required");
-  const executionRunId = text(job?.data?.run_id);
+  if (!client || typeof client.query !== "function") throw new TypeError("transaction client is required");
+  const requestedRunId = text(job?.data?.run_id);
+  const requestedBusinessRunKey = text(job?.data?.business_run_key);
+  if (!requestedRunId && !requestedBusinessRunKey) {
+    throw new BusinessRunBudgetRecoveryError("Business Run identity is missing from the BullMQ Job");
+  }
+  const bindings = await client.query(
+    `SELECT business_run_key,business_run_id,status,terminal_reason,channel_id,candidate_id
+     FROM crawler.business_run_bindings
+     WHERE ($1::text IS NOT NULL AND business_run_key=$1)
+        OR ($2::text IS NOT NULL AND business_run_id=$2)
+     FOR UPDATE`,
+    [requestedBusinessRunKey, requestedRunId],
+  );
+  if (bindings.rowCount !== 1) {
+    throw new BusinessRunBudgetRecoveryError("Business Run Binding could not be resolved uniquely");
+  }
+  const binding = bindings.rows[0];
+  if ((requestedBusinessRunKey && binding.business_run_key !== requestedBusinessRunKey)
+      || (requestedRunId && binding.business_run_id !== requestedRunId)) {
+    throw new BusinessRunBudgetRecoveryError("BullMQ Job conflicts with its Business Run Binding");
+  }
+  const terminalReason = "proxy_control_business_run_budget_exhausted";
+  if (binding.status === "terminal" && binding.terminal_reason !== terminalReason) {
+    throw new BusinessRunBudgetRecoveryError(
+      "Business Run Binding already has a different terminal reason",
+    );
+  }
+
+  const jobCandidateId = optionalPositiveInteger(job?.data?.candidate_id, "job.data.candidate_id");
+  const jobDispatchGeneration = optionalPositiveInteger(
+    job?.data?.dispatch_generation,
+    "job.data.dispatch_generation",
+  );
+  const bindingCandidateId = optionalPositiveInteger(binding.candidate_id, "binding.candidate_id");
+  if (jobCandidateId && bindingCandidateId && jobCandidateId !== bindingCandidateId) {
+    throw new BusinessRunBudgetRecoveryError("BullMQ Job conflicts with the Binding Candidate");
+  }
+  const candidateId = bindingCandidateId ?? jobCandidateId;
+  const requestedChannelId = text(job?.data?.channel_id);
+  if (requestedChannelId && text(binding.channel_id) !== requestedChannelId) {
+    throw new BusinessRunBudgetRecoveryError("BullMQ Job conflicts with the Binding Channel");
+  }
+  let lockedCandidate = null;
+  if (candidateId) {
+    const candidate = await client.query(
+      `SELECT candidate_id,status,channel_id,snapshot_dispatch_generation
+       FROM crawler.channel_candidates
+       WHERE candidate_id=$1
+       FOR UPDATE`,
+      [candidateId],
+    );
+    if (candidate.rowCount !== 1
+        || (text(binding.channel_id) && candidate.rows[0].channel_id !== binding.channel_id)) {
+      throw new BusinessRunBudgetRecoveryError("Binding Candidate could not be locked consistently");
+    }
+    lockedCandidate = candidate.rows[0];
+    const candidateDispatchGeneration = Number(lockedCandidate.snapshot_dispatch_generation);
+    if (jobDispatchGeneration === null) {
+      throw new BusinessRunBudgetRecoveryError(
+        "job.data.dispatch_generation is required for Candidate budget recovery",
+      );
+    }
+    if (candidateDispatchGeneration !== jobDispatchGeneration) {
+      throw new BusinessRunBudgetRecoveryError(
+        `Candidate dispatch generation changed: expected ${jobDispatchGeneration}, got ${candidateDispatchGeneration}`,
+      );
+    }
+    if (["accepted", "rejected", "existing"].includes(lockedCandidate.status)) {
+      throw new BusinessRunBudgetRecoveryError(
+        `Business Run Candidate is already terminal: ${lockedCandidate.status}`,
+      );
+    }
+  }
+
+  const executionRunId = binding.business_run_id;
   const targetRunId = text(job?.data?.checkpoint_target_run_id)
     ?? (job?.name === "channel-checkpoint-repair" ? text(job?.data?.repair_parent_run_id) : null)
     ?? executionRunId;
-  if (!executionRunId || !targetRunId) {
-    return { recorded: false, reason: "run_identity_missing" };
+  const runIds = [...new Set([executionRunId, targetRunId])].sort();
+  const lockedRuns = await client.query(
+    `SELECT run_id,status,detail_status
+     FROM crawler.channel_runs
+     WHERE run_id=ANY($1::text[])
+     ORDER BY run_id
+     FOR UPDATE`,
+    [runIds],
+  );
+  const runsById = new Map(lockedRuns.rows.map((row) => [row.run_id, row]));
+  const executionRun = runsById.get(executionRunId) ?? null;
+  const targetRun = runsById.get(targetRunId) ?? null;
+  if (binding.status === "materialized" && !executionRun) {
+    throw new BusinessRunBudgetRecoveryError("Materialized Business Run has no Channel Run");
+  }
+  if (binding.status === "reserved" && executionRun) {
+    throw new BusinessRunBudgetRecoveryError("Reserved Business Run already has a Channel Run");
+  }
+  if (targetRunId !== executionRunId && !targetRun) {
+    throw new BusinessRunBudgetRecoveryError("Checkpoint target Channel Run is missing");
+  }
+  for (const run of runsById.values()) {
+    if (["done", "skipped"].includes(run.status)) {
+      throw new BusinessRunBudgetRecoveryError(
+        `Channel Run is already terminal: ${run.run_id} (${run.status})`,
+      );
+    }
   }
   const evidence = {
     status: "business_run_budget_exhausted",
@@ -36,8 +152,10 @@ export async function recordBusinessRunBudgetExhaustion(query, job, {
     job_id: text(job?.id),
     job_name: text(job?.name),
     repair_round: Number(job?.data?.repair_round ?? 0) || null,
+    business_run_key: binding.business_run_key,
+    business_run_id: binding.business_run_id,
   };
-  const execution = await query(
+  const execution = await client.query(
     `UPDATE crawler.channel_runs
      SET status='failed',detail_status='failed',
          error_message='Rota Business Run budget exhausted',
@@ -46,16 +164,22 @@ export async function recordBusinessRunBudgetExhaustion(query, job, {
            '{proxy_control}',
            COALESCE(result_json->'proxy_control','{}'::jsonb)
              || $2::jsonb
-             || jsonb_build_object('observed_at',now()),
+             || jsonb_build_object(
+                  'observed_at',
+                  COALESCE(result_json->'proxy_control'->'observed_at',to_jsonb(now()))
+                ),
            true
          ),
          finished_at=COALESCE(finished_at,now()),updated_at=now()
-     WHERE run_id=$1
+     WHERE run_id=$1 AND status NOT IN ('done','skipped')
      RETURNING run_id`,
     [executionRunId, JSON.stringify(evidence)],
   );
+  if (executionRun && execution.rowCount !== 1) {
+    throw new BusinessRunBudgetRecoveryError("Business Run Channel Run changed during termination");
+  }
   if (targetRunId !== executionRunId) {
-    await query(
+    const target = await client.query(
       `UPDATE crawler.channel_runs
        SET status='failed',detail_status='failed',
            error_message='Checkpoint repair Business Run budget exhausted',
@@ -67,7 +191,8 @@ export async function recordBusinessRunBudgetExhaustion(query, job, {
                  || $2::jsonb
                  || jsonb_build_object(
                       'exhausted_execution_run_id',$3::text,
-                      'observed_at',now()
+                      'observed_at',
+                      COALESCE(result_json->'proxy_control'->'observed_at',to_jsonb(now()))
                     ),
                true
              ),
@@ -75,31 +200,99 @@ export async function recordBusinessRunBudgetExhaustion(query, job, {
              COALESCE(result_json->'checkpoint_repair','{}'::jsonb)
                || jsonb_build_object(
                     'last_budget_exhausted_run_id',$3::text,
-                    'last_budget_exhausted_at',now()
+                    'last_budget_exhausted_at',
+                    COALESCE(
+                      result_json->'checkpoint_repair'->'last_budget_exhausted_at',
+                      to_jsonb(now())
+                    )
                   ),
              true
            ),
            finished_at=NULL,updated_at=now()
-       WHERE run_id=$1
+       WHERE run_id=$1 AND status NOT IN ('done','skipped')
        RETURNING run_id`,
       [targetRunId, JSON.stringify(evidence), executionRunId],
     );
+    if (target.rowCount !== 1) {
+      throw new BusinessRunBudgetRecoveryError(
+        "Checkpoint target Channel Run changed during termination",
+      );
+    }
+  }
+  const terminalBinding = await client.query(
+    `UPDATE crawler.business_run_bindings
+     SET status='terminal',terminal_reason=COALESCE(terminal_reason,$3),updated_at=now()
+     WHERE business_run_key=$1 AND business_run_id=$2
+       AND (
+         status IN ('reserved','materialized')
+         OR (status='terminal' AND terminal_reason=$3)
+       )
+     RETURNING business_run_key,business_run_id,status,terminal_reason`,
+    [binding.business_run_key, binding.business_run_id, terminalReason],
+  );
+  if (terminalBinding.rowCount !== 1) {
+    throw new BusinessRunBudgetRecoveryError("Business Run Binding could not be terminated");
+  }
+
+  let candidateRecorded = false;
+  if (candidateId) {
+    const candidate = await client.query(
+      `UPDATE crawler.channel_candidates
+       SET status=CASE
+             WHEN status IN ('accepted','rejected','existing') THEN status
+             ELSE 'failed'
+           END,
+           error_message=CASE
+             WHEN status IN ('accepted','rejected','existing') THEN error_message
+             ELSE 'Rota Business Run budget exhausted'
+           END,
+           snapshot_json=jsonb_set(
+             COALESCE(snapshot_json,'{}'::jsonb),
+             '{proxy_control}',
+             COALESCE(snapshot_json->'proxy_control','{}'::jsonb)
+               || $2::jsonb
+               || jsonb_build_object(
+                    'observed_at',
+                    COALESCE(snapshot_json->'proxy_control'->'observed_at',to_jsonb(now()))
+                  ),
+             true
+           ),
+           snapshot_active_job_id=NULL,
+           snapshot_active_job_attempt=NULL,
+           next_retry_at=NULL,
+           validation_finished_at=COALESCE(validation_finished_at,now()),
+           updated_at=now()
+       WHERE candidate_id=$1
+         AND snapshot_dispatch_generation=$3
+         AND status NOT IN ('accepted','rejected','existing')
+       RETURNING candidate_id,status`,
+      [candidateId, JSON.stringify(evidence), jobDispatchGeneration],
+    );
+    if (candidate.rowCount !== 1) {
+      throw new BusinessRunBudgetRecoveryError("Business Run Candidate could not be terminated");
+    }
+    candidateRecorded = true;
   }
   return {
-    recorded: execution.rowCount === 1,
+    recorded: true,
     execution_run_id: executionRunId,
     target_run_id: targetRunId,
+    business_run_key: binding.business_run_key,
+    run_materialized: execution.rowCount === 1,
+    binding_recorded: true,
+    candidate_recorded: candidateRecorded,
   };
 }
 
-export async function terminateExhaustedBusinessRun(query, job, error) {
+export async function terminateExhaustedBusinessRun(withTransaction, job, error) {
   if (!isBusinessRunBudgetExhausted(error)) return false;
-  const recorded = await recordBusinessRunBudgetExhaustion(query, job);
-  if (!recorded.recorded) {
-    throw new Error("Rota Business Run budget exhausted but the Crawler Run was not recorded");
-  }
-  const terminal = new UnrecoverableError("Rota Business Run budget exhausted; checkpoint repair required");
+  if (typeof withTransaction !== "function") throw new TypeError("withTransaction is required");
+  const recorded = await withTransaction((client) => (
+    recordBusinessRunBudgetExhaustion(client, job)
+  ));
+  const terminal = new UnrecoverableError("Rota Business Run budget exhausted; terminal state recorded");
   terminal.code = "BUSINESS_RUN_BUDGET_EXHAUSTED";
   terminal.recovery = recorded;
+  terminal.business_run_terminal = true;
   throw terminal;
 }

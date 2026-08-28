@@ -48,8 +48,23 @@ async function main() {
   const pool = new Pool(databaseConfig());
   const queue = new Queue("youtube-channel-crawl", { connection: redisConfig() });
   try {
+    const withTransaction = async (action) => {
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+        const result = await action(client);
+        await client.query("COMMIT");
+        return result;
+      } catch (error) {
+        await client.query("ROLLBACK").catch(() => {});
+        throw error;
+      } finally {
+        client.release();
+      }
+    };
     const result = await recoverLegacyBusinessRunBudgetEvidence({
       query: (sql, params) => pool.query(sql, params),
+      withTransaction,
       queue,
       runId: options.runId,
       jobId: options.jobId,

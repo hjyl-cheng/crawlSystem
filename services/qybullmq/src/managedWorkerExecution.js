@@ -1,5 +1,5 @@
 import { queuesByRole } from "./queues.js";
-import { decideYoutubeFailure } from "./youtubeFailurePolicy.js";
+import { selectYoutubeFailure } from "./youtubeFailurePolicy.js";
 
 const RETRYABLE_ROUTE_FAILURES = new Set([
   "proxy_transport",
@@ -31,14 +31,25 @@ function decisionPriority(decision) {
   return 0;
 }
 
-function failureDecisions(error) {
+function failureSelections(error) {
   const recorded = Array.isArray(error?.channel_execution_attempt?.failure_decisions)
     ? error.channel_execution_attempt.failure_decisions
     : [];
+  const computed = selectYoutubeFailure({ error });
+  const explicit = error?.youtube_failure_decision;
+  const explicitHasOwnSelection = explicit && (
+    explicit?.evidence != null || explicit?.kind !== computed.decision.kind
+  );
   return [
-    ...recorded,
-    error?.youtube_failure_decision,
-    decideYoutubeFailure({ error }),
+    ...recorded.map((decision) => ({
+      decision,
+      evidence: decision?.evidence ?? null,
+    })),
+    ...(explicitHasOwnSelection ? [{
+      decision: explicit,
+      evidence: explicit.evidence ?? null,
+    }] : []),
+    computed,
   ].filter(Boolean);
 }
 
@@ -80,16 +91,17 @@ export function validateWorkerQueueConfiguration({
 }
 
 export function retryableRotaFailure(error) {
-  const selected = failureDecisions(error)
-    .filter((decision) => RETRYABLE_ROUTE_FAILURES.has(decision?.kind))
-    .sort((left, right) => decisionPriority(right) - decisionPriority(left))[0] ?? null;
+  const selected = failureSelections(error)
+    .filter((selection) => RETRYABLE_ROUTE_FAILURES.has(selection?.decision?.kind))
+    .sort((left, right) => (
+      decisionPriority(right.decision) - decisionPriority(left.decision)
+    ))[0] ?? null;
   if (!selected) return null;
+  const source = selected.decision?.evidence?.source ?? selected.evidence?.source;
   return Object.freeze({
-    observation: selected.kind,
+    observation: selected.decision.kind,
     source: String(
-      selected?.evidence?.source
-        ?? error?.youtube_failure_evidence?.source
-        ?? "youtube_managed_request",
+      source || "youtube_managed_request",
     ),
   });
 }

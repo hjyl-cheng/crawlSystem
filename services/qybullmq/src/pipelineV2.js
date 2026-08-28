@@ -49,6 +49,13 @@ import {
   claimChannelRegistryPromotion,
   resolveChannelRegistryRunId,
 } from "./channelRegistryPromotion.js";
+import { activeChannelCandidateAttemptFence } from "./channelCandidateAttemptFence.js";
+import {
+  beginChannelCandidateValidation,
+  markChannelCandidateAlreadyPromoted,
+  recordAcceptedChannelCandidateSnapshot,
+  rejectChannelCandidateAdmission,
+} from "./channelCandidateAttemptMutations.js";
 import {
   currentChannelExecution,
   currentChannelExecutionAbortSignal,
@@ -1037,6 +1044,9 @@ export async function processChannelCrawlV2(job, { resumeMode = "initial" } = {}
   const channelId = text(job.data?.channel_id);
   if (!channelId) throw new Error("channel_id is required");
   const candidateId = integer(job.data?.candidate_id);
+  const candidateAttemptFence = candidateId == null
+    ? null
+    : activeChannelCandidateAttemptFence(job);
   const dispatchBatchId = text(job.data?.dispatch_batch_id) ?? text(job.data?.pipeline_cycle_id);
   const settings = await getCrawlSettingsV2();
   const repairRunMetadata = fullRepairRunMetadata(job.data);
@@ -1082,6 +1092,7 @@ export async function processChannelCrawlV2(job, { resumeMode = "initial" } = {}
       await withTransaction((client) => markChannelRemoved(client, {
         channelId,
         candidateId,
+        candidateAttemptFence,
         terminal: {
           failure_kind: "channel_removed",
           removed_reason: existingChannel.removed_reason || "channel_not_found",
@@ -1120,13 +1131,7 @@ export async function processChannelCrawlV2(job, { resumeMode = "initial" } = {}
     };
   }
   if (candidate && existingChannel && candidate.status !== "accepted") {
-    await query(
-      `UPDATE crawler.channel_candidates
-       SET status='existing',reject_reason='channel_already_promoted',error_message=NULL,
-           snapshot_json=snapshot_json-'parser_contract_error',validation_finished_at=now(),updated_at=now()
-       WHERE candidate_id=$1`,
-      [candidateId],
-    );
+    await markChannelCandidateAlreadyPromoted(query, candidateAttemptFence);
     await refreshDispatchCandidateCounts(dispatchBatchId);
     await signalReadyDiscoveryPageQualifications({ candidateId });
     await terminateReservedBinding("channel_already_promoted");
@@ -1142,14 +1147,7 @@ export async function processChannelCrawlV2(job, { resumeMode = "initial" } = {}
     };
   }
   if (candidate && candidate.status !== "accepted") {
-    await query(
-      `UPDATE crawler.channel_candidates
-       SET status='validating',snapshot_attempts=snapshot_attempts+1,
-           validation_started_at=COALESCE(validation_started_at,now()),
-           snapshot_json=snapshot_json-'parser_contract_error',error_message=NULL,updated_at=now()
-       WHERE candidate_id=$1`,
-      [candidateId],
-    );
+    await beginChannelCandidateValidation(query, candidateAttemptFence);
   }
   if (candidate?.status === "accepted") {
     await signalReadyDiscoveryPageQualifications({ candidateId });
@@ -1363,6 +1361,7 @@ export async function processChannelCrawlV2(job, { resumeMode = "initial" } = {}
     await withTransaction((client) => markChannelRemoved(client, {
       channelId,
       candidateId: candidateId ?? null,
+      candidateAttemptFence,
       runId: runPrepared ? runId : null,
       terminal: terminalChannel,
     }));
@@ -1588,14 +1587,10 @@ export async function processChannelCrawlV2(job, { resumeMode = "initial" } = {}
     : runResultJson;
 
   if (channelCandidateCanFailAdmission(candidate) && !qualification.qualified) {
-    await query(
-      `UPDATE crawler.channel_candidates
-       SET status='rejected',reject_reason=$2,error_message=NULL,
-           snapshot_json=(snapshot_json-'parser_contract_error') || $3::jsonb,
-           validation_finished_at=now(),updated_at=now()
-       WHERE candidate_id=$1`,
-      [candidateId, qualification.reason, JSON.stringify(channelSource)],
-    );
+    await rejectChannelCandidateAdmission(query, candidateAttemptFence, {
+      reason: qualification.reason,
+      sourceJson: channelSource,
+    });
     await refreshDispatchCandidateCounts(dispatchBatchId);
     await signalReadyDiscoveryPageQualifications({ candidateId });
     await terminateReservedBinding(qualification.reason);
@@ -1644,14 +1639,10 @@ export async function processChannelCrawlV2(job, { resumeMode = "initial" } = {}
             merged.country_canonical_name,
           ],
         );
-        await client.query(
-          `UPDATE crawler.channel_candidates
-           SET reject_reason=NULL,error_message=NULL,
-               snapshot_json=(snapshot_json-'parser_contract_error') || $2::jsonb,
-               validation_finished_at=COALESCE(validation_finished_at,now()),
-               accepted_at=COALESCE(accepted_at,now()),updated_at=now()
-           WHERE candidate_id=$1 AND status='accepted'`,
-          [candidateId, JSON.stringify(channelSource)],
+        await recordAcceptedChannelCandidateSnapshot(
+          client.query.bind(client),
+          candidateAttemptFence,
+          { sourceJson: channelSource },
         );
       } else {
         registryPromotion = await claimChannelRegistryPromotion(client, {
@@ -1668,6 +1659,7 @@ export async function processChannelCrawlV2(job, { resumeMode = "initial" } = {}
           subscriberCountText: merged.subscriber_count_text,
           readyForAgent: !rejectIfNoRecentContent,
           sourceJson: channelSource,
+          candidateAttemptFence,
         });
         if (!registryPromotion.promoted) return;
       }

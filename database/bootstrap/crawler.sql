@@ -1205,6 +1205,9 @@ CREATE TABLE crawler.channel_candidates (
     priority integer DEFAULT 100 NOT NULL,
     status text DEFAULT 'discovered'::text NOT NULL,
     snapshot_attempts integer DEFAULT 0 NOT NULL,
+    snapshot_dispatch_generation bigint DEFAULT 0 NOT NULL,
+    snapshot_active_job_id text,
+    snapshot_active_job_attempt integer,
     snapshot_json jsonb DEFAULT '{}'::jsonb NOT NULL,
     source_json jsonb DEFAULT '{}'::jsonb NOT NULL,
     reject_reason text,
@@ -1215,6 +1218,8 @@ CREATE TABLE crawler.channel_candidates (
     accepted_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT channel_candidates_snapshot_active_job_check CHECK ((((snapshot_active_job_id IS NULL) AND (snapshot_active_job_attempt IS NULL)) OR ((snapshot_active_job_id IS NOT NULL) AND (snapshot_active_job_attempt IS NOT NULL) AND (snapshot_active_job_attempt >= 0)))),
+    CONSTRAINT channel_candidates_snapshot_dispatch_generation_check CHECK ((snapshot_dispatch_generation >= 0)),
     CONSTRAINT channel_candidates_status_check CHECK ((status = ANY (ARRAY['discovered'::text, 'queued'::text, 'validating'::text, 'accepted'::text, 'rejected'::text, 'existing'::text, 'failed'::text])))
 );
 
@@ -1273,6 +1278,7 @@ CREATE TABLE crawler.channel_execution_attempts (
     queue_name text NOT NULL,
     job_id text,
     job_attempt integer DEFAULT 0 NOT NULL,
+    dispatch_generation bigint,
     worker_id text NOT NULL,
     slot_name text NOT NULL,
     proxy_user text NOT NULL,
@@ -1299,6 +1305,7 @@ CREATE TABLE crawler.channel_execution_attempts (
     network_identity_key text,
     identity_policy_id text,
     identity_policy_version integer,
+    CONSTRAINT channel_execution_attempts_dispatch_generation_check CHECK (((dispatch_generation IS NULL) OR (dispatch_generation > 0))),
     CONSTRAINT channel_execution_attempts_status_check CHECK ((status = ANY (ARRAY['running'::text, 'success'::text, 'failed'::text, 'aborted'::text])))
 );
 
@@ -4290,6 +4297,13 @@ CREATE INDEX idx_crawler_proxy_job_dispatch_outbox_pending ON crawler.proxy_job_
 
 
 --
+-- Name: ux_crawler_proxy_job_dispatch_outbox_channel_snapshot_generation; Type: INDEX; Schema: crawler; Owner: -
+--
+
+CREATE UNIQUE INDEX ux_crawler_proxy_job_dispatch_outbox_channel_snapshot_generation ON crawler.proxy_job_dispatch_outbox USING btree (aggregate_id, (((payload_json ->> 'dispatch_generation'::text))::bigint)) WHERE (aggregate_kind = 'channel_snapshot'::text);
+
+
+--
 -- Name: idx_crawler_query_dispatch_batches_status; Type: INDEX; Schema: crawler; Owner: -
 --
 
@@ -5403,6 +5417,37 @@ CREATE TABLE crawler.migration_channel_intents (
 CREATE INDEX idx_crawler_migration_intents_target
 ON crawler.migration_channel_intents (target_candidate_id)
 WHERE target_candidate_id IS NOT NULL;
+
+CREATE TABLE crawler.migration_retry_intents (
+    retry_intent_id text PRIMARY KEY,
+    request_key text NOT NULL UNIQUE,
+    candidate_id bigint NOT NULL REFERENCES crawler.channel_candidates(candidate_id) ON DELETE RESTRICT,
+    previous_business_run_id text NOT NULL REFERENCES crawler.business_run_bindings(business_run_id) ON DELETE RESTRICT,
+    new_business_run_id text NOT NULL UNIQUE,
+    new_business_run_key text NOT NULL UNIQUE,
+    new_job_id text NOT NULL UNIQUE,
+    dispatch_generation bigint NOT NULL CHECK (dispatch_generation > 0),
+    reason text NOT NULL,
+    intent_hash text NOT NULL,
+    job_payload_json jsonb DEFAULT '{}'::jsonb NOT NULL,
+    status text DEFAULT 'requested'::text NOT NULL
+      CHECK (status = ANY (ARRAY['requested'::text,'dispatched'::text,'running'::text,'finished'::text,'failed'::text])),
+    dispatch_status text DEFAULT 'pending'::text NOT NULL
+      CHECK (dispatch_status = ANY (ARRAY['pending'::text,'deferred'::text,'enqueued'::text,'terminal'::text])),
+    requested_at timestamp with time zone DEFAULT now() NOT NULL,
+    dispatched_at timestamp with time zone,
+    finished_at timestamp with time zone,
+    last_error text,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    UNIQUE (candidate_id,dispatch_generation)
+);
+
+CREATE UNIQUE INDEX ux_crawler_migration_retry_intents_active_candidate
+ON crawler.migration_retry_intents (candidate_id)
+WHERE status = ANY (ARRAY['requested'::text,'dispatched'::text,'running'::text]);
+
+CREATE INDEX idx_crawler_migration_retry_intents_status
+ON crawler.migration_retry_intents (status,requested_at);
 
 -- migration-channel-inventory-schema:start
 CREATE TABLE crawler.migration_channel_inventory_syncs (

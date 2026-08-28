@@ -15,6 +15,9 @@ import {
   withTransaction,
 } from "./db.js";
 import { createControllerLifecycle } from "./controllerLifecycle.js";
+import {
+  reconcileChannelCandidateQueue as reconcileChannelCandidateQueueWithDependencies,
+} from "./channelSnapshotReconciliation.js";
 import { resolveDiscoveryPageQualification } from "./discoveryPagePolicy.js";
 import {
   createCoalescedWakeup,
@@ -56,6 +59,10 @@ import {
   ManagedJobIntentStore,
   PostgresManagedJobIntentRepository,
 } from "./managedJobIntentStore.js";
+import {
+  MigrationRetryIntentJobReconciler,
+  PostgresMigrationRetryIntentRepository,
+} from "./migrationRetryIntent.js";
 import { ManagedPolicyUnavailableError } from "./managedJobIntents.js";
 import { loadIdentityPolicyCatalog } from "./identityPolicyCatalog.js";
 import { closeProxyControlClient, proxyControlClient } from "./proxyControlClient.js";
@@ -116,6 +123,10 @@ const managedJobIntentStore = new ManagedJobIntentStore({
 const managedJobOutboxDispatcher = new ManagedJobOutboxDispatcher({
   repository: new PostgresManagedJobDispatchRepository({ withTransaction }),
   queues,
+});
+const migrationRetryIntentJobReconciler = new MigrationRetryIntentJobReconciler({
+  repository: new PostgresMigrationRetryIntentRepository({ withTransaction }),
+  queue: queues[queuesByRole.channelCrawl],
 });
 
 function intEnv(name, fallback, min = 0, max = Number.MAX_SAFE_INTEGER) {
@@ -189,6 +200,7 @@ const channelSnapshotReconcileLimit = intEnv("CHANNEL_SNAPSHOT_RECONCILE_LIMIT",
 const channelSnapshotMaxAttempts = intEnv("CHANNEL_SNAPSHOT_MAX_ATTEMPTS", 6, 3, 30);
 const channelSnapshotRetrySeconds = intEnv("CHANNEL_SNAPSHOT_RETRY_SECONDS", 60, 10, 3600);
 const channelSnapshotStaleSeconds = intEnv("CHANNEL_SNAPSHOT_STALE_SECONDS", 900, 60, 7200);
+const channelSnapshotMinSubscriberCount = intEnv("MIN_SUBSCRIBER_COUNT", 1000, 1, 100_000_000);
 const channelCandidateDispatchEnabled = booleanEnv("CHANNEL_CANDIDATE_DISPATCH_ENABLED", true);
 const agentMaxBatchesPerTick = intEnv("AGENT_MAX_BATCHES_PER_TICK", 5, 1, 100);
 const agentQueuedStaleSeconds = intEnv("AGENT_QUEUED_STALE_SECONDS", 180, 60, 3600);
@@ -459,94 +471,19 @@ async function reconcileQueryQualityQueue(actions) {
 }
 
 async function reconcileChannelCandidateQueue(actions, dispatchBatchId) {
-  if (!dispatchBatchId) return 0;
-  const rows = await query(
-    `SELECT candidate.candidate_id,candidate.channel_id,candidate.channel_url,
-            candidate.pipeline_cycle_id,candidate.priority,candidate.status,
-            candidate.source_json->>'source' AS candidate_source,
-            source.query_id,source.query_text
-     FROM crawler.channel_candidates candidate
-     LEFT JOIN LATERAL (
-       SELECT candidate_source.query_id,candidate_source.query_text
-       FROM crawler.channel_candidate_sources candidate_source
-       WHERE candidate_source.candidate_id=candidate.candidate_id
-       ORDER BY candidate_source.created_at,candidate_source.candidate_source_id
-       LIMIT 1
-     ) source ON true
-     WHERE candidate.dispatch_batch_id=$1
-       AND NOT (candidate.snapshot_json ? 'parser_contract_error')
-       AND (
-         (
-           candidate.status IN ('discovered','queued')
-           AND (candidate.next_retry_at IS NULL OR candidate.next_retry_at<=now())
-         )
-         OR (
-           candidate.status='validating'
-           AND candidate.updated_at<=now()-($2::int * interval '1 second')
-         )
-         OR (
-           candidate.status='failed'
-           AND candidate.snapshot_attempts<$3
-           AND candidate.updated_at<=now()-($4::int * interval '1 second')
-         )
-       )
-     ORDER BY candidate.priority DESC,candidate.created_at
-     LIMIT $5`,
-    [
-      dispatchBatchId,
-      channelSnapshotStaleSeconds,
-      channelSnapshotMaxAttempts,
-      channelSnapshotRetrySeconds,
-      channelSnapshotReconcileLimit,
-    ],
-  );
-  let enqueued = 0;
-  for (const row of rows.rows) {
-    const jobId = safeJobId("channel-snapshot", dispatchBatchId, row.channel_id);
-    const existing = await queues[queuesByRole.channelCrawl].getJob(jobId);
-    if (existing) {
-      const state = await existing.getState();
-      if (["waiting", "active", "delayed", "prioritized", "waiting-children"].includes(state)) continue;
-      try {
-        await existing.remove();
-      } catch {
-        continue;
-      }
-    }
-    await query(
-      `UPDATE crawler.channel_candidates
-       SET status='queued',next_retry_at=NULL,validation_finished_at=NULL,updated_at=now()
-       WHERE candidate_id=$1
-         AND NOT (snapshot_json ? 'parser_contract_error')
-         AND status IN ('discovered','queued','validating','failed')`,
-      [row.candidate_id],
-    );
-    await queues[queuesByRole.channelCrawl].add(
-      "channel-snapshot",
-      {
-        candidate_id: Number(row.candidate_id),
-        dispatch_batch_id: dispatchBatchId,
-        channel_id: row.channel_id,
-        channel_url: row.channel_url,
-        crawl_mode: "full",
-        query_id: row.query_id ?? null,
-        query_text: row.query_text ?? null,
-        pipeline_cycle_id: row.pipeline_cycle_id || dispatchBatchId,
-        enforce_min_subscribers: true,
-        reject_if_no_recent_content: row.candidate_source === "legacy_results_db",
-      },
-      { jobId, priority: Number(row.priority ?? 100) },
-    );
-    enqueued += 1;
-  }
-  if (enqueued > 0) {
-    actions.push({
-      action: "reconcile-channel-snapshots",
-      dispatch_batch_id: dispatchBatchId,
-      enqueued,
-    });
-  }
-  return enqueued;
+  return reconcileChannelCandidateQueueWithDependencies({
+    actions,
+    dispatchBatchId,
+    query,
+    queue: queues[queuesByRole.channelCrawl],
+    withTransaction,
+    safeJobId,
+    minSubscriberCount: channelSnapshotMinSubscriberCount,
+    staleSeconds: channelSnapshotStaleSeconds,
+    maxAttempts: channelSnapshotMaxAttempts,
+    retrySeconds: channelSnapshotRetrySeconds,
+    limit: channelSnapshotReconcileLimit,
+  });
 }
 
 async function updateSchedulerRuntime(status, values = {}) {
@@ -2387,6 +2324,7 @@ async function maybeRepairFailedChannelRuns(actions, stats, queryScheduler, prox
       {
         name,
         data: {
+          dispatch_generation: round,
           channel_id: row.channel_id,
           channel_url: detailOnly ? row.channel_url : `https://www.youtube.com/channel/${row.channel_id}`,
           ...repairReference,
@@ -2768,6 +2706,15 @@ async function tick() {
   });
   if (finalManagedDispatch.claimed > 0) {
     actions.push({ action: "flush-managed-job-outbox", dispatch: finalManagedDispatch });
+  }
+  const recoveryIntentReconcile = await migrationRetryIntentJobReconciler.reconcileAvailable({
+    limit: 100,
+  });
+  if (recoveryIntentReconcile.scanned > 0) {
+    actions.push({
+      action: "reconcile-migration-retry-intents",
+      ...recoveryIntentReconcile,
+    });
   }
 
   const tickStored = await persistControllerTick(stats, actions, queryScheduler);

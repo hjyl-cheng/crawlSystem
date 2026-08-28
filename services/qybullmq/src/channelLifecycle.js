@@ -1,4 +1,6 @@
 import { retractPublicationChannel } from "./publicationReconciler.js";
+import { normalizeChannelCandidateAttemptFence } from "./channelCandidateAttemptFence.js";
+import { StaleChannelCandidateAttemptError } from "./channelCandidateAttemptMutations.js";
 
 const TERMINAL_EVIDENCE_MAX_LENGTH = 2000;
 
@@ -79,6 +81,7 @@ function requiredText(value, field) {
 export async function markChannelRemoved(client, {
   channelId,
   candidateId = null,
+  candidateAttemptFence = null,
   runId = null,
   runStatus = "skipped",
   terminal,
@@ -131,6 +134,11 @@ export async function markChannelRemoved(client, {
     if (!Number.isSafeInteger(normalizedCandidateId) || normalizedCandidateId <= 0) {
       throw new TypeError("candidateId must be a positive integer");
     }
+    const attemptFence = candidateAttemptFence == null
+      ? null
+      : normalizeChannelCandidateAttemptFence(candidateAttemptFence, {
+          candidateId: normalizedCandidateId,
+        });
     candidate = await client.query(
       `UPDATE crawler.channel_candidates AS candidate
        SET status=CASE WHEN promotion.is_registry_promotion
@@ -157,9 +165,29 @@ export async function markChannelRemoved(client, {
          ) AS is_registry_promotion
        ) AS promotion
        WHERE candidate.candidate_id=$1
+         AND (
+           $6::bigint IS NULL
+           OR (
+             candidate.snapshot_dispatch_generation=$6
+             AND candidate.snapshot_active_job_id=$7
+             AND candidate.snapshot_active_job_attempt=$8
+           )
+         )
        RETURNING candidate.candidate_id`,
-      [normalizedCandidateId, removedReason, evidence, removedAt, removedSource],
+      [
+        normalizedCandidateId,
+        removedReason,
+        evidence,
+        removedAt,
+        removedSource,
+        attemptFence?.dispatchGeneration ?? null,
+        attemptFence?.jobId ?? null,
+        attemptFence?.bullmqAttempt ?? null,
+      ],
     );
+    if (attemptFence != null && Number(candidate.rowCount || 0) !== 1) {
+      throw new StaleChannelCandidateAttemptError("mark Channel removed", normalizedCandidateId);
+    }
   }
 
   await client.query(

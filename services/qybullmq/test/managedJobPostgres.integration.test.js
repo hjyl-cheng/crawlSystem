@@ -112,12 +112,16 @@ test("PostgreSQL persists managed Intents, replays Outbox, and freezes Chunk mem
   )).rows[0].count, 1);
 
   const queueCalls = [];
+  const persistedJobs = new Map();
   const queues = {
     "youtube-discover-page": {
-      add: async (_name, _payload, options) => {
+      add: async (name, payload, options) => {
         queueCalls.push(options.jobId);
-        return { id: options.jobId };
+        const job = { id: options.jobId, name, data: payload };
+        if (!persistedJobs.has(options.jobId)) persistedJobs.set(options.jobId, job);
+        return job;
       },
+      getJob: async (jobId) => persistedJobs.get(jobId) ?? null,
     },
   };
   const postgresDispatchRepository = new PostgresManagedJobDispatchRepository({

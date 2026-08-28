@@ -11,7 +11,8 @@ import {
 
 function fixture() {
   const payload = {
-    schema_version: 4,
+    schema_version: 5,
+    dispatch_generation: 1,
     job_id: "incremental__UCtest__20260720__clock_7__5d62c032cbbc",
     plan_id: "4c6ff5ea-b6d9-53f9-b8cf-43cfe430298d",
     plan_day: "2026-07-20",
@@ -44,12 +45,12 @@ test("Dispatch row validates the frozen Plan contract and canonical hash", () =>
   assert.equal("video_mask" in row.payload_json, false);
 });
 
-test("Dispatch hash is stable for the schema v4 three-domain contract", () => {
+test("Dispatch hash is stable for the schema v5 generation-fenced contract", () => {
   const payload = fixture().payload_json;
 
   assert.equal(
     dispatchPayloadHash(payload),
-    "sha256:7da48d6fb29746439f39e9df3038dfba451284e102c2cd5335d2142c39786342",
+    "sha256:29ca59a90f3955a654388746123077bb1de13d87c7b6d67b4f43f1e7807e100a",
   );
 });
 
@@ -57,7 +58,7 @@ test("Dispatch rejects legacy schemas and any Profile task key", () => {
   const legacy = fixture();
   legacy.payload_json.schema_version = 3;
   legacy.payload_hash = dispatchPayloadHash(legacy.payload_json);
-  assert.throws(() => validateDispatchOutboxRow(legacy), /schema_version must be 4/);
+  assert.throws(() => validateDispatchOutboxRow(legacy), /schema_version must be 5/);
 
   const profile = fixture();
   profile.payload_json.task_mask = { profile: false, ...profile.payload_json.task_mask };

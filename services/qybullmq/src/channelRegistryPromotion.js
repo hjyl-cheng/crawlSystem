@@ -1,3 +1,5 @@
+import { normalizeChannelCandidateAttemptFence } from "./channelCandidateAttemptFence.js";
+
 function activeClient(client) {
   if (!client || typeof client.query !== "function") {
     throw new TypeError("an active PostgreSQL client is required");
@@ -58,8 +60,9 @@ export function resolveChannelRegistryRunId({
 }
 
 function normalizeInput(input) {
+  const candidateId = positiveInteger(input?.candidateId, "candidateId");
   return {
-    candidateId: positiveInteger(input?.candidateId, "candidateId"),
+    candidateId,
     runId: requiredText(input?.runId, "runId"),
     channelId: requiredText(input?.channelId, "channelId"),
     channelUrl: requiredText(input?.channelUrl, "channelUrl"),
@@ -74,6 +77,10 @@ function normalizeInput(input) {
     sourceJson: input?.sourceJson && typeof input.sourceJson === "object"
       ? input.sourceJson
       : {},
+    candidateAttemptFence: normalizeChannelCandidateAttemptFence(
+      input?.candidateAttemptFence,
+      { candidateId },
+    ),
   };
 }
 
@@ -119,11 +126,21 @@ export async function claimChannelRegistryPromotion(clientValue, inputValue) {
            validation_finished_at=now(),accepted_at=COALESCE(accepted_at,now()),updated_at=now()
        WHERE candidate_id=$1 AND channel_id=$2
          AND status IN ('discovered','queued','validating')
+         AND snapshot_dispatch_generation=$4
+         AND snapshot_active_job_id=$5
+         AND snapshot_active_job_attempt=$6
        RETURNING candidate_id,accepted_at`,
-      [input.candidateId, input.channelId, JSON.stringify(input.sourceJson)],
+      [
+        input.candidateId,
+        input.channelId,
+        JSON.stringify(input.sourceJson),
+        input.candidateAttemptFence.dispatchGeneration,
+        input.candidateAttemptFence.jobId,
+        input.candidateAttemptFence.bullmqAttempt,
+      ],
     );
     if (accepted.rowCount !== 1) {
-      throw new Error(`Channel Registry promotion Candidate is not claimable: ${input.candidateId}`);
+      throw new Error(`Channel Registry promotion Candidate attempt Fence is stale: ${input.candidateId}`);
     }
     return {
       status: "promoted",
@@ -145,16 +162,30 @@ export async function claimChannelRegistryPromotion(clientValue, inputValue) {
   if (existing.rowCount !== 1) {
     throw new Error(`Channel Registry conflict winner is missing: ${input.channelId}`);
   }
-  await client.query(
+  const markedExisting = await client.query(
     `/* channel-registry-promotion:mark-existing */
      UPDATE crawler.channel_candidates
      SET status='existing',reject_reason='channel_already_promoted',error_message=NULL,
          snapshot_json=(snapshot_json-'parser_contract_error') || $3::jsonb,
          validation_finished_at=now(),updated_at=now()
      WHERE candidate_id=$1 AND channel_id=$2
-       AND status IN ('discovered','queued','validating')`,
-    [input.candidateId, input.channelId, JSON.stringify(input.sourceJson)],
+       AND status IN ('discovered','queued','validating')
+       AND snapshot_dispatch_generation=$4
+       AND snapshot_active_job_id=$5
+       AND snapshot_active_job_attempt=$6
+     RETURNING candidate_id`,
+    [
+      input.candidateId,
+      input.channelId,
+      JSON.stringify(input.sourceJson),
+      input.candidateAttemptFence.dispatchGeneration,
+      input.candidateAttemptFence.jobId,
+      input.candidateAttemptFence.bullmqAttempt,
+    ],
   );
+  if (markedExisting.rowCount !== 1) {
+    throw new Error(`Channel Registry promotion Candidate attempt Fence is stale: ${input.candidateId}`);
+  }
   const winner = existing.rows[0];
   return {
     status: "existing",

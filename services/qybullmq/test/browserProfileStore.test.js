@@ -188,13 +188,15 @@ test("Rota v2 profiles are keyed by Policy, anonymous network identity and Profi
   await assert.rejects(store.loadOrCreate({ ...base, profileEpoch: 0 }), /cannot move backwards/);
 });
 
-test("a stale channel run id is omitted from a new execution attempt", async () => {
+test("a new execution attempt persists generation while omitting a stale run id", async () => {
   let insertParams = null;
+  let insertSql = null;
   const store = new BrowserProfileStore({
     transactionFn: async (action) => action({ query: async () => ({ rows: [] }) }),
     queryFn: async (sql, params = []) => {
       if (sql.includes("SELECT run_id FROM crawler.channel_runs")) return { rows: [] };
       if (sql.includes("INSERT INTO crawler.channel_execution_attempts")) {
+        insertSql = sql;
         insertParams = params;
         return { rows: [] };
       }
@@ -209,6 +211,7 @@ test("a stale channel run id is omitted from a new execution attempt", async () 
     queueName: "youtube-channel-crawl",
     jobId: "job-stale",
     jobAttempt: 1,
+    dispatchGeneration: 7,
     workerId: "qy-channel-01",
     proxy: {
       slot_name: "bullmq-channel-01",
@@ -228,4 +231,6 @@ test("a stale channel run id is omitted from a new execution attempt", async () 
 
   assert.ok(insertParams);
   assert.equal(insertParams[2], null);
+  assert.match(insertSql, /job_attempt,dispatch_generation,worker_id/);
+  assert.equal(insertParams[6], 7);
 });

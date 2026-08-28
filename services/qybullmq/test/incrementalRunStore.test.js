@@ -4,7 +4,8 @@ import { IncrementalRunStore } from "../src/incrementalRunStore.js";
 
 function plan() {
   return {
-    schema_version: 4,
+    schema_version: 5,
+    dispatch_generation: 1,
     job_id: "incremental__UCutc__20260720__clock_7__5d62c032cbbc",
     plan_id: "4c6ff5ea-b6d9-53f9-b8cf-43cfe430298d",
     plan_mode: "standard",

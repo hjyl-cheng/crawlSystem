@@ -13,6 +13,7 @@ test("fingerprint schema deployment extracts only the three qy runtime tables", 
   assert.match(block, /CREATE TABLE IF NOT EXISTS crawler\.browser_profile_groups/);
   assert.match(block, /CREATE TABLE IF NOT EXISTS crawler\.browser_profiles/);
   assert.match(block, /CREATE TABLE IF NOT EXISTS crawler\.channel_execution_attempts/);
+  assert.match(block, /channel_execution_attempts[\s\S]*dispatch_generation BIGINT/);
   assert.match(block, /profile_epoch >= 0/);
   assert.doesNotMatch(block, /ALTER TABLE crawler\.channels/);
 });

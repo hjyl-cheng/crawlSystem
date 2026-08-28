@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 
+import { buildManagedDiagnosticJob } from "../src/managedDiagnosticJob.js";
+
 const proxyControlUrl = String(
   process.env.ROTA_PROXY_CONTROL_URL
   || process.env.PROXY_RECONCILER_URL
@@ -67,12 +69,11 @@ const runtime = new ChannelExecutionRuntime();
 try {
   if (!claim.proxy) throw new Error("Canary requires a managed qy proxy claim");
   const execution = await runtime.run({
-    job: {
-      id: `youtubejs-canary-${Date.now()}`,
-      queueName: "youtube-channel-crawl",
-      attemptsMade: 0,
-      data: { channel_id: channels[0], run_id: null },
-    },
+    job: buildManagedDiagnosticJob({
+      kind: "youtubejs_canary",
+      channelId: channels[0],
+      runId: null,
+    }),
     proxy: claim.proxy,
     getProxySnapshot: () => claim.proxy,
     proxyUrl: process.env.YOUTUBE_PROXY_URL,

@@ -46,7 +46,7 @@ function job() {
     id: "job-01",
     queueName: "youtube-channel-crawl",
     attemptsMade: 0,
-    data: { channel_id: "UCtest", run_id: "run-01" },
+    data: { channel_id: "UCtest", run_id: "run-01", dispatch_generation: 1 },
   };
 }
 
@@ -219,7 +219,10 @@ test("a normal managed job uses one fenced Rota task", async () => {
   assert.deepEqual(result, { channel_id: "UCtest" });
   assert.equal(attempts.length, 1);
   assert.equal(attempts[0].businessRunId, "run-01");
-  assert.equal(attempts[0].jobExecutionId, "youtube-channel-crawl:job-01:1");
+  assert.equal(
+    attempts[0].jobExecutionId,
+    "exec:v1:50c74cc206cb2310fa7eef46d312c15937263bbd8d14907325077d5d154783e5",
+  );
   assert.equal(attempts[0].number, 1);
   assert.equal(attempts[0].resumeMode, "initial");
   assert.deepEqual(calls.map((call) => call.command), ["claim", "begin", "complete", "release"]);
@@ -228,7 +231,7 @@ test("a normal managed job uses one fenced Rota task", async () => {
   assert.deepEqual(runtimeCalls.map((call) => call.action), ["acquire", "quiesce", "checkpoint", "retire"]);
 });
 
-test("Rota's production Business Run budget code becomes a typed checkpoint deferral", async () => {
+test("Rota's production Business Run budget code is not a capacity deferral", async () => {
   const { adapter } = createFixture({
     clientOverrides: {
       async beginTask() {
@@ -245,8 +248,117 @@ test("Rota's production Business Run budget code becomes a typed checkpoint defe
       prepare: async () => prepared(),
       executeAttempt: async () => ({ kind: "managed_work_complete", businessState: "terminal" }),
     }),
+    (error) => !(error instanceof RotaSlotDeferredError)
+      && error.code === "BUSINESS_RUN_BUDGET_EXHAUSTED",
+  );
+  await adapter.close();
+});
+
+test("Rota's Execution budget code ends the current BullMQ attempt", async () => {
+  const { adapter } = createFixture({
+    clientOverrides: {
+      async beginTask() {
+        const error = new Error("proxy control Execution Route budget exhausted");
+        error.code = "EXECUTION_ROUTE_BUDGET_EXHAUSTED";
+        error.payload = {};
+        throw error;
+      },
+    },
+  });
+  await adapter.start();
+  await assert.rejects(
+    adapter.executeJob(job(), {
+      prepare: async () => prepared(),
+      executeAttempt: async () => ({ kind: "managed_work_complete", businessState: "terminal" }),
+    }),
+    (error) => !(error instanceof RotaSlotDeferredError)
+      && error.code === "EXECUTION_ROUTE_BUDGET_EXHAUSTED",
+  );
+  await adapter.close();
+});
+
+test("a temporarily unavailable Route defers without consuming the BullMQ attempt", async () => {
+  const { adapter } = createFixture({
+    clientOverrides: {
+      async beginTask() {
+        const error = new Error("proxy control Route is not ready");
+        error.code = "ROUTE_NOT_READY";
+        throw error;
+      },
+    },
+  });
+  await adapter.start();
+  await assert.rejects(
+    adapter.executeJob(job(), {
+      prepare: async () => prepared(),
+      executeAttempt: async () => assert.fail("an ineligible Route must not start an attempt"),
+    }),
     (error) => error instanceof RotaSlotDeferredError
-      && error.reason === "business_run_budget_exhausted",
+      && error.reason === "route_not_ready",
+  );
+  await adapter.close();
+});
+
+test("a genuine BeginTask Lease conflict is not treated as capacity waiting", async () => {
+  const expected = Object.assign(new Error("proxy control lease conflict"), {
+    code: "LEASE_CONFLICT",
+  });
+  const { adapter } = createFixture({
+    clientOverrides: {
+      async beginTask() {
+        throw expected;
+      },
+    },
+  });
+  await adapter.start();
+  await assert.rejects(
+    adapter.executeJob(job(), {
+      prepare: async () => prepared(),
+      executeAttempt: async () => assert.fail("a fenced Lease must not start an attempt"),
+    }),
+    (error) => error === expected && !(error instanceof RotaSlotDeferredError),
+  );
+  await adapter.close();
+});
+
+test("the local Route switch limit ends the current BullMQ attempt", async () => {
+  const { adapter, calls } = createFixture({
+    challenge: true,
+    adapterOverrides: { maxRouteSwitchesPerExecution: 0 },
+  });
+  await adapter.start();
+  await assert.rejects(
+    adapter.executeJob(job(), {
+      prepare: async () => prepared(),
+      executeAttempt: async () => ({
+        kind: "retryable_network_failure",
+        observation: "youtube_challenge",
+        source: "youtubejs_player",
+        failedStage: "content_detail",
+        checkpointPersisted: true,
+      }),
+    }),
+    (error) => !(error instanceof RotaSlotDeferredError)
+      && error.code === "EXECUTION_ROUTE_BUDGET_EXHAUSTED",
+  );
+  assert.equal(adapter.status().assignment.route_generation, 2);
+  assert.equal(adapter.status().assignment.ready, true);
+
+  const retriedJob = { ...job(), attemptsMade: 1 };
+  const result = await adapter.executeJob(retriedJob, {
+    prepare: async () => prepared(),
+    executeAttempt: async () => ({
+      kind: "managed_work_complete",
+      businessState: "terminal",
+      result: { recovered: true },
+    }),
+  });
+  assert.deepEqual(result, { recovered: true });
+  const beginRequests = calls.filter((call) => call.command === "begin");
+  assert.equal(beginRequests.at(-1).request.route_generation, 2);
+  assert.equal(
+    beginRequests.at(-1).request.job_execution_id,
+    "exec:v1:536cbead3094086cee6d12d60ed26c28e13faac3834078e19bc7db9deab83225",
   );
   await adapter.close();
 });
@@ -282,8 +394,8 @@ test("a challenge rotates the same Slot and resumes the same business run", asyn
   assert.deepEqual(attempts.map((value) => value.routeGeneration), [1, 2]);
   assert.deepEqual(attempts.map((value) => value.businessRunId), ["run-01", "run-01"]);
   assert.deepEqual(attempts.map((value) => value.jobExecutionId), [
-    "youtube-channel-crawl:job-01:1",
-    "youtube-channel-crawl:job-01:1",
+    "exec:v1:50c74cc206cb2310fa7eef46d312c15937263bbd8d14907325077d5d154783e5",
+    "exec:v1:50c74cc206cb2310fa7eef46d312c15937263bbd8d14907325077d5d154783e5",
   ]);
   assert.deepEqual(calls.map((call) => call.command), [
     "claim", "begin", "observe", "complete", "renew", "begin", "complete", "release",
@@ -294,6 +406,52 @@ test("a challenge rotates the same Slot and resumes the same business run", asyn
     .every((call) => call.request.slot_name === "bullmq-channel-01"
       && call.request.lease_id === "lease-01"));
   assert.equal(runtimeCalls.filter((call) => call.action === "retire").length, 2);
+});
+
+test("Execution IDs are bounded and distinct across dispatch generations", async () => {
+  const { adapter, calls } = createFixture();
+  const longJobID = `channel-snapshot__${"x".repeat(300)}`;
+  await adapter.start();
+  for (const dispatchGeneration of [7, 8]) {
+    await adapter.executeJob({
+      ...job(),
+      id: longJobID,
+      attemptsMade: 2,
+      data: { ...job().data, dispatch_generation: dispatchGeneration },
+    }, {
+      prepare: async () => prepared(),
+      executeAttempt: async () => ({
+        kind: "managed_work_complete",
+        businessState: "terminal",
+        result: { dispatchGeneration },
+      }),
+    });
+  }
+  await adapter.close();
+
+  const executionIDs = calls
+    .filter((call) => call.command === "begin")
+    .map((call) => call.request.job_execution_id);
+  assert.equal(executionIDs.length, 2);
+  assert.ok(executionIDs.every((value) => Buffer.byteLength(value, "utf8") <= 255));
+  assert.notEqual(executionIDs[0], executionIDs[1]);
+});
+
+test("a managed Job without a persisted dispatch generation fails before BeginTask", async () => {
+  const { adapter, calls } = createFixture();
+  await adapter.start();
+  const missingGeneration = job();
+  delete missingGeneration.data.dispatch_generation;
+
+  await assert.rejects(
+    adapter.executeJob(missingGeneration, {
+      prepare: async () => prepared(),
+      executeAttempt: async () => assert.fail("Attempt must not start"),
+    }),
+    /job\.data\.dispatch_generation must be a positive integer/,
+  );
+  assert.equal(calls.some((call) => call.command === "begin"), false);
+  await adapter.close();
 });
 
 test("no policy-eligible warm standby returns a bounded defer without reusing the failed route", async () => {
@@ -408,6 +566,61 @@ test("a failed periodic Renew fences the Slot before another job can begin", asy
   await adapter.close();
 });
 
+test("an idle Runtime is retired before Renew accepts a higher Route generation", async () => {
+  let scheduledRenew = null;
+  let renewReturned;
+  const renewCompleted = new Promise((resolve) => { renewReturned = resolve; });
+  const { adapter, calls, runtimeCalls } = createFixture({
+    clientOverrides: {
+      async renew(request) {
+        calls.push({ command: "renew", request });
+        renewReturned();
+        return assignment(2, { route_changed: true, identity_action: "rotate_route" });
+      },
+    },
+    adapterOverrides: {
+      setTimeoutImpl(callback) {
+        scheduledRenew = callback;
+        return { unref() {} };
+      },
+      clearTimeoutImpl() {},
+    },
+  });
+  await adapter.start();
+  await adapter.executeJob(job(), {
+    prepare: async () => prepared(),
+    executeAttempt: async () => ({
+      kind: "managed_work_complete",
+      businessState: "terminal",
+      result: { first: true },
+    }),
+  });
+  assert.equal(runtimeCalls.some((call) => call.action === "retire"), false);
+
+  scheduledRenew();
+  await renewCompleted;
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(adapter.status().assignment.route_generation, 2);
+  const retired = runtimeCalls.filter((call) => call.action === "retire");
+  assert.equal(retired.length, 1);
+  assert.equal(retired[0].assignment.route_generation, 1);
+
+  await adapter.executeJob({ ...job(), id: "job-after-idle-route-change" }, {
+    prepare: async () => prepared(),
+    executeAttempt: async () => ({
+      kind: "managed_work_complete",
+      businessState: "terminal",
+      result: { second: true },
+    }),
+  });
+  const acquires = runtimeCalls.filter((call) => call.action === "acquire");
+  assert.equal(acquires.length, 2);
+  assert.equal(acquires[1].context.reusableRuntime, null);
+  assert.equal(acquires[1].context.assignment.route_generation, 2);
+  await adapter.close();
+});
+
 test("a failed Renew aborts the active network Attempt", async () => {
   let scheduledRenew = null;
   let renewAttempted;
@@ -461,6 +674,144 @@ test("a failed Renew aborts the active network Attempt", async () => {
   assert.equal(observedSignal.aborted, true);
   await executionSettled;
   await adapter.close();
+});
+
+test("a conclusively gone Lease with an abandoned active Task is reclaimed", async () => {
+  let scheduledRenew = null;
+  let attemptEntered;
+  const attemptStarted = new Promise((resolve) => { attemptEntered = resolve; });
+  let reclaimed;
+  const reclaimedLease = new Promise((resolve) => { reclaimed = resolve; });
+  const { adapter, calls, runtimeCalls } = createFixture({
+    clientOverrides: {
+      async renew(request) {
+        calls.push({ command: "renew", request });
+        const error = new Error("lease is no longer authoritative");
+        error.code = "LEASE_GONE";
+        error.retryable = false;
+        throw error;
+      },
+    },
+    adapterOverrides: {
+      setTimeoutImpl(callback) {
+        scheduledRenew = callback;
+        return { unref() {} };
+      },
+      clearTimeoutImpl() {},
+    },
+  });
+  let claimCount = 0;
+  adapter.client.claim = async (request) => {
+    calls.push({ command: "claim", request });
+    claimCount += 1;
+    if (claimCount === 1) return assignment(1);
+    const next = assignment(2, {
+      lease_id: "lease-02",
+      route_changed: true,
+    });
+    reclaimed();
+    return next;
+  };
+  const completeTask = adapter.client.completeTask.bind(adapter.client);
+  adapter.client.completeTask = async (request) => {
+    if (request.lease_id === "lease-01") {
+      calls.push({ command: "complete", request });
+      const error = new Error("abandoned Task belongs to a gone Lease");
+      error.code = "LEASE_GONE";
+      error.retryable = false;
+      throw error;
+    }
+    return completeTask(request);
+  };
+
+  await adapter.start();
+  const firstExecution = adapter.executeJob(job(), {
+    prepare: async () => prepared(),
+    executeAttempt: async (_prepared, attempt) => {
+      attemptEntered();
+      await new Promise((resolve, reject) => {
+        attempt.abortSignal.addEventListener("abort", () => {
+          reject(attempt.abortSignal.reason);
+        }, { once: true });
+      });
+      return { kind: "managed_work_complete", businessState: "terminal" };
+    },
+  });
+  const firstSettled = assert.rejects(firstExecution, (error) => error?.code === "LEASE_GONE");
+  await attemptStarted;
+  scheduledRenew();
+  await Promise.race([
+    reclaimedLease,
+    new Promise((_, reject) => {
+      setTimeout(() => reject(new Error("Adapter did not reclaim the gone Lease")), 100);
+    }),
+  ]);
+  await new Promise((resolve) => setImmediate(resolve));
+  await firstSettled;
+
+  assert.equal(adapter.status().assignment.ready, true);
+  assert.equal(adapter.status().assignment.lease_id, "lease-02");
+  assert.equal(runtimeCalls.filter((call) => call.action === "retire").length, 1);
+
+  const secondResult = await adapter.executeJob({ ...job(), id: "job-02" }, {
+    prepare: async () => prepared(),
+    executeAttempt: async () => ({
+      kind: "managed_work_complete",
+      businessState: "terminal",
+      result: { recovered: true },
+    }),
+  });
+  assert.deepEqual(secondResult, { recovered: true });
+  await adapter.close();
+
+  assert.equal(calls.filter((call) => call.command === "claim").length, 2);
+  assert.equal(calls.at(-1).command, "release");
+  assert.equal(calls.at(-1).request.lease_id, "lease-02");
+});
+
+test("close releases a new Lease returned by an in-flight reclaim", async () => {
+  let scheduledRenew = null;
+  let reclaimEntered;
+  const reclaimStarted = new Promise((resolve) => { reclaimEntered = resolve; });
+  let resolveReclaim;
+  const { adapter, calls } = createFixture({
+    clientOverrides: {
+      async renew(request) {
+        calls.push({ command: "renew", request });
+        const error = new Error("lease is conclusively gone");
+        error.code = "LEASE_GONE";
+        error.retryable = false;
+        throw error;
+      },
+    },
+    adapterOverrides: {
+      setTimeoutImpl(callback) {
+        scheduledRenew = callback;
+        return { unref() {} };
+      },
+      clearTimeoutImpl() {},
+    },
+  });
+  let claimCount = 0;
+  adapter.client.claim = async (request) => {
+    calls.push({ command: "claim", request });
+    claimCount += 1;
+    if (claimCount === 1) return assignment(1);
+    reclaimEntered();
+    return new Promise((resolve) => { resolveReclaim = resolve; });
+  };
+
+  await adapter.start();
+  scheduledRenew();
+  await reclaimStarted;
+  const closing = adapter.close();
+  resolveReclaim(assignment(2, { lease_id: "lease-02", route_changed: true }));
+  await closing;
+
+  const releases = calls.filter((call) => call.command === "release");
+  assert.equal(releases.length, 1);
+  assert.equal(releases[0].request.lease_id, "lease-02");
+  assert.equal(adapter.status().assignment, null);
 });
 
 test("an uncertain CompleteTask response is retried with the same idempotency key", async () => {
@@ -579,6 +930,165 @@ test("an unresolved CompleteTask fences the Slot and close does not release an a
     (call) => call.request.completion_request_id,
   )).size, 1);
   assert.equal(calls.some((call) => call.command === "release"), false);
+});
+
+test("a successful Renew retries an unresolved Completion before reopening the Slot", async () => {
+  let scheduledRenew = null;
+  let completionAttempts = 0;
+  let recoveredCompletion;
+  const completionRecovered = new Promise((resolve) => { recoveredCompletion = resolve; });
+  const { adapter, calls, runtimeCalls } = createFixture({
+    clientOverrides: {
+      async completeTask(request) {
+        calls.push({ command: "complete", request });
+        completionAttempts += 1;
+        if (completionAttempts === 1) {
+          const error = new Error("complete outcome remains uncertain");
+          error.retryable = true;
+          throw error;
+        }
+        recoveredCompletion();
+        return {
+          ok: true,
+          task_completed: true,
+          completion_request_id: request.completion_request_id,
+          task_id: request.task_id,
+          slot_name: request.slot_name,
+          lease_id: request.lease_id,
+          control_state: "READY_KEEP_ROUTE",
+          ready: true,
+          completed_task_route_generation: request.route_generation,
+        };
+      },
+    },
+    adapterOverrides: {
+      maxCompletionAttempts: 1,
+      setTimeoutImpl(callback) {
+        scheduledRenew = callback;
+        return { unref() {} };
+      },
+      clearTimeoutImpl() {},
+    },
+  });
+  await adapter.start();
+  await assert.rejects(
+    adapter.executeJob(job(), {
+      prepare: async () => prepared(),
+      executeAttempt: async () => ({
+        kind: "managed_work_complete",
+        businessState: "terminal",
+      }),
+    }),
+    /complete outcome remains uncertain/,
+  );
+
+  assert.equal(adapter.status().assignment.ready, false);
+  scheduledRenew();
+  try {
+    await Promise.race([
+      completionRecovered,
+      new Promise((_, reject) => setTimeout(
+        () => reject(new Error("Renew did not retry the unresolved Completion")),
+        100,
+      )),
+    ]);
+    await new Promise((resolve) => setImmediate(resolve));
+    const completions = calls.filter((call) => call.command === "complete");
+    assert.equal(completions.length, 2);
+    assert.equal(
+      completions[0].request.completion_request_id,
+      completions[1].request.completion_request_id,
+    );
+    assert.equal(adapter.status().assignment.ready, true);
+    assert.deepEqual(runtimeCalls.map((call) => call.action), ["acquire", "quiesce", "retire"]);
+    const recovered = await adapter.executeJob({ ...job(), id: "job-after-uncertain-completion" }, {
+      prepare: async () => prepared(),
+      executeAttempt: async () => ({
+        kind: "managed_work_complete",
+        businessState: "terminal",
+        result: { recovered: true },
+      }),
+    });
+    assert.deepEqual(recovered, { recovered: true });
+  } finally {
+    await adapter.close();
+  }
+});
+
+test("a failed Completion replay stays fenced until a later Renew replays the same request", async () => {
+  const scheduledRenews = [];
+  let completionAttempts = 0;
+  let recoveredCompletion;
+  const completionRecovered = new Promise((resolve) => { recoveredCompletion = resolve; });
+  const { adapter, calls } = createFixture({
+    clientOverrides: {
+      async completeTask(request) {
+        calls.push({ command: "complete", request });
+        completionAttempts += 1;
+        if (completionAttempts < 3) {
+          const error = new Error("complete outcome remains uncertain");
+          error.retryable = true;
+          throw error;
+        }
+        recoveredCompletion();
+        return {
+          ok: true,
+          task_completed: true,
+          completion_request_id: request.completion_request_id,
+          task_id: request.task_id,
+          slot_name: request.slot_name,
+          lease_id: request.lease_id,
+          control_state: "READY_KEEP_ROUTE",
+          ready: true,
+          completed_task_route_generation: request.route_generation,
+        };
+      },
+    },
+    adapterOverrides: {
+      maxCompletionAttempts: 1,
+      setTimeoutImpl(callback) {
+        scheduledRenews.push(callback);
+        return { unref() {} };
+      },
+      clearTimeoutImpl() {},
+    },
+  });
+  await adapter.start();
+  await assert.rejects(
+    adapter.executeJob(job(), {
+      prepare: async () => prepared(),
+      executeAttempt: async () => ({
+        kind: "managed_work_complete",
+        businessState: "terminal",
+      }),
+    }),
+    /complete outcome remains uncertain/,
+  );
+
+  try {
+    scheduledRenews.shift()();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(completionAttempts, 2);
+    assert.equal(adapter.status().assignment.ready, false);
+
+    scheduledRenews.shift()();
+    await Promise.race([
+      completionRecovered,
+      new Promise((_, reject) => setTimeout(
+        () => reject(new Error("later Renew did not replay Completion")),
+        100,
+      )),
+    ]);
+    await new Promise((resolve) => setImmediate(resolve));
+    const completionIDs = calls
+      .filter((call) => call.command === "complete")
+      .map((call) => call.request.completion_request_id);
+    assert.equal(completionIDs.length, 3);
+    assert.equal(new Set(completionIDs).size, 1);
+    assert.equal(adapter.status().assignment.ready, true);
+  } finally {
+    await adapter.close();
+  }
 });
 
 test("a periodic Renew and route-ready poll share one coalesced control request", async () => {

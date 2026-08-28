@@ -52,24 +52,56 @@ func (m *Manager) BeginTask(ctx context.Context, request BeginTaskRequest) (Task
 		return Task{}, err
 	}
 
-	var slotName, role, identityPolicyID, identityPolicyHash string
+	var slotName, role, identityPolicyID, identityPolicyHash, controlState string
 	var identityPolicyVersion int
+	var proxyID *int
+	var activeTaskID *string
 	err = tx.QueryRow(ctx, `
-		SELECT slot_name,role,identity_policy_id,identity_policy_version,identity_policy_hash
-		FROM proxy_running_slots
-		WHERE slot_name=$1 AND worker_id=$2 AND worker_instance_id=$3 AND lease_id=$4
-		  AND assignment_version=$5 AND lease_until > NOW()
-		  AND active_task_id IS NULL AND control_state='leased_idle'
-		FOR UPDATE
+		SELECT s.slot_name,s.role,s.identity_policy_id,s.identity_policy_version,s.identity_policy_hash,
+		       s.proxy_id,s.active_task_id,s.control_state
+		FROM proxy_running_slots s
+		WHERE s.slot_name=$1 AND s.worker_id=$2 AND s.worker_instance_id=$3 AND s.lease_id=$4
+		  AND s.assignment_version=$5 AND s.lease_until > NOW()
+		FOR UPDATE OF s
 	`, request.SlotName, request.WorkerID, request.WorkerInstanceID,
 		request.LeaseID, request.RouteGeneration).Scan(
 		&slotName, &role, &identityPolicyID, &identityPolicyVersion, &identityPolicyHash,
+		&proxyID, &activeTaskID, &controlState,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Task{}, ErrLeaseConflict
 	}
 	if err != nil {
 		return Task{}, fmt.Errorf("lock proxy task lease: %w", err)
+	}
+	if activeTaskID != nil {
+		return Task{}, ErrLeaseConflict
+	}
+	if proxyID == nil || controlState != "leased_idle" {
+		return Task{}, ErrRouteNotReady
+	}
+	var routeEligible bool
+	err = tx.QueryRow(ctx, `
+		SELECT COALESCE(
+		  p.status='active' AND p.revalidation_required=false
+		  AND (p.cooldown_until IS NULL OR p.cooldown_until <= NOW())
+		  AND (
+		    (p.base_health_status='passed' AND p.youtube_health_status='passed')
+		    OR (p.last_youtube_status=200 AND p.last_rota_youtube_status=200)
+		  ), false
+		)
+		FROM proxies p
+		WHERE p.id=$1
+		FOR UPDATE OF p
+	`, *proxyID).Scan(&routeEligible)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Task{}, ErrRouteNotReady
+	}
+	if err != nil {
+		return Task{}, fmt.Errorf("lock proxy task route: %w", err)
+	}
+	if !routeEligible {
+		return Task{}, ErrRouteNotReady
 	}
 	if !roleAllowsTaskKind(role, request.TaskKind) {
 		return Task{}, fmt.Errorf("%w: role %q cannot begin task kind %q", ErrPolicyRejected, role, request.TaskKind)
@@ -99,6 +131,21 @@ func (m *Manager) BeginTask(ctx context.Context, request BeginTaskRequest) (Task
 	); err != nil {
 		return Task{}, fmt.Errorf("lock proxy business run: %w", err)
 	}
+	if budgetErr := taskBudgetError(nextAttempt, maxAttempts, 0, maxSwitches); budgetErr != nil {
+		if !errors.Is(budgetErr, ErrBusinessRunBudget) {
+			return Task{}, budgetErr
+		}
+		if _, err := tx.Exec(ctx, `
+				UPDATE proxy_control_business_runs SET budget_exhausted_at=COALESCE(budget_exhausted_at,NOW()), updated_at=NOW()
+				WHERE workload_scope=$1 AND business_run_id=$2
+			`, m.options.WorkloadScope, request.BusinessRunID); err != nil {
+			return Task{}, fmt.Errorf("mark proxy business run budget exhausted: %w", err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return Task{}, fmt.Errorf("commit proxy business run budget exhaustion: %w", err)
+		}
+		return Task{}, budgetErr
+	}
 
 	var boundRunID, boundTaskKind string
 	err = tx.QueryRow(ctx, `
@@ -123,20 +170,8 @@ func (m *Manager) BeginTask(ctx context.Context, request BeginTaskRequest) (Task
 	`, m.options.WorkloadScope, request.JobExecutionID).Scan(&executionTaskCount); err != nil {
 		return Task{}, fmt.Errorf("count proxy execution tasks: %w", err)
 	}
-	if executionTaskCount >= 1+maxSwitches {
-		return Task{}, ErrExecutionBudget
-	}
-	if nextAttempt > maxAttempts {
-		if _, err := tx.Exec(ctx, `
-			UPDATE proxy_control_business_runs SET budget_exhausted_at=COALESCE(budget_exhausted_at,NOW()), updated_at=NOW()
-			WHERE workload_scope=$1 AND business_run_id=$2
-		`, m.options.WorkloadScope, request.BusinessRunID); err != nil {
-			return Task{}, fmt.Errorf("mark proxy business run budget exhausted: %w", err)
-		}
-		if err := tx.Commit(ctx); err != nil {
-			return Task{}, fmt.Errorf("commit proxy business run budget exhaustion: %w", err)
-		}
-		return Task{}, ErrBusinessRunBudget
+	if budgetErr := taskBudgetError(nextAttempt, maxAttempts, executionTaskCount, maxSwitches); budgetErr != nil {
+		return Task{}, budgetErr
 	}
 
 	taskID := uuid.NewString()
@@ -183,6 +218,16 @@ func (m *Manager) BeginTask(ctx context.Context, request BeginTaskRequest) (Task
 		return Task{}, fmt.Errorf("commit proxy task: %w", err)
 	}
 	return startedAt, nil
+}
+
+func taskBudgetError(nextAttempt, maxAttempts, executionTaskCount, maxSwitches int) error {
+	if nextAttempt > maxAttempts {
+		return ErrBusinessRunBudget
+	}
+	if executionTaskCount >= 1+maxSwitches {
+		return ErrExecutionBudget
+	}
+	return nil
 }
 
 type storedTask struct {

@@ -6,7 +6,8 @@ import {
 
 function plan(overrides = {}) {
   const base = {
-    schema_version: 4,
+    schema_version: 5,
+    dispatch_generation: 1,
     job_id: "incremental__UCfailed__20260723__clock_6__terminal",
     plan_id: "4c6ff5ea-b6d9-53f9-b8cf-43cfe430298d",
     plan_mode: "standard",

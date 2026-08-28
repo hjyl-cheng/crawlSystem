@@ -28,7 +28,7 @@ function job(id = "job-1") {
     id,
     queueName: "youtube-channel-crawl",
     attemptsMade: 0,
-    data: { channel_id: "UCtest", run_id: "run-test" },
+    data: { channel_id: "UCtest", run_id: "run-test", dispatch_generation: 3 },
   };
 }
 
@@ -96,6 +96,28 @@ test("channel runtime binds both client profiles and checkpoints cookies without
   assert.equal(runtime.activeAttemptId, null);
 });
 
+test("channel runtime writes the persisted dispatch generation into execution audit", async () => {
+  const currentProxy = { value: { ...proxy } };
+  const { runtime, calls } = runtimeFixture();
+
+  await runtime.run(context(currentProxy), async () => ({ ok: true }));
+
+  assert.equal(calls.attempts[0].dispatchGeneration, 3);
+});
+
+test("channel runtime rejects a missing dispatch generation before audit starts", async () => {
+  const currentProxy = { value: { ...proxy } };
+  const { runtime, calls } = runtimeFixture();
+  const invalid = context(currentProxy);
+  delete invalid.job.data.dispatch_generation;
+
+  await assert.rejects(
+    runtime.run(invalid, async () => ({ ok: true })),
+    /dispatch_generation must be a positive integer/,
+  );
+  assert.equal(calls.attempts.length, 0);
+});
+
 test("channel runtime opens a Rota v2 session at initial profile epoch zero", async () => {
   const initialProxy = {
     slot_name: "bullmq-channel-01",
@@ -132,7 +154,7 @@ test("channel runtime links an immutable Incremental Plan through prepared Busin
   const incrementalJob = {
     ...job(),
     queueName: "youtube-channel-incremental",
-    data: { channel_id: "UCtest", plan_id: "plan-1" },
+    data: { channel_id: "UCtest", plan_id: "plan-1", dispatch_generation: 4 },
   };
 
   await runtime.run({
@@ -142,7 +164,9 @@ test("channel runtime links an immutable Incremental Plan through prepared Busin
   }, async () => ({ ok: true }));
 
   assert.equal(calls.attempts[0].runId, "incremental:plan-1");
-  assert.deepEqual(incrementalJob.data, { channel_id: "UCtest", plan_id: "plan-1" });
+  assert.deepEqual(incrementalJob.data, {
+    channel_id: "UCtest", plan_id: "plan-1", dispatch_generation: 4,
+  });
 });
 
 test("channel runtime aborts and skips cookie checkpoint when proxy identity drifts", async () => {
@@ -388,6 +412,57 @@ test("channel runtime preserves real failure evidence recorded before Rota cance
     )),
     false,
   );
+});
+
+test("channel runtime preserves the source attached to a nested structured failure", async () => {
+  const currentProxy = { value: { ...proxy } };
+  const { runtime, calls } = runtimeFixture();
+  const gatewayError = Object.assign(new Error("gateway request failed"), {
+    failureKind: "proxy_transport",
+    code: "FINGERPRINT_PROXY_TRANSPORT",
+    youtube_failure_evidence: { source: "fingerprint_gateway" },
+  });
+
+  let failure = null;
+  try {
+    await runtime.run(context(currentProxy), async () => {
+      throw new Error("channel snapshot failed", { cause: gatewayError });
+    });
+  } catch (error) {
+    failure = error;
+  }
+
+  assert.ok(failure);
+  const decision = failure.channel_execution_attempt.failure_decisions.find(
+    (item) => item.kind === "proxy_transport",
+  );
+  assert.equal(decision.evidence.source, "fingerprint_gateway");
+  assert.equal(
+    calls.finishes[0].value.result.failure_decisions[0].evidence.source,
+    "fingerprint_gateway",
+  );
+});
+
+test("channel runtime persists Decision and Evidence from the same nested failure", async () => {
+  const currentProxy = { value: { ...proxy } };
+  const { runtime, calls } = runtimeFixture();
+  const rateLimit = Object.assign(new Error("HTTP 429"), {
+    youtube_failure_evidence: { status: 429, source: "youtubejs_player" },
+  });
+  const wrapper = Object.assign(new Error("channel snapshot failed", { cause: rateLimit }), {
+    youtube_failure_evidence: { source: "unrelated_wrapper" },
+  });
+
+  await assert.rejects(
+    runtime.run(context(currentProxy), async () => { throw wrapper; }),
+    (error) => error === wrapper,
+  );
+
+  const persisted = calls.finishes[0].value.result.failure_decisions.find(
+    (item) => item.kind === "youtube_rate_limited",
+  );
+  assert.equal(persisted.evidence.source, "youtubejs_player");
+  assert.equal(persisted.evidence.status, 429);
 });
 
 test("channel runtime rejects a second attempt while the first is still preparing", async () => {

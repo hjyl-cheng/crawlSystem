@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/alpkeskin/rota/core/internal/models"
+	"github.com/alpkeskin/rota/core/internal/proxycontrol"
 	"github.com/alpkeskin/rota/core/internal/xraynode"
 	"github.com/alpkeskin/rota/core/pkg/logger"
 	"github.com/google/uuid"
@@ -32,6 +33,11 @@ type activeTunnel struct {
 	doneOnce sync.Once
 }
 
+type routeActivationRecord struct {
+	claimID string
+	phase   proxycontrol.RouteActivationPhase
+}
+
 // UpstreamProxyHandler handles requests with upstream proxy rotation
 type UpstreamProxyHandler struct {
 	routingMu sync.RWMutex
@@ -42,6 +48,10 @@ type UpstreamProxyHandler struct {
 	tunnelMu      sync.Mutex
 	tunnels       map[*activeTunnel]struct{}
 	retiredUsers  map[string]struct{}
+	managedUsers  map[string]struct{}
+	activations   map[string]routeActivationRecord
+	registryReady bool
+	registryGate  bool
 	tunnelWG      sync.WaitGroup
 	tunnelWait    sync.Once
 	tunnelsDone   chan struct{}
@@ -84,12 +94,36 @@ func NewUpstreamProxyHandler(
 			selector: selector,
 			settings: rotationSettings,
 		},
-		tracker:      tracker,
-		logger:       log,
-		tunnels:      make(map[*activeTunnel]struct{}),
-		retiredUsers: make(map[string]struct{}),
-		tunnelsDone:  make(chan struct{}),
+		tracker:       tracker,
+		logger:        log,
+		tunnels:       make(map[*activeTunnel]struct{}),
+		retiredUsers:  make(map[string]struct{}),
+		managedUsers:  make(map[string]struct{}),
+		activations:   make(map[string]routeActivationRecord),
+		registryReady: true,
+		tunnelsDone:   make(chan struct{}),
 	}
+}
+
+func (h *UpstreamProxyHandler) requireRouteActivationRegistry() {
+	h.tunnelMu.Lock()
+	h.registryGate = true
+	h.registryReady = false
+	h.tunnelMu.Unlock()
+}
+
+func (h *UpstreamProxyHandler) proxyUserReady(username string) bool {
+	username = strings.TrimSpace(username)
+	if username == "" {
+		return true
+	}
+	h.tunnelMu.Lock()
+	defer h.tunnelMu.Unlock()
+	return h.proxyUserReadyLocked(username)
+}
+
+func isManagedProxyUsername(username string) bool {
+	return strings.HasPrefix(strings.TrimSpace(username), "bullmq-")
 }
 
 func (h *UpstreamProxyHandler) beginTunnel(client, upstream net.Conn, username string) (*activeTunnel, bool) {
@@ -99,7 +133,7 @@ func (h *UpstreamProxyHandler) beginTunnel(client, upstream net.Conn, username s
 	if h.tunnelsClosed {
 		return nil, false
 	}
-	if _, retired := h.retiredUsers[username]; username != "" && retired {
+	if !h.proxyUserReadyLocked(username) {
 		return nil, false
 	}
 	if h.tunnels == nil {
@@ -111,6 +145,30 @@ func (h *UpstreamProxyHandler) beginTunnel(client, upstream net.Conn, username s
 	h.tunnels[tunnel] = struct{}{}
 	h.tunnelWG.Add(1)
 	return tunnel, true
+}
+
+func (h *UpstreamProxyHandler) proxyUserReadyLocked(username string) bool {
+	username = strings.TrimSpace(username)
+	if username == "" {
+		return true
+	}
+	managed := isManagedProxyUsername(username)
+	if h.registryGate && managed {
+		if !h.registryReady {
+			return false
+		}
+		if _, registered := h.managedUsers[username]; !registered {
+			return false
+		}
+	}
+	if _, retired := h.retiredUsers[username]; retired {
+		return false
+	}
+	activation, found := h.activations[username]
+	if h.registryGate && managed {
+		return found && activation.phase == proxycontrol.RouteActivationCommitted
+	}
+	return !found || activation.phase == proxycontrol.RouteActivationCommitted
 }
 
 func (h *UpstreamProxyHandler) endTunnel(tunnel *activeTunnel) {
@@ -131,6 +189,7 @@ func (h *UpstreamProxyHandler) RetireProxyUser(ctx context.Context, username str
 		h.retiredUsers = make(map[string]struct{})
 	}
 	h.retiredUsers[username] = struct{}{}
+	delete(h.activations, username)
 	tunnels := make([]*activeTunnel, 0)
 	for tunnel := range h.tunnels {
 		if tunnel.username == username {
@@ -139,6 +198,169 @@ func (h *UpstreamProxyHandler) RetireProxyUser(ctx context.Context, username str
 	}
 	h.tunnelMu.Unlock()
 
+	for _, tunnel := range tunnels {
+		_ = tunnel.client.Close()
+		_ = tunnel.upstream.Close()
+	}
+	for _, tunnel := range tunnels {
+		select {
+		case <-tunnel.done:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return nil
+}
+
+func (h *UpstreamProxyHandler) rebuildRouteActivationRegistry(
+	ctx context.Context,
+	entries []proxycontrol.RouteActivationRegistryEntry,
+) error {
+	h.tunnelMu.Lock()
+	h.registryGate = true
+	h.registryReady = false
+	h.managedUsers = make(map[string]struct{}, len(entries))
+	h.activations = make(map[string]routeActivationRecord, len(entries))
+	blocked := make(map[string]struct{})
+	for _, entry := range entries {
+		username := strings.TrimSpace(entry.Username)
+		if username == "" {
+			continue
+		}
+		h.managedUsers[username] = struct{}{}
+		if entry.Phase != "" {
+			h.activations[username] = routeActivationRecord{
+				claimID: strings.TrimSpace(entry.ClaimID),
+				phase:   entry.Phase,
+			}
+		}
+		if entry.Blocked || entry.Phase != proxycontrol.RouteActivationCommitted {
+			h.retiredUsers[username] = struct{}{}
+			blocked[username] = struct{}{}
+		} else {
+			delete(h.retiredUsers, username)
+		}
+	}
+	tunnels := h.tunnelsForUsersLocked(blocked)
+	h.registryReady = true
+	h.tunnelMu.Unlock()
+	return closeAndWaitTunnels(ctx, tunnels)
+}
+
+func (h *UpstreamProxyHandler) beginRouteActivation(
+	username string,
+	previousClaimID string,
+	claimID string,
+) (proxycontrol.RouteActivationBeginResult, error) {
+	username = strings.TrimSpace(username)
+	previousClaimID = strings.TrimSpace(previousClaimID)
+	claimID = strings.TrimSpace(claimID)
+	if username == "" || claimID == "" {
+		return proxycontrol.RouteActivationBeginResult{}, fmt.Errorf("proxy user and activation claim are required")
+	}
+	h.tunnelMu.Lock()
+	defer h.tunnelMu.Unlock()
+	current, found := h.activations[username]
+	if found && current.claimID == claimID {
+		if current.phase == proxycontrol.RouteActivationCommitted {
+			return proxycontrol.RouteActivationBeginResult{AlreadyCommitted: true}, nil
+		}
+		h.retiredUsers[username] = struct{}{}
+		return proxycontrol.RouteActivationBeginResult{}, nil
+	}
+	if found && current.claimID == "" && previousClaimID == "" &&
+		current.phase == proxycontrol.RouteActivationCommitted {
+		return proxycontrol.RouteActivationBeginResult{AlreadyCommitted: true}, nil
+	}
+	if found {
+		if current.claimID != previousClaimID {
+			return proxycontrol.RouteActivationBeginResult{}, fmt.Errorf(
+				"activation claim changed from %q to %q", previousClaimID, current.claimID,
+			)
+		}
+	} else if previousClaimID != "" {
+		return proxycontrol.RouteActivationBeginResult{}, fmt.Errorf(
+			"previous activation claim %q is unavailable", previousClaimID,
+		)
+	}
+	if h.activations == nil {
+		h.activations = make(map[string]routeActivationRecord)
+	}
+	if h.retiredUsers == nil {
+		h.retiredUsers = make(map[string]struct{})
+	}
+	h.activations[username] = routeActivationRecord{
+		claimID: claimID,
+		phase:   proxycontrol.RouteActivationActivating,
+	}
+	if h.registryGate && isManagedProxyUsername(username) {
+		if h.managedUsers == nil {
+			h.managedUsers = make(map[string]struct{})
+		}
+		h.managedUsers[username] = struct{}{}
+	}
+	h.retiredUsers[username] = struct{}{}
+	return proxycontrol.RouteActivationBeginResult{}, nil
+}
+
+func (h *UpstreamProxyHandler) commitRouteActivation(username string, claimID string) error {
+	username = strings.TrimSpace(username)
+	claimID = strings.TrimSpace(claimID)
+	h.tunnelMu.Lock()
+	defer h.tunnelMu.Unlock()
+	current, found := h.activations[username]
+	if !found || current.claimID != claimID {
+		return fmt.Errorf("activation claim %q is not current", claimID)
+	}
+	switch current.phase {
+	case proxycontrol.RouteActivationActivating:
+		current.phase = proxycontrol.RouteActivationCommitted
+		h.activations[username] = current
+	case proxycontrol.RouteActivationCommitted:
+	default:
+		return fmt.Errorf("activation claim %q has invalid phase %q", claimID, current.phase)
+	}
+	delete(h.retiredUsers, username)
+	return nil
+}
+
+func (h *UpstreamProxyHandler) retireProxyUserIfClaim(
+	ctx context.Context,
+	username string,
+	claimID string,
+) (bool, error) {
+	username = strings.TrimSpace(username)
+	claimID = strings.TrimSpace(claimID)
+	if username == "" || claimID == "" {
+		return false, nil
+	}
+	h.tunnelMu.Lock()
+	current, found := h.activations[username]
+	if !found || current.claimID != claimID ||
+		current.phase != proxycontrol.RouteActivationActivating {
+		h.tunnelMu.Unlock()
+		return false, nil
+	}
+	h.retiredUsers[username] = struct{}{}
+	tunnels := h.tunnelsForUsersLocked(map[string]struct{}{username: {}})
+	h.tunnelMu.Unlock()
+	if err := closeAndWaitTunnels(ctx, tunnels); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (h *UpstreamProxyHandler) tunnelsForUsersLocked(users map[string]struct{}) []*activeTunnel {
+	tunnels := make([]*activeTunnel, 0)
+	for tunnel := range h.tunnels {
+		if _, found := users[tunnel.username]; found {
+			tunnels = append(tunnels, tunnel)
+		}
+	}
+	return tunnels
+}
+
+func closeAndWaitTunnels(ctx context.Context, tunnels []*activeTunnel) error {
 	for _, tunnel := range tunnels {
 		_ = tunnel.client.Close()
 		_ = tunnel.upstream.Close()

@@ -4,6 +4,7 @@ import { ChannelExecutionRuntimeAdapter } from "../src/channelExecutionRuntimeAd
 import { closeDb } from "../src/db.js";
 import { dynamicRotaProxyConfig } from "../src/fixedProxyConfig.js";
 import { resolveWorkerIdentityPolicy } from "../src/identityPolicyCatalog.js";
+import { buildManagedDiagnosticJob } from "../src/managedDiagnosticJob.js";
 import { closeProxyControlClient, proxyControlClient } from "../src/proxyControlClient.js";
 import { RotaSlotAdapter } from "../src/rotaSlotAdapter.js";
 import {
@@ -119,12 +120,12 @@ const policy = rotaSlot.policy;
 const reports = [];
 try {
   await rotaSlot.start();
-  await rotaSlot.executeJob({
-    id: `comment-probe:${Date.now()}`,
-    queueName: "youtube-channel-crawl",
-    attemptsMade: 0,
-    data: { channel_id: "comment-probe", run_id: `comment-probe:${Date.now()}` },
-  }, {
+  const runId = `comment-probe:${Date.now()}`;
+  await rotaSlot.executeJob(buildManagedDiagnosticJob({
+    kind: "comment_probe",
+    channelId: "comment-probe",
+    runId,
+  }), {
     prepare: async () => ({
       kind: "ready",
       businessRunId: `comment-probe:${Date.now()}`,

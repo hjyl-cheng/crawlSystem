@@ -109,6 +109,62 @@ test("a redelivered candidate Full job reuses its reserved Business Run identity
   ]);
 });
 
+test("a controlled Recovery Job resolves a new Candidate Business Run boundary", async () => {
+  const store = bindingStore();
+  const retryIntentId = "11111111-1111-4111-8111-111111111111";
+  const job = {
+    id: `channel-recovery__42__${retryIntentId}__g5`,
+    name: "channel-snapshot-recovery",
+    queueName: queuesByRole.channelCrawl,
+    attemptsMade: 0,
+    data: {
+      candidate_id: 42,
+      retry_intent_id: retryIntentId,
+      recovery_business_run_id: "run:new",
+      dispatch_generation: 5,
+      channel_id: "UC1",
+      channel_url: "https://www.youtube.com/channel/UC1",
+      crawl_mode: "full",
+    },
+    async updateData(data) { this.data = data; },
+  };
+  const preparer = new ProxyBusinessRunPreparer({
+    queryFn: async (sql) => {
+      if (sql.includes("FROM crawler.migration_retry_intents")) {
+        return {
+          rows: [{
+            retry_intent_id: retryIntentId,
+            candidate_id: "42",
+            new_business_run_id: "run:new",
+            new_business_run_key: `full-candidate:42:recovery:${retryIntentId}`,
+            new_job_id: job.id,
+            dispatch_generation: "5",
+            status: "running",
+          }],
+        };
+      }
+      if (sql.includes("FROM (SELECT")) return { rows: [{ candidate_status: "queued" }] };
+      if (sql.includes("FROM crawler.channel_runs")) return { rows: [] };
+      return { rows: [] };
+    },
+    withTransaction: async () => {},
+    resolvedPolicy,
+    bindingStore: store,
+  });
+
+  const prepared = await preparer.prepareChannel(job);
+
+  assert.equal(prepared.businessRunId, "run:new");
+  assert.equal(
+    prepared.businessRunKey,
+    `full-candidate:42:recovery:${retryIntentId}`,
+  );
+  assert.equal(store.calls[0].explicitBusinessRunId, "run:new");
+  assert.equal(store.calls[0].fullIntentId, retryIntentId);
+  assert.equal(job.data.business_run_key, prepared.businessRunKey);
+  assert.equal(job.data.run_id, "run:new");
+});
+
 test("an automatic Full Repair redelivery keeps its original Business Run identity", async () => {
   const store = bindingStore({ created: false });
   const job = {
@@ -453,7 +509,8 @@ test("an Incremental Plan reuses the existing Run and freezes its Policy", async
 test("managed Incremental preparation preserves the frozen Plan contract", async () => {
   const store = bindingStore();
   const plan = {
-    schema_version: 4,
+    schema_version: 5,
+    dispatch_generation: 1,
     job_id: "incremental__UCtest__20260814__agent_v5_canary__905c961593d7",
     plan_id: "905c9615-93d7-41dc-9c99-3ca33abd0aa6",
     plan_mode: "standard",
@@ -533,7 +590,8 @@ test("managed Content Enrich uses a stable Business Run identity and a real task
 test("managed Incremental preparation repairs only matching legacy runtime metadata", async () => {
   const store = bindingStore();
   const plan = {
-    schema_version: 4,
+    schema_version: 5,
+    dispatch_generation: 1,
     job_id: "incremental__UCtest__20260814__clock_16__905c961593d7",
     plan_id: "905c9615-93d7-41dc-9c99-3ca33abd0aa6",
     plan_mode: "standard",

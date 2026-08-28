@@ -10,7 +10,8 @@ import {
 
 function fixture() {
   return {
-    schema_version: 4,
+    schema_version: 5,
+    dispatch_generation: 1,
     job_id: "incremental__UCtest__20260720__clock_7__5d62c032cbbc",
     plan_id: "4c6ff5ea-b6d9-53f9-b8cf-43cfe430298d",
     plan_mode: "standard",
@@ -38,7 +39,7 @@ test("incremental Plan accepts only the frozen three-domain contract", () => {
   assert.match(incrementalPlanHash(plan), /^sha256:[0-9a-f]{64}$/);
 });
 
-test("schema v4 scheduled_at must stay inside plan_day UTC", () => {
+test("schema v5 scheduled_at must stay inside plan_day UTC", () => {
   assert.throws(
     () => validateIncrementalPlan({
       ...fixture(),
@@ -48,7 +49,7 @@ test("schema v4 scheduled_at must stay inside plan_day UTC", () => {
   );
 });
 
-test("schema v4 accepts only a Video-only dormant probe", () => {
+test("schema v5 accepts only a Video-only dormant probe", () => {
   const payload = {
     ...fixture(),
     plan_mode: "dormant_probe",
@@ -67,7 +68,7 @@ test("legacy schemas and any Profile task key are rejected", () => {
   assert.throws(() => validateIncrementalPlan({
     ...payload,
     schema_version: 3,
-  }), /schema_version must be 4/);
+  }), /schema_version must be 5/);
   assert.throws(() => validateIncrementalPlan({
     ...payload,
     task_mask: { profile: true, ...payload.task_mask },

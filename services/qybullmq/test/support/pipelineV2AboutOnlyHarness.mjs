@@ -27,6 +27,7 @@ const job = {
     channel_id: "UCaboutOnlyRegression",
     channel_url: "https://www.youtube.com/channel/UCaboutOnlyRegression",
     candidate_id: 42,
+    dispatch_generation: 1,
     run_id: "run:promotion",
     business_run_key: "full:candidate:42",
     crawl_mode: "full",

@@ -128,15 +128,20 @@ func (m *Manager) CompleteTask(ctx context.Context, request CompleteTaskRequest)
 				return CompleteTaskResult{}, err
 			}
 			tag, err := tx.Exec(ctx, `
-				UPDATE proxy_running_slots
-				SET active_task_id=NULL,active_task_started_at=NULL,
-				    proxy_id=$2,assignment_version=$3,assigned_at=NOW(),ready_after=NULL,
-				    network_identity_key=$4,profile_epoch=$5,
-				    control_state='pending_new_route',rotation_deadline_at=NULL,updated_at=NOW()
-				WHERE slot_name=$1 AND active_task_id=$6 AND current_lease_id=$7
-				  AND assignment_version=$8
-			`, request.SlotName, selected.ID, newGeneration, selected.NetworkIdentityKey,
-				profileEpoch, request.TaskID, request.LeaseID, request.RouteGeneration)
+					UPDATE proxy_running_slots
+					SET active_task_id=NULL,active_task_started_at=NULL,
+					    proxy_id=$2,assignment_version=$3,assigned_at=NOW(),ready_after=NULL,
+					    network_identity_key=$4,profile_epoch=$5,
+					    control_state='pending_new_route',rotation_deadline_at=NULL,
+					    route_activation_old_username=NULLIF($9,''),
+					    route_activation_claim_id=NULL,route_activation_claim_until=NULL,
+					    route_activation_previous_claim_id=NULL,
+					    updated_at=NOW()
+					WHERE slot_name=$1 AND active_task_id=$6 AND current_lease_id=$7
+					  AND assignment_version=$8
+				`, request.SlotName, selected.ID, newGeneration, selected.NetworkIdentityKey,
+				profileEpoch, request.TaskID, request.LeaseID, request.RouteGeneration,
+				rotation.OldUsername)
 			if err != nil {
 				return CompleteTaskResult{}, fmt.Errorf("bind completed task replacement slot: %w", err)
 			}
@@ -189,21 +194,17 @@ func (m *Manager) CompleteTask(ctx context.Context, request CompleteTaskRequest)
 	}
 	if result.ControlState == CompletionPendingNewRoute && len(credentialRotations) == 1 &&
 		replacementProxyID != nil {
-		rotation := credentialRotations[0]
-		if m.activateUser(ctx, rotation.OldUsername, rotation.NewUsername, *replacementProxyID) {
-			if _, err := m.db.Pool.Exec(ctx, `
-				UPDATE proxy_running_slots
-				SET ready_after=NOW(),control_state='leased_idle',updated_at=NOW()
-				WHERE slot_name=$1 AND current_lease_id=$2 AND proxy_id=$3
-				  AND assignment_version=$4 AND active_task_id IS NULL
-				  AND control_state='pending_new_route'
-			`, request.SlotName, request.LeaseID, *replacementProxyID,
-				*result.PendingRouteGeneration); err != nil {
-				m.logError("mark replacement proxy binding ready failed", err, "slot", request.SlotName)
-			}
-		}
+		m.activatePendingRoute(ctx, routeActivationFence{
+			SlotName:        request.SlotName,
+			LeaseID:         request.LeaseID,
+			ProxyID:         *replacementProxyID,
+			RouteGeneration: *result.PendingRouteGeneration,
+		})
 	} else {
 		m.invalidateCredentials(credentialRotations)
+	}
+	if (state.pendingAction == "" || state.pendingAction == PendingActionNone) && !state.routeEligible {
+		m.requestReconcile()
 	}
 	return result, nil
 }
@@ -225,6 +226,7 @@ type completionTaskState struct {
 	role                string
 	poolID              int
 	proxyID             *int
+	routeEligible       bool
 	networkIdentityKey  string
 	identityPolicyID    string
 	identityPolicyVer   int
@@ -243,10 +245,20 @@ func lockCompletionTask(
 		       t.worker_instance_id,t.lease_id,t.route_generation,t.business_run_id,
 		       COALESCE(s.active_task_id,''),COALESCE(s.current_lease_id,''),s.lease_until,
 		       s.assignment_version,COALESCE(s.pending_action,''),s.role,s.pool_id,s.proxy_id,
+		       COALESCE(
+		         p.status='active' AND p.revalidation_required=false
+		         AND (p.cooldown_until IS NULL OR p.cooldown_until <= NOW())
+		         AND (
+		           (p.base_health_status='passed' AND p.youtube_health_status='passed')
+		           OR (p.last_youtube_status=200 AND p.last_rota_youtube_status=200)
+		         ),
+		         false
+		       ),
 		       COALESCE(s.network_identity_key,''),t.identity_policy_id,
 		       t.identity_policy_version,t.identity_policy_hash
 		FROM proxy_control_tasks t
 		JOIN proxy_running_slots s ON s.slot_name=t.slot_name
+		LEFT JOIN proxies p ON p.id=s.proxy_id
 		WHERE t.workload_scope=$1 AND t.task_id=$2
 		FOR UPDATE OF t,s
 	`, workloadScope, taskID).Scan(
@@ -254,7 +266,7 @@ func lockCompletionTask(
 		&state.workerInstanceID, &state.leaseID, &state.routeGeneration,
 		&state.businessRunID, &state.activeTaskID, &state.currentLeaseID,
 		&state.leaseUntil, &state.slotRouteGeneration, &state.pendingAction,
-		&state.role, &state.poolID, &state.proxyID, &state.networkIdentityKey,
+		&state.role, &state.poolID, &state.proxyID, &state.routeEligible, &state.networkIdentityKey,
 		&state.identityPolicyID, &state.identityPolicyVer, &state.identityPolicyHash,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -466,7 +478,10 @@ func pauseCompletionWithoutReserve(
 		SET active_task_id=NULL,active_task_started_at=NULL,
 		    proxy_id=NULL,assignment_version=$2,assigned_at=NULL,ready_after=NULL,
 		    network_identity_key=NULL,profile_epoch=0,
-		    control_state='paused_no_reserve',rotation_deadline_at=NULL,updated_at=NOW()
+		    control_state='paused_no_reserve',rotation_deadline_at=NULL,
+		    route_activation_old_username=NULL,route_activation_claim_id=NULL,
+		    route_activation_claim_until=NULL,route_activation_previous_claim_id=NULL,
+		    updated_at=NOW()
 		WHERE slot_name=$1 AND active_task_id=$3 AND current_lease_id=$4
 		  AND assignment_version=$5
 	`, request.SlotName, newGeneration, request.TaskID, request.LeaseID, request.RouteGeneration)

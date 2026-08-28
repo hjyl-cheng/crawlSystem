@@ -5,6 +5,7 @@ export const INCREMENTAL_JOB_NAME = "channel.incremental.plan";
 
 const PAYLOAD_KEYS = [
   "schema_version",
+  "dispatch_generation",
   "job_id",
   "plan_id",
   "plan_mode",
@@ -112,8 +113,8 @@ export function incrementalRunId(planId) {
 
 export function validateIncrementalPlan(value) {
   exactKeys(value, PAYLOAD_KEYS, "payload");
-  if (value.schema_version !== 4) {
-    throw new IncrementalPlanContractError("schema_version must be 4");
+  if (value.schema_version !== 5) {
+    throw new IncrementalPlanContractError("schema_version must be 5");
   }
   const planId = uuid(value.plan_id, "payload.plan_id");
   const planDay = requiredText(value.plan_day, "payload.plan_day");
@@ -142,6 +143,13 @@ export function validateIncrementalPlan(value) {
   }
   const clockVersion = nonNegativeInteger(value.clock_version, "payload.clock_version");
   if (clockVersion === 0) throw new IncrementalPlanContractError("payload.clock_version must be positive");
+  const dispatchGeneration = nonNegativeInteger(
+    value.dispatch_generation,
+    "payload.dispatch_generation",
+  );
+  if (dispatchGeneration === 0) {
+    throw new IncrementalPlanContractError("payload.dispatch_generation must be positive");
+  }
   const scheduledAt = timestamp(value.scheduled_at, "payload.scheduled_at");
   if (scheduledAt.slice(0, 10) !== planDay) {
     throw new IncrementalPlanContractError("payload.scheduled_at must fall inside plan_day UTC");
@@ -158,6 +166,7 @@ export function validateIncrementalPlan(value) {
 
   return Object.freeze({
     schema_version: value.schema_version,
+    dispatch_generation: dispatchGeneration,
     job_id: jobId,
     plan_id: planId,
     plan_mode: planMode,

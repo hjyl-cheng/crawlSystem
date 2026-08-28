@@ -7,7 +7,7 @@ import {
   loadContentRepairTargets,
   prepareContentRepairTargets,
 } from "../src/contentRepair.js";
-import { queuesByRole } from "../src/queues.js";
+import { queuesByRole, safeJobId } from "../src/queues.js";
 
 test("content repair targets use the configured publication window", async () => {
   const statements = [];
@@ -129,9 +129,16 @@ test("repair state resets retain parser contract failures", async () => {
   );
 });
 
-test("a newly prepared repair replaces a terminal job with the same id", async () => {
+test("a new repair batch preserves terminal Job history under a distinct identity", async () => {
   let removed = false;
   const added = [];
+  const oldJobId = safeJobId(
+    "repair",
+    "content-completeness-v6",
+    "repair:first-pass",
+    "channel-detail",
+    "run:detail",
+  );
   const existing = {
     getState: async () => "completed",
     remove: async () => {
@@ -139,7 +146,7 @@ test("a newly prepared repair replaces a terminal job with the same id", async (
     },
   };
   const queue = {
-    getJob: async () => (removed ? null : existing),
+    getJob: async (jobId) => (jobId === oldJobId ? existing : null),
     add: async (name, data, options) => {
       added.push({ name, data, options });
     },
@@ -158,9 +165,49 @@ test("a newly prepared repair replaces a terminal job with the same id", async (
     pipelineCycleId: "pipeline:test",
   });
 
-  assert.equal(removed, true);
+  assert.equal(removed, false);
   assert.equal(added.length, 1);
   assert.equal(added[0].name, "channel-detail-repair");
+  assert.equal(added[0].data.dispatch_generation, 1);
   assert.equal(added[0].data.api_fallback_mode, "emergency");
+  assert.notEqual(added[0].options.jobId, oldJobId);
+  assert.match(added[0].options.jobId, /repair_second-pass/);
   assert.equal(result.detail, 1);
+});
+
+test("replaying one repair batch reuses its existing Job", async () => {
+  const batchId = "repair:stable-pass";
+  const jobId = safeJobId(
+    "repair",
+    "content-completeness-v6",
+    batchId,
+    "channel",
+    "run:channel",
+  );
+  let removed = false;
+  const added = [];
+  const queue = {
+    getJob: async (requestedJobId) => (requestedJobId === jobId ? {
+      getState: async () => "failed",
+      remove: async () => { removed = true; },
+    } : null),
+    add: async (...args) => { added.push(args); },
+  };
+  const queues = {
+    [queuesByRole.channelCrawl]: queue,
+    [queuesByRole.finalize]: { getJob: async () => null, add: async () => {} },
+  };
+
+  await enqueueContentRepairTargets(async () => ({ rows: [] }), queues, {
+    detailRuns: [],
+    channelRuns: [{
+      run_id: "run:channel",
+      channel_id: "UCchannel",
+      channel_url: "https://www.youtube.com/channel/UCchannel",
+    }],
+    staleRuns: [],
+  }, { batchId });
+
+  assert.equal(removed, false);
+  assert.equal(added.length, 0);
 });

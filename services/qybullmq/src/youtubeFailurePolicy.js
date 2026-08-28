@@ -8,6 +8,25 @@ const POSTGRES_CONTRACT_CODES = new Set([
   "42804",
 ]);
 
+const STRUCTURED_FAILURE_KINDS = new Set([
+  "proxy_transport",
+  "upstream_transient",
+]);
+
+const STRUCTURED_FAILURE_CODES = new Map([
+  ["FINGERPRINT_PROXY_TRANSPORT", "proxy_transport"],
+  ["FINGERPRINT_UPSTREAM_TRANSIENT", "upstream_transient"],
+]);
+
+const TRUSTED_PROXY_TLS_SOURCES = new Set([
+  "youtube_fetch_transport",
+  "youtubejs_fetch",
+]);
+
+const TRUSTED_FINGERPRINT_SOURCES = new Set([
+  "fingerprint_gateway",
+]);
+
 function normalizedStatus(value, text) {
   const numeric = Number(value);
   if (Number.isInteger(numeric) && numeric >= 100 && numeric <= 599) return numeric;
@@ -18,6 +37,56 @@ function normalizedStatus(value, text) {
 function boundedText(value, maxLength = 500) {
   const output = String(value ?? "");
   return output.length <= maxLength ? output : output.slice(0, maxLength);
+}
+
+function nonEmptyText(value) {
+  const output = String(value ?? "").trim();
+  return output || null;
+}
+
+function structuredFailure(error, nodeEvidence) {
+  const failureKind = nonEmptyText(error?.failureKind ?? error?.failure_kind)?.toLowerCase() ?? null;
+  const code = nonEmptyText(error?.code)?.toUpperCase() ?? null;
+  const kindFromField = STRUCTURED_FAILURE_KINDS.has(failureKind) ? failureKind : null;
+  const kindFromCode = STRUCTURED_FAILURE_CODES.get(code) ?? null;
+  if (!kindFromField && !kindFromCode) return null;
+  if (kindFromField && kindFromCode && kindFromField !== kindFromCode) return null;
+  const matchedKind = kindFromCode ?? kindFromField;
+  return Object.freeze({
+    status: normalizedStatus(
+      nodeEvidence.status,
+      [error?.message, nodeEvidence.body, error?.body].filter(Boolean).join("\n"),
+    ),
+    evidence: Object.freeze({
+      failure_kind: matchedKind,
+      code: kindFromCode ? code : null,
+      source: nonEmptyText(nodeEvidence.source),
+    }),
+  });
+}
+
+function legacyFingerprintProxyTransport(error, { source = "", body = "" } = {}) {
+  const isLegacyTransportText = (value) => (
+    /(?:^|\b)(?:fingerprint[_ ]?)?proxy[_ ]transport\b/i.test(value)
+    || /sslerror[^\n]{0,100}\bcurl[_ ]code\s*=?\s*35\b/i.test(value)
+  );
+  const nodeSource = nonEmptyText(source)?.toLowerCase() ?? "";
+  const nodeText = [error?.message, error?.code, body, error?.body]
+    .map((part) => nonEmptyText(part))
+    .filter(Boolean)
+    .join("\n");
+  return TRUSTED_FINGERPRINT_SOURCES.has(nodeSource) && isLegacyTransportText(nodeText)
+    ? nodeSource
+    : null;
+}
+
+function trustedProxyTlsTransport(error, { source = "", body = "" } = {}) {
+  const isAmbiguousTlsText = (value) => /wrong[_ ]version[_ ]number|ssl routines/i.test(value);
+  const nodeSource = nonEmptyText(source)?.toLowerCase() ?? "";
+  const nodeText = [body, error?.message, error?.code, error?.body].filter(Boolean).join("\n");
+  return TRUSTED_PROXY_TLS_SOURCES.has(nodeSource) && isAmbiguousTlsText(nodeText)
+    ? nodeSource
+    : null;
 }
 
 export function youtubeFailureText(error) {
@@ -50,6 +119,7 @@ function decision(kind, {
   clientAction = "none",
   terminal = false,
   status = null,
+  evidence = null,
 } = {}) {
   return Object.freeze({
     kind,
@@ -58,19 +128,18 @@ function decision(kind, {
     client_action: clientAction,
     terminal,
     status,
+    ...(evidence ? { evidence: Object.freeze({ ...evidence }) } : {}),
   });
 }
 
 export function youtubeFailureEvidence(error, overrides = {}) {
-  const embedded = error?.youtube_failure_evidence ?? {};
-  return {
-    error,
-    status: overrides.status ?? embedded.status ?? error?.status ?? null,
-    body: boundedText(overrides.body ?? embedded.body ?? error?.body ?? ""),
-    source: String(overrides.source ?? embedded.source ?? error?.source ?? ""),
-    target_url: String(overrides.targetUrl ?? overrides.target_url ?? embedded.target_url ?? "") || null,
-    client: String(overrides.client ?? embedded.client ?? "") || null,
-  };
+  const explicitOverride = overrides.status != null
+    || nonEmptyText(overrides.body) != null
+    || nonEmptyText(overrides.source) != null
+    || nonEmptyText(overrides.targetUrl ?? overrides.target_url) != null
+    || nonEmptyText(overrides.client) != null;
+  if (explicitOverride) return youtubeFailureNodeEvidence(error, overrides);
+  return selectYoutubeFailure({ error }).evidence;
 }
 
 export function annotateYoutubeFailure(error, evidence = {}) {
@@ -87,19 +156,40 @@ export function annotateYoutubeFailure(error, evidence = {}) {
   return target;
 }
 
-export function decideYoutubeFailure({
+function youtubeFailureNodeEvidence(error, overrides = {}) {
+  const embedded = error?.youtube_failure_evidence ?? {};
+  return {
+    error,
+    status: overrides.status ?? embedded.status ?? error?.status ?? null,
+    body: boundedText(
+      nonEmptyText(overrides.body) ?? nonEmptyText(embedded.body) ?? error?.body ?? "",
+    ),
+    source: nonEmptyText(overrides.source)
+      ?? nonEmptyText(embedded.source)
+      ?? nonEmptyText(error?.source)
+      ?? "",
+    target_url: nonEmptyText(overrides.targetUrl ?? overrides.target_url)
+      ?? nonEmptyText(embedded.target_url),
+    client: nonEmptyText(overrides.client) ?? nonEmptyText(embedded.client),
+  };
+}
+
+function decideYoutubeFailureBranch({
   error = null,
   status = null,
   body = "",
   source = "",
 } = {}) {
-  const evidence = youtubeFailureEvidence(error, { status, body, source });
-  const errorText = youtubeFailureText(error);
+  const evidence = youtubeFailureNodeEvidence(error, { status, body, source });
+  const errorText = [error?.message, error?.code].map(nonEmptyText).filter(Boolean).join(": ");
   const text = [errorText, evidence.body].filter(Boolean).join("\n");
   const lower = text.toLowerCase();
   const httpStatus = normalizedStatus(evidence.status, text);
   const errorName = String(error?.name || "");
-  const errorCode = String(error?.code || error?.cause?.code || "").toUpperCase();
+  const errorCode = String(error?.code || "").toUpperCase();
+  const structured = structuredFailure(error, evidence);
+  const legacyFingerprintSource = legacyFingerprintProxyTransport(error, evidence);
+  const trustedTlsSource = trustedProxyTlsTransport(error, evidence);
 
   if (error?.youtube_collection_failure === true) {
     return decision("youtube_challenge", {
@@ -114,6 +204,33 @@ export function decideYoutubeFailure({
   if (POSTGRES_CONTRACT_CODES.has(errorCode)) {
     return decision("database_contract", { retryMode: "none", terminal: true, status: httpStatus });
   }
+  if (structured?.evidence?.failure_kind === "proxy_transport") {
+    return decision("proxy_transport", {
+      retryMode: "new_identity",
+      proxyAction: "cooldown_network",
+      status: structured.status,
+      evidence: structured.evidence,
+    });
+  }
+  if (structured?.evidence?.failure_kind === "upstream_transient") {
+    return decision("upstream_transient", {
+      retryMode: "same_identity",
+      status: structured.status,
+      evidence: structured.evidence,
+    });
+  }
+  if (legacyFingerprintSource) {
+    return decision("proxy_transport", {
+      retryMode: "new_identity",
+      proxyAction: "cooldown_network",
+      status: httpStatus,
+      evidence: {
+        failure_kind: "proxy_transport",
+        code: null,
+        source: legacyFingerprintSource,
+      },
+    });
+  }
   if (
     httpStatus === 404
     || /(?:channel|video|playlist)[^\n]{0,100}(?:does not exist|not found)/i.test(text)
@@ -122,14 +239,25 @@ export function decideYoutubeFailure({
     return decision("content_terminal", { retryMode: "none", terminal: true, status: httpStatus });
   }
 
-  const proxyTransport = /proxyerror|proxy[_ ]unavailable|proxy connection|tunnel connection|socks(?:4|5)? connection|wrong[_ ]version[_ ]number|ssl routines|proxy authentication|\b407\b/i
+  const explicitProxyTransport = /proxyerror|proxy[_ ]unavailable|proxy connection|tunnel connection|socks(?:4|5)? connection|proxy authentication|\b407\b/i
     .test(text);
+  const ambiguousTlsTransport = /wrong[_ ]version[_ ]number|ssl routines/i.test(text);
+  const proxyTransport = explicitProxyTransport
+    || Boolean(trustedTlsSource);
   if (proxyTransport) {
     return decision("proxy_transport", {
       retryMode: "new_identity",
       proxyAction: "cooldown_network",
       status: httpStatus,
+      evidence: trustedTlsSource ? {
+        failure_kind: "proxy_transport",
+        code: null,
+        source: trustedTlsSource,
+      } : null,
     });
+  }
+  if (ambiguousTlsTransport) {
+    return decision("upstream_transient", { retryMode: "same_identity", status: httpStatus });
   }
   if (httpStatus === 429 || /too many requests|rate limit(?:ed)?/i.test(text)) {
     return decision("youtube_rate_limited", {
@@ -171,6 +299,74 @@ export function decideYoutubeFailure({
     return decision("database_runtime", { retryMode: "same_identity", status: httpStatus });
   }
   return decision("unknown", { retryMode: "default", status: httpStatus });
+}
+
+function aggregateDecisionPriority(value) {
+  if (value.kind === "parser_contract") return 1000;
+  if (value.kind === "database_contract") return 990;
+  if (value.kind === "proxy_transport" && value.evidence) return 950;
+  if (value.kind === "upstream_transient" && value.evidence) return 940;
+  if (value.kind === "content_terminal") return 900;
+  if (value.kind === "proxy_transport") return 850;
+  if (value.kind === "youtube_rate_limited") return 800;
+  if (value.kind === "youtube_challenge") return 790;
+  if (value.kind === "token_or_client") return 700;
+  if (value.kind === "upstream_transient") return 600;
+  if (value.kind === "parser_runtime") return 500;
+  if (value.kind === "database_runtime") return 400;
+  return 0;
+}
+
+function failureNodes(error) {
+  const nodes = [];
+  const pending = [error];
+  const seen = new Set();
+  while (pending.length > 0 && nodes.length < 20) {
+    const value = pending.shift();
+    if (!value || (typeof value !== "object" && typeof value !== "function") || seen.has(value)) {
+      continue;
+    }
+    seen.add(value);
+    nodes.push(value);
+    if (value.cause != null) pending.push(value.cause);
+    if (Array.isArray(value.errors)) pending.push(...value.errors);
+  }
+  return nodes;
+}
+
+export function selectYoutubeFailure(input = {}) {
+  const nodes = failureNodes(input.error);
+  const candidates = [];
+  if (nodes.length === 0) {
+    candidates.push({
+      node: input.error ?? null,
+      decision: decideYoutubeFailureBranch(input),
+      evidence: youtubeFailureNodeEvidence(input.error, input),
+    });
+  } else {
+    for (const node of nodes) {
+      const root = node === input.error;
+      candidates.push({
+        node,
+        decision: decideYoutubeFailureBranch(root ? input : { error: node }),
+        evidence: youtubeFailureNodeEvidence(node, root ? input : {}),
+      });
+    }
+  }
+  const selected = candidates.reduce((current, candidate) => (
+    aggregateDecisionPriority(candidate.decision) > aggregateDecisionPriority(current.decision)
+      ? candidate
+      : current
+  ));
+  return Object.freeze({
+    node: selected.node,
+    decision: selected.decision,
+    evidence: Object.freeze({ ...selected.evidence }),
+  });
+}
+
+export function decideYoutubeFailure(input = {}) {
+  return selectYoutubeFailure(input).decision;
 }
 
 export function shouldReportProxyFailure(value) {

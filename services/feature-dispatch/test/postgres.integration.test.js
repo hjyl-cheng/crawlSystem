@@ -17,7 +17,8 @@ function fixture(channelId, scheduledAt) {
   const dispatchEventId = randomUUID();
   const suffix = randomUUID().replaceAll("-", "");
   const payload = {
-    schema_version: 4,
+    schema_version: 5,
+    dispatch_generation: 1,
     job_id: `incremental__${channelId}__clock_1__${suffix}`,
     plan_id: planId,
     plan_mode: "standard",

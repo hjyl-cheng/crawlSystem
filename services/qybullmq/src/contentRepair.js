@@ -410,13 +410,7 @@ async function markRepairEnqueued(dbQuery, runId, repairVersion, jobId) {
 }
 
 async function reusableRepairJob(queue, jobId) {
-  const existing = await queue.getJob(jobId);
-  if (!existing) return null;
-  if (["completed", "failed"].includes(await existing.getState())) {
-    await existing.remove();
-    return queue.getJob(jobId);
-  }
-  return existing;
+  return queue.getJob(jobId);
 }
 
 export async function enqueueContentRepairTargets(dbQuery, queues, targets, {
@@ -425,19 +419,28 @@ export async function enqueueContentRepairTargets(dbQuery, queues, targets, {
   retryEnqueued = false,
   pipelineCycleId = null,
 } = {}) {
+  const normalizedBatchId = String(batchId ?? "").trim();
+  if (!normalizedBatchId) throw new TypeError("batchId is required");
   let detail = 0;
   let channel = 0;
   let finalize = 0;
   for (const row of targets.detailRuns) {
-    const jobId = safeJobId("repair", repairVersion, "channel-detail", row.run_id);
+    const jobId = safeJobId(
+      "repair",
+      repairVersion,
+      normalizedBatchId,
+      "channel-detail",
+      row.run_id,
+    );
     const existing = await reusableRepairJob(queues[queuesByRole.channelCrawl], jobId);
     if (!existing) {
       await queues[queuesByRole.channelCrawl].add(
         "channel-detail-repair",
         {
+          dispatch_generation: 1,
           run_id: row.run_id,
           channel_id: row.channel_id,
-          repair_batch_id: batchId,
+          repair_batch_id: normalizedBatchId,
           repair_version: repairVersion,
           pipeline_cycle_id: pipelineCycleId,
           published_at_required_precision: "date_only",
@@ -450,16 +453,23 @@ export async function enqueueContentRepairTargets(dbQuery, queues, targets, {
     detail += 1;
   }
   for (const row of targets.channelRuns) {
-    const jobId = safeJobId("repair", repairVersion, "channel", row.run_id);
+    const jobId = safeJobId(
+      "repair",
+      repairVersion,
+      normalizedBatchId,
+      "channel",
+      row.run_id,
+    );
     if (!(await reusableRepairJob(queues[queuesByRole.channelCrawl], jobId))) {
       await queues[queuesByRole.channelCrawl].add(
         "channel-crawl-repair",
         {
+          dispatch_generation: 1,
           run_id: row.run_id,
           channel_id: row.channel_id,
           channel_url: row.channel_url,
           crawl_mode: "full",
-          repair_batch_id: batchId,
+          repair_batch_id: normalizedBatchId,
           pipeline_cycle_id: pipelineCycleId,
         },
         { jobId },
@@ -468,7 +478,13 @@ export async function enqueueContentRepairTargets(dbQuery, queues, targets, {
     channel += 1;
   }
   for (const row of targets.staleRuns) {
-    const jobId = safeJobId("repair", repairVersion, "finalize", row.run_id);
+    const jobId = safeJobId(
+      "repair",
+      repairVersion,
+      normalizedBatchId,
+      "finalize",
+      row.run_id,
+    );
     if (!(await reusableRepairJob(queues[queuesByRole.finalize], jobId))) {
       await queues[queuesByRole.finalize].add(
         "finalize-reconciled-run",
@@ -476,7 +492,7 @@ export async function enqueueContentRepairTargets(dbQuery, queues, targets, {
           run_id: row.run_id,
           channel_id: row.channel_id,
           reason: "repair-stale-api-status",
-          repair_batch_id: batchId,
+          repair_batch_id: normalizedBatchId,
           pipeline_cycle_id: pipelineCycleId,
         },
         { jobId },

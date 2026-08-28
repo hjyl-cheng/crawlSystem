@@ -21,18 +21,34 @@ func TestProxyControlTaskMigrationPreservesLegacyControlState(t *testing.T) {
 		t.Fatalf("apply proxy control task migration: %v", err)
 	}
 
-	var slotCount, reportCount, migrationCount int
+	var slotCount, reportCount, migrationCount, activationColumns int
 	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM proxy_running_slots WHERE slot_name='legacy-channel-01'`).Scan(&slotCount); err != nil {
 		t.Fatalf("count preserved slots: %v", err)
 	}
 	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM proxy_control_reports WHERE incident_id='legacy-incident-1'`).Scan(&reportCount); err != nil {
 		t.Fatalf("count preserved reports: %v", err)
 	}
-	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM schema_migrations WHERE version=1004`).Scan(&migrationCount); err != nil {
-		t.Fatalf("count migration 1004: %v", err)
+	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM schema_migrations WHERE version IN (1004,1009,1010)`).Scan(&migrationCount); err != nil {
+		t.Fatalf("count Proxy Control migrations: %v", err)
 	}
-	if slotCount != 1 || reportCount != 1 || migrationCount != 1 {
-		t.Fatalf("preserved slots=%d reports=%d migration=%d", slotCount, reportCount, migrationCount)
+	if err := pool.QueryRow(ctx, `
+		SELECT COUNT(*)
+		FROM information_schema.columns
+		WHERE table_schema=current_schema() AND table_name='proxy_running_slots'
+		  AND column_name IN (
+		    'route_activation_old_username',
+		    'route_activation_claim_id',
+		    'route_activation_claim_until',
+		    'route_activation_previous_claim_id'
+		  )
+	`).Scan(&activationColumns); err != nil {
+		t.Fatalf("count Route activation Fence columns: %v", err)
+	}
+	if slotCount != 1 || reportCount != 1 || migrationCount != 3 || activationColumns != 4 {
+		t.Fatalf(
+			"preserved slots=%d reports=%d migration=%d activation_columns=%d",
+			slotCount, reportCount, migrationCount, activationColumns,
+		)
 	}
 
 	for _, table := range []string{
@@ -115,7 +131,7 @@ func newProxyControlMigrationPostgres(t *testing.T) (*DB, *pgxpool.Pool) {
 		t.Fatalf("create migration 1003 fixture: %v", err)
 	}
 	for _, migration := range migrations {
-		if migration.Version == 1004 {
+		if migration.Version == 1004 || migration.Version == 1009 || migration.Version == 1010 {
 			continue
 		}
 		if _, err := pool.Exec(ctx, `

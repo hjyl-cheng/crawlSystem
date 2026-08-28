@@ -39,8 +39,10 @@ test("migration channel jobs start at the post-Discover channel snapshot contrac
     candidate_id: "42",
     channel_id: "UC1234567890123456789012",
     channel_url: "https://www.youtube.com/channel/UC1234567890123456789012",
+    snapshot_dispatch_generation: "3",
   }, "legacy-results-pilot-30-v1"), {
     candidate_id: 42,
+    dispatch_generation: 3,
     dispatch_batch_id: "legacy-results-pilot-30-v1",
     channel_id: "UC1234567890123456789012",
     channel_url: "https://www.youtube.com/channel/UC1234567890123456789012",

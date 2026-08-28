@@ -14,7 +14,43 @@ test("Rota Worker V2 deployment extracts the complete additive integration schem
   assert.match(block, /CREATE TABLE IF NOT EXISTS crawler\.proxy_job_dispatch_outbox/);
   assert.match(block, /trg_guard_managed_query_page_state/);
   assert.match(block, /trg_guard_query_quality_chunk_members/);
+  assert.match(
+    block,
+    /ALTER TABLE crawler\.channel_candidates[\s\S]*ADD COLUMN IF NOT EXISTS snapshot_dispatch_generation BIGINT NOT NULL DEFAULT 0/,
+  );
+  assert.match(block, /channel_candidates_snapshot_dispatch_generation_check/);
+  assert.match(block, /ADD COLUMN IF NOT EXISTS snapshot_active_job_id TEXT/);
+  assert.match(block, /ADD COLUMN IF NOT EXISTS snapshot_active_job_attempt INTEGER/);
+  assert.match(block, /channel_candidates_snapshot_active_job_check/);
+  assert.match(block, /snapshot_active_job_attempt >= 0/);
+  assert.match(block, /ux_crawler_proxy_job_dispatch_outbox_channel_snapshot_generation/);
+  assert.match(block, /payload_json->>'dispatch_generation'/);
+  assert.match(block, /MAX\(intent\.dispatch_attempts\)/);
+  assert.match(block, /LEFT JOIN crawler\.migration_channel_intents AS intent/);
+  assert.match(
+    block,
+    /SET snapshot_dispatch_generation = expectation\.expected_generation,[\s\S]*snapshot_active_job_id = NULL,[\s\S]*snapshot_active_job_attempt = NULL/,
+  );
+  assert.match(block, /CREATE TABLE IF NOT EXISTS crawler\.migration_retry_intents/);
+  assert.match(block, /channel_execution_attempts[\s\S]*dispatch_generation BIGINT/);
+  assert.match(block, /UNIQUE \(candidate_id,dispatch_generation\)/);
+  assert.match(block, /ux_crawler_migration_retry_intents_active_candidate/);
+  assert.match(block, /idx_crawler_migration_retry_intents_status/);
   assert.doesNotMatch(block, /ALTER TABLE crawler\.channels ADD COLUMN IF NOT EXISTS country/);
+});
+
+test("Crawler bootstrap includes the Candidate attempt Fence shape", async () => {
+  const bootstrap = await readFile(
+    new URL("../../../database/bootstrap/crawler.sql", import.meta.url),
+    "utf8",
+  );
+  assert.match(bootstrap, /snapshot_dispatch_generation bigint DEFAULT 0 NOT NULL/);
+  assert.match(bootstrap, /snapshot_active_job_id text/);
+  assert.match(bootstrap, /snapshot_active_job_attempt integer/);
+  assert.match(bootstrap, /channel_candidates_snapshot_active_job_check/);
+  assert.match(bootstrap, /snapshot_active_job_attempt >= 0/);
+  assert.match(bootstrap, /ux_crawler_proxy_job_dispatch_outbox_channel_snapshot_generation/);
+  assert.match(bootstrap, /channel_execution_attempts[\s\S]*dispatch_generation bigint/);
 });
 
 test("Rota Worker V2 deployment requires explicit database and row-count confirmation", () => {

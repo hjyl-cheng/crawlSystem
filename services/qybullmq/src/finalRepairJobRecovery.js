@@ -64,6 +64,7 @@ function assertSameRepairIntent(job, { name, data, jobId }) {
     }
   }
   for (const field of [
+    "dispatch_generation",
     "repair_parent_run_id",
     "checkpoint_target_run_id",
     "repair_round",

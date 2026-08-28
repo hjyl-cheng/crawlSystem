@@ -11,11 +11,13 @@ var (
 	ErrInvalidInput         = errors.New("invalid proxy control request")
 	ErrLeaseConflict        = errors.New("proxy control lease conflict")
 	ErrLeaseGone            = errors.New("proxy control lease is no longer live")
+	ErrRouteNotReady        = errors.New("proxy control route is not ready")
 	ErrPolicyRejected       = errors.New("proxy control identity policy rejected")
 	ErrIdempotencyConflict  = errors.New("proxy control idempotency key reused")
 	ErrJobExecutionConflict = errors.New("proxy control job execution conflict")
 	ErrExecutionBudget      = errors.New("proxy control execution route budget exhausted")
 	ErrBusinessRunBudget    = errors.New("proxy control business run budget exhausted")
+	ErrBusinessRunNotFound  = errors.New("proxy control business run was not found")
 	ErrTaskConflict         = errors.New("proxy control task conflict")
 	ErrTaskCompleted        = errors.New("proxy control task is already completed")
 	ErrAttemptNotQuiesced   = errors.New("proxy control attempt is not quiesced")
@@ -220,52 +222,38 @@ type ReleaseRequest struct {
 	Reason               string `json:"reason"`
 }
 
-type SwapRequest struct {
-	WorkerID          string `json:"worker_id"`
-	LeaseID           string `json:"lease_id"`
-	AssignmentVersion int64  `json:"assignment_version"`
-	FailedProxyID     int    `json:"failed_proxy_id"`
-}
-
 type Assignment struct {
-	OK                    bool         `json:"ok"`
-	Ready                 bool         `json:"ready"`
-	Reason                string       `json:"reason,omitempty"`
-	ControlState          string       `json:"control_state,omitempty"`
-	WorkloadScope         string       `json:"workload_scope,omitempty"`
-	ProtocolVersion       int          `json:"protocol_version,omitempty"`
-	Role                  string       `json:"role"`
-	WorkerID              string       `json:"worker_id"`
-	WorkerInstanceID      string       `json:"worker_instance_id,omitempty"`
-	SlotName              string       `json:"slot_name,omitempty"`
-	ProxyUser             string       `json:"proxy_user,omitempty"`
-	ProxyID               *int         `json:"-"`
-	ProxyAddressHash      string       `json:"-"`
-	LeaseID               string       `json:"lease_id,omitempty"`
-	LeaseUntil            *time.Time   `json:"lease_until,omitempty"`
-	LeaseRemainingMS      int64        `json:"lease_remaining_ms,omitempty"`
-	ServerTime            time.Time    `json:"server_time,omitempty"`
-	AssignmentVersion     int64        `json:"route_generation"`
-	CredentialGeneration  int64        `json:"credential_generation,omitempty"`
-	NetworkIdentityKey    string       `json:"network_identity_key,omitempty"`
-	ProfileEpoch          int64        `json:"profile_epoch"`
-	IdentityPolicyID      string       `json:"identity_policy_id,omitempty"`
-	IdentityPolicyVersion int          `json:"identity_policy_version,omitempty"`
-	IdentityPolicyHash    string       `json:"identity_policy_hash,omitempty"`
-	IdentityAction        string       `json:"identity_action,omitempty"`
-	EgressCountry         string       `json:"egress_country,omitempty"`
-	RouteChanged          bool         `json:"route_changed,omitempty"`
-	RenewSequence         int64        `json:"renew_sequence,omitempty"`
-	ReadyAfter            *time.Time   `json:"-"`
-	Replacement           *Replacement `json:"-"`
-}
-
-type Replacement struct {
-	Swapped            bool `json:"swapped"`
-	FailedProxyID      int  `json:"failed_proxy_id"`
-	FromProxyID        *int `json:"from_proxy_id,omitempty"`
-	ReplacementProxyID *int `json:"replacement_proxy_id,omitempty"`
-	CacheRefreshed     bool `json:"cache_refreshed"`
+	OK                    bool       `json:"ok"`
+	Ready                 bool       `json:"ready"`
+	Reason                string     `json:"reason,omitempty"`
+	ReasonCode            string     `json:"reason_code,omitempty"`
+	RetryAfterMS          int64      `json:"retry_after_ms,omitempty"`
+	ControlState          string     `json:"control_state,omitempty"`
+	WorkloadScope         string     `json:"workload_scope,omitempty"`
+	ProtocolVersion       int        `json:"protocol_version,omitempty"`
+	Role                  string     `json:"role"`
+	WorkerID              string     `json:"worker_id"`
+	WorkerInstanceID      string     `json:"worker_instance_id,omitempty"`
+	SlotName              string     `json:"slot_name,omitempty"`
+	ProxyUser             string     `json:"proxy_user,omitempty"`
+	ProxyID               *int       `json:"-"`
+	ProxyAddressHash      string     `json:"-"`
+	LeaseID               string     `json:"lease_id,omitempty"`
+	LeaseUntil            *time.Time `json:"lease_until,omitempty"`
+	LeaseRemainingMS      int64      `json:"lease_remaining_ms,omitempty"`
+	ServerTime            time.Time  `json:"server_time,omitempty"`
+	AssignmentVersion     int64      `json:"route_generation"`
+	CredentialGeneration  int64      `json:"credential_generation,omitempty"`
+	NetworkIdentityKey    string     `json:"network_identity_key,omitempty"`
+	ProfileEpoch          int64      `json:"profile_epoch"`
+	IdentityPolicyID      string     `json:"identity_policy_id,omitempty"`
+	IdentityPolicyVersion int        `json:"identity_policy_version,omitempty"`
+	IdentityPolicyHash    string     `json:"identity_policy_hash,omitempty"`
+	IdentityAction        string     `json:"identity_action,omitempty"`
+	EgressCountry         string     `json:"egress_country,omitempty"`
+	RouteChanged          bool       `json:"route_changed,omitempty"`
+	RenewSequence         int64      `json:"renew_sequence,omitempty"`
+	ReadyAfter            *time.Time `json:"-"`
 }
 
 type ReleaseResult struct {
@@ -340,7 +328,19 @@ type Capacity struct {
 	Roles               map[string]RoleCapacity `json:"roles"`
 }
 
-// Interface is the complete Worker-facing interface. Resource synchronization
+type BusinessRunBudget struct {
+	OK                  bool       `json:"ok"`
+	WorkloadScope       string     `json:"workload_scope"`
+	BusinessRunID       string     `json:"business_run_id"`
+	BusinessTasksUsed   int        `json:"business_tasks_used"`
+	BusinessTasksLimit  int        `json:"business_tasks_limit"`
+	CurrentExecutionID  string     `json:"current_execution_id,omitempty"`
+	ExecutionTasksUsed  int        `json:"execution_tasks_used"`
+	ExecutionTasksLimit int        `json:"execution_tasks_limit"`
+	BudgetExhaustedAt   *time.Time `json:"budget_exhausted_at"`
+}
+
+// Interface is the authenticated Proxy Control interface. Resource synchronization
 // and assignment reconciliation remain implementation details behind Run.
 type Interface interface {
 	Claim(context.Context, ClaimRequest) (Assignment, error)
@@ -349,7 +349,7 @@ type Interface interface {
 	Observe(context.Context, ObserveRequest) (ObservationResult, error)
 	CompleteTask(context.Context, CompleteTaskRequest) (CompleteTaskResult, error)
 	Report(context.Context, ReportRequest) (ReportResult, error)
-	Swap(context.Context, SwapRequest) (Assignment, error)
 	Release(context.Context, ReleaseRequest) (ReleaseResult, error)
 	Capacity(context.Context) (Capacity, error)
+	BusinessRunBudget(context.Context, string) (BusinessRunBudget, error)
 }

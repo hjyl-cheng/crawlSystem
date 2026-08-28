@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 )
 
 func TestBeginTaskIsIdempotent(t *testing.T) {
@@ -435,6 +436,225 @@ func TestBeginTaskRejectsFourthTaskWithoutAdvancingRun(t *testing.T) {
 	}
 	if taskCount != 3 || nextAttemptNumber != 4 {
 		t.Fatalf("task count = %d, next attempt = %d; want 3 and 4", taskCount, nextAttemptNumber)
+	}
+}
+
+func TestBeginTaskPrioritizesExhaustedBusinessRunOverExecution(t *testing.T) {
+	manager, pool := newProxyControlPostgres(t)
+	ctx := context.Background()
+
+	_ = insertControlProxy(t, pool, "task-run-budget.example:8080", 10)
+	manager.SetCacheInvalidator(func(string) {})
+	if err := manager.syncResources(ctx); err != nil {
+		t.Fatalf("sync managed resources: %v", err)
+	}
+	if _, err := manager.reconcile(ctx); err != nil {
+		t.Fatalf("reconcile initial assignments: %v", err)
+	}
+	claim, err := manager.Claim(ctx, testClaimRequest(
+		"claim-task-run-budget", "worker-task-run-budget", "instance-task-run-budget",
+	))
+	if err != nil {
+		t.Fatalf("claim proxy: %v", err)
+	}
+
+	const businessRunID = "channel-run-total-budget"
+	const jobExecutionID = "youtube-channel-crawl:channel-total-budget:1"
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO proxy_control_business_runs (
+		  workload_scope,business_run_id,next_attempt_number,retry_policy_id,retry_policy_version,
+		  max_route_switches_per_execution,max_network_attempts_per_business_run
+		) VALUES ('qy-test',$1,10,'default',1,2,9)
+	`, businessRunID); err != nil {
+		t.Fatalf("insert exhausted business run: %v", err)
+	}
+	for attempt := 1; attempt <= 3; attempt++ {
+		if _, err := pool.Exec(ctx, `
+			INSERT INTO proxy_control_tasks (
+			  task_id,attempt_request_id,request_hash,workload_scope,business_run_id,
+			  job_execution_id,attempt_number,slot_name,worker_id,worker_instance_id,
+			  lease_id,route_generation,task_kind,identity_policy_id,
+			  identity_policy_version,identity_policy_hash,status,outcome,completed_at
+			) VALUES (
+			  $1,$2,$2,'qy-test',$3,$4,$5,$6,$7,$8,$9,$10,'channel_full',
+			  'qy-test-channel-v1',1,'sha256:test-channel-v1','completed','failed',NOW()
+			)
+		`, fmt.Sprintf("task-total-budget-%d", attempt),
+			fmt.Sprintf("attempt-total-budget-%d", attempt), businessRunID, jobExecutionID,
+			attempt, claim.SlotName, claim.WorkerID, claim.WorkerInstanceID, claim.LeaseID,
+			claim.AssignmentVersion); err != nil {
+			t.Fatalf("insert completed task %d: %v", attempt, err)
+		}
+	}
+
+	_, err = manager.BeginTask(ctx, BeginTaskRequest{
+		SlotName:         claim.SlotName,
+		WorkerID:         claim.WorkerID,
+		WorkerInstanceID: claim.WorkerInstanceID,
+		LeaseID:          claim.LeaseID,
+		RouteGeneration:  claim.AssignmentVersion,
+		AttemptRequestID: "attempt-total-budget-4",
+		BusinessRunID:    businessRunID,
+		JobExecutionID:   jobExecutionID,
+		TaskKind:         "channel_full",
+	})
+	if !errors.Is(err, ErrBusinessRunBudget) {
+		t.Fatalf("begin error = %v, want business run budget", err)
+	}
+	var exhausted bool
+	if err := pool.QueryRow(ctx, `
+		SELECT budget_exhausted_at IS NOT NULL
+		FROM proxy_control_business_runs
+		WHERE workload_scope='qy-test' AND business_run_id=$1
+	`, businessRunID).Scan(&exhausted); err != nil {
+		t.Fatalf("load business run budget marker: %v", err)
+	}
+	if !exhausted {
+		t.Fatal("business run budget_exhausted_at was not recorded")
+	}
+}
+
+func TestBeginTaskStopsAtBusinessRunBudgetAfterThreeExecutions(t *testing.T) {
+	manager, pool := newProxyControlPostgres(t)
+	ctx := context.Background()
+
+	_ = insertControlProxy(t, pool, "task-nine-attempts.example:8080", 10)
+	manager.SetCacheInvalidator(func(string) {})
+	if err := manager.syncResources(ctx); err != nil {
+		t.Fatalf("sync managed resources: %v", err)
+	}
+	if _, err := manager.reconcile(ctx); err != nil {
+		t.Fatalf("reconcile initial assignments: %v", err)
+	}
+	claim, err := manager.Claim(ctx, testClaimRequest(
+		"claim-task-nine-attempts", "worker-task-nine-attempts", "instance-task-nine-attempts",
+	))
+	if err != nil {
+		t.Fatalf("claim proxy: %v", err)
+	}
+
+	const businessRunID = "channel-run-nine-attempts"
+	for attempt := 1; attempt <= 9; attempt++ {
+		execution := 1 + (attempt-1)/3
+		task, err := manager.BeginTask(ctx, BeginTaskRequest{
+			SlotName:         claim.SlotName,
+			WorkerID:         claim.WorkerID,
+			WorkerInstanceID: claim.WorkerInstanceID,
+			LeaseID:          claim.LeaseID,
+			RouteGeneration:  claim.AssignmentVersion,
+			AttemptRequestID: fmt.Sprintf("attempt-nine-budget-%d", attempt),
+			BusinessRunID:    businessRunID,
+			JobExecutionID:   fmt.Sprintf("youtube-channel-crawl:nine-budget:%d", execution),
+			TaskKind:         TaskKindChannelFull,
+		})
+		if err != nil {
+			t.Fatalf("begin task %d in execution %d: %v", attempt, execution, err)
+		}
+		if task.AttemptNumber != attempt {
+			t.Fatalf("task %d attempt number = %d", attempt, task.AttemptNumber)
+		}
+		if _, err := manager.CompleteTask(ctx, CompleteTaskRequest{
+			CompletionRequestID:   fmt.Sprintf("completion-nine-budget-%d", attempt),
+			SlotName:              claim.SlotName,
+			WorkerID:              claim.WorkerID,
+			WorkerInstanceID:      claim.WorkerInstanceID,
+			LeaseID:               claim.LeaseID,
+			RouteGeneration:       claim.AssignmentVersion,
+			TaskID:                task.TaskID,
+			BusinessRunID:         businessRunID,
+			Outcome:               TaskOutcomeFailed,
+			AttemptQuiesced:       true,
+			ActiveManagedRequests: 0,
+		}); err != nil {
+			t.Fatalf("complete task %d: %v", attempt, err)
+		}
+	}
+
+	for requestNumber := 10; requestNumber <= 11; requestNumber++ {
+		_, err := manager.BeginTask(ctx, BeginTaskRequest{
+			SlotName:         claim.SlotName,
+			WorkerID:         claim.WorkerID,
+			WorkerInstanceID: claim.WorkerInstanceID,
+			LeaseID:          claim.LeaseID,
+			RouteGeneration:  claim.AssignmentVersion,
+			AttemptRequestID: fmt.Sprintf("attempt-nine-budget-%d", requestNumber),
+			BusinessRunID:    businessRunID,
+			JobExecutionID:   "youtube-channel-crawl:nine-budget:3",
+			TaskKind:         TaskKindChannelFull,
+		})
+		if !errors.Is(err, ErrBusinessRunBudget) {
+			t.Fatalf("begin request %d error = %v, want business run budget", requestNumber, err)
+		}
+	}
+
+	var taskCount, nextAttemptNumber int
+	var budgetExhaustedAt *time.Time
+	if err := pool.QueryRow(ctx, `
+		SELECT COUNT(*),MAX(run.next_attempt_number),MAX(run.budget_exhausted_at)
+		FROM proxy_control_business_runs run
+		LEFT JOIN proxy_control_tasks task
+		  ON task.workload_scope=run.workload_scope AND task.business_run_id=run.business_run_id
+		WHERE run.workload_scope='qy-test' AND run.business_run_id=$1
+	`, businessRunID).Scan(&taskCount, &nextAttemptNumber, &budgetExhaustedAt); err != nil {
+		t.Fatalf("load exhausted business run: %v", err)
+	}
+	if taskCount != 9 || nextAttemptNumber != 10 || budgetExhaustedAt == nil {
+		t.Fatalf(
+			"business run tasks=%d next_attempt=%d budget_exhausted_at=%v; want 9/10/non-null",
+			taskCount, nextAttemptNumber, budgetExhaustedAt,
+		)
+	}
+}
+
+func TestBeginTaskRejectsAnIneligibleLeasedProxy(t *testing.T) {
+	manager, pool := newProxyControlPostgres(t)
+	ctx := context.Background()
+
+	proxyID := insertControlProxy(t, pool, "task-ineligible.example:8080", 10)
+	manager.SetCacheInvalidator(func(string) {})
+	if err := manager.syncResources(ctx); err != nil {
+		t.Fatalf("sync managed resources: %v", err)
+	}
+	if _, err := manager.reconcile(ctx); err != nil {
+		t.Fatalf("reconcile initial assignments: %v", err)
+	}
+	claim, err := manager.Claim(ctx, testClaimRequest(
+		"claim-task-ineligible", "worker-task-ineligible", "instance-task-ineligible",
+	))
+	if err != nil {
+		t.Fatalf("claim proxy: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		UPDATE proxies
+		SET status='failed',base_health_status='failed',youtube_health_status='not_run'
+		WHERE id=$1
+	`, proxyID); err != nil {
+		t.Fatalf("mark claimed proxy failed: %v", err)
+	}
+
+	_, err = manager.BeginTask(ctx, BeginTaskRequest{
+		SlotName:         claim.SlotName,
+		WorkerID:         claim.WorkerID,
+		WorkerInstanceID: claim.WorkerInstanceID,
+		LeaseID:          claim.LeaseID,
+		RouteGeneration:  claim.AssignmentVersion,
+		AttemptRequestID: "attempt-task-ineligible",
+		BusinessRunID:    "channel-run-ineligible",
+		JobExecutionID:   "youtube-channel-crawl:channel-ineligible:1",
+		TaskKind:         "channel_full",
+	})
+	if !errors.Is(err, ErrRouteNotReady) {
+		t.Fatalf("begin error = %v, want route not ready", err)
+	}
+	var taskCount int
+	if err := pool.QueryRow(ctx, `
+		SELECT COUNT(*) FROM proxy_control_tasks
+		WHERE workload_scope='qy-test' AND business_run_id='channel-run-ineligible'
+	`).Scan(&taskCount); err != nil {
+		t.Fatalf("count ineligible proxy tasks: %v", err)
+	}
+	if taskCount != 0 {
+		t.Fatalf("ineligible proxy created %d tasks", taskCount)
 	}
 }
 

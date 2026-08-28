@@ -143,7 +143,7 @@ test("release envelope receives scheduled_at only at dispatch time", () => {
   };
 
   assert.equal(envelope.payload.scheduled_at, releasedAt.toISOString());
-  assert.equal(envelope.payload.schema_version, 4);
+  assert.equal(envelope.payload.schema_version, 5);
   assert.deepEqual(envelope.payload.task_mask, {
     about: true,
     video: false,

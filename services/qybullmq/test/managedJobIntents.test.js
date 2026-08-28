@@ -49,6 +49,7 @@ test("Discover Page Intent is stable and its BullMQ payload contains only the pe
   assert.deepEqual(first.jobPayload, {
     page_id: "query:42:run:stable:page:1",
     intent_schema_version: 1,
+    dispatch_generation: 1,
   });
   assert.equal(first.managedIntent.continuation_token, null);
 });
@@ -74,7 +75,7 @@ test("Query Quality freezes ordered members only after grouping by effective Loc
   assert.deepEqual(chunks.map((chunk) => chunk.qualityTaskIds), [[1, 2], [3]]);
   assert.ok(chunks.every((chunk) => chunk.policy.id === "qy-br-query-quality-anonymous-v1"));
   assert.ok(chunks.every((chunk) => Object.keys(chunk.jobPayload).sort().join(",")
-    === "intent_schema_version,quality_chunk_id"));
+    === "dispatch_generation,intent_schema_version,quality_chunk_id"));
   assert.notEqual(chunks[0].chunkIntentHash, chunks[1].chunkIntentHash);
 });
 

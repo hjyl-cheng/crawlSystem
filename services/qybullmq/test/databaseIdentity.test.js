@@ -231,7 +231,14 @@ test("fresh Crawler bootstrap owns idempotent immutable Migration intents", asyn
     assert.match(schema, /UNIQUE \(source_id, channel_id\)/);
     assert.match(schema, /UNIQUE \(source_id, source_candidate_id\)/);
     assert.match(schema, /prevent_migration_intent_source_update/);
+    assert.match(
+      schema,
+      /snapshot_dispatch_generation\s+(?:BIGINT NOT NULL DEFAULT 0|bigint DEFAULT 0 NOT NULL)/,
+    );
+    assert.match(schema, /CREATE TABLE(?: IF NOT EXISTS)? crawler\.migration_retry_intents/);
+    assert.match(schema, /UNIQUE \(candidate_id,dispatch_generation\)/);
   }
+  assert.match(runtime, /ALTER TABLE crawler\.channel_candidates[\s\S]*snapshot_dispatch_generation/);
   assert.doesNotMatch(dispatch, /UPDATE crawler\.channel_candidates[\s\S]*source_json->>'source'='legacy_results_db'/);
   assert.match(dispatch, /loadMigrationSourceChannel/);
 });

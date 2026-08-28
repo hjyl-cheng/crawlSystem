@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/alpkeskin/rota/core/docs"
@@ -37,7 +38,18 @@ type ProxyServer interface {
 	ReloadSettings(ctx context.Context) error
 	RefreshProxyUser(username string)
 	RetireProxyUser(ctx context.Context, username string) error
-	ActivateProxyUser(ctx context.Context, oldUsername, newUsername string, expectedProxyID int) error
+	RequireRouteActivationRegistry()
+	RebuildRouteActivationRegistry(context.Context, []proxycontrol.RouteActivationRegistryEntry) error
+	BeginProxyUserActivation(
+		context.Context,
+		string,
+		string,
+		int,
+		string,
+		string,
+	) (proxycontrol.RouteActivationBeginResult, error)
+	CommitProxyUserActivation(context.Context, string, string) error
+	RetireProxyUserIfClaim(context.Context, string, string) (bool, error)
 }
 
 // Server represents the API server
@@ -59,6 +71,7 @@ type Server struct {
 	proxyControl        *proxycontrol.Manager
 	proxyControlToken   string
 	proxyControlEnabled bool
+	proxyControlStart   sync.Once
 
 	// Handlers
 	authHandler          *handlers.AuthHandler
@@ -150,6 +163,9 @@ func New(
 		},
 		log,
 	)
+	healthChecker.SetOnVerdictApplied(func(event proxy.HealthVerdictEvent) {
+		control.NotifyHealthVerdictApplied(event.ProxyID)
+	})
 
 	// Initialize handlers
 	authHandler := handlers.NewAuthHandler(settingsRepo, adminRepo, log, jwtSecret, cfg.AdminUser, cfg.AdminPass)
@@ -255,10 +271,6 @@ func New(
 	} else {
 		log.Info("periodic proxy health check disabled")
 	}
-	if cfg.ProxyControl.Enabled {
-		serviceGroup.Go(control.Run)
-	}
-
 	s.setupMiddleware()
 	s.setupRoutes()
 
@@ -322,9 +334,9 @@ func (s *Server) setupRoutes() {
 			r.Post("/tasks/observe", s.proxyControlHandler.Observe)
 			r.Post("/tasks/complete", s.proxyControlHandler.CompleteTask)
 			r.Post("/report", s.proxyControlHandler.Report)
-			r.Post("/swap", s.proxyControlHandler.Swap)
 			r.Post("/release", s.proxyControlHandler.Release)
 			r.Get("/capacity", s.proxyControlHandler.Capacity)
+			r.Get("/business-runs/{businessRunID}/budget", s.proxyControlHandler.BusinessRunBudget)
 		})
 	}
 
@@ -458,23 +470,27 @@ func (s *Server) Shutdown(ctx context.Context) error {
 }
 
 // SetProxyServer sets the proxy server reference after initialization
-func (s *Server) SetProxyServer(ps ProxyServer) {
-	s.proxyServer = ps
-	if s.proxyControl != nil {
-		if ps == nil {
-			s.proxyControl.SetDataPlaneController(nil)
-		} else {
-			s.proxyControl.SetDataPlaneController(ps)
+func (s *Server) SetProxyServer(ps ProxyServer) error {
+	if s.proxyControl != nil && s.proxyControlEnabled {
+		if err := s.proxyControl.SetDataPlaneController(ps); err != nil {
+			return err
+		}
+		if ps != nil && s.background != nil {
+			s.proxyControlStart.Do(func() {
+				s.background.Go(s.proxyControl.Run)
+			})
 		}
 	}
+	s.proxyServer = ps
 	if s.userHandler == nil {
-		return
+		return nil
 	}
 	if ps == nil {
 		s.userHandler.SetOnChange(nil)
-		return
+		return nil
 	}
 	s.userHandler.SetOnChange(ps.RefreshProxyUser)
+	return nil
 }
 
 // RefreshProxyUser invalidates one cached pool chain. The next request from

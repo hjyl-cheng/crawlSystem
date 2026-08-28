@@ -10,6 +10,7 @@ import (
 )
 
 type credentialRotation struct {
+	SlotName    string
 	OldUsername string
 	NewUsername string
 }
@@ -52,7 +53,11 @@ func rotateSlotCredential(
 	`, slotName, generation); err != nil {
 		return credentialRotation{}, fmt.Errorf("persist slot credential generation %s: %w", slotName, err)
 	}
-	return credentialRotation{OldUsername: oldName, NewUsername: newName}, nil
+	return credentialRotation{
+		SlotName:    slotName,
+		OldUsername: oldName,
+		NewUsername: newName,
+	}, nil
 }
 
 func (m *Manager) invalidateCredentials(rotations []credentialRotation) {
@@ -70,6 +75,58 @@ func (m *Manager) invalidateCredentials(rotations []credentialRotation) {
 			m.invalidateUser(username)
 		}
 	}
+}
+
+func (m *Manager) retireExpiredCredentialUsers(
+	ctx context.Context,
+	rotations []credentialRotation,
+) error {
+	retireCtx, cancel := context.WithTimeout(
+		context.WithoutCancel(ctx),
+		routeActivationAttemptTimeout,
+	)
+	defer cancel()
+	seen := make(map[string]struct{}, len(rotations))
+	for _, rotation := range rotations {
+		username := strings.TrimSpace(rotation.OldUsername)
+		if username == "" {
+			continue
+		}
+		if _, found := seen[username]; found {
+			continue
+		}
+		seen[username] = struct{}{}
+		if !m.retireUser(retireCtx, username) {
+			return fmt.Errorf("retire expired proxy user %s", username)
+		}
+	}
+	return nil
+}
+
+func (m *Manager) cleanupExpiredLeases(
+	ctx context.Context,
+) ([]credentialRotation, error) {
+	tx, err := m.db.Pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("begin expired Lease cleanup: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, controlAdvisoryLock); err != nil {
+		return nil, fmt.Errorf("lock expired Lease cleanup: %w", err)
+	}
+
+	rotations, err := expireLeases(ctx, tx)
+	if err != nil {
+		return nil, err
+	}
+	if err := m.retireExpiredCredentialUsers(ctx, rotations); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit expired Lease cleanup: %w", err)
+	}
+	m.invalidateCredentials(rotations)
+	return rotations, nil
 }
 
 func expireLeases(
@@ -130,7 +187,10 @@ func expireLeases(
 			    identity_policy_version=NULL, identity_policy_hash=NULL,
 			    required_egress_country=NULL, active_task_id=NULL,
 			    active_task_started_at=NULL, pending_action=NULL, pending_incident_id=NULL,
-			    control_state='unleased', rotation_deadline_at=NULL, updated_at=NOW()
+			    control_state='unleased', rotation_deadline_at=NULL,
+			    route_activation_old_username=NULL,route_activation_claim_id=NULL,
+			    route_activation_claim_until=NULL,route_activation_previous_claim_id=NULL,
+			    updated_at=NOW()
 			WHERE slot_name = ANY($1::text[])
 		`, slotNames); err != nil {
 			return nil, fmt.Errorf("expire proxy leases: %w", err)

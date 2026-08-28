@@ -9,6 +9,7 @@ import (
 
 	"github.com/alpkeskin/rota/core/internal/api/handlers"
 	"github.com/alpkeskin/rota/core/internal/models"
+	"github.com/alpkeskin/rota/core/internal/proxycontrol"
 	"github.com/alpkeskin/rota/core/pkg/logger"
 	"github.com/go-chi/chi/v5"
 )
@@ -25,8 +26,36 @@ func (s *refreshProxyServerStub) RefreshProxyUser(username string) {
 
 func (*refreshProxyServerStub) RetireProxyUser(context.Context, string) error { return nil }
 
-func (*refreshProxyServerStub) ActivateProxyUser(context.Context, string, string, int) error {
+func (*refreshProxyServerStub) RequireRouteActivationRegistry() {}
+
+func (*refreshProxyServerStub) RebuildRouteActivationRegistry(
+	context.Context,
+	[]proxycontrol.RouteActivationRegistryEntry,
+) error {
 	return nil
+}
+
+func (*refreshProxyServerStub) BeginProxyUserActivation(
+	context.Context,
+	string,
+	string,
+	int,
+	string,
+	string,
+) (proxycontrol.RouteActivationBeginResult, error) {
+	return proxycontrol.RouteActivationBeginResult{}, nil
+}
+
+func (*refreshProxyServerStub) CommitProxyUserActivation(context.Context, string, string) error {
+	return nil
+}
+
+func (*refreshProxyServerStub) RetireProxyUserIfClaim(
+	context.Context,
+	string,
+	string,
+) (bool, error) {
+	return false, nil
 }
 
 func TestRefreshProxyUserInvalidatesOneNamedUser(t *testing.T) {

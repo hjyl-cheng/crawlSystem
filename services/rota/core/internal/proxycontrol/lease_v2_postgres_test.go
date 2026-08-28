@@ -145,14 +145,24 @@ func TestRenewV2DiscoversNewReadyRouteFromOlderKnownGeneration(t *testing.T) {
 		t.Fatalf("initial claim = %+v", claim)
 	}
 
-	swapped, err := manager.Swap(ctx, SwapRequest{
-		WorkerID:          claim.WorkerID,
-		LeaseID:           claim.LeaseID,
-		AssignmentVersion: claim.AssignmentVersion,
-		FailedProxyID:     firstProxyID,
-	})
+	dataPlane := &idleRouteDataPlaneStub{}
+	if err := manager.SetDataPlaneController(dataPlane); err != nil {
+		t.Fatalf("initialize data plane: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		UPDATE proxies
+		SET status='failed',base_health_status='failed',youtube_health_status='not_run',
+		    health_generation=health_generation+1,updated_at=NOW()
+		WHERE id=$1
+	`, firstProxyID); err != nil {
+		t.Fatalf("mark old Route unhealthy: %v", err)
+	}
+	if _, err := manager.reconcile(ctx); err != nil {
+		t.Fatalf("activate replacement Route: %v", err)
+	}
+	swapped, err := manager.loadAssignment(ctx, pool, claim.SlotName)
 	if err != nil {
-		t.Fatalf("activate replacement route: %v", err)
+		t.Fatalf("load replacement Route: %v", err)
 	}
 	if !swapped.Ready || swapped.ProxyID == nil || *swapped.ProxyID != secondProxyID {
 		t.Fatalf("replacement assignment = %+v", swapped)

@@ -34,6 +34,10 @@ func (m *Manager) Claim(ctx context.Context, request ClaimRequest) (Assignment, 
 	if err != nil {
 		return Assignment{}, err
 	}
+	expiredCredentialRotations, err := m.cleanupExpiredLeases(ctx)
+	if err != nil {
+		return Assignment{}, err
+	}
 
 	tx, err := m.db.Pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
@@ -42,10 +46,6 @@ func (m *Manager) Claim(ctx context.Context, request ClaimRequest) (Assignment, 
 	defer func() { _ = tx.Rollback(ctx) }()
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, controlAdvisoryLock); err != nil {
 		return Assignment{}, fmt.Errorf("lock proxy claim: %w", err)
-	}
-	credentialRotations, err := expireLeases(ctx, tx)
-	if err != nil {
-		return Assignment{}, err
 	}
 
 	replayed, found, err := loadClaimLease(ctx, tx, m.options.WorkloadScope, request.ClaimRequestID)
@@ -69,7 +69,9 @@ func (m *Manager) Claim(ctx context.Context, request ClaimRequest) (Assignment, 
 		if err := tx.Commit(ctx); err != nil {
 			return Assignment{}, fmt.Errorf("commit replayed proxy claim: %w", err)
 		}
-		m.invalidateCredentials(credentialRotations)
+		if err := m.publishClaimedRoute(ctx, assignment, ""); err != nil {
+			return Assignment{}, err
+		}
 		return assignment, nil
 	}
 
@@ -97,21 +99,21 @@ func (m *Manager) Claim(ctx context.Context, request ClaimRequest) (Assignment, 
 	for _, item := range eligible {
 		eligibleIDs = append(eligibleIDs, item.ID)
 	}
-	var slotName string
+	var slotName, currentProxyUsername string
 	err = tx.QueryRow(ctx, `
-		SELECT s.slot_name
+		SELECT s.slot_name,proxy_user.username
 		FROM proxy_running_slots s
+		JOIN proxy_users proxy_user ON proxy_user.id=s.user_id
 		WHERE s.role=$1 AND s.worker_id IS NULL AND s.current_lease_id IS NULL
 		  AND s.proxy_id=ANY($2::int[]) AND s.ready_after <= NOW()
 		ORDER BY s.slot_no
 		LIMIT 1
 		FOR UPDATE OF s SKIP LOCKED
-	`, request.Role, eligibleIDs).Scan(&slotName)
+	`, request.Role, eligibleIDs).Scan(&slotName, &currentProxyUsername)
 	if errors.Is(err, pgx.ErrNoRows) {
 		if err := tx.Commit(ctx); err != nil {
 			return Assignment{}, fmt.Errorf("commit empty proxy claim: %w", err)
 		}
-		m.invalidateCredentials(credentialRotations)
 		return Assignment{
 			OK:                    true,
 			Ready:                 false,
@@ -132,11 +134,22 @@ func (m *Manager) Claim(ctx context.Context, request ClaimRequest) (Assignment, 
 	}
 
 	leaseID := uuid.NewString()
-	rotation, err := rotateSlotCredential(ctx, tx, slotName)
-	if err != nil {
-		return Assignment{}, err
+	var rotation credentialRotation
+	for _, expiredRotation := range expiredCredentialRotations {
+		if expiredRotation.SlotName == slotName &&
+			expiredRotation.NewUsername == currentProxyUsername {
+			rotation = expiredRotation
+			break
+		}
 	}
-	credentialRotations = append(credentialRotations, rotation)
+	claimCredentialRotations := make([]credentialRotation, 0, 1)
+	if rotation.SlotName == "" {
+		rotation, err = rotateSlotCredential(ctx, tx, slotName)
+		if err != nil {
+			return Assignment{}, err
+		}
+		claimCredentialRotations = append(claimCredentialRotations, rotation)
+	}
 
 	var networkIdentityKey string
 	if err := tx.QueryRow(ctx, `
@@ -192,7 +205,10 @@ func (m *Manager) Claim(ctx context.Context, request ClaimRequest) (Assignment, 
 	if err := tx.Commit(ctx); err != nil {
 		return Assignment{}, fmt.Errorf("commit proxy claim: %w", err)
 	}
-	m.invalidateCredentials(credentialRotations)
+	m.invalidateCredentials(claimCredentialRotations)
+	if err := m.publishClaimedRoute(ctx, assignment, rotation.OldUsername); err != nil {
+		return Assignment{}, err
+	}
 	return assignment, nil
 }
 
@@ -518,7 +534,10 @@ func (m *Manager) Release(ctx context.Context, request ReleaseRequest) (ReleaseR
 		    identity_policy_version=NULL,identity_policy_hash=NULL,
 		    required_egress_country=NULL,active_task_id=NULL,
 		    active_task_started_at=NULL,pending_action=NULL,pending_incident_id=NULL,
-		    control_state='unleased',rotation_deadline_at=NULL,updated_at=NOW()
+		    control_state='unleased',rotation_deadline_at=NULL,
+		    route_activation_old_username=NULL,route_activation_claim_id=NULL,
+		    route_activation_claim_until=NULL,route_activation_previous_claim_id=NULL,
+		    updated_at=NOW()
 		WHERE slot_name=$1 AND worker_id=$2 AND worker_instance_id=$3
 		  AND lease_id=$4 AND current_lease_id=$4 AND assignment_version=$5
 		  AND active_task_id IS NULL
@@ -761,6 +780,14 @@ func scanAssignment(row scanner) (Assignment, error) {
 	}
 	if !assignment.Ready {
 		switch {
+		case assignment.ControlState == "paused_no_reserve":
+			assignment.Reason = "waiting_for_healthy_proxy"
+			assignment.ReasonCode = "NO_POLICY_ELIGIBLE_RESERVE"
+			assignment.RetryAfterMS = 1000
+		case assignment.ControlState == "pending_new_route":
+			assignment.Reason = "waiting_for_rota_refresh"
+			assignment.ReasonCode = "WAITING_FOR_ROUTE_REFRESH"
+			assignment.RetryAfterMS = 250
 		case assignment.ProxyID == nil:
 			assignment.Reason = "waiting_for_healthy_proxy"
 		case assignment.ReadyAfter == nil || assignment.ReadyAfter.After(time.Now()):
@@ -777,17 +804,22 @@ func assignmentSQL() string {
 		SELECT s.slot_name, s.role, COALESCE(s.worker_id,''), COALESCE(s.worker_instance_id,''), s.proxy_id,
 		       p.address, p.protocol, s.ready_after, COALESCE(s.lease_id,''),
 		       s.lease_until, s.assignment_version, s.credential_generation, u.username,
-		       (
-		         s.proxy_id IS NOT NULL AND s.ready_after IS NOT NULL
-		         AND s.current_lease_id IS NOT NULL AND s.lease_until > NOW()
-		         AND s.ready_after <= NOW() AND p.status='active'
-		         AND p.revalidation_required=false
-		         AND (p.cooldown_until IS NULL OR p.cooldown_until <= NOW())
-		         AND (
-		           (p.base_health_status='passed' AND p.youtube_health_status='passed')
-		           OR (p.last_youtube_status=200 AND p.last_rota_youtube_status=200)
-		         )
-		       ) AS ready,
+			       (
+			         s.proxy_id IS NOT NULL AND s.ready_after IS NOT NULL
+			         AND s.current_lease_id IS NOT NULL AND s.lease_until > NOW()
+			         AND s.ready_after <= NOW()
+			         AND (
+			           s.active_task_id IS NOT NULL
+			           OR (
+			             p.status='active' AND p.revalidation_required=false
+			             AND (p.cooldown_until IS NULL OR p.cooldown_until <= NOW())
+			             AND (
+			               (p.base_health_status='passed' AND p.youtube_health_status='passed')
+			               OR (p.last_youtube_status=200 AND p.last_rota_youtube_status=200)
+			             )
+			           )
+			         )
+			       ) AS ready,
 		       s.control_state, COALESCE(s.identity_policy_id,''),
 		       COALESCE(s.identity_policy_version,0), COALESCE(s.identity_policy_hash,''),
 		       COALESCE(s.network_identity_key,''), s.profile_epoch,
