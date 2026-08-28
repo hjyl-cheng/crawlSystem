@@ -95,17 +95,19 @@ func (m *Manager) finalizeRouteActivationClaim(
 	claim routeActivationClaim,
 ) (bool, error) {
 	tag, err := m.db.Pool.Exec(ctx, `
-		UPDATE proxy_running_slots
+		UPDATE proxy_running_slots AS slot
 		SET ready_after=NOW(),control_state='leased_idle',
 		    route_activation_old_username=NULL,route_activation_claim_id=NULL,
 		    route_activation_claim_until=NULL,route_activation_previous_claim_id=NULL,
 		    rotation_deadline_at=NULL,updated_at=NOW()
-		WHERE slot_name=$1 AND current_lease_id=$2 AND lease_until > NOW()
-		  AND proxy_id=$3 AND assignment_version=$4
-		  AND active_task_id IS NULL AND control_state='pending_new_route'
-		  AND route_activation_claim_id=$5 AND route_activation_claim_until > NOW()
+		WHERE slot.slot_name=$1
+		  AND `+expectedLiveLeaseFencePredicate(2, 6)+`
+		  AND slot.proxy_id=$3 AND slot.assignment_version=$4
+		  AND slot.active_task_id IS NULL AND slot.control_state='pending_new_route'
+		  AND slot.route_activation_claim_id=$5
+		  AND slot.route_activation_claim_until > NOW()
 	`, claim.Fence.SlotName, claim.Fence.LeaseID, claim.Fence.ProxyID,
-		claim.Fence.RouteGeneration, claim.ClaimID)
+		claim.Fence.RouteGeneration, claim.ClaimID, m.options.WorkloadScope)
 	if err != nil {
 		return false, err
 	}
@@ -125,13 +127,7 @@ func (m *Manager) resolveUncertainRouteActivation(
 	var ready, leaseLive bool
 	err := m.db.Pool.QueryRow(compensationCtx, `
 		SELECT slot.control_state,slot.ready_after IS NOT NULL,
-		       COALESCE(slot.lease_until > NOW(),false) AND EXISTS (
-		         SELECT 1
-		         FROM proxy_control_leases lease
-		         WHERE lease.workload_scope=$6 AND lease.lease_id=slot.current_lease_id
-		           AND lease.slot_name=slot.slot_name AND lease.status='active'
-		           AND lease.lease_until > NOW()
-		       )
+		       `+expectedLiveLeaseFencePredicate(2, 6)+`
 		FROM proxy_running_slots slot
 		JOIN proxy_users proxy_user ON proxy_user.id=slot.user_id
 		WHERE slot.slot_name=$1 AND slot.current_lease_id=$2
@@ -186,12 +182,14 @@ func (m *Manager) loadOrClaimPendingRouteActivation(
 		       slot.route_activation_claim_until,NOW()
 		FROM proxy_running_slots slot
 		JOIN proxy_users proxy_user ON proxy_user.id=slot.user_id
-		WHERE slot.slot_name=$1 AND slot.current_lease_id=$2 AND slot.lease_until > NOW()
+		WHERE slot.slot_name=$1
+		  AND `+expectedLiveLeaseFencePredicate(2, 5)+`
 		  AND slot.proxy_id=$3 AND slot.assignment_version=$4
 		  AND slot.ready_after IS NULL AND slot.active_task_id IS NULL
 		  AND slot.control_state='pending_new_route'
 		FOR UPDATE OF slot,proxy_user
-	`, fence.SlotName, fence.LeaseID, fence.ProxyID, fence.RouteGeneration).Scan(
+	`, fence.SlotName, fence.LeaseID, fence.ProxyID, fence.RouteGeneration,
+		m.options.WorkloadScope).Scan(
 		&claim.OldUsername,
 		&claim.NewUsername,
 		&persistedClaimID,
@@ -218,17 +216,19 @@ func (m *Manager) loadOrClaimPendingRouteActivation(
 	claim.PreviousClaimID = persistedClaimID
 	claim.ClaimID = uuid.NewString()
 	tag, err := tx.Exec(ctx, `
-		UPDATE proxy_running_slots
+		UPDATE proxy_running_slots AS slot
 		SET route_activation_claim_id=$5,
 		    route_activation_claim_until=NOW()+($6::bigint*interval '1 millisecond'),
 		    route_activation_previous_claim_id=NULLIF($7,''),
 		    updated_at=NOW()
-		WHERE slot_name=$1 AND current_lease_id=$2 AND lease_until > NOW()
-		  AND proxy_id=$3 AND assignment_version=$4
-		  AND ready_after IS NULL AND active_task_id IS NULL
-		  AND control_state='pending_new_route'
+		WHERE slot.slot_name=$1
+		  AND `+expectedLiveLeaseFencePredicate(2, 8)+`
+		  AND slot.proxy_id=$3 AND slot.assignment_version=$4
+		  AND slot.ready_after IS NULL AND slot.active_task_id IS NULL
+		  AND slot.control_state='pending_new_route'
 	`, fence.SlotName, fence.LeaseID, fence.ProxyID, fence.RouteGeneration,
-		claim.ClaimID, routeActivationClaimTTL.Milliseconds(), claim.PreviousClaimID)
+		claim.ClaimID, routeActivationClaimTTL.Milliseconds(), claim.PreviousClaimID,
+		m.options.WorkloadScope)
 	if err != nil {
 		return routeActivationClaim{}, false, fmt.Errorf("persist pending Route activation claim: %w", err)
 	}
@@ -243,16 +243,18 @@ func (m *Manager) loadOrClaimPendingRouteActivation(
 
 func (m *Manager) renewRouteActivationClaim(ctx context.Context, claim routeActivationClaim) bool {
 	tag, err := m.db.Pool.Exec(ctx, `
-		UPDATE proxy_running_slots
+		UPDATE proxy_running_slots AS slot
 		SET route_activation_claim_until=NOW()+($6::bigint*interval '1 millisecond'),
 		    updated_at=NOW()
-		WHERE slot_name=$1 AND current_lease_id=$2 AND lease_until > NOW()
-		  AND proxy_id=$3 AND assignment_version=$4
-		  AND active_task_id IS NULL AND control_state='pending_new_route'
-		  AND ready_after IS NULL AND route_activation_claim_id=$5
-		  AND route_activation_claim_until > NOW()
+		WHERE slot.slot_name=$1
+		  AND `+expectedLiveLeaseFencePredicate(2, 7)+`
+		  AND slot.proxy_id=$3 AND slot.assignment_version=$4
+		  AND slot.active_task_id IS NULL AND slot.control_state='pending_new_route'
+		  AND slot.ready_after IS NULL AND slot.route_activation_claim_id=$5
+		  AND slot.route_activation_claim_until > NOW()
 	`, claim.Fence.SlotName, claim.Fence.LeaseID, claim.Fence.ProxyID,
-		claim.Fence.RouteGeneration, claim.ClaimID, routeActivationClaimTTL.Milliseconds())
+		claim.Fence.RouteGeneration, claim.ClaimID, routeActivationClaimTTL.Milliseconds(),
+		m.options.WorkloadScope)
 	if err != nil {
 		m.logError(
 			"renew pending Route activation claim failed", err,
@@ -269,12 +271,12 @@ func (m *Manager) loadRouteActivationRegistry(
 ) ([]RouteActivationRegistryEntry, error) {
 	rows, err := m.db.Pool.Query(ctx, `
 		SELECT proxy_user.username,slot.control_state,slot.ready_after IS NOT NULL,
-		       slot.current_lease_id IS NOT NULL AND slot.lease_until > NOW(),
+		       `+liveLeaseFencePredicate(1)+`,
 		       COALESCE(slot.route_activation_claim_id,'')
 		FROM proxy_running_slots slot
 		JOIN proxy_users proxy_user ON proxy_user.id=slot.user_id
 		ORDER BY slot.slot_name
-	`)
+	`, m.options.WorkloadScope)
 	if err != nil {
 		return nil, fmt.Errorf("load Route activation registry: %w", err)
 	}
