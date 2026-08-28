@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 )
 
 func TestLiveLeaseFenceRejectsEitherInvalidLeaseRecordAtEveryActivationBoundary(t *testing.T) {
@@ -151,5 +152,76 @@ func TestLiveLeaseFenceRejectsEitherInvalidLeaseRecordAtEveryActivationBoundary(
 				)
 			}
 		})
+	}
+}
+
+func TestRouteActivationFinalizeBudgetIsShorterThanMinimumLease(t *testing.T) {
+	if routeActivationFinalizeTimeout >= routeActivationFinalizeMargin {
+		t.Fatalf(
+			"Finalize timeout %s must be shorter than margin %s",
+			routeActivationFinalizeTimeout,
+			routeActivationFinalizeMargin,
+		)
+	}
+	if routeActivationFinalizeMargin >= 15*time.Second {
+		t.Fatalf("Finalize margin %s must be shorter than the 15s minimum Lease", routeActivationFinalizeMargin)
+	}
+}
+
+func TestLiveLeaseFenceNullSlotLeaseUntilProjectsFalseWithoutScanError(t *testing.T) {
+	manager, pool := newProxyControlPostgres(t)
+	ctx := context.Background()
+
+	proxyID := insertControlProxy(t, pool, "null-slot-lease.example:8080", 10)
+	manager.SetDataPlaneController(&idleRouteDataPlaneStub{})
+	if _, err := manager.reconcile(ctx); err != nil {
+		t.Fatalf("reconcile null Slot Lease Route: %v", err)
+	}
+	assignment, err := manager.Claim(ctx, testClaimRequest(
+		"claim-null-slot-lease",
+		"worker-null-slot-lease",
+		"instance-null-slot-lease",
+	))
+	if err != nil {
+		t.Fatalf("Claim live Route: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		UPDATE proxy_running_slots
+		SET ready_after=NULL,control_state='pending_new_route',
+		    route_activation_old_username='retired-proxy-user'
+		WHERE slot_name=$1 AND current_lease_id=$2
+	`, assignment.SlotName, assignment.LeaseID); err != nil {
+		t.Fatalf("prepare pending Route: %v", err)
+	}
+	fence := routeActivationFence{
+		SlotName:        assignment.SlotName,
+		LeaseID:         assignment.LeaseID,
+		ProxyID:         proxyID,
+		RouteGeneration: assignment.AssignmentVersion,
+	}
+	claim, found, err := manager.loadOrClaimPendingRouteActivation(ctx, fence)
+	if err != nil || !found {
+		t.Fatalf("claim pending Route activation: claim=%+v found=%v err=%v", claim, found, err)
+	}
+	if _, err := pool.Exec(ctx, `
+		UPDATE proxy_running_slots
+		SET lease_until=NULL
+		WHERE slot_name=$1 AND current_lease_id=$2
+	`, assignment.SlotName, assignment.LeaseID); err != nil {
+		t.Fatalf("clear Slot lease_until: %v", err)
+	}
+
+	dataPlane := &idleRouteDataPlaneStub{}
+	manager.SetDataPlaneController(dataPlane)
+	if committed := manager.resolveUncertainRouteActivation(ctx, claim); committed {
+		t.Fatal("NULL Slot lease_until was accepted as a live committed Route")
+	}
+
+	registry, err := manager.loadRouteActivationRegistry(ctx)
+	if err != nil {
+		t.Fatalf("load Route activation Registry with NULL Slot lease_until: %v", err)
+	}
+	if len(registry) != 1 || !registry[0].Blocked || registry[0].Phase != "" {
+		t.Fatalf("NULL Slot lease_until Registry entry = %+v, want blocked with empty phase", registry)
 	}
 }

@@ -11,8 +11,10 @@ import (
 )
 
 const (
-	routeActivationAttemptTimeout = 30 * time.Second
-	routeActivationClaimTTL       = time.Minute
+	routeActivationAttemptTimeout  = 30 * time.Second
+	routeActivationClaimTTL        = time.Minute
+	routeActivationFinalizeTimeout = 5 * time.Second
+	routeActivationFinalizeMargin  = 10 * time.Second
 )
 
 type routeActivationClaim struct {
@@ -53,20 +55,32 @@ func (m *Manager) activatePendingRoute(
 		claim.ClaimID,
 	)
 	cancel()
-	if !began || !m.renewRouteActivationClaim(ctx, claim) {
-		return false
+	if !began {
+		// Uncertain Begin may have left an activating Token. Compensate only
+		// within that Claim; never unconditionally retire the username.
+		return m.resolveUncertainBegin(ctx, claim)
+	}
+	if !m.renewRouteActivationClaim(ctx, claim) {
+		return m.resolveUncertainRouteActivation(ctx, claim)
 	}
 
 	if !begin.AlreadyCommitted {
 		commitCtx, commitCancel := context.WithTimeout(ctx, routeActivationAttemptTimeout)
 		committed := m.commitUserActivation(commitCtx, claim.NewUsername, claim.ClaimID)
 		commitCancel()
-		if !committed || !m.renewRouteActivationClaim(ctx, claim) {
-			return false
+		if !committed {
+			// Commit errors are uncertain: the Token may already be committed.
+			// Only a confirmed !began may use claim-scoped compensation.
+			return m.resolveUncertainRouteActivation(ctx, claim)
+		}
+		if !m.renewRouteActivationClaim(ctx, claim) {
+			return m.resolveUncertainRouteActivation(ctx, claim)
 		}
 	}
 
-	finalized, err := m.finalizeRouteActivationClaim(ctx, claim)
+	finalizeCtx, finalizeCancel := context.WithTimeout(ctx, routeActivationFinalizeTimeout)
+	finalized, err := m.finalizeRouteActivationClaim(finalizeCtx, claim)
+	finalizeCancel()
 	if err != nil {
 		if m.resolveUncertainRouteActivation(ctx, claim) {
 			return true
@@ -94,29 +108,97 @@ func (m *Manager) finalizeRouteActivationClaim(
 	ctx context.Context,
 	claim routeActivationClaim,
 ) (bool, error) {
-	tag, err := m.db.Pool.Exec(ctx, `
+	tx, err := m.db.Pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return false, fmt.Errorf("begin pending Route Finalize: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, controlAdvisoryLock); err != nil {
+		return false, fmt.Errorf("lock pending Route Finalize: %w", err)
+	}
+
+	var leaseID string
+	err = tx.QueryRow(ctx, `
+		SELECT lease_id
+		FROM proxy_control_leases
+		WHERE workload_scope=$1 AND lease_id=$2
+		FOR UPDATE
+	`, m.options.WorkloadScope, claim.Fence.LeaseID).Scan(&leaseID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("lock pending Route Finalize Lease history: %w", err)
+	}
+
+	var slotName string
+	err = tx.QueryRow(ctx, `
+		SELECT slot_name
+		FROM proxy_running_slots
+		WHERE slot_name=$1
+		FOR UPDATE
+	`, claim.Fence.SlotName).Scan(&slotName)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("lock pending Route Finalize Slot: %w", err)
+	}
+
+	tag, err := tx.Exec(ctx, `
 		UPDATE proxy_running_slots AS slot
-		SET ready_after=NOW(),control_state='leased_idle',
+		SET ready_after=statement_timestamp(),control_state='leased_idle',
 		    route_activation_old_username=NULL,route_activation_claim_id=NULL,
 		    route_activation_claim_until=NULL,route_activation_previous_claim_id=NULL,
-		    rotation_deadline_at=NULL,updated_at=NOW()
+		    rotation_deadline_at=NULL,updated_at=statement_timestamp()
 		WHERE slot.slot_name=$1
-		  AND `+expectedLiveLeaseFencePredicate(2, 6)+`
+		  AND slot.current_lease_id=$2
+		  AND slot.lease_until > statement_timestamp() + interval '10 seconds'
+		  AND EXISTS (
+		    SELECT 1
+		    FROM proxy_control_leases live_lease
+		    WHERE live_lease.workload_scope=$6
+		      AND live_lease.lease_id=slot.current_lease_id
+		      AND live_lease.slot_name=slot.slot_name
+		      AND live_lease.status='active'
+		      AND live_lease.lease_until > statement_timestamp() + interval '10 seconds'
+		  )
 		  AND slot.proxy_id=$3 AND slot.assignment_version=$4
 		  AND slot.active_task_id IS NULL AND slot.control_state='pending_new_route'
 		  AND slot.route_activation_claim_id=$5
-		  AND slot.route_activation_claim_until > NOW()
+		  AND slot.route_activation_claim_until > statement_timestamp() + interval '10 seconds'
 	`, claim.Fence.SlotName, claim.Fence.LeaseID, claim.Fence.ProxyID,
 		claim.Fence.RouteGeneration, claim.ClaimID, m.options.WorkloadScope)
 	if err != nil {
 		return false, err
 	}
-	return tag.RowsAffected() == 1, nil
+	if tag.RowsAffected() != 1 {
+		return false, nil
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, fmt.Errorf("commit pending Route Finalize: %w", err)
+	}
+	return true, nil
+}
+
+func (m *Manager) resolveUncertainBegin(
+	ctx context.Context,
+	claim routeActivationClaim,
+) bool {
+	return m.resolveUncertainRouteActivationWithOptions(ctx, claim, false)
 }
 
 func (m *Manager) resolveUncertainRouteActivation(
 	ctx context.Context,
 	claim routeActivationClaim,
+) bool {
+	return m.resolveUncertainRouteActivationWithOptions(ctx, claim, true)
+}
+
+func (m *Manager) resolveUncertainRouteActivationWithOptions(
+	ctx context.Context,
+	claim routeActivationClaim,
+	allowUnconditionalRetire bool,
 ) bool {
 	compensationCtx, cancel := context.WithTimeout(
 		context.WithoutCancel(ctx),
@@ -151,7 +233,11 @@ func (m *Manager) resolveUncertainRouteActivation(
 		)
 		return false
 	}
-	if err == nil && !leaseLive {
+	fenceGone := errors.Is(err, pgx.ErrNoRows) || (err == nil && !leaseLive)
+	if fenceGone && allowUnconditionalRetire {
+		// The authoritative Fence no longer exists or is not live. This
+		// username was the activation in progress; retire it even if the
+		// Token is already committed. Real query errors must not retire.
 		m.retireUser(compensationCtx, claim.NewUsername)
 		return false
 	}
@@ -170,6 +256,22 @@ func (m *Manager) loadOrClaimPendingRouteActivation(
 		return routeActivationClaim{}, false, fmt.Errorf("begin pending Route activation claim: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, controlAdvisoryLock); err != nil {
+		return routeActivationClaim{}, false, fmt.Errorf("lock pending Route activation claim: %w", err)
+	}
+	var leaseID string
+	err = tx.QueryRow(ctx, `
+		SELECT lease_id
+		FROM proxy_control_leases
+		WHERE workload_scope=$1 AND lease_id=$2
+		FOR UPDATE
+	`, m.options.WorkloadScope, fence.LeaseID).Scan(&leaseID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return routeActivationClaim{}, false, nil
+	}
+	if err != nil {
+		return routeActivationClaim{}, false, fmt.Errorf("lock pending Route activation Lease history: %w", err)
+	}
 
 	claim := routeActivationClaim{Fence: fence}
 	var persistedClaimID, persistedPreviousClaimID string
@@ -179,7 +281,7 @@ func (m *Manager) loadOrClaimPendingRouteActivation(
 		SELECT COALESCE(slot.route_activation_old_username,''),proxy_user.username,
 		       COALESCE(slot.route_activation_claim_id,''),
 		       COALESCE(slot.route_activation_previous_claim_id,''),
-		       slot.route_activation_claim_until,NOW()
+		       slot.route_activation_claim_until,statement_timestamp()
 		FROM proxy_running_slots slot
 		JOIN proxy_users proxy_user ON proxy_user.id=slot.user_id
 		WHERE slot.slot_name=$1
@@ -218,9 +320,9 @@ func (m *Manager) loadOrClaimPendingRouteActivation(
 	tag, err := tx.Exec(ctx, `
 		UPDATE proxy_running_slots AS slot
 		SET route_activation_claim_id=$5,
-		    route_activation_claim_until=NOW()+($6::bigint*interval '1 millisecond'),
+		    route_activation_claim_until=statement_timestamp()+($6::bigint*interval '1 millisecond'),
 		    route_activation_previous_claim_id=NULLIF($7,''),
-		    updated_at=NOW()
+		    updated_at=statement_timestamp()
 		WHERE slot.slot_name=$1
 		  AND `+expectedLiveLeaseFencePredicate(2, 8)+`
 		  AND slot.proxy_id=$3 AND slot.assignment_version=$4
@@ -242,16 +344,52 @@ func (m *Manager) loadOrClaimPendingRouteActivation(
 }
 
 func (m *Manager) renewRouteActivationClaim(ctx context.Context, claim routeActivationClaim) bool {
-	tag, err := m.db.Pool.Exec(ctx, `
+	tx, err := m.db.Pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		m.logError(
+			"renew pending Route activation claim failed", err,
+			"slot", claim.Fence.SlotName,
+			"claim_id", claim.ClaimID,
+		)
+		return false
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, controlAdvisoryLock); err != nil {
+		m.logError(
+			"renew pending Route activation claim failed", err,
+			"slot", claim.Fence.SlotName,
+			"claim_id", claim.ClaimID,
+		)
+		return false
+	}
+	var leaseID string
+	err = tx.QueryRow(ctx, `
+		SELECT lease_id
+		FROM proxy_control_leases
+		WHERE workload_scope=$1 AND lease_id=$2
+		FOR UPDATE
+	`, m.options.WorkloadScope, claim.Fence.LeaseID).Scan(&leaseID)
+	if err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			m.logError(
+				"renew pending Route activation claim failed", err,
+				"slot", claim.Fence.SlotName,
+				"claim_id", claim.ClaimID,
+			)
+		}
+		return false
+	}
+
+	tag, err := tx.Exec(ctx, `
 		UPDATE proxy_running_slots AS slot
-		SET route_activation_claim_until=NOW()+($6::bigint*interval '1 millisecond'),
-		    updated_at=NOW()
+		SET route_activation_claim_until=statement_timestamp()+($6::bigint*interval '1 millisecond'),
+		    updated_at=statement_timestamp()
 		WHERE slot.slot_name=$1
 		  AND `+expectedLiveLeaseFencePredicate(2, 7)+`
 		  AND slot.proxy_id=$3 AND slot.assignment_version=$4
 		  AND slot.active_task_id IS NULL AND slot.control_state='pending_new_route'
 		  AND slot.ready_after IS NULL AND slot.route_activation_claim_id=$5
-		  AND slot.route_activation_claim_until > NOW()
+		  AND slot.route_activation_claim_until > statement_timestamp()
 	`, claim.Fence.SlotName, claim.Fence.LeaseID, claim.Fence.ProxyID,
 		claim.Fence.RouteGeneration, claim.ClaimID, routeActivationClaimTTL.Milliseconds(),
 		m.options.WorkloadScope)
@@ -263,7 +401,18 @@ func (m *Manager) renewRouteActivationClaim(ctx context.Context, claim routeActi
 		)
 		return false
 	}
-	return tag.RowsAffected() == 1
+	if tag.RowsAffected() != 1 {
+		return false
+	}
+	if err := tx.Commit(ctx); err != nil {
+		m.logError(
+			"renew pending Route activation claim failed", err,
+			"slot", claim.Fence.SlotName,
+			"claim_id", claim.ClaimID,
+		)
+		return false
+	}
+	return true
 }
 
 func (m *Manager) loadRouteActivationRegistry(

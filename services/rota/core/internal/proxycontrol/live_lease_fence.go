@@ -5,9 +5,9 @@ import "fmt"
 // liveLeaseFencePredicate keeps the Slot and Lease history halves of a live
 // Lease in one predicate shared by Route control SQL.
 func liveLeaseFencePredicate(workloadScopeParameter int) string {
-	return fmt.Sprintf(`(
+	return fmt.Sprintf(`COALESCE((
 		slot.current_lease_id IS NOT NULL
-		AND slot.lease_until > NOW()
+		AND slot.lease_until > statement_timestamp()
 		AND EXISTS (
 		  SELECT 1
 		  FROM proxy_control_leases live_lease
@@ -15,9 +15,9 @@ func liveLeaseFencePredicate(workloadScopeParameter int) string {
 		    AND live_lease.lease_id=slot.current_lease_id
 		    AND live_lease.slot_name=slot.slot_name
 		    AND live_lease.status='active'
-		    AND live_lease.lease_until > NOW()
+		    AND live_lease.lease_until > statement_timestamp()
 		)
-	)`, workloadScopeParameter)
+	), FALSE)`, workloadScopeParameter)
 }
 
 func expectedLiveLeaseFencePredicate(
