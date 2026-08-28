@@ -346,6 +346,13 @@ func TestClaimAfterLeaseExpiryRetiresTheExpiredWorkersRoute(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second Claim: %v", err)
 	}
+	if second.CredentialGeneration != first.CredentialGeneration+1 {
+		t.Fatalf(
+			"replacement Claim credential generation = %d, want %d",
+			second.CredentialGeneration,
+			first.CredentialGeneration+1,
+		)
+	}
 	if dataPlane.ready(first.ProxyUser, firstClaimID) {
 		t.Fatalf("expired Worker route %q remained committed after replacement Claim", first.ProxyUser)
 	}
@@ -426,6 +433,65 @@ func TestExpiredClaimReplayCommitsExpiryAndRetiresItsRoute(t *testing.T) {
 	}
 	if rotatedUsername == claimed.ProxyUser {
 		t.Fatalf("expired Claim replay did not rotate credential %q", claimed.ProxyUser)
+	}
+}
+
+func TestConflictingExpiredClaimReplayStillCommitsExpiryAndRetiresItsRoute(t *testing.T) {
+	manager, pool := newProxyControlPostgres(t)
+	ctx := context.Background()
+
+	_ = insertControlProxy(t, pool, "claim-expired-conflict.example:8080", 10)
+	dataPlane := &claimedRouteDataPlane{}
+	if err := manager.SetDataPlaneController(dataPlane); err != nil {
+		t.Fatalf("set Claim data plane: %v", err)
+	}
+	if _, err := manager.reconcile(ctx); err != nil {
+		t.Fatalf("reconcile Claim route: %v", err)
+	}
+
+	request := testClaimRequest(
+		"claim-expired-conflict-request",
+		"claim-expired-conflict-worker",
+		"claim-expired-conflict-instance",
+	)
+	claimed, err := manager.Claim(ctx, request)
+	if err != nil {
+		t.Fatalf("initial Claim: %v", err)
+	}
+	activationClaimID := "lease:" + claimed.LeaseID
+	if !dataPlane.ready(claimed.ProxyUser, activationClaimID) {
+		t.Fatalf("initial Claim route was not committed: assignment=%+v data_plane=%+v", claimed, dataPlane)
+	}
+	if _, err := pool.Exec(ctx, `
+		UPDATE proxy_control_leases SET lease_until=NOW()-interval '1 second'
+		WHERE lease_id=$1
+	`, claimed.LeaseID); err != nil {
+		t.Fatalf("expire Claim Lease history: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		UPDATE proxy_running_slots SET lease_until=NOW()-interval '1 second'
+		WHERE current_lease_id=$1
+	`, claimed.LeaseID); err != nil {
+		t.Fatalf("expire Claim Slot Lease: %v", err)
+	}
+
+	conflicting := request
+	conflicting.WorkerInstanceID = "claim-expired-conflict-other-instance"
+	if replayed, err := manager.Claim(ctx, conflicting); !errors.Is(err, ErrIdempotencyConflict) {
+		t.Fatalf("conflicting expired Claim replay: assignment=%+v err=%v", replayed, err)
+	}
+	if dataPlane.ready(claimed.ProxyUser, activationClaimID) {
+		t.Fatalf("expired Route %q remained committed after conflicting Claim replay", claimed.ProxyUser)
+	}
+
+	var leaseStatus string
+	if err := pool.QueryRow(ctx, `
+		SELECT status FROM proxy_control_leases WHERE lease_id=$1
+	`, claimed.LeaseID).Scan(&leaseStatus); err != nil {
+		t.Fatalf("load expired conflicting Claim Lease: %v", err)
+	}
+	if leaseStatus != "expired" {
+		t.Fatalf("conflicting replay left expired Lease status %q", leaseStatus)
 	}
 }
 
@@ -538,6 +604,68 @@ func TestReconcileRetiresAnExpiredWorkersRouteBeforeAnotherClaim(t *testing.T) {
 	}
 	if dataPlane.ready(claimed.ProxyUser, claimID) {
 		t.Fatalf("expired Worker route %q remained committed after Reconcile", claimed.ProxyUser)
+	}
+}
+
+func TestReconcileFailureAfterExpiryStillCommitsCleanupAndRetiresRoute(t *testing.T) {
+	manager, pool := newProxyControlPostgres(t)
+	ctx := context.Background()
+
+	_ = insertControlProxy(t, pool, "reconcile-expiry-failure.example:8080", 10)
+	dataPlane := &claimedRouteDataPlane{}
+	if err := manager.SetDataPlaneController(dataPlane); err != nil {
+		t.Fatalf("set Claim data plane: %v", err)
+	}
+	if _, err := manager.reconcile(ctx); err != nil {
+		t.Fatalf("reconcile Claim route: %v", err)
+	}
+	claimed, err := manager.Claim(ctx, testClaimRequest(
+		"reconcile-expiry-failure-request",
+		"reconcile-expiry-failure-worker",
+		"reconcile-expiry-failure-instance",
+	))
+	if err != nil {
+		t.Fatalf("Claim route before expiry: %v", err)
+	}
+	activationClaimID := "lease:" + claimed.LeaseID
+	if !dataPlane.ready(claimed.ProxyUser, activationClaimID) {
+		t.Fatalf("Claim route was not committed: assignment=%+v data_plane=%+v", claimed, dataPlane)
+	}
+	if _, err := pool.Exec(ctx, `
+		UPDATE proxy_control_leases SET lease_until=NOW()-interval '1 second'
+		WHERE lease_id=$1
+	`, claimed.LeaseID); err != nil {
+		t.Fatalf("expire Lease history: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		UPDATE proxy_running_slots SET lease_until=NOW()-interval '1 second'
+		WHERE current_lease_id=$1
+	`, claimed.LeaseID); err != nil {
+		t.Fatalf("expire Slot Lease: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `ALTER TABLE pool_proxies RENAME TO pool_proxies_unavailable`); err != nil {
+		t.Fatalf("inject post-expiry reconciliation failure: %v", err)
+	}
+
+	if _, err := manager.reconcile(ctx); err == nil {
+		t.Fatal("Reconcile unexpectedly succeeded after its post-expiry query was removed")
+	}
+	if dataPlane.ready(claimed.ProxyUser, activationClaimID) {
+		t.Fatalf("expired Route %q remained committed after Reconcile failure", claimed.ProxyUser)
+	}
+
+	var leaseStatus string
+	var currentLeaseID *string
+	if err := pool.QueryRow(ctx, `
+		SELECT lease.status,slot.current_lease_id
+		FROM proxy_control_leases AS lease
+		JOIN proxy_running_slots AS slot ON slot.slot_name=lease.slot_name
+		WHERE lease.lease_id=$1
+	`, claimed.LeaseID).Scan(&leaseStatus, &currentLeaseID); err != nil {
+		t.Fatalf("load independently expired Lease: %v", err)
+	}
+	if leaseStatus != "expired" || currentLeaseID != nil {
+		t.Fatalf("failed Reconcile rolled back expiry: status=%q current_lease_id=%v", leaseStatus, currentLeaseID)
 	}
 }
 

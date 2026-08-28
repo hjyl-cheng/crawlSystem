@@ -122,17 +122,28 @@ func (m *Manager) resolveUncertainRouteActivation(
 	)
 	defer cancel()
 	var controlState string
-	var ready bool
+	var ready, leaseLive bool
 	err := m.db.Pool.QueryRow(compensationCtx, `
-		SELECT slot.control_state,slot.ready_after IS NOT NULL
+		SELECT slot.control_state,slot.ready_after IS NOT NULL,
+		       COALESCE(slot.lease_until > NOW(),false) AND EXISTS (
+		         SELECT 1
+		         FROM proxy_control_leases lease
+		         WHERE lease.workload_scope=$6 AND lease.lease_id=slot.current_lease_id
+		           AND lease.slot_name=slot.slot_name AND lease.status='active'
+		           AND lease.lease_until > NOW()
+		       )
 		FROM proxy_running_slots slot
 		JOIN proxy_users proxy_user ON proxy_user.id=slot.user_id
 		WHERE slot.slot_name=$1 AND slot.current_lease_id=$2
 		  AND slot.proxy_id=$3 AND slot.assignment_version=$4
 		  AND proxy_user.username=$5
 	`, claim.Fence.SlotName, claim.Fence.LeaseID, claim.Fence.ProxyID,
-		claim.Fence.RouteGeneration, claim.NewUsername).Scan(&controlState, &ready)
-	if err == nil && ready &&
+		claim.Fence.RouteGeneration, claim.NewUsername, m.options.WorkloadScope).Scan(
+		&controlState,
+		&ready,
+		&leaseLive,
+	)
+	if err == nil && leaseLive && ready &&
 		(controlState == "leased_idle" || controlState == "active_task") {
 		return true
 	}
@@ -142,6 +153,10 @@ func (m *Manager) resolveUncertainRouteActivation(
 			"slot", claim.Fence.SlotName,
 			"route_generation", claim.Fence.RouteGeneration,
 		)
+		return false
+	}
+	if err == nil && !leaseLive {
+		m.retireUser(compensationCtx, claim.NewUsername)
 		return false
 	}
 	// A committed Token makes this a no-op. Only an activation that never

@@ -28,7 +28,7 @@ type runningSlot struct {
 	IdentityPolicyID  string
 }
 
-type bindingRefresh struct {
+type routeAssignmentRefresh struct {
 	SlotName          string
 	OldProxyUser      string
 	ProxyUser         string
@@ -49,6 +49,11 @@ func (m *Manager) reconcile(ctx context.Context) (reconcileSummary, error) {
 	if err := m.requireEnabled(); err != nil {
 		return reconcileSummary{}, err
 	}
+	m.reconcileMu.Lock()
+	defer m.reconcileMu.Unlock()
+	if _, err := m.cleanupExpiredLeases(ctx); err != nil {
+		return reconcileSummary{}, err
+	}
 	tx, err := m.db.Pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return reconcileSummary{}, fmt.Errorf("begin proxy reconciliation: %w", err)
@@ -56,10 +61,6 @@ func (m *Manager) reconcile(ctx context.Context) (reconcileSummary, error) {
 	defer func() { _ = tx.Rollback(ctx) }()
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, controlAdvisoryLock); err != nil {
 		return reconcileSummary{}, fmt.Errorf("lock proxy reconciliation: %w", err)
-	}
-	credentialRotations, err := expireLeases(ctx, tx)
-	if err != nil {
-		return reconcileSummary{}, err
 	}
 
 	slots, err := loadRunningSlots(ctx, tx)
@@ -90,7 +91,7 @@ func (m *Manager) reconcile(ctx context.Context) (reconcileSummary, error) {
 		})
 	}
 	plan := planPolicyAssignments(states, candidatesByRole)
-	refreshes := make([]bindingRefresh, 0)
+	refreshes := make([]routeAssignmentRefresh, 0)
 	assignmentChanges := make(map[string]bool)
 	for _, slot := range slots {
 		if slotLeaseOwned(slot) && slot.ActiveTaskID != nil {
@@ -104,7 +105,7 @@ func (m *Manager) reconcile(ctx context.Context) (reconcileSummary, error) {
 		}
 	}
 
-	// Release changed assignments first so unique proxy bindings cannot collide
+	// Release changed assignments first so unique Route assignments cannot collide
 	// while two free slots exchange endpoints.
 	changedNames := make([]string, 0, len(assignmentChanges))
 	for name := range assignmentChanges {
@@ -178,7 +179,7 @@ func (m *Manager) reconcile(ctx context.Context) (reconcileSummary, error) {
 					RouteGeneration: slot.AssignmentVersion,
 				}
 			}
-			refreshes = append(refreshes, bindingRefresh{
+			refreshes = append(refreshes, routeAssignmentRefresh{
 				SlotName:          slot.Name,
 				OldProxyUser:      oldProxyUser,
 				ProxyUser:         slot.ProxyUser,
@@ -188,7 +189,7 @@ func (m *Manager) reconcile(ctx context.Context) (reconcileSummary, error) {
 				ActivationFence:   activationFence,
 			})
 		} else if changed {
-			refreshes = append(refreshes, bindingRefresh{
+			refreshes = append(refreshes, routeAssignmentRefresh{
 				SlotName:          slot.Name,
 				OldProxyUser:      oldProxyUser,
 				ProxyUser:         slot.ProxyUser,
@@ -198,14 +199,10 @@ func (m *Manager) reconcile(ctx context.Context) (reconcileSummary, error) {
 		}
 	}
 
-	if err := m.retireExpiredCredentialUsers(ctx, credentialRotations); err != nil {
-		return reconcileSummary{}, err
-	}
 	if err := tx.Commit(ctx); err != nil {
 		return reconcileSummary{}, fmt.Errorf("commit proxy reconciliation: %w", err)
 	}
-	m.invalidateCredentials(credentialRotations)
-	m.finalizeBindings(ctx, refreshes)
+	m.finalizeRouteAssignments(ctx, refreshes)
 	eligible := uniqueCandidateCount(candidatesByRole)
 	return reconcileSummary{
 		Eligible: eligible,
@@ -528,11 +525,14 @@ func equalOptionalInt(left, right *int) bool {
 	return (left == nil && right == nil) || (left != nil && right != nil && *left == *right)
 }
 
-func (m *Manager) finalizeBindings(ctx context.Context, bindings []bindingRefresh) {
-	if len(bindings) == 0 {
+func (m *Manager) finalizeRouteAssignments(
+	ctx context.Context,
+	assignments []routeAssignmentRefresh,
+) {
+	if len(assignments) == 0 {
 		return
 	}
-	slices.SortFunc(bindings, func(left, right bindingRefresh) int {
+	slices.SortFunc(assignments, func(left, right routeAssignmentRefresh) int {
 		if left.ProxyUser < right.ProxyUser {
 			return -1
 		}
@@ -541,7 +541,7 @@ func (m *Manager) finalizeBindings(ctx context.Context, bindings []bindingRefres
 		}
 		return 0
 	})
-	bindings = slices.CompactFunc(bindings, func(left, right bindingRefresh) bool {
+	assignments = slices.CompactFunc(assignments, func(left, right routeAssignmentRefresh) bool {
 		return left.SlotName == right.SlotName &&
 			left.OldProxyUser == right.OldProxyUser &&
 			left.ProxyUser == right.ProxyUser &&
@@ -550,27 +550,27 @@ func (m *Manager) finalizeBindings(ctx context.Context, bindings []bindingRefres
 			left.ControlState == right.ControlState &&
 			equalRouteActivationFence(left.ActivationFence, right.ActivationFence)
 	})
-	for _, binding := range bindings {
-		if binding.ProxyID == nil {
-			if binding.OldProxyUser != "" {
-				m.retireUser(ctx, binding.OldProxyUser)
+	for _, assignment := range assignments {
+		if assignment.ProxyID == nil {
+			if assignment.OldProxyUser != "" {
+				m.retireUser(ctx, assignment.OldProxyUser)
 			}
-			m.invalidateUser(binding.ProxyUser)
+			m.invalidateUser(assignment.ProxyUser)
 			continue
 		}
-		if binding.ControlState == "pending_new_route" {
-			if binding.ActivationFence == nil {
+		if assignment.ControlState == "pending_new_route" {
+			if assignment.ActivationFence == nil {
 				m.logError(
 					"pending Route activation is missing its Fence",
 					ErrLeaseConflict,
-					"slot", binding.SlotName,
+					"slot", assignment.SlotName,
 				)
 				continue
 			}
-			m.activatePendingRoute(ctx, *binding.ActivationFence)
+			m.activatePendingRoute(ctx, *assignment.ActivationFence)
 			continue
 		}
-		if !m.invalidateUser(binding.ProxyUser) {
+		if !m.invalidateUser(assignment.ProxyUser) {
 			continue
 		}
 		if _, err := m.db.Pool.Exec(ctx, `
@@ -578,8 +578,8 @@ func (m *Manager) finalizeBindings(ctx context.Context, bindings []bindingRefres
 			SET ready_after=NOW(), updated_at=NOW()
 			WHERE user_id=(SELECT id FROM proxy_users WHERE username=$1)
 			  AND proxy_id=$2 AND assignment_version=$3
-		`, binding.ProxyUser, *binding.ProxyID, binding.AssignmentVersion); err != nil {
-			m.logError("mark proxy binding ready failed", err, "proxy_user", binding.ProxyUser)
+		`, assignment.ProxyUser, *assignment.ProxyID, assignment.AssignmentVersion); err != nil {
+			m.logError("mark Route assignment ready failed", err, "proxy_user", assignment.ProxyUser)
 		}
 	}
 }

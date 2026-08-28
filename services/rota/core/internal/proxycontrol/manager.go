@@ -67,6 +67,7 @@ type Manager struct {
 	invalidate   func(string)
 	dataPlane    DataPlaneController
 
+	reconcileMu       sync.Mutex
 	reconcileRequests chan struct{}
 	healthRequests    chan int
 	healthMu          sync.Mutex
@@ -133,7 +134,7 @@ func New(
 }
 
 // SetCacheInvalidator installs the in-process adapter that drops a Proxy
-// User's cached Pool chain after a committed binding change.
+// User's cached Pool chain after a committed Route assignment change.
 func (m *Manager) SetCacheInvalidator(invalidate func(string)) {
 	m.invalidateMu.Lock()
 	m.invalidate = invalidate

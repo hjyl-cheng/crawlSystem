@@ -103,6 +103,32 @@ func (m *Manager) retireExpiredCredentialUsers(
 	return nil
 }
 
+func (m *Manager) cleanupExpiredLeases(
+	ctx context.Context,
+) ([]credentialRotation, error) {
+	tx, err := m.db.Pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("begin expired Lease cleanup: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, controlAdvisoryLock); err != nil {
+		return nil, fmt.Errorf("lock expired Lease cleanup: %w", err)
+	}
+
+	rotations, err := expireLeases(ctx, tx)
+	if err != nil {
+		return nil, err
+	}
+	if err := m.retireExpiredCredentialUsers(ctx, rotations); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit expired Lease cleanup: %w", err)
+	}
+	m.invalidateCredentials(rotations)
+	return rotations, nil
+}
+
 func expireLeases(
 	ctx context.Context,
 	tx pgx.Tx,

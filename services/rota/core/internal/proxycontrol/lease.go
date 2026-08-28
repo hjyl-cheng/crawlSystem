@@ -34,6 +34,10 @@ func (m *Manager) Claim(ctx context.Context, request ClaimRequest) (Assignment, 
 	if err != nil {
 		return Assignment{}, err
 	}
+	expiredCredentialRotations, err := m.cleanupExpiredLeases(ctx)
+	if err != nil {
+		return Assignment{}, err
+	}
 
 	tx, err := m.db.Pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
@@ -43,11 +47,6 @@ func (m *Manager) Claim(ctx context.Context, request ClaimRequest) (Assignment, 
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, controlAdvisoryLock); err != nil {
 		return Assignment{}, fmt.Errorf("lock proxy claim: %w", err)
 	}
-	credentialRotations, err := expireLeases(ctx, tx)
-	if err != nil {
-		return Assignment{}, err
-	}
-	expiredCredentialRotations := append([]credentialRotation(nil), credentialRotations...)
 
 	replayed, found, err := loadClaimLease(ctx, tx, m.options.WorkloadScope, request.ClaimRequestID)
 	if err != nil {
@@ -58,13 +57,6 @@ func (m *Manager) Claim(ctx context.Context, request ClaimRequest) (Assignment, 
 			return Assignment{}, fmt.Errorf("%w: claim_request_id %q", ErrIdempotencyConflict, request.ClaimRequestID)
 		}
 		if replayed.Status != "active" || !replayed.LeaseUntil.After(time.Now()) {
-			if err := m.retireExpiredCredentialUsers(ctx, expiredCredentialRotations); err != nil {
-				return Assignment{}, err
-			}
-			if err := tx.Commit(ctx); err != nil {
-				return Assignment{}, fmt.Errorf("commit expired proxy claim replay: %w", err)
-			}
-			m.invalidateCredentials(credentialRotations)
 			return Assignment{}, ErrLeaseGone
 		}
 		assignment, err := m.loadAssignment(ctx, tx, replayed.SlotName)
@@ -74,13 +66,9 @@ func (m *Manager) Claim(ctx context.Context, request ClaimRequest) (Assignment, 
 		if assignment.LeaseID != replayed.LeaseID || assignment.WorkerInstanceID != request.WorkerInstanceID {
 			return Assignment{}, ErrLeaseGone
 		}
-		if err := m.retireExpiredCredentialUsers(ctx, expiredCredentialRotations); err != nil {
-			return Assignment{}, err
-		}
 		if err := tx.Commit(ctx); err != nil {
 			return Assignment{}, fmt.Errorf("commit replayed proxy claim: %w", err)
 		}
-		m.invalidateCredentials(credentialRotations)
 		if err := m.publishClaimedRoute(ctx, assignment, ""); err != nil {
 			return Assignment{}, err
 		}
@@ -111,24 +99,21 @@ func (m *Manager) Claim(ctx context.Context, request ClaimRequest) (Assignment, 
 	for _, item := range eligible {
 		eligibleIDs = append(eligibleIDs, item.ID)
 	}
-	var slotName string
+	var slotName, currentProxyUsername string
 	err = tx.QueryRow(ctx, `
-		SELECT s.slot_name
+		SELECT s.slot_name,proxy_user.username
 		FROM proxy_running_slots s
+		JOIN proxy_users proxy_user ON proxy_user.id=s.user_id
 		WHERE s.role=$1 AND s.worker_id IS NULL AND s.current_lease_id IS NULL
 		  AND s.proxy_id=ANY($2::int[]) AND s.ready_after <= NOW()
 		ORDER BY s.slot_no
 		LIMIT 1
 		FOR UPDATE OF s SKIP LOCKED
-	`, request.Role, eligibleIDs).Scan(&slotName)
+	`, request.Role, eligibleIDs).Scan(&slotName, &currentProxyUsername)
 	if errors.Is(err, pgx.ErrNoRows) {
-		if err := m.retireExpiredCredentialUsers(ctx, expiredCredentialRotations); err != nil {
-			return Assignment{}, err
-		}
 		if err := tx.Commit(ctx); err != nil {
 			return Assignment{}, fmt.Errorf("commit empty proxy claim: %w", err)
 		}
-		m.invalidateCredentials(credentialRotations)
 		return Assignment{
 			OK:                    true,
 			Ready:                 false,
@@ -150,18 +135,20 @@ func (m *Manager) Claim(ctx context.Context, request ClaimRequest) (Assignment, 
 
 	leaseID := uuid.NewString()
 	var rotation credentialRotation
-	for _, expiredRotation := range credentialRotations {
-		if expiredRotation.SlotName == slotName {
+	for _, expiredRotation := range expiredCredentialRotations {
+		if expiredRotation.SlotName == slotName &&
+			expiredRotation.NewUsername == currentProxyUsername {
 			rotation = expiredRotation
 			break
 		}
 	}
+	claimCredentialRotations := make([]credentialRotation, 0, 1)
 	if rotation.SlotName == "" {
 		rotation, err = rotateSlotCredential(ctx, tx, slotName)
 		if err != nil {
 			return Assignment{}, err
 		}
-		credentialRotations = append(credentialRotations, rotation)
+		claimCredentialRotations = append(claimCredentialRotations, rotation)
 	}
 
 	var networkIdentityKey string
@@ -215,13 +202,10 @@ func (m *Manager) Claim(ctx context.Context, request ClaimRequest) (Assignment, 
 	if err != nil {
 		return Assignment{}, err
 	}
-	if err := m.retireExpiredCredentialUsers(ctx, expiredCredentialRotations); err != nil {
-		return Assignment{}, err
-	}
 	if err := tx.Commit(ctx); err != nil {
 		return Assignment{}, fmt.Errorf("commit proxy claim: %w", err)
 	}
-	m.invalidateCredentials(credentialRotations)
+	m.invalidateCredentials(claimCredentialRotations)
 	if err := m.publishClaimedRoute(ctx, assignment, rotation.OldUsername); err != nil {
 		return Assignment{}, err
 	}
