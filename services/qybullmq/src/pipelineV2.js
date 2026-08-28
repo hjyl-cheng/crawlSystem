@@ -56,8 +56,22 @@ import {
   recordAcceptedChannelCandidateSnapshot,
   rejectChannelCandidateAdmission,
 } from "./channelCandidateAttemptMutations.js";
-import { currentChannelExecution } from "./channelExecutionContext.js";
-import { detailAgeDays } from "./contentWindow.js";
+import {
+  currentChannelExecution,
+  currentChannelExecutionAbortSignal,
+} from "./channelExecutionContext.js";
+import { throwIfAborted } from "./abortSignal.js";
+import {
+  classifyContentWindow,
+  CONTENT_WINDOW_POLICY_VERSION,
+  detailAgeDays,
+} from "./contentWindow.js";
+import { contentDetailBatchStopReason } from "./contentDetailBatchPolicy.js";
+import {
+  publicationEvidenceFromFields,
+  publicationEvidenceConflictRecord,
+  selectPublicationEvidence,
+} from "./publicationTimeEvidence.js";
 import { query, withTransaction } from "./db.js";
 import {
   IncrementalAgentResultStore,
@@ -188,6 +202,10 @@ const incrementalAgentResultStore = new IncrementalAgentResultStore({
   withTransaction,
   maxAttempts: intValue(process.env.INCREMENTAL_AGENT_MAX_ATTEMPTS, 8, 1, 50),
 });
+
+function throwIfChannelExecutionAborted() {
+  throwIfAborted(currentChannelExecutionAbortSignal());
+}
 const localOfflineProfileExecutor = new LocalOfflineProfileExecutor({
   loadLatestRunIds: async (channelIds) => {
     if (!Array.isArray(channelIds) || channelIds.length === 0) return new Map();
@@ -350,6 +368,12 @@ function mergeChannelMetadata(base, patch) {
   return output;
 }
 
+function detailPublicationEvidence(detail, { afterApi = false } = {}) {
+  return publicationEvidenceFromFields(detail, {
+    missingStatus: afterApi ? "unavailable" : "unresolved",
+  });
+}
+
 function mergeDetail(base, patch) {
   const previous = base ?? {};
   const next = patch ?? {};
@@ -377,17 +401,15 @@ function mergeDetail(base, patch) {
       previousAccess === "unlisted" ? previous : next,
     );
   }
-  const precisionRank = { unknown: 0, date_only: 1, second: 2 };
-  const previousPrecision = previous.published_at_precision ?? "unknown";
-  const nextPrecision = next.published_at_precision ?? "unknown";
-  const nextHasUsablePublishedAt = Boolean(next.published_at)
-    && (precisionRank[nextPrecision] ?? 0) >= (precisionRank[previousPrecision] ?? 0);
-  if (previous.published_at && !nextHasUsablePublishedAt) {
-    output.published_at = previous.published_at;
-    output.published_text = previous.published_text;
-    output.published_at_precision = previousPrecision;
-    output.published_at_source = previous.published_at_source;
-  }
+  const publicationSelection = selectPublicationEvidence(
+    detailPublicationEvidence(previous),
+    detailPublicationEvidence(next),
+  );
+  Object.assign(output, publicationSelection.evidence);
+  if (publicationSelection.selected === "current") output.published_text = previous.published_text;
+  else if (publicationSelection.selected === "candidate") output.published_text = next.published_text;
+  const publicationConflict = publicationEvidenceConflictRecord(publicationSelection);
+  if (publicationConflict) output.publication_evidence_conflict = publicationConflict;
 
   const previousComment = migrationCommentObservation(previous);
   const nextComment = migrationCommentObservation(next);
@@ -620,9 +642,7 @@ function normalizeResolvedDetail(detail, { afterApi = false, access = null } = {
   } else {
     output.comment_count_status = afterApi ? "unavailable" : "unresolved";
   }
-  if (output.published_at && !output.published_at_precision) {
-    output.published_at_precision = afterApi ? "second" : "unknown";
-  }
+  Object.assign(output, detailPublicationEvidence(output, { afterApi }));
   const durationSeconds = positiveDurationSeconds(output.duration_seconds);
   if (durationSeconds != null) {
     output.duration_seconds = durationSeconds;
@@ -630,7 +650,6 @@ function normalizeResolvedDetail(detail, { afterApi = false, access = null } = {
     output.duration_seconds = null;
     if (!hasResolvedDuration({ length_text: output.length_text })) output.length_text = null;
   }
-  output.published_at_status = output.published_at ? "exact" : (afterApi ? "unavailable" : "unresolved");
   if (hasResolvedDuration(output)) {
     output.duration_status = "exact";
   } else if (isLiveInProgress(output)) {
@@ -668,13 +687,28 @@ function detailFromCandidate(row) {
       ? null
       : `${Math.floor(durationSeconds / 60)}:${String(durationSeconds % 60).padStart(2, "0")}`,
     view_count_text: flat.view_count_text,
+    published_text: flat.published_text,
+    published_at: flat.published_at,
+    published_at_status: flat.published_at_status,
+    published_at_precision: flat.published_at_precision,
+    published_at_source: flat.published_at_source,
     is_upcoming: isUpcoming ? true : null,
     is_live: isLive ? true : null,
     live_status: isUpcoming ? "is_upcoming" : isLive ? "is_live" : null,
     live_scheduled_at: flat.live_scheduled_at,
     source: "uploads_playlist",
   });
-  return mergeDefined(flatDetail, previousDetail);
+  const output = mergeDefined(flatDetail, previousDetail);
+  const publicationSelection = selectPublicationEvidence(
+    detailPublicationEvidence(previousDetail),
+    detailPublicationEvidence(flatDetail),
+  );
+  Object.assign(output, publicationSelection.evidence);
+  if (publicationSelection.selected === "current") output.published_text = previousDetail.published_text;
+  else if (publicationSelection.selected === "candidate") output.published_text = flatDetail.published_text;
+  const publicationConflict = publicationEvidenceConflictRecord(publicationSelection);
+  if (publicationConflict) output.publication_evidence_conflict = publicationConflict;
+  return output;
 }
 
 function youtubeJsFallbackReasons(detail, requiredPrecision, videoId) {
@@ -839,7 +873,10 @@ async function updateRunDetailStatus(runId) {
        count(*) FILTER (WHERE result_json->'scope'->>'status' = 'excluded')::int AS excluded,
        count(*) FILTER (WHERE result_json->'scope'->>'reason' IN ('older_than_max_age','after_chronological_age_cutoff'))::int AS age_excluded,
        count(*) FILTER (WHERE result_json->'scope'->>'reason' = 'upcoming_live')::int AS upcoming_excluded,
-       count(*) FILTER (WHERE result_json->'scope'->>'reason' = 'live_in_progress')::int AS live_in_progress_excluded
+       count(*) FILTER (WHERE result_json->'scope'->>'reason' = 'live_in_progress')::int AS live_in_progress_excluded,
+       count(*) FILTER (
+         WHERE result_json#>>'{detail_request,reason_code}'='initial_publication_unresolved'
+       )::int AS details_requested_due_to_unresolved_count
      FROM crawler.content_candidates
      WHERE run_id=$1`,
     [runId],
@@ -870,6 +907,12 @@ async function updateRunDetailStatus(runId) {
            'live_in_progress_excluded_count',$7::int,
            'undisposed_content_count',$8::int,
            'retained_content_count',GREATEST($3::int-$4::int,0)
+         ) || jsonb_build_object(
+           'migration_activity_metrics',
+           COALESCE(result_json->'migration_activity_metrics','{}'::jsonb)
+             || jsonb_build_object(
+               'details_requested_due_to_unresolved_count',$10::int
+             )
          ),
          error_message=CASE
            WHEN $8::int>0 THEN $9
@@ -888,6 +931,7 @@ async function updateRunDetailStatus(runId) {
       Number(summary.live_in_progress_excluded ?? 0),
       undisposed,
       dispositionError?.message ?? null,
+      Number(summary.details_requested_due_to_unresolved_count ?? 0),
     ],
   );
   const migrationActivity = await applyMigrationActivityGate(runId, status);
@@ -1188,6 +1232,7 @@ export async function processChannelCrawlV2(job, { resumeMode = "initial" } = {}
       const detailResult = await processContentDetailRun({
         runId,
         channelId,
+        signal: currentChannelExecutionAbortSignal(),
         executionMode: "channel_inline_resume",
         finalize: false,
         contentMaxAgeDays,
@@ -1275,6 +1320,7 @@ export async function processChannelCrawlV2(job, { resumeMode = "initial" } = {}
         metadata: { channel_id: channelId, run_id: runId },
       });
     } catch (error) {
+      throwIfChannelExecutionAborted();
       youtubeJsChannelError = error;
     }
   }
@@ -1292,6 +1338,7 @@ export async function processChannelCrawlV2(job, { resumeMode = "initial" } = {}
       header = youtubeJsChannel ? mergeChannelMetadata(legacy.header, header) : legacy.header;
       channelExtractor = youtubeJsChannel ? "youtubejs+legacy_html" : "legacy_html";
     } catch (error) {
+      throwIfChannelExecutionAborted();
       legacyHeaderError = error;
       if (!youtubeJsChannel) primaryError = error;
     }
@@ -1357,6 +1404,7 @@ export async function processChannelCrawlV2(job, { resumeMode = "initial" } = {}
         metadata: { channel_id: channelId, run_id: runId },
       });
     } catch (error) {
+      throwIfChannelExecutionAborted();
       if (primaryError) throw primaryError;
       fallback = { error: String(error?.message ?? error) };
     }
@@ -1772,6 +1820,7 @@ export async function processChannelCrawlV2(job, { resumeMode = "initial" } = {}
       });
       uploadsExtractor = "youtubejs";
     } catch (error) {
+      throwIfChannelExecutionAborted();
       youtubeJsUploadsError = error;
     }
   }
@@ -1802,6 +1851,24 @@ export async function processChannelCrawlV2(job, { resumeMode = "initial" } = {}
     observedAt: checkedAt,
     locale: language,
   });
+  const migrationActivityInitialEvidence = rejectIfNoRecentContent
+    ? {
+        evidence_complete: uploadsActivity.evidenceComplete,
+        decision: uploadsActivity.decision,
+        max_age_days: uploadsActivity.maxAgeDays,
+        reference_day: uploadsActivity.referenceDay,
+        reference_at: uploadsActivity.referenceAt,
+        recent_published_content_count: uploadsActivity.recentPublishedContentCount,
+        uncertain_content_count: uploadsActivity.uncertainContentCount,
+        inspected_content_count: uploadsActivity.inspectedContentCount,
+        excluded_upcoming_count: uploadsActivity.excludedUpcomingCount,
+        newest_published_day: uploadsActivity.newestPublishedDay,
+        classifier_version: uploadsActivity.classifierVersion,
+        policy_version: uploadsActivity.policyVersion,
+        relation_counts: uploadsActivity.relationCounts,
+        unresolved_by_status_counts: uploadsActivity.unresolvedByStatusCounts,
+      }
+    : null;
   if (uploadsActivity.dormant) {
     const migrationActivity = await applyMigrationActivityGate(runId, "done", {
       evaluatedAt: checkedAt,
@@ -1814,6 +1881,11 @@ export async function processChannelCrawlV2(job, { resumeMode = "initial" } = {}
         excludedUpcomingCount: uploadsActivity.excludedUpcomingCount,
         newestPublishedDay: uploadsActivity.newestPublishedDay,
         referenceDay: uploadsActivity.referenceDay,
+        referenceAt: uploadsActivity.referenceAt,
+        classifierVersion: uploadsActivity.classifierVersion,
+        policyVersion: uploadsActivity.policyVersion,
+        relationCounts: uploadsActivity.relationCounts,
+        unresolvedByStatusCounts: uploadsActivity.unresolvedByStatusCounts,
       },
     });
     phaseTimingsMs.channel_candidates_persist = 0;
@@ -1913,6 +1985,9 @@ export async function processChannelCrawlV2(job, { resumeMode = "initial" } = {}
         channel_extractor: channelExtractor,
         uploads_extractor: uploadsExtractor,
         youtubejs_uploads_error: youtubeJsUploadsError ? String(youtubeJsUploadsError?.message ?? youtubeJsUploadsError) : null,
+        ...(migrationActivityInitialEvidence == null
+          ? {}
+          : { migration_activity_initial_evidence: migrationActivityInitialEvidence }),
         youtube_request_counts: {
           get_channel: Number(youtubeJsChannel?.raw?.request_counts?.get_channel ?? 0),
           get_about: Number(youtubeJsChannel?.raw?.request_counts?.get_about ?? 0),
@@ -1930,6 +2005,7 @@ export async function processChannelCrawlV2(job, { resumeMode = "initial" } = {}
     detailResult = await processContentDetailRun({
       runId,
       channelId,
+      signal: currentChannelExecutionAbortSignal(),
       executionMode: "channel_inline",
       finalize: false,
       contentMaxAgeDays,
@@ -1989,7 +2065,7 @@ export async function processChannelCrawlV2(job, { resumeMode = "initial" } = {}
   };
 }
 
-async function excludeCandidateByAge(row, detail, ageDays, maxAgeDays, source) {
+async function excludeCandidateByAge(row, detail, ageDays, maxAgeDays, source, window) {
   const resultJson = {
     ...(row.result_json ?? {}),
     detail,
@@ -1999,6 +2075,13 @@ async function excludeCandidateByAge(row, detail, ageDays, maxAgeDays, source) {
       age_days: ageDays,
       max_age_days: maxAgeDays,
       source,
+      classifier_version: window.classifier_version,
+      policy_version: CONTENT_WINDOW_POLICY_VERSION,
+      relation: window.relation,
+      relation_reason_code: window.reason_code,
+      basis: window.basis,
+      precision: window.precision,
+      evidence_source: window.source,
     },
     extractor_version: detail?.extractor_version ?? "v5_full_config_first_success",
   };
@@ -2029,6 +2112,8 @@ async function excludeCandidateByAge(row, detail, ageDays, maxAgeDays, source) {
     cutoff: true,
     age_days: ageDays,
     max_age_days: maxAgeDays,
+    classifier_version: window.classifier_version,
+    policy_version: CONTENT_WINDOW_POLICY_VERSION,
   };
 }
 
@@ -2173,19 +2258,27 @@ function shouldPrefetchYoutubeJsDetail(row, settings) {
   if (!youtubeJsDetailEnabled()) return false;
   const detail = detailFromCandidate(row);
   if (unfinishedLiveReason(detail)) return false;
-  const ageDays = detailAgeDays(detail, row.crawl_started_at ?? Date.now());
-  return !(settings.contentMaxAgeDays > 0 && ageDays != null && ageDays > settings.contentMaxAgeDays);
+  if (settings.contentMaxAgeDays <= 0) return true;
+  return classifyContentWindow(
+    detail,
+    settings.contentMaxAgeDays,
+    row.crawl_started_at ?? Date.now(),
+  ).relation !== "outside";
 }
 
-async function captureYoutubeJsDetail(videoId) {
+async function captureYoutubeJsDetail(videoId, { signal = null } = {}) {
   try {
-    return { detail: await fetchYoutubeJsVideoDetail(videoId), error: null };
+    return { detail: await fetchYoutubeJsVideoDetail(videoId, { signal }), error: null };
   } catch (error) {
     return { detail: null, error };
   }
 }
 
-async function processOneCandidate(row, settings, { youtubeJsDetail = null } = {}) {
+async function processOneCandidate(row, settings, {
+  youtubeJsDetail = null,
+  signal = null,
+} = {}) {
+  throwIfAborted(signal);
   if (isUndisposedTerminalCandidate(row)) {
     return recoverTerminalCandidateDisposition(row);
   }
@@ -2214,15 +2307,47 @@ async function processOneCandidate(row, settings, { youtubeJsDetail = null } = {
   }
 
   const crawlReferenceAt = row.crawl_started_at ?? Date.now();
-  const flatAgeDays = detailAgeDays(detail, crawlReferenceAt);
-  if (settings.contentMaxAgeDays > 0 && flatAgeDays != null && flatAgeDays > settings.contentMaxAgeDays) {
-    return excludeCandidateByAge(row, detail, flatAgeDays, settings.contentMaxAgeDays, "uploads_playlist");
+  const flatWindow = classifyContentWindow(detail, settings.contentMaxAgeDays, crawlReferenceAt);
+  if (settings.contentMaxAgeDays > 0 && flatWindow.relation === "outside") {
+    return excludeCandidateByAge(
+      row,
+      detail,
+      detailAgeDays(detail, crawlReferenceAt),
+      settings.contentMaxAgeDays,
+      "uploads_playlist",
+      flatWindow,
+    );
+  }
+  if (settings.contentMaxAgeDays > 0 && flatWindow.relation === "unresolved") {
+    const detailRequest = {
+      reason_code: "initial_publication_unresolved",
+      relation: flatWindow.relation,
+      relation_reason_code: flatWindow.reason_code,
+      classifier_version: flatWindow.classifier_version,
+      policy_version: CONTENT_WINDOW_POLICY_VERSION,
+      basis: flatWindow.basis,
+      precision: flatWindow.precision,
+      evidence_source: flatWindow.source,
+      requested_at: new Date().toISOString(),
+    };
+    row.result_json = {
+      ...(row.result_json ?? {}),
+      detail_request: detailRequest,
+    };
+    await query(
+      `UPDATE crawler.content_candidates
+       SET result_json=result_json || jsonb_build_object('detail_request',$2::jsonb),
+           updated_at=now()
+       WHERE candidate_id=$1`,
+      [row.candidate_id, JSON.stringify(detailRequest)],
+    );
   }
 
   if (youtubeJsDetailEnabled()) {
     const youtubeJsResult = youtubeJsDetail === null
-      ? await captureYoutubeJsDetail(row.source_content_id)
+      ? await captureYoutubeJsDetail(row.source_content_id, { signal })
       : await youtubeJsDetail;
+    throwIfAborted(signal);
     if (!youtubeJsResult?.error && youtubeJsResult?.detail) {
       const youtubeJsObservation = youtubeJsResult.detail;
       verifyYoutubeJsDisabledComments =
@@ -2260,7 +2385,13 @@ async function processOneCandidate(row, settings, { youtubeJsDetail = null } = {
 
   if (youtubeJsFallback.length > 0) {
     try {
-      detail = mergeDetail(detail, await fetchVideoYtDlpDetail(row.source_content_id, row.source_url, { language }));
+      const ytDlpDetail = await fetchVideoYtDlpDetail(
+        row.source_content_id,
+        row.source_url,
+        { language, signal },
+      );
+      throwIfAborted(signal);
+      detail = mergeDetail(detail, ytDlpDetail);
       commentAttemptSources.push("yt_dlp_top_comments");
       detailExtractor = youtubeJsDetailEnabled() ? "youtubejs+yt_dlp" : "yt_dlp";
       if (
@@ -2271,6 +2402,7 @@ async function processOneCandidate(row, settings, { youtubeJsDetail = null } = {
         detailError = youtubeJsDetailError;
       }
     } catch (error) {
+      throwIfAborted(signal);
       detailError = error;
     }
   }
@@ -2284,19 +2416,28 @@ async function processOneCandidate(row, settings, { youtubeJsDetail = null } = {
     try {
       detail = mergeDetail(detail, await fetchYoutubeJsCommentFirstPage(
         row.source_content_id,
-        { totalCount: integer(detail?.comment_count) },
+        { totalCount: integer(detail?.comment_count), signal },
       ));
+      throwIfAborted(signal);
       commentAttemptSources.push("youtubejs_comments");
       detailExtractor = `${detailExtractor}+youtubejs_comments`;
     } catch (error) {
+      throwIfAborted(signal);
       youtubeJsCommentError = error;
       commentAttemptSources.push("youtubejs_comments_error");
     }
   }
 
-  const resolvedAgeDays = detailAgeDays(detail, crawlReferenceAt);
-  if (settings.contentMaxAgeDays > 0 && resolvedAgeDays != null && resolvedAgeDays > settings.contentMaxAgeDays) {
-    return excludeCandidateByAge(row, detail, resolvedAgeDays, settings.contentMaxAgeDays, "youtube_detail");
+  const resolvedWindow = classifyContentWindow(detail, settings.contentMaxAgeDays, crawlReferenceAt);
+  if (settings.contentMaxAgeDays > 0 && resolvedWindow.relation === "outside") {
+    return excludeCandidateByAge(
+      row,
+      detail,
+      detailAgeDays(detail, crawlReferenceAt),
+      settings.contentMaxAgeDays,
+      "youtube_detail",
+      resolvedWindow,
+    );
   }
 
   try {
@@ -2739,48 +2880,10 @@ async function processOneCandidate(row, settings, { youtubeJsDetail = null } = {
   };
 }
 
-async function excludeRemainingCandidatesByAge(rows, cutoffResult, maxAgeDays) {
-  const candidateIds = rows.map((row) => Number(row.candidate_id)).filter(Number.isFinite);
-  if (candidateIds.length === 0) return 0;
-  await query(
-    `DELETE FROM crawler.contents c
-     USING crawler.content_candidates cc
-     WHERE cc.candidate_id=ANY($1::bigint[])
-       AND cc.content_key=c.content_key
-       AND cc.run_id=c.run_id`,
-    [candidateIds],
-  );
-  const scope = {
-    status: "excluded",
-    reason: "after_chronological_age_cutoff",
-    cutoff_video_id: cutoffResult.video_id,
-    cutoff_age_days: cutoffResult.age_days,
-    max_age_days: maxAgeDays,
-    source: "uploads_playlist_order",
-  };
-  const updated = await query(
-    `UPDATE crawler.content_candidates
-     SET content_key=NULL,detail_status='done',api_status='not_needed',missing_fields='{}'::text[],
-         result_json=result_json || jsonb_build_object('scope',$2::jsonb),
-         error_message=NULL,finished_at=now(),updated_at=now()
-     WHERE candidate_id=ANY($1::bigint[])`,
-    [candidateIds, JSON.stringify(scope)],
-  );
-  for (const row of rows) {
-    await persistFullVideoDisposition(row, {
-      storageAction: { kind: "unresolved" },
-      classification: null,
-      access: { access_status: "unknown", access_status_source: "chronological_cutoff" },
-      detail: row.result_json?.detail ?? null,
-      terminalReason: "outside_content_window",
-    });
-  }
-  return updated.rowCount;
-}
-
 async function processContentDetailRun({
   runId,
   channelId,
+  signal = null,
   executionMode = "detail_queue",
   finalize = true,
   publishedAtRequiredPrecision = null,
@@ -2833,29 +2936,17 @@ async function processContentDetailRun({
   const execution = await processWithOrderedPrefetch({
     items: rows.rows,
     concurrency: settings.detailConcurrency,
+    signal,
     shouldPrefetch: (row) => shouldPrefetchYoutubeJsDetail(row, settings),
-    prefetch: (row) => captureYoutubeJsDetail(row.source_content_id),
-    process: (row, youtubeJsDetail) => processOneCandidate(row, settings, { youtubeJsDetail }),
-    stopAfter: (result) => result.retryable ? "retryable" : result.cutoff ? "cutoff" : null,
+    prefetch: (row) => captureYoutubeJsDetail(row.source_content_id, { signal }),
+    process: (row, youtubeJsDetail) => processOneCandidate(row, settings, {
+      youtubeJsDetail,
+      signal,
+    }),
+    stopAfter: contentDetailBatchStopReason,
   });
   const results = [...execution.results];
   const processed = execution.processed;
-  if (execution.stopReason === "cutoff") {
-    const result = execution.results.at(-1);
-    const skipped = await excludeRemainingCandidatesByAge(
-      execution.remaining,
-      result,
-      settings.contentMaxAgeDays,
-    );
-    if (skipped > 0) {
-      results.push({
-        excluded_after_cutoff: skipped,
-        cutoff_video_id: result.video_id,
-        cutoff_age_days: result.age_days,
-        max_age_days: settings.contentMaxAgeDays,
-      });
-    }
-  }
   const cancelledApiTasks = await cancelResolvedYoutubeApiTasks(runId);
   await saveJsonRaw({
     objectType: "youtube_content_detail_batch_json",
@@ -2917,6 +3008,7 @@ export async function processContentDetailBatchV2(job) {
   const result = await processContentDetailRun({
     runId,
     channelId,
+    signal: currentChannelExecutionAbortSignal(),
     publishedAtRequiredPrecision: text(job.data?.published_at_required_precision),
     apiFallbackMode: text(job.data?.api_fallback_mode),
     contentMaxAgeDays: job.data?.content_max_age_days,
@@ -2952,6 +3044,7 @@ export async function processCheckpointRepairV2(job) {
     const result = await processContentDetailRun({
       runId: targetRunId,
       channelId,
+      signal: currentChannelExecutionAbortSignal(),
       executionMode: "checkpoint_repair",
       finalize: true,
       publishedAtRequiredPrecision: text(job.data?.published_at_required_precision),
@@ -3411,27 +3504,26 @@ export async function processDataApiBatchV2(job) {
           normalized.access,
         );
         terminalMissing.forEach((field) => taskMissing.add(field));
-        const apiAgeDays = detailAgeDays(
-          normalized.detail,
-          candidate.crawl_started_at ?? Date.now(),
-        );
+        const apiReferenceAt = candidate.crawl_started_at ?? Date.now();
         const contentMaxAgeDays = intValue(
           candidate.repair_content_max_age_days,
           crawlSettings.contentMaxAgeDays,
           0,
           3650,
         );
-        if (
-          contentMaxAgeDays > 0
-          && apiAgeDays != null
-          && apiAgeDays > contentMaxAgeDays
-        ) {
+        const apiWindow = classifyContentWindow(
+          normalized.detail,
+          contentMaxAgeDays,
+          apiReferenceAt,
+        );
+        if (contentMaxAgeDays > 0 && apiWindow.relation === "outside") {
           await excludeCandidateByAge(
             candidate,
             normalized.detail,
-            apiAgeDays,
+            detailAgeDays(normalized.detail, apiReferenceAt),
             contentMaxAgeDays,
             "youtube_data_api",
+            apiWindow,
           );
           affectedRuns.set(candidate.run_id, candidate.channel_id);
           continue;

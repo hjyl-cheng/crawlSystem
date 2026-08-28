@@ -9,6 +9,7 @@ const YOUTUBEJS_COMMENT_SCENARIOS = new Set([
 const YOUTUBEJS_DETAIL_SCENARIOS = new Set([
   ...YOUTUBEJS_COMMENT_SCENARIOS,
   "youtubejs_unlisted_ytdlp_public",
+  "detail_cancelled",
 ]);
 
 function result(rows = [], rowCount = rows.length) {
@@ -30,6 +31,8 @@ function candidateSummary() {
     age_excluded: ["older_than_max_age", "after_chronological_age_cutoff"].includes(scopeReason) ? 1 : 0,
     upcoming_excluded: scopeReason === "upcoming_live" ? 1 : 0,
     live_in_progress_excluded: scopeReason === "live_in_progress" ? 1 : 0,
+    details_requested_due_to_unresolved_count:
+      candidate.result_json?.detail_request?.reason_code === "initial_publication_unresolved" ? 1 : 0,
   };
 }
 
@@ -252,6 +255,7 @@ export async function fetchVideoYtDlpDetail(videoId) {
       "stored_public",
       "disabled_comments",
       "disposition_write_retry",
+      "candidate_retry_publication_conflict",
       ...YOUTUBEJS_DETAIL_SCENARIOS,
     ].includes(state().scenario);
   const commentsVisible = state().scenario === "youtubejs_disabled_ytdlp_visible";
@@ -363,8 +367,13 @@ export function parseChannelHeader() { return {}; }
 export function youtubeJsChannelEnabled() { return false; }
 export function youtubeJsDetailEnabled() { return YOUTUBEJS_DETAIL_SCENARIOS.has(state().scenario); }
 export async function openYoutubeJsChannel() { return null; }
-export async function fetchYoutubeJsVideoDetail(videoId) {
+export async function fetchYoutubeJsVideoDetail(videoId, { signal = null } = {}) {
   state().youtubeJsDetailAttempts += 1;
+  if (state().scenario === "detail_cancelled") {
+    state().forwardedDetailSignal = signal === state().cancellationSignal;
+    state().cancelDetail();
+    throw state().cancellationSignal.reason;
+  }
   const unlistedConflict = state().scenario === "youtubejs_unlisted_ytdlp_public";
   const visible = state().scenario === "youtubejs_visible_ytdlp_disabled" || unlistedConflict;
   return {

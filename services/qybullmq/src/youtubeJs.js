@@ -1,8 +1,10 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { Innertube, Log, Utils, YTNodes } from "youtubei.js";
 import { ProxyAgent, fetch as undiciFetch } from "undici";
+import { combineAbortSignals, throwIfAborted } from "./abortSignal.js";
 import { youtubeErrorText } from "./detailPolicy.js";
 import {
   recordChannelExecutionFailure,
@@ -21,6 +23,7 @@ import { normalizeVideoKeywords, normalizeVideoTextMetadata } from "./videoMetad
 import { annotateYoutubeFailure } from "./youtubeFailurePolicy.js";
 import { observeYoutubeBusinessEmail } from "./youtubeBusinessEmailAvailability.js";
 import { extractYoutubePlayerContentTypeSignals } from "./youtubeContentType.js";
+import { currentManagedAbortSignal } from "./proxyIdentity.js";
 import {
   classifyYoutubeCommentPage,
   commentPageHasFirstPage,
@@ -44,6 +47,14 @@ const MAX_TAB_PAGES = Math.max(1, Number(process.env.YOUTUBEJS_MAX_TAB_PAGES || 
 let runtime = null;
 let runtimePromise = null;
 let activeLease = null;
+const operationSignalStorage = new AsyncLocalStorage();
+
+function throwIfYoutubeJsOperationAborted() {
+  throwIfAborted(combineAbortSignals(
+    operationSignalStorage.getStore() ?? null,
+    currentManagedAbortSignal(),
+  ));
+}
 
 Log.setLevel(Log.Level.ERROR);
 
@@ -81,28 +92,36 @@ export async function inspectYoutubeJsCommentsSection(videoId) {
   return fetchYoutubeJsCommentsSection(current.client, videoId);
 }
 
-export async function fetchYoutubeJsCommentFirstPage(videoId, { totalCount = null } = {}) {
+export async function fetchYoutubeJsCommentFirstPage(videoId, {
+  totalCount = null,
+  signal = null,
+} = {}) {
   const cleanVideoId = String(videoId ?? "").trim();
   if (!cleanVideoId) throw new Error("video_id is required");
-  const raw = await inspectYoutubeJsCommentsSection(cleanVideoId);
-  const disabled = youtubeCommentsDisabled(raw);
-  const page = disabled
-    ? emptyYoutubeCommentPage({ totalCount: 0 })
-    : normalizeYoutubeCommentPage(raw, { totalCount });
-  const classified = classifyYoutubeCommentPage(page, { disabled });
-  return {
-    comment_count: classified.comment_count ?? totalCount,
-    comment_count_status: classified.comment_count_status,
-    comments_disabled: classified.comments_disabled,
-    comments_status_source: classified.comment_count_source,
-    comment_count_source: classified.comment_count_source,
-    comments_first_page: page,
-    comments_first_page_status: disabled
-      ? "disabled"
-      : Number(page.returned_count) > 0 ? "collected" : "unresolved",
-    comments_first_page_source: "youtubejs_comments",
-    source: "youtubejs_comments",
-  };
+  throwIfAborted(signal);
+  const current = await getRuntime();
+  return operationSignalStorage.run(signal, async () => {
+    const raw = await fetchYoutubeJsCommentsSection(current.client, cleanVideoId);
+    throwIfYoutubeJsOperationAborted();
+    const disabled = youtubeCommentsDisabled(raw);
+    const page = disabled
+      ? emptyYoutubeCommentPage({ totalCount: 0 })
+      : normalizeYoutubeCommentPage(raw, { totalCount });
+    const classified = classifyYoutubeCommentPage(page, { disabled });
+    return {
+      comment_count: classified.comment_count ?? totalCount,
+      comment_count_status: classified.comment_count_status,
+      comments_disabled: classified.comments_disabled,
+      comments_status_source: classified.comment_count_source,
+      comment_count_source: classified.comment_count_source,
+      comments_first_page: page,
+      comments_first_page_status: disabled
+        ? "disabled"
+        : Number(page.returned_count) > 0 ? "collected" : "unresolved",
+      comments_first_page_source: "youtubejs_comments",
+      source: "youtubejs_comments",
+    };
+  });
 }
 
 export async function fetchYoutubeJsCommentsSection(client, videoId) {
@@ -419,7 +438,15 @@ export async function scanYoutubeJsFeed(feed, {
       if (pages === 1) firstPageItemCount += 1;
       else catchUpItemCount += 1;
       const publishedDay = localizedPublishedUtcDay(entry.published_text, { locale, now });
-      entries.push({ ...entry, position: sourcePosition, published_day: publishedDay });
+      entries.push({
+        ...entry,
+        position: sourcePosition,
+        published_day: publishedDay,
+        published_at: publishedDay,
+        published_at_status: publishedDay ? "relative" : "unresolved",
+        published_at_precision: publishedDay ? "date_only" : "unknown",
+        published_at_source: publishedDay ? "youtube_uploads_relative_time" : null,
+      });
       const matchedAnchorIndex = anchorIndexes.get(entry.id);
       if (matchedAnchorIndex != null) {
         for (let index = 0; index < matchedAnchorIndex; index += 1) {
@@ -447,6 +474,7 @@ export async function scanYoutubeJsFeed(feed, {
     try {
       page = await page.getContinuation();
     } catch (error) {
+      throwIfYoutubeJsOperationAborted();
       paginationError = error;
       stopReason = "pagination_error";
     }
@@ -500,6 +528,7 @@ export async function collectYoutubeJsUploadBundle(client, channelId, limit = 30
       view_count_text: upload.view_count != null ? String(upload.view_count) : null,
       published_text: upload.published_text,
       published_at: publishedDay,
+      published_at_status: publishedDay ? "relative" : "unresolved",
       published_at_precision: publishedDay ? "date_only" : "unknown",
       published_at_source: publishedDay ? "youtube_uploads_relative_time" : null,
       position: index + 1,
@@ -806,13 +835,18 @@ async function createFetch(proxyUrl, dispatcher, stats, playerTypeSurfaces) {
     const { requestLike, url, method } = requestParts(input, init);
     const startedAt = Date.now();
     stats.requests += 1;
+    const callerSignal = init.signal || (requestLike ? input.signal : undefined);
+    const operationSignal = operationSignalStorage.getStore() ?? null;
+    const managedSignal = currentManagedAbortSignal();
+    const externalSignal = combineAbortSignals(callerSignal, operationSignal, managedSignal);
+    throwIfAborted(externalSignal);
     let body = init.body;
     if (body === undefined && requestLike && !["GET", "HEAD"].includes(method.toUpperCase())) {
       body = await input.clone().arrayBuffer();
     }
-    const callerSignal = init.signal || (requestLike ? input.signal : undefined);
+    throwIfAborted(externalSignal);
     const timeoutSignal = AbortSignal.timeout(DEFAULT_TIMEOUT_MS);
-    const signal = callerSignal ? AbortSignal.any([callerSignal, timeoutSignal]) : timeoutSignal;
+    const signal = combineAbortSignals(externalSignal, timeoutSignal);
     let recorded = false;
     try {
       const requestInit = {
@@ -828,10 +862,12 @@ async function createFetch(proxyUrl, dispatcher, stats, playerTypeSurfaces) {
         requestInit,
         () => undiciFetch(url, { ...requestInit, dispatcher }),
       );
+      throwIfAborted(externalSignal);
       stats.statuses[response.status] = (stats.statuses[response.status] || 0) + 1;
       let responseSample = "";
       if (!response.ok || response.status === 200) {
         const sample = await response.clone().text();
+        throwIfAborted(externalSignal);
         responseSample = sample.slice(0, 500);
         if (isYoutubeJsHttpBotChallenge(sample)) {
           stats.challenges += 1;
@@ -881,6 +917,7 @@ async function createFetch(proxyUrl, dispatcher, stats, playerTypeSurfaces) {
       }
       return response;
     } catch (error) {
+      if (externalSignal?.aborted) throw externalSignal.reason;
       stats.failures += 1;
       const annotated = annotateYoutubeFailure(error, {
         source: error?.youtube_failure_evidence?.source || "youtubejs_fetch",
@@ -1097,6 +1134,7 @@ export async function openYoutubeJsChannel(channelId, { includeAbout = true } = 
       about = await root.getAbout();
       aboutRequestCount = current.stats.requests - aboutRequestStart;
     } catch (error) {
+      throwIfYoutubeJsOperationAborted();
       aboutRequestCount = current.stats.requests - aboutRequestStart;
       aboutFailure = error;
       aboutError = String(error?.message || error);
@@ -1401,6 +1439,7 @@ export function normalizeYoutubeJsVideoInfo(info, comments = null, {
       : commentsPage,
     published_at: published.value,
     published_text: published.value?.slice(0, 10) ?? null,
+    published_at_status: published.value ? "exact" : "unresolved",
     published_at_precision: published.precision,
     published_at_source: published.value ? "youtubejs_player_microformat" : null,
     availability,
@@ -1533,57 +1572,65 @@ export async function fetchYoutubeJsPlayerTypeDetail(videoId) {
   });
 }
 
-export async function fetchYoutubeJsVideoDetail(videoId) {
+export async function fetchYoutubeJsVideoDetail(videoId, { signal = null } = {}) {
   if (!youtubeJsDetailEnabled()) throw new Error("YouTube.js detail extraction is disabled");
   const cleanVideoId = String(videoId ?? "").trim();
   if (!cleanVideoId) throw new Error("video_id is required");
+  throwIfAborted(signal);
   const current = await getRuntime();
-  const startedAt = Date.now();
-  const requestStart = current.stats.requests;
-  current.playerTypeSurfaces.delete(cleanVideoId);
-  let info;
-  let contentTypeSignals;
-  try {
-    info = await current.client.getInfo(cleanVideoId, { client: "WEB" });
-    contentTypeSignals = current.playerTypeSurfaces.get(cleanVideoId) ?? null;
-  } finally {
+  return operationSignalStorage.run(signal, async () => {
+    throwIfYoutubeJsOperationAborted();
+    const startedAt = Date.now();
+    const requestStart = current.stats.requests;
     current.playerTypeSurfaces.delete(cleanVideoId);
-  }
-  const playabilityStatus = info?.playability_status?.status || null;
-  const playabilityReason = info?.playability_status?.reason || null;
-  if (isYoutubeJsBotChallenge(playabilityStatus, playabilityReason)) {
-    throwYoutubeJsBotChallenge(cleanVideoId, playabilityStatus, playabilityReason);
-  }
-  let comments = null;
-  let commentsError = null;
-  const hint = parseObservedYoutubeJsCount(
-    info?.comments_entry_point_header?.comment_count,
-    {
-      field: "comment_count",
-      source: "youtubejs_next",
-      context: { video_id: cleanVideoId },
-    },
-  );
-  try {
-    const raw = await fetchYoutubeJsCommentsSection(current.client, cleanVideoId);
-    if (youtubeCommentsDisabled(raw)) {
-      comments = emptyYoutubeCommentPage({ totalCount: 0 });
-      comments.comments_disabled = true;
-    } else {
-      comments = normalizeYoutubeCommentPage(raw, {
-        locale: DEFAULT_LANGUAGE,
-        totalCount: hint,
-      });
+    let info;
+    let contentTypeSignals;
+    try {
+      info = await current.client.getInfo(cleanVideoId, { client: "WEB" });
+      throwIfYoutubeJsOperationAborted();
+      contentTypeSignals = current.playerTypeSurfaces.get(cleanVideoId) ?? null;
+    } finally {
+      current.playerTypeSurfaces.delete(cleanVideoId);
     }
-  } catch (error) {
-    commentsError = String(error?.message || error);
-  }
-  return {
-    ...normalizeYoutubeJsVideoInfo(info, comments, { commentsError, contentTypeSignals }),
-    youtubejs_duration_ms: Date.now() - startedAt,
-    youtubejs_request_count: current.stats.requests - requestStart,
-    youtubejs_comments_error: commentsError,
-  };
+    const playabilityStatus = info?.playability_status?.status || null;
+    const playabilityReason = info?.playability_status?.reason || null;
+    if (isYoutubeJsBotChallenge(playabilityStatus, playabilityReason)) {
+      throwYoutubeJsBotChallenge(cleanVideoId, playabilityStatus, playabilityReason);
+    }
+    let comments = null;
+    let commentsError = null;
+    const hint = parseObservedYoutubeJsCount(
+      info?.comments_entry_point_header?.comment_count,
+      {
+        field: "comment_count",
+        source: "youtubejs_next",
+        context: { video_id: cleanVideoId },
+      },
+    );
+    try {
+      const raw = await fetchYoutubeJsCommentsSection(current.client, cleanVideoId);
+      throwIfYoutubeJsOperationAborted();
+      if (youtubeCommentsDisabled(raw)) {
+        comments = emptyYoutubeCommentPage({ totalCount: 0 });
+        comments.comments_disabled = true;
+      } else {
+        comments = normalizeYoutubeCommentPage(raw, {
+          locale: DEFAULT_LANGUAGE,
+          totalCount: hint,
+        });
+      }
+    } catch (error) {
+      throwIfYoutubeJsOperationAborted();
+      commentsError = String(error?.message || error);
+    }
+    throwIfYoutubeJsOperationAborted();
+    return {
+      ...normalizeYoutubeJsVideoInfo(info, comments, { commentsError, contentTypeSignals }),
+      youtubejs_duration_ms: Date.now() - startedAt,
+      youtubejs_request_count: current.stats.requests - requestStart,
+      youtubejs_comments_error: commentsError,
+    };
+  });
 }
 
 export function isYoutubeJsBotChallenge(status, reason) {

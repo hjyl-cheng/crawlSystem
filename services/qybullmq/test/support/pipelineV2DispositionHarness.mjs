@@ -2,12 +2,29 @@ import { writeFile } from "node:fs/promises";
 
 const outputPath = process.argv[2];
 const scenario = process.argv[3] ?? "deferred_type";
+const transportCancellation = scenario === "detail_transport_cancelled";
+let originalInnertubeCreate = null;
+if (transportCancellation) {
+  process.env.YOUTUBEJS_EXTRACTOR_MODE = "full";
+  const { Innertube } = await import("youtubei.js");
+  originalInnertubeCreate = Innertube.create;
+  Innertube.create = async ({ fetch }) => ({
+    async getInfo(videoId) {
+      await fetch("https://www.youtube.com/youtubei/v1/player", {
+        method: "POST",
+        body: JSON.stringify({ videoId }),
+      });
+      throw new Error("controlled transport unexpectedly resolved");
+    },
+  });
+}
 const existingContent = scenario === "existing_private";
 const dataApiReplay = scenario === "data_api_replay";
 const dataApiLive = scenario === "data_api_live";
 const dataApiScenario = dataApiReplay || dataApiLive;
 const dispositionWriteRetry = scenario === "disposition_write_retry";
 const flatLiveInProgress = scenario === "live_in_progress_flat";
+const candidateRetryPublicationConflict = scenario === "candidate_retry_publication_conflict";
 const deferredDisposition = {
   version: "video-disposition-v1",
   kind: "deferred",
@@ -37,10 +54,11 @@ globalThis.__pipelineV2DispositionState = {
       : existingContent || dataApiReplay ? "youtube_watch_canonical" : null,
     detail_status: scenario === "undisposed_terminal"
       ? "done"
+      : candidateRetryPublicationConflict ? "failed"
       : dataApiScenario ? "api_pending" : "queued",
     api_status: dataApiScenario ? "queued" : "not_needed",
     missing_fields: dataApiLive ? ["comment_count"] : dataApiReplay ? ["access_status"] : [],
-    attempts: 0,
+    attempts: candidateRetryPublicationConflict ? 1 : 0,
     content_key: dataApiLive
       ? "UCsharedDisposition:live:public-without-type"
       : existingContent ? "UCsharedDisposition:video:public-without-type" : null,
@@ -66,14 +84,54 @@ globalThis.__pipelineV2DispositionState = {
               live_status: "is_live",
             }
           : {}),
+        ...(candidateRetryPublicationConflict
+          ? {
+              published_text: "Old flat text",
+              published_at: "2026-01-01T00:00:00.000Z",
+              published_at_status: "exact",
+              published_at_precision: "second",
+              published_at_source: "yt_dlp_flat_timestamp",
+            }
+          : {}),
       },
       ...(scenario === "age_excluded"
         ? {
             detail: {
               id: "public-without-type",
               published_at: "2025-01-01T00:00:00.000Z",
+              published_at_status: "exact",
               published_at_precision: "second",
+              published_at_source: "yt_dlp_timestamp",
               access_status: "public",
+            },
+          }
+        : {}),
+      ...(candidateRetryPublicationConflict
+        ? {
+            detail: {
+              id: "public-without-type",
+              title: "Existing retry Detail",
+              description: "Existing complete Detail",
+              description_status: "exact",
+              description_source: "youtubejs_player",
+              published_text: "Existing recent Detail text",
+              published_at: "2026-07-19T00:00:00.000Z",
+              published_at_status: "exact",
+              published_at_precision: "second",
+              published_at_source: "youtubejs_player_microformat",
+              duration_seconds: 90,
+              view_count: 100,
+              view_count_text: "100",
+              like_count: 3,
+              comment_count: 0,
+              comments_disabled: false,
+              access_status: "public",
+              content_type_signals: {
+                source: "youtubei_player",
+                canonical_url: "https://www.youtube.com/watch?v=public-without-type",
+                is_shorts_eligible: false,
+                is_live_content: false,
+              },
             },
           }
         : {}),
@@ -174,12 +232,34 @@ globalThis.__pipelineV2DispositionState = {
   dispositionWriteAttempts: 0,
 };
 
+const cancellationController = ["detail_cancelled", "detail_transport_cancelled"].includes(scenario)
+  ? new AbortController()
+  : null;
+const cancellationReason = cancellationController
+  ? new Error("injected channel detail cancellation")
+  : null;
+if (cancellationController) {
+  Object.assign(globalThis.__pipelineV2DispositionState, {
+    cancellationSignal: cancellationController.signal,
+    cancelDetail: () => cancellationController.abort(cancellationReason),
+    forwardedDetailSignal: false,
+    transportAborted: false,
+  });
+}
+
 const { processContentDetailBatchV2, processDataApiBatchV2 } = await import("../../src/pipelineV2.js");
+const {
+  ChannelExecutionMetrics,
+  runWithChannelExecution,
+} = await import("../../src/channelExecutionContext.js");
 let value = null;
 let error = null;
 let firstError = null;
 let retryError = null;
 let requestsAfterFirst = null;
+let cancellationReasonPreserved = null;
+let cancellationElapsedMs = null;
+let deadlineExceeded = false;
 if (dispositionWriteRetry) {
   const job = {
     data: {
@@ -202,8 +282,8 @@ if (dispositionWriteRetry) {
   }
 } else {
   try {
-    value = dataApiScenario
-      ? await processDataApiBatchV2({
+    const operation = () => (dataApiScenario
+      ? processDataApiBatchV2({
         id: dataApiReplay ? "batch:stored-evidence" : "batch:live-api",
         data: {
           batch_id: dataApiReplay ? "batch:stored-evidence" : "batch:live-api",
@@ -220,15 +300,80 @@ if (dispositionWriteRetry) {
             : {}),
         },
         })
-      : await processContentDetailBatchV2({
+      : processContentDetailBatchV2({
         data: {
           run_id: "run:shared-video-disposition",
           channel_id: "UCsharedDisposition",
           api_fallback_mode: "disabled",
-          content_max_age_days: scenario === "age_excluded" ? 90 : 0,
+          content_max_age_days: [
+            "age_excluded",
+            "stored_public",
+            "candidate_retry_publication_conflict",
+          ].includes(scenario) ? 90 : 0,
         },
-        });
+        }));
+    if (transportCancellation) {
+      let notifyTransportStarted;
+      let rejectTransport;
+      const transportStarted = new Promise((resolve) => { notifyTransportStarted = resolve; });
+      const metrics = new ChannelExecutionMetrics();
+      const proxy = { proxy_id: 17, proxy_address_hash: "transport-cancel-route" };
+      const running = runWithChannelExecution({
+        abort_signal: cancellationController.signal,
+        proxy,
+        get_proxy_snapshot: () => proxy,
+        profile_group: {
+          clients: { youtubejs_chrome: { profile_id: "transport-cancel-chrome" } },
+        },
+        fingerprint_gateway: {
+          fetch(_profile, _input, init) {
+            notifyTransportStarted();
+            return new Promise((resolve, reject) => {
+              rejectTransport = reject;
+              const rejectFromAbort = () => {
+                globalThis.__pipelineV2DispositionState.transportAborted = true;
+                reject(init.signal.reason);
+              };
+              if (init.signal.aborted) rejectFromAbort();
+              else init.signal.addEventListener("abort", rejectFromAbort, { once: true });
+            });
+          },
+        },
+        metrics,
+      }, operation);
+      const settled = running.then(
+        (resolvedValue) => ({ value: resolvedValue }),
+        (caught) => ({ error: caught }),
+      );
+      await transportStarted;
+      const abortedAt = Date.now();
+      cancellationController.abort(cancellationReason);
+      let deadlineTimer;
+      const outcome = await Promise.race([
+        settled,
+        new Promise((resolve) => {
+          deadlineTimer = setTimeout(() => resolve({ deadlineExceeded: true }), 250);
+        }),
+      ]);
+      clearTimeout(deadlineTimer);
+      cancellationElapsedMs = Date.now() - abortedAt;
+      deadlineExceeded = outcome.deadlineExceeded === true;
+      if (deadlineExceeded) {
+        rejectTransport?.(new Error("controlled transport deadline cleanup"));
+        await settled;
+      }
+      if (outcome.error) throw outcome.error;
+      value = outcome.value;
+    } else {
+      value = cancellationController
+        ? await runWithChannelExecution(
+          { abort_signal: cancellationController.signal },
+          operation,
+        )
+        : await operation();
+    }
   } catch (caught) {
+    cancellationReasonPreserved = caught === cancellationReason;
     error = { message: caught?.message ?? String(caught), stack: caught?.stack ?? null };
   }
 }
@@ -243,7 +388,16 @@ await writeFile(outputPath, JSON.stringify({
   youtubejs_detail_attempts: globalThis.__pipelineV2DispositionState.youtubeJsDetailAttempts,
   ytdlp_detail_attempts: globalThis.__pipelineV2DispositionState.ytDlpDetailAttempts,
   disposition_write_attempts: globalThis.__pipelineV2DispositionState.dispositionWriteAttempts,
+  cancellation_reason_preserved: cancellationReasonPreserved,
+  cancellation_elapsed_ms: cancellationElapsedMs,
+  cancellation_deadline_exceeded: deadlineExceeded,
+  transport_aborted: globalThis.__pipelineV2DispositionState.transportAborted ?? null,
+  forwarded_detail_signal: globalThis.__pipelineV2DispositionState.forwardedDetailSignal ?? null,
   candidate: globalThis.__pipelineV2DispositionState.candidate,
   queries: globalThis.__pipelineV2DispositionState.queries.map(({ sql }) => sql),
 }), "utf8");
+if (originalInnertubeCreate) {
+  const { Innertube } = await import("youtubei.js");
+  Innertube.create = originalInnertubeCreate;
+}
 if (error || retryError) process.exitCode = 1;

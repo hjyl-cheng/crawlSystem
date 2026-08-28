@@ -246,6 +246,8 @@ test("Uploads preserves only explicit type evidence without requesting content t
   ]);
   assert.equal(bundle.entries[0].source_url, "https://www.youtube.com/watch?v=short-id");
   assert.equal(bundle.entries[0].published_at, "2026-07-21");
+  assert.equal(bundle.entries[0].published_at_status, "relative");
+  assert.equal(bundle.entries[0].published_at_precision, "date_only");
   assert.equal(bundle.entries[0].published_at_source, "youtube_uploads_relative_time");
   assert.equal(bundle.activityEvidenceComplete, true);
   assert.equal(bundle.uploads.stop_reason, "list_end");
@@ -683,6 +685,7 @@ test("parseYoutubeJsCount handles exact and localized abbreviated counts", () =>
 test("normalizeYoutubeJsVideoInfo preserves second timestamps and exact engagement", () => {
   const detail = normalizeYoutubeJsVideoInfo(infoFixture());
   assert.equal(detail.published_at, "2026-07-10T00:00:09.000Z");
+  assert.equal(detail.published_at_status, "exact");
   assert.equal(detail.published_at_precision, "second");
   assert.equal(detail.duration_seconds, 2111);
   assert.equal(detail.duration_source, "youtubejs_player");
@@ -867,6 +870,7 @@ test("normalizeYoutubeJsVideoInfo retains genuine date-only precision", () => {
   info.page[0].microformat.publish_date = "2026-07-10";
   const detail = normalizeYoutubeJsVideoInfo(info);
   assert.equal(detail.published_at, "2026-07-10");
+  assert.equal(detail.published_at_status, "exact");
   assert.equal(detail.published_at_precision, "date_only");
 });
 

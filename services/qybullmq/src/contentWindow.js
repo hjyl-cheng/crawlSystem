@@ -1,3 +1,10 @@
+import {
+  classifyPublicationWindow,
+  publicationEvidenceFromFields,
+} from "./publicationTimeEvidence.js";
+
+export const CONTENT_WINDOW_POLICY_VERSION = "content-window-v2";
+
 function utcDayNumber(value) {
   const parsed = new Date(value);
   if (Number.isNaN(parsed.getTime())) return null;
@@ -6,6 +13,11 @@ function utcDayNumber(value) {
     parsed.getUTCMonth(),
     parsed.getUTCDate(),
   ) / 86400000);
+}
+
+function contentPublicationEvidence(detail) {
+  const raw = detail?.published_at ?? detail?.published_text ?? null;
+  return publicationEvidenceFromFields(detail, { publishedAt: raw });
 }
 
 export function detailAgeDays(detail, now = Date.now()) {
@@ -17,9 +29,14 @@ export function detailAgeDays(detail, now = Date.now()) {
   return Math.max(0, referenceDay - publishedDay);
 }
 
-export function isOutsideContentWindow(detail, maxAgeDays, now = Date.now()) {
+export function classifyContentWindow(detail, maxAgeDays, now = Date.now()) {
   const limit = Number(maxAgeDays);
-  if (!Number.isFinite(limit) || limit <= 0) return false;
-  const ageDays = detailAgeDays(detail, now);
-  return ageDays != null && ageDays > limit;
+  return classifyPublicationWindow(contentPublicationEvidence(detail), {
+    asOf: now,
+    maxAgeDays: limit,
+  });
+}
+
+export function isOutsideContentWindow(detail, maxAgeDays, now = Date.now()) {
+  return classifyContentWindow(detail, maxAgeDays, now).relation === "outside";
 }

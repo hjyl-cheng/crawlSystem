@@ -213,11 +213,14 @@ export class ChannelExecutionRuntime {
     const gateway = this.transport();
     let result;
     let error = null;
+    let hasError = false;
     let ytdlpLease = null;
     let youtubeLease = null;
     let ytdlpRelease = null;
     let youtubeRelease = null;
     let cleanupError = null;
+    let identityChanged = false;
+    let attemptAborted = false;
     const startedAt = Date.now();
     const metrics = new ChannelExecutionMetrics();
     let metricsSnapshot = null;
@@ -257,38 +260,84 @@ export class ChannelExecutionRuntime {
       }));
     } catch (caught) {
       error = caught;
+      hasError = true;
     } finally {
+      const attemptCancelled = () => identityChanged || Boolean(abortSignal?.aborted);
+      const refreshAttemptState = () => {
+        const finalProxy = getProxySnapshot();
+        const changed = !sameProxyAssignment(proxy, finalProxy)
+          || error instanceof ProxyIdentityChangedError;
+        if (changed) {
+          identityChanged = true;
+          if (!hasError) {
+            error = new ProxyIdentityChangedError(proxy, finalProxy);
+            hasError = true;
+          }
+        }
+        if (abortSignal?.aborted) {
+          error = abortSignal.reason;
+          hasError = true;
+        }
+      };
+      refreshAttemptState();
       try {
         youtubeRelease = await this.releaseYoutube();
       } catch (caught) {
         cleanupError = cleanupError || caught;
       }
+      refreshAttemptState();
+      const ytdlpReleaseStartedCancelled = attemptCancelled();
       try {
-        ytdlpRelease = await this.releaseYtDlp();
+        ytdlpRelease = await this.releaseYtDlp({
+          cancelled: ytdlpReleaseStartedCancelled,
+          reason: error,
+          signal: abortSignal,
+        });
       } catch (caught) {
         cleanupError = cleanupError || caught;
       }
+      refreshAttemptState();
+      let ytdlpCancellationApplied = ytdlpReleaseStartedCancelled;
+      const terminateReleasedYtDlpIfNeeded = async () => {
+        if (ytdlpCancellationApplied || !attemptCancelled()) return;
+        ytdlpCancellationApplied = true;
+        try {
+          await this.releaseYtDlp({ cancelled: true, reason: error, signal: abortSignal });
+        } catch (caught) {
+          cleanupError = cleanupError || caught;
+        }
+        refreshAttemptState();
+      };
+      await terminateReleasedYtDlpIfNeeded();
       const ytdlp = cleanSessionRelease(ytdlpRelease);
       ytdlpRelease = ytdlp.summary;
-      const identityChanged = !sameProxyAssignment(proxy, getProxySnapshot())
-        || error instanceof ProxyIdentityChangedError;
-      if (!identityChanged && !error) {
+      if (!attemptCancelled() && !hasError) {
         try {
           const youtubeCookies = await gateway.snapshot(profileGroup.clients.youtubejs_chrome);
-          await store.checkpointCookies(profileGroup.profile_group_id, {
-            youtubejs_chrome: youtubeCookies,
-            ytdlp_safari: ytdlp.cookieState,
-          });
+          refreshAttemptState();
+          await terminateReleasedYtDlpIfNeeded();
+          if (!attemptCancelled() && !hasError) {
+            await store.checkpointCookies(profileGroup.profile_group_id, {
+              youtubejs_chrome: youtubeCookies,
+              ytdlp_safari: ytdlp.cookieState,
+            });
+          }
         } catch (caught) {
           cleanupError = cleanupError || caught;
         }
       }
-      if (!error && cleanupError) error = cleanupError;
+      refreshAttemptState();
+      await terminateReleasedYtDlpIfNeeded();
+      if (!attemptCancelled() && !hasError && cleanupError) {
+        error = cleanupError;
+        hasError = true;
+      }
+      attemptAborted = attemptCancelled();
       metricsSnapshot = metrics.snapshot();
-      decisions = failureDecisions(metricsSnapshot, error);
+      decisions = failureDecisions(metricsSnapshot, attemptAborted ? null : error);
       try {
         await store.finishAttempt(attemptId, {
-          status: error ? (identityChanged ? "aborted" : "failed") : "success",
+          status: attemptAborted ? "aborted" : hasError ? "failed" : "success",
           identityChanged,
           error,
           result: {
@@ -300,17 +349,26 @@ export class ChannelExecutionRuntime {
           },
         });
       } catch (caught) {
-        if (!error) error = caught;
+        if (!attemptCancelled() && !hasError) {
+          error = caught;
+          hasError = true;
+        }
       }
       this.activeAttemptId = null;
     }
 
-    if (error) {
-      error.channel_execution_attempt = {
-        attempt_id: attemptId,
-        youtube_requests: metricsSnapshot,
-        failure_decisions: decisions,
-      };
+    if (hasError) {
+      if (error && ["object", "function"].includes(typeof error)) {
+        try {
+          error.channel_execution_attempt = {
+            attempt_id: attemptId,
+            youtube_requests: metricsSnapshot,
+            failure_decisions: decisions,
+          };
+        } catch {
+          // Cancellation reason identity takes precedence over diagnostic decoration.
+        }
+      }
       throw error;
     }
     return {

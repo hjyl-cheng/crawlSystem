@@ -108,3 +108,235 @@ test("processWithOrderedPrefetch drains the current prefetch window after proces
   );
   assert.equal(secondPrefetchFinished, true);
 });
+
+test("processWithOrderedPrefetch rejects an already-cancelled empty run", async () => {
+  const controller = new AbortController();
+  const reason = new Error("content detail cancelled");
+  controller.abort(reason);
+
+  await assert.rejects(
+    processWithOrderedPrefetch({
+      items: [],
+      signal: controller.signal,
+      prefetch: async () => assert.fail("empty run must not prefetch"),
+      process: async () => assert.fail("empty run must not process"),
+    }),
+    (error) => error === reason,
+  );
+});
+
+test("processWithOrderedPrefetch discards a result when cancellation arrives during processing", async () => {
+  const controller = new AbortController();
+  const reason = new Error("lease lost while processing");
+  let releaseProcess;
+  let releaseSibling;
+  let notifyProcessStarted;
+  let siblingFinished = false;
+  let stopAfterCalls = 0;
+  const processStarted = new Promise((resolve) => { notifyProcessStarted = resolve; });
+  const processGate = new Promise((resolve) => { releaseProcess = resolve; });
+  const siblingGate = new Promise((resolve) => { releaseSibling = resolve; });
+
+  const execution = processWithOrderedPrefetch({
+    items: [1, 2],
+    concurrency: 2,
+    signal: controller.signal,
+    prefetch: async (item) => {
+      if (item === 2) {
+        await siblingGate;
+        siblingFinished = true;
+      }
+      return item;
+    },
+    process: async (item, detailPromise) => {
+      await detailPromise;
+      if (item === 1) {
+        notifyProcessStarted();
+        await processGate;
+      }
+      return { item };
+    },
+    stopAfter: () => {
+      stopAfterCalls += 1;
+      return null;
+    },
+  });
+
+  await processStarted;
+  controller.abort(reason);
+  releaseProcess();
+  releaseSibling();
+
+  await assert.rejects(execution, (error) => error === reason);
+  assert.equal(siblingFinished, true);
+  assert.equal(stopAfterCalls, 0);
+});
+
+test("processWithOrderedPrefetch gives cancellation priority during stop-path draining", async () => {
+  const controller = new AbortController();
+  const reason = new Error("cancelled while draining a stopped window");
+  let releaseSibling;
+  let notifyStop;
+  const siblingGate = new Promise((resolve) => { releaseSibling = resolve; });
+  const stopReached = new Promise((resolve) => { notifyStop = resolve; });
+
+  const execution = processWithOrderedPrefetch({
+    items: [1, 2],
+    concurrency: 2,
+    signal: controller.signal,
+    prefetch: async (item) => {
+      if (item === 2) await siblingGate;
+      return item;
+    },
+    process: async (item, detailPromise) => ({ item, detail: await detailPromise }),
+    stopAfter: ({ item }) => {
+      if (item !== 1) return null;
+      notifyStop();
+      return "retryable";
+    },
+  });
+
+  await stopReached;
+  controller.abort(reason);
+  releaseSibling();
+
+  await assert.rejects(execution, (error) => error === reason);
+});
+
+test("processWithOrderedPrefetch gives cancellation priority during error-path draining", async () => {
+  const controller = new AbortController();
+  const ordinaryError = new Error("candidate persistence failed");
+  const reason = new Error("cancelled while draining a failed window");
+  let releaseSibling;
+  let notifyFailure;
+  const siblingGate = new Promise((resolve) => { releaseSibling = resolve; });
+  const failureReached = new Promise((resolve) => { notifyFailure = resolve; });
+
+  const execution = processWithOrderedPrefetch({
+    items: [1, 2],
+    concurrency: 2,
+    signal: controller.signal,
+    prefetch: async (item) => {
+      if (item === 2) await siblingGate;
+      return item;
+    },
+    process: async () => {
+      notifyFailure();
+      throw ordinaryError;
+    },
+  });
+
+  await failureReached;
+  controller.abort(reason);
+  releaseSibling();
+
+  await assert.rejects(execution, (error) => error === reason);
+});
+
+test("processWithOrderedPrefetch handles a later sibling rejection before it is consumed", async () => {
+  const primaryError = new Error("first candidate failed");
+  const siblingError = new Error("later prefetch failed early");
+  const unhandled = [];
+  const onUnhandled = (error) => unhandled.push(error);
+  process.on("unhandledRejection", onUnhandled);
+
+  try {
+    await assert.rejects(
+      processWithOrderedPrefetch({
+        items: [1, 2],
+        concurrency: 2,
+        prefetch: async (item) => {
+          if (item === 1) return item;
+          await new Promise((resolve) => setImmediate(resolve));
+          throw siblingError;
+        },
+        process: async (item, detailPromise) => {
+          await detailPromise;
+          if (item === 1) {
+            await new Promise((resolve) => setImmediate(resolve));
+            await new Promise((resolve) => setImmediate(resolve));
+            throw primaryError;
+          }
+          return { item };
+        },
+      }),
+      (error) => error === primaryError,
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(unhandled, []);
+  } finally {
+    process.off("unhandledRejection", onUnhandled);
+  }
+});
+
+test("processWithOrderedPrefetch checks cancellation before processing the next item", async () => {
+  const controller = new AbortController();
+  const reason = new Error("cancelled after the first ordered result");
+  const processed = [];
+
+  await assert.rejects(
+    processWithOrderedPrefetch({
+      items: [1, 2],
+      concurrency: 2,
+      signal: controller.signal,
+      prefetch: async (item) => item,
+      process: async (item, detailPromise) => {
+        await detailPromise;
+        processed.push(item);
+        return { item };
+      },
+      stopAfter: ({ item }) => {
+        if (item === 1) controller.abort(reason);
+        return null;
+      },
+    }),
+    (error) => error === reason,
+  );
+
+  assert.deepEqual(processed, [1]);
+});
+
+test("processWithOrderedPrefetch checks cancellation before opening the next window", async () => {
+  const controller = new AbortController();
+  const reason = new Error("cancelled between prefetch windows");
+  const prefetched = [];
+
+  await assert.rejects(
+    processWithOrderedPrefetch({
+      items: [1, 2],
+      concurrency: 1,
+      signal: controller.signal,
+      prefetch: async (item) => {
+        prefetched.push(item);
+        return item;
+      },
+      process: async (item, detailPromise) => ({ item, detail: await detailPromise }),
+      stopAfter: ({ item }) => {
+        if (item === 1) controller.abort(reason);
+        return null;
+      },
+    }),
+    (error) => error === reason,
+  );
+
+  assert.deepEqual(prefetched, [1]);
+});
+
+test("processWithOrderedPrefetch checks cancellation before its final return", async () => {
+  const controller = new AbortController();
+  const reason = new Error("cancelled by the final stop check");
+
+  await assert.rejects(
+    processWithOrderedPrefetch({
+      items: [1],
+      signal: controller.signal,
+      prefetch: async (item) => item,
+      process: async (item, detailPromise) => ({ item, detail: await detailPromise }),
+      stopAfter: () => {
+        controller.abort(reason);
+        return null;
+      },
+    }),
+    (error) => error === reason,
+  );
+});

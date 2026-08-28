@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-test("an accepted Promotion with existing content reaches About-only repair before generic resume", () => {
+function runScenario(scenario = "about_only") {
   const loader = new URL("./support/pipelineV2AboutOnlyLoader.mjs", import.meta.url);
   const harness = new URL("./support/pipelineV2AboutOnlyHarness.mjs", import.meta.url);
   const env = { ...process.env };
@@ -20,6 +20,7 @@ test("an accepted Promotion with existing content reaches About-only repair befo
       loader.pathname,
       harness.pathname,
       outputPath,
+      scenario,
     ], {
       cwd: new URL("..", import.meta.url),
       encoding: "utf8",
@@ -27,7 +28,14 @@ test("an accepted Promotion with existing content reaches About-only repair befo
     });
 
     assert.equal(child.status, 0, child.stderr || child.stdout);
-    const observed = JSON.parse(readFileSync(outputPath, "utf8"));
+    return JSON.parse(readFileSync(outputPath, "utf8"));
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+test("an accepted Promotion with existing content reaches About-only repair before generic resume", () => {
+    const observed = runScenario();
     assert.equal(observed.outcome, "resolved");
     assert.equal(observed.value.repaired, true);
     assert.equal(observed.value.resumed, undefined);
@@ -51,7 +59,12 @@ test("an accepted Promotion with existing content reaches About-only repair befo
       false,
       "About-only repair must not regenerate a Content detail artifact",
     );
-  } finally {
-    rmSync(directory, { recursive: true, force: true });
-  }
+});
+
+test("channel crawl does not fall back to legacy metadata after YouTube.js cancellation", () => {
+  const observed = runScenario("youtubejs_channel_cancelled");
+
+  assert.equal(observed.outcome, "rejected");
+  assert.equal(observed.reason_preserved, true);
+  assert.equal(observed.state.legacyHeaderAttempts, 0);
 });

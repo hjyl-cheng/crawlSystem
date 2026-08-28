@@ -10,6 +10,7 @@ function runScenario(scenario, { expectedStatus = 0 } = {}) {
   const harness = new URL("./support/pipelineV2DispositionHarness.mjs", import.meta.url);
   const env = { ...process.env };
   delete env.NODE_TEST_CONTEXT;
+  env.QY_PIPELINE_DISPOSITION_SCENARIO = scenario;
   const directory = mkdtempSync(join(tmpdir(), "qy-pipeline-disposition-"));
   const outputPath = join(directory, "result.json");
   try {
@@ -82,6 +83,7 @@ test("the shared Full Crawl detail path stores a public authoritative Video", ()
   );
   assert.equal(observed.candidate.result_json.access.access_status, "public");
   assert.equal(observed.candidate.result_json.classification.authoritative, true);
+  assert.equal(observed.value.details_requested_due_to_unresolved_count, 1);
 });
 
 test("the shared Full Crawl detail path normalizes disabled comments to zero", () => {
@@ -216,6 +218,7 @@ test("the shared Full Crawl path accepts live_status as the only current-Live si
   assert.equal(observed.candidate.result_json.disposition.reason_code, "live_in_progress");
   assert.equal(observed.candidate.api_status, "not_needed");
   assert.equal(observed.candidate.content_key, null);
+  assert.equal(observed.value.details_requested_due_to_unresolved_count, 0);
 });
 
 test("the shared Full Crawl detail path stores an ended Live replay", () => {
@@ -249,6 +252,23 @@ test("the shared Full Crawl detail path records an age-window exclusion", () => 
   assert.match(observed.candidate.next_attempt_at, /^\d{4}-\d{2}-\d{2}T/);
   assert.equal(observed.candidate.content_key, null);
   assert.equal(observed.candidate.result_json.scope.reason, "older_than_max_age");
+  assert.equal(observed.value.details_requested_due_to_unresolved_count, 0);
+});
+
+test("Candidate retry keeps an existing recent Detail over conflicting old flat evidence", () => {
+  const observed = runScenario("candidate_retry_publication_conflict");
+
+  assert.equal(observed.error, null);
+  assert.equal(observed.ytdlp_detail_attempts, 1);
+  assert.equal(observed.candidate.disposition, "stored");
+  assert.equal(
+    observed.candidate.result_json.detail.published_at,
+    "2026-07-19T00:00:00.000Z",
+  );
+  assert.equal(
+    observed.candidate.result_json.detail.published_text,
+    "Existing recent Detail text",
+  );
 });
 
 test("the shared Full Crawl detail path persists a deferred disposition before retrying a failure", () => {
@@ -325,4 +345,25 @@ test("Data API videos.list excludes a running Live instead of repairing comment 
   assert.equal(observed.candidate.api_status, "not_needed");
   assert.deepEqual(observed.candidate.missing_fields, []);
   assert.equal(observed.candidate.content_key, null);
+});
+
+test("the shared detail pipeline propagates channel cancellation without yt-dlp fallback", () => {
+  const observed = runScenario("detail_cancelled", { expectedStatus: 1 });
+
+  assert.equal(observed.forwarded_detail_signal, true);
+  assert.equal(observed.cancellation_reason_preserved, true);
+  assert.equal(observed.youtubejs_detail_attempts, 1);
+  assert.equal(observed.ytdlp_detail_attempts, 0);
+  assert.equal(observed.candidate.result_json.detail, undefined);
+});
+
+test("the real detail pipeline aborts its YouTube.js transport well before the internal timeout", () => {
+  const observed = runScenario("detail_transport_cancelled", { expectedStatus: 1 });
+
+  assert.equal(observed.transport_aborted, true);
+  assert.equal(observed.cancellation_reason_preserved, true);
+  assert.equal(observed.cancellation_deadline_exceeded, false);
+  assert.equal(observed.cancellation_elapsed_ms < 250, true);
+  assert.equal(observed.ytdlp_detail_attempts, 0);
+  assert.equal(observed.candidate.result_json.detail, undefined);
 });

@@ -5,6 +5,7 @@ import {
   executeIncrementalVideo as executeIncrementalVideoWithSystemClock,
   fetchIncrementalVideoDetail,
 } from "../src/incrementalVideo.js";
+import { runWithChannelExecution } from "../src/channelExecutionContext.js";
 
 function executeIncrementalVideo(options) {
   return executeIncrementalVideoWithSystemClock({
@@ -72,6 +73,8 @@ function databaseFixture({
   failPublication = false,
 } = {}) {
   let transactionCount = 0;
+  let activityCursorRows = [];
+  let activityCursorOffset = 0;
   const state = {
     candidates: new Set(["candidate-only"]),
     candidateRows: [],
@@ -82,6 +85,9 @@ function databaseFixture({
         source_content_id: "known-anchor",
         content_type: "video",
         published_at: "2026-07-10T00:00:00.000Z",
+        published_at_status: "exact",
+        published_at_precision: "second",
+        published_at_source: "test_existing_detail",
         last_seen_at: "2026-07-20T00:00:00.000Z",
         view_count: 200,
         player_last_observed_at: "2026-07-20T00:00:00.000Z",
@@ -96,6 +102,9 @@ function databaseFixture({
         source_content_id: "old-video",
         content_type: "video",
         published_at: "2026-07-09T00:00:00.000Z",
+        published_at_status: "exact",
+        published_at_precision: "second",
+        published_at_source: "test_existing_detail",
         last_seen_at: "2026-07-20T00:00:00.000Z",
         view_count: 90,
         player_last_observed_at: null,
@@ -164,6 +173,29 @@ function databaseFixture({
         state.channelStatus = "dormant";
         return { rowCount: 1, rows: [] };
       }
+      if (sql.includes("current_setting('statement_timeout')")) {
+        return { rows: [{ statement_timeout: "0" }] };
+      }
+      if (sql.startsWith("DECLARE video_activity_evidence_cursor")) {
+        activityCursorRows = state.contents
+          .filter((row) => row.channel_id === params[0])
+          .filter((row) => ["video", "short", "live"].includes(row.content_type))
+          .sort((left, right) => left.source_content_id.localeCompare(right.source_content_id))
+          .map((row) => ({ ...row }));
+        activityCursorOffset = 0;
+        return { rowCount: 0, rows: [] };
+      }
+      if (sql.startsWith("FETCH FORWARD")) {
+        const limit = Number(sql.match(/^FETCH FORWARD (\d+)/)?.[1] ?? 0);
+        const rows = activityCursorRows.slice(activityCursorOffset, activityCursorOffset + limit);
+        activityCursorOffset += rows.length;
+        return { rowCount: rows.length, rows };
+      }
+      if (sql.startsWith("CLOSE video_activity_evidence_cursor")) {
+        activityCursorRows = [];
+        activityCursorOffset = 0;
+        return { rowCount: 0, rows: [] };
+      }
       if (sql.includes("UPDATE crawler.channel_domain_cursors")) {
         state.cursorUpdates.push({
           outcome: params[4],
@@ -176,6 +208,15 @@ function databaseFixture({
       if (sql.includes("FROM crawler.contents") && sql.includes("source_content_id=ANY")) {
         const known = new Set(state.contents.map((row) => row.source_content_id));
         const rows = params[1].filter((id) => known.has(id)).map((video_id) => ({ video_id }));
+        return { rowCount: rows.length, rows };
+      }
+      if (sql.includes("FROM crawler.contents") && sql.includes("source_content_id>$2")) {
+        const cursor = String(params[1] ?? "");
+        const limit = Number(params[2] ?? state.contents.length);
+        const rows = state.contents
+          .filter((row) => row.channel_id === params[0] && row.source_content_id > cursor)
+          .sort((left, right) => left.source_content_id.localeCompare(right.source_content_id))
+          .slice(0, limit);
         return { rowCount: rows.length, rows };
       }
       if (sql.includes("UPDATE crawler.contents content") && sql.includes("jsonb_to_recordset")) {
@@ -241,6 +282,9 @@ function databaseFixture({
           source_content_id: params[5],
           content_type: params[3],
           published_at: params[15],
+          published_at_status: params[16],
+          published_at_source: params[17],
+          published_at_precision: params[18],
           view_count: params[23],
           player_last_observed_at: params[39],
           next_last_observed_at: params[40] ? params[39] : null,
@@ -1495,6 +1539,10 @@ test("Video execution deduplicates Contents and samples current Uploads dates in
               content_type: "video",
               title: "Uploads dated",
               published_day: "2026-07-19",
+              published_at: "2026-07-19",
+              published_at_status: "relative",
+              published_at_precision: "date_only",
+              published_at_source: "youtube_uploads_relative_time",
             },
             { id: "known-anchor", position: 4, content_type: "video", title: "Known" },
           ],
@@ -2518,9 +2566,9 @@ test("Video detail falls back to yt-dlp when YouTube.js returns incomplete facts
         description: null,
         description_status: "unresolved",
         description_source: null,
-        published_at: "2026-07-19T00:00:00.000Z",
-        published_at_precision: "date_only",
-        published_at_source: "yt_dlp_upload_date",
+        published_at: "2026-07-18T23:00:00.000Z",
+        published_at_precision: "second",
+        published_at_source: "yt_dlp_timestamp",
         comment_count: null,
         comment_count_status: "unresolved",
         comment_count_source: null,
@@ -2540,6 +2588,14 @@ test("Video detail falls back to yt-dlp when YouTube.js returns incomplete facts
   assert.equal(result.description, "Long description collected by YouTube.js");
   assert.equal(result.published_at, "2026-07-19T12:34:56.000Z");
   assert.equal(result.published_at_precision, "second");
+  assert.equal(
+    result.publication_evidence_conflict?.reason_code,
+    "equal_quality_publication_conflict",
+  );
+  assert.equal(
+    result.publication_evidence_conflict?.resolution?.reason_code,
+    "equal_quality_conflict_current_retained",
+  );
   assert.equal(result.comment_count, 2);
   assert.equal(result.comments_first_page.returned_count, 1);
   assert.equal(result.access_status, "public");
@@ -2784,6 +2840,56 @@ test("Video detail propagates cancellation and does not start a fallback after a
 
   assert.equal(forwardedSignal, controller.signal);
   assert.equal(fallbackCalls, 0);
+});
+
+test("Video discovery forwards cancellation through the real capture loop and stops the batch", async () => {
+  const fixture = databaseFixture();
+  const controller = new AbortController();
+  const leaseLost = new Error("Enrich lease lost during discovery detail");
+  const calls = [];
+  let forwardedSignal = null;
+
+  const operation = () => executeIncrementalVideo({
+    plan: plan(),
+    runId: "incremental:detail-cancelled",
+    startedAt: "2026-07-20T00:00:00.000Z",
+    query: fixture.query,
+    withTransaction: fixture.withTransaction,
+    getChannelSnapshot: async () => ({
+      async scanUploads() {
+        return {
+          playlist_id: "UUvideo",
+          entries: [
+            { id: "cancel-first", position: 1, title: "Cancel first" },
+            { id: "must-not-run", position: 2, title: "Must not run" },
+            { id: "known-anchor", position: 3, title: "Known anchor" },
+          ],
+          pages: 1,
+          item_count: 3,
+          parse_gap_count: 0,
+          anchor_matched: true,
+          matched_anchor_id: "known-anchor",
+          stop_reason: "anchor_matched",
+          terminal_reason: "anchor_matched",
+          complete: true,
+          raw: { engine: "youtubei.js@test" },
+        };
+      },
+    }),
+    fetchDetail: async (videoId, { signal } = {}) => {
+      calls.push(videoId);
+      forwardedSignal = signal ?? null;
+      if (videoId === "cancel-first") controller.abort(leaseLost);
+      return detail(videoId, 84);
+    },
+  });
+
+  await assert.rejects(
+    runWithChannelExecution({ abort_signal: controller.signal }, operation),
+    (error) => error === leaseLost,
+  );
+  assert.equal(forwardedSignal, controller.signal);
+  assert.deepEqual(calls, ["cancel-first"]);
 });
 
 test("Video discovery falls back to the migration yt-dlp Uploads collector without losing anchor safety", async () => {
@@ -3130,6 +3236,12 @@ test("Video discovery honors an upcoming state first revealed by Player detail",
 
 test("Video discovery does not persist a live broadcast while it is in progress", async () => {
   const fixture = databaseFixture();
+  for (const [index, row] of fixture.state.contents.entries()) {
+    row.published_at = `2026-01-0${index + 1}T00:00:00.000Z`;
+    row.published_at_status = "exact";
+    row.published_at_precision = "second";
+    row.published_at_source = "test_existing_detail";
+  }
   const fetched = [];
   const result = await executeIncrementalVideo({
     plan: plan(),
@@ -3188,6 +3300,475 @@ test("Video discovery does not persist a live broadcast while it is in progress"
     false,
   );
   assert.equal(fetched.includes("active-live"), false);
+  assert.equal(fixture.state.candidateRows[0].disposition, "terminal_excluded");
+  assert.equal(
+    fixture.state.candidateRows[0].result_json.disposition.reason_code,
+    "live_in_progress",
+  );
+  assert.equal(result.lifecycle_status, "active");
+  assert.equal(fixture.state.channelStatus, "active");
+  const activityEvidence = fixture.state.outbox[0].payload.activity_evidence;
+  assert.equal(activityEvidence.uncertain_content_count, 1);
+  assert.equal(activityEvidence.evidence_complete, true);
+  assert.equal(activityEvidence.evidence_scan_complete, true);
+  assert.equal(activityEvidence.evidence_scan_rows, 2);
+  assert.equal(activityEvidence.evidence_scan_page_count, 1);
+  assert.equal(activityEvidence.evidence_scan_truncated_count, 0);
+  assert.equal(activityEvidence.evidence_scan_stop_reason, "complete");
+  assert.equal(
+    fixture.state.observationSummaries[0].activity.evidence_scan_rows,
+    activityEvidence.evidence_scan_rows,
+  );
+});
+
+test("a current-run ended live replay reactivates a dormant channel beyond the history limit", async () => {
+  const fixture = databaseFixture();
+  fixture.state.channelStatus = "dormant";
+  fixture.state.contents = Array.from({ length: 1001 }, (_, index) => ({
+    content_key: `UCvideo:video:old-${String(index).padStart(4, "0")}`,
+    channel_id: "UCvideo",
+    source_content_id: `old-${String(index).padStart(4, "0")}`,
+    content_type: "video",
+    published_at: "2026-01-01T00:00:00.000Z",
+    published_at_status: "exact",
+    published_at_precision: "second",
+    published_at_source: "test_existing_detail",
+    last_seen_at: "2026-07-20T00:00:00.000Z",
+    view_count: 1,
+    player_last_observed_at: "2026-07-20T00:00:00.000Z",
+    next_last_observed_at: null,
+    video_change_probability: 0,
+    like_count: null,
+    comment_count: null,
+  }));
+  fixture.state.cursorAnchors = ["old-0000"];
+  const replayId = "zz-ended-live-replay";
+
+  const result = await executeIncrementalVideo({
+    plan: plan(),
+    runId: "incremental:ended-live-replay",
+    startedAt: "2026-07-20T00:00:00.000Z",
+    query: fixture.query,
+    withTransaction: fixture.withTransaction,
+    getChannelSnapshot: async () => ({
+      async scanUploads() {
+        return {
+          playlist_id: "UUvideo",
+          entries: [
+            {
+              id: replayId,
+              position: 1,
+              content_type: "live",
+              title: "Ended live replay",
+              published_day: "2026-07-19",
+            },
+            { id: "old-0000", position: 2, content_type: "video", title: "Anchor" },
+          ],
+          pages: 1,
+          item_count: 2,
+          parse_gap_count: 0,
+          anchor_matched: true,
+          matched_anchor_id: "old-0000",
+          stop_reason: "anchor_matched",
+          terminal_reason: "anchor_matched",
+          complete: true,
+          raw: { engine: "youtubei.js@test" },
+        };
+      },
+    }),
+    fetchDetail: async (videoId) => ({
+      ...detail(videoId, 100, { contentType: videoId === replayId ? "live" : "video" }),
+      ...(videoId === replayId ? {
+        live_ended_at: "2026-07-19T01:30:00.000Z",
+      } : {}),
+    }),
+  });
+
+  assert.equal(result.lifecycle_status, "active");
+  assert.equal(fixture.state.channelStatus, "active");
+  const activityEvidence = fixture.state.outbox[0].payload.activity_evidence;
+  assert.equal(activityEvidence.evidence_scan_stop_reason, "row_limit");
+  assert.equal(activityEvidence.recent_published_content_count, 1);
+  assert.equal(activityEvidence.relation_counts.inside, 1);
+});
+
+test("a page-out due recheck reactivates a dormant channel beyond the history limit", async () => {
+  const fixture = databaseFixture();
+  fixture.state.channelStatus = "dormant";
+  fixture.state.contents = Array.from({ length: 1001 }, (_, index) => ({
+    content_key: `UCvideo:video:old-${String(index).padStart(4, "0")}`,
+    channel_id: "UCvideo",
+    source_content_id: `old-${String(index).padStart(4, "0")}`,
+    content_type: "video",
+    published_at: "2026-01-01T00:00:00.000Z",
+    published_at_status: "exact",
+    published_at_precision: "second",
+    published_at_source: "test_existing_detail",
+    last_seen_at: "2026-07-20T00:00:00.000Z",
+    view_count: 1,
+    player_last_observed_at: "2026-07-20T00:00:00.000Z",
+    next_last_observed_at: null,
+    video_change_probability: 0,
+    like_count: null,
+    comment_count: null,
+  }));
+  fixture.state.cursorAnchors = ["old-0000"];
+  const recheckId = "zz-page-out-recheck";
+  fixture.state.candidateRows.push({
+    candidate_id: "1",
+    run_id: "incremental:prior-page-out-recheck",
+    channel_id: "UCvideo",
+    source_content_id: recheckId,
+    disposition: "terminal_excluded",
+    next_attempt_at: "2026-07-19T00:00:00.000Z",
+    result_json: {
+      flat: { id: recheckId, title: "Previously private" },
+      disposition: { reason_code: "access_private" },
+    },
+    first_seen_ledger_status: "not_applicable",
+    first_seen_ledger_observation_id: null,
+  });
+
+  const result = await executeIncrementalVideo({
+    plan: plan(),
+    runId: "incremental:page-out-recheck",
+    startedAt: "2026-07-20T00:00:00.000Z",
+    query: fixture.query,
+    withTransaction: fixture.withTransaction,
+    getChannelSnapshot: async () => ({
+      async scanUploads() {
+        return {
+          playlist_id: "UUvideo",
+          entries: [{ id: "old-0000", position: 1, content_type: "video", title: "Anchor" }],
+          pages: 1,
+          item_count: 1,
+          parse_gap_count: 0,
+          anchor_matched: true,
+          matched_anchor_id: "old-0000",
+          stop_reason: "anchor_matched",
+          terminal_reason: "anchor_matched",
+          complete: true,
+          raw: { engine: "youtubei.js@test" },
+        };
+      },
+    }),
+    fetchDetail: async (videoId) => detail(videoId, 100),
+  });
+
+  assert.equal(result.lifecycle_status, "active");
+  assert.equal(fixture.state.channelStatus, "active");
+  const activityEvidence = fixture.state.outbox[0].payload.activity_evidence;
+  assert.equal(activityEvidence.evidence_scan_stop_reason, "row_limit");
+  assert.equal(activityEvidence.recent_published_content_count, 1);
+  assert.equal(activityEvidence.relation_counts.inside, 1);
+});
+
+test("a page-out deferred detail uses recent publication evidence without storing content", async () => {
+  const fixture = databaseFixture();
+  fixture.state.channelStatus = "dormant";
+  for (const row of fixture.state.contents) {
+    row.published_at = "2026-01-01T00:00:00.000Z";
+    row.published_at_status = "exact";
+    row.published_at_precision = "second";
+    row.published_at_source = "test_existing_detail";
+  }
+  fixture.state.cursorAnchors = ["known-anchor"];
+  const recheckId = "page-out-access-unresolved";
+  fixture.state.candidateRows.push({
+    candidate_id: "1",
+    run_id: "incremental:prior-page-out-access-unresolved",
+    channel_id: "UCvideo",
+    source_content_id: recheckId,
+    disposition: "deferred",
+    next_attempt_at: "2026-07-19T00:00:00.000Z",
+    result_json: {
+      flat: { id: recheckId, title: "Access unresolved" },
+      disposition: { reason_code: "access_login_required" },
+    },
+    first_seen_ledger_status: "not_applicable",
+    first_seen_ledger_observation_id: null,
+  });
+
+  const result = await executeIncrementalVideo({
+    plan: plan(),
+    runId: "incremental:page-out-access-unresolved",
+    startedAt: "2026-07-20T00:00:00.000Z",
+    query: fixture.query,
+    withTransaction: fixture.withTransaction,
+    getChannelSnapshot: async () => ({
+      async scanUploads() {
+        return {
+          playlist_id: "UUvideo",
+          entries: [{ id: "known-anchor", position: 1, content_type: "video", title: "Anchor" }],
+          pages: 1,
+          item_count: 1,
+          parse_gap_count: 0,
+          anchor_matched: true,
+          matched_anchor_id: "known-anchor",
+          stop_reason: "anchor_matched",
+          terminal_reason: "anchor_matched",
+          complete: true,
+          raw: { engine: "youtubei.js@test" },
+        };
+      },
+    }),
+    fetchDetail: async (videoId) => ({
+      ...detail(videoId, 100),
+      access_status: "login_required",
+      availability: "needs_auth",
+      playability_status: "LOGIN_REQUIRED",
+    }),
+  });
+
+  assert.equal(
+    fixture.state.contents.some((row) => row.source_content_id === recheckId),
+    false,
+  );
+  assert.equal(fixture.state.candidateRows[0].disposition, "deferred");
+  assert.equal(result.lifecycle_status, "active");
+  assert.equal(fixture.state.channelStatus, "active");
+  const activityEvidence = fixture.state.outbox[0].payload.activity_evidence;
+  assert.equal(activityEvidence.recent_published_content_count, 1);
+  assert.equal(activityEvidence.relation_counts.inside, 1);
+});
+
+test("a Recent Sampling detail reactivates a dormant channel beyond the history limit", async () => {
+  const fixture = databaseFixture();
+  fixture.state.channelStatus = "dormant";
+  fixture.state.contents = Array.from({ length: 1001 }, (_, index) => ({
+    content_key: `UCvideo:video:old-${String(index).padStart(4, "0")}`,
+    channel_id: "UCvideo",
+    source_content_id: `old-${String(index).padStart(4, "0")}`,
+    content_type: "video",
+    published_at: "2026-01-01T00:00:00.000Z",
+    published_at_status: "exact",
+    published_at_precision: "second",
+    published_at_source: "test_existing_detail",
+    last_seen_at: "2026-07-20T00:00:00.000Z",
+    view_count: 1,
+    player_last_observed_at: "2026-07-20T00:00:00.000Z",
+    next_last_observed_at: null,
+    video_change_probability: 0,
+    like_count: null,
+    comment_count: null,
+  }));
+  fixture.state.cursorAnchors = ["old-0000"];
+  const sampledId = "zz-recent-sampling";
+  const sampledContentKey = `UCvideo:video:${sampledId}`;
+  fixture.state.contents.push({
+    content_key: sampledContentKey,
+    channel_id: "UCvideo",
+    source_content_id: sampledId,
+    content_type: "video",
+    published_at: null,
+    published_at_status: "unresolved",
+    published_at_precision: "unknown",
+    published_at_source: null,
+    last_seen_at: "2026-07-20T00:00:00.000Z",
+    view_count: null,
+    player_last_observed_at: null,
+    next_last_observed_at: null,
+    video_change_probability: null,
+    like_count: null,
+    comment_count: null,
+  });
+  fixture.state.enrichPending.add(sampledContentKey);
+
+  const result = await executeIncrementalVideo({
+    plan: {
+      ...plan(),
+      capacity: { ...plan().capacity, player_cap: 1, next_cap: 0 },
+    },
+    runId: "incremental:recent-sampling-activity",
+    startedAt: "2026-07-20T00:00:00.000Z",
+    query: fixture.query,
+    withTransaction: fixture.withTransaction,
+    getChannelSnapshot: async () => ({
+      async scanUploads() {
+        return {
+          playlist_id: "UUvideo",
+          entries: [{ id: "old-0000", position: 1, content_type: "video", title: "Anchor" }],
+          pages: 1,
+          item_count: 1,
+          parse_gap_count: 0,
+          anchor_matched: true,
+          matched_anchor_id: "old-0000",
+          stop_reason: "anchor_matched",
+          terminal_reason: "anchor_matched",
+          complete: true,
+          raw: { engine: "youtubei.js@test" },
+        };
+      },
+    }),
+    fetchDetail: async (videoId) => detail(videoId, 100),
+  });
+
+  assert.equal(result.lifecycle_status, "active");
+  assert.equal(fixture.state.channelStatus, "active");
+  const activityEvidence = fixture.state.outbox[0].payload.activity_evidence;
+  assert.equal(activityEvidence.evidence_scan_stop_reason, "row_limit");
+  assert.equal(activityEvidence.recent_published_content_count, 1);
+  assert.equal(activityEvidence.relation_counts.inside, 1);
+});
+
+test("a Recent Sampling access-only update still contributes recent publication evidence", async () => {
+  const fixture = databaseFixture();
+  fixture.state.channelStatus = "dormant";
+  fixture.state.contents = Array.from({ length: 1001 }, (_, index) => ({
+    content_key: `UCvideo:video:old-${String(index).padStart(4, "0")}`,
+    channel_id: "UCvideo",
+    source_content_id: `old-${String(index).padStart(4, "0")}`,
+    content_type: "video",
+    content_type_source: "test_existing_detail",
+    published_at: "2026-01-01T00:00:00.000Z",
+    published_at_status: "exact",
+    published_at_precision: "second",
+    published_at_source: "test_existing_detail",
+    last_seen_at: "2026-07-20T00:00:00.000Z",
+    view_count: 1,
+    player_last_observed_at: "2026-07-20T00:00:00.000Z",
+    next_last_observed_at: null,
+    video_change_probability: 0,
+    like_count: null,
+    comment_count: null,
+  }));
+  fixture.state.cursorAnchors = ["old-0000"];
+  const sampledId = "zz-recent-access-only";
+  const sampledContentKey = `UCvideo:video:${sampledId}`;
+  fixture.state.contents.push({
+    content_key: sampledContentKey,
+    channel_id: "UCvideo",
+    source_content_id: sampledId,
+    content_type: "video",
+    content_type_source: "test_existing_detail",
+    published_at: null,
+    published_at_status: "unresolved",
+    published_at_precision: "unknown",
+    published_at_source: null,
+    last_seen_at: "2026-07-20T00:00:00.000Z",
+    view_count: null,
+    player_last_observed_at: null,
+    next_last_observed_at: null,
+    video_change_probability: null,
+    like_count: null,
+    comment_count: null,
+  });
+  fixture.state.enrichPending.add(sampledContentKey);
+
+  const result = await executeIncrementalVideo({
+    plan: {
+      ...plan(),
+      capacity: { ...plan().capacity, player_cap: 1, next_cap: 0 },
+    },
+    runId: "incremental:recent-sampling-access-only",
+    startedAt: "2026-07-20T00:00:00.000Z",
+    query: fixture.query,
+    withTransaction: fixture.withTransaction,
+    getChannelSnapshot: async () => ({
+      async scanUploads() {
+        return {
+          playlist_id: "UUvideo",
+          entries: [{ id: "old-0000", position: 1, content_type: "video", title: "Anchor" }],
+          pages: 1,
+          item_count: 1,
+          parse_gap_count: 0,
+          anchor_matched: true,
+          matched_anchor_id: "old-0000",
+          stop_reason: "anchor_matched",
+          terminal_reason: "anchor_matched",
+          complete: true,
+          raw: { engine: "youtubei.js@test" },
+        };
+      },
+    }),
+    fetchDetail: async (videoId) => ({
+      ...detail(videoId, 100),
+      access_status: "private",
+      availability: "private",
+    }),
+  });
+
+  assert.equal(
+    fixture.state.contents.find((row) => row.source_content_id === sampledId).access_status,
+    "private",
+  );
+  assert.equal(result.lifecycle_status, "active");
+  assert.equal(fixture.state.channelStatus, "active");
+  const activityEvidence = fixture.state.outbox[0].payload.activity_evidence;
+  assert.equal(activityEvidence.evidence_scan_stop_reason, "row_limit");
+  assert.equal(activityEvidence.recent_published_content_count, 1);
+  assert.equal(activityEvidence.relation_counts.inside, 1);
+});
+
+test("a throttled live Candidate still blocks Incremental dormancy from current Uploads", async () => {
+  const fixture = databaseFixture();
+  for (const [index, row] of fixture.state.contents.entries()) {
+    row.published_at = `2026-01-0${index + 1}T00:00:00.000Z`;
+    row.published_at_status = "exact";
+    row.published_at_precision = "second";
+    row.published_at_source = "test_existing_detail";
+  }
+  fixture.state.candidateRows.push({
+    candidate_id: "1",
+    run_id: "incremental:prior-live",
+    channel_id: "UCvideo",
+    source_content_id: "still-live",
+    disposition: "terminal_excluded",
+    next_attempt_at: "2026-07-21T00:00:00.000Z",
+    result_json: {
+      disposition: {
+        kind: "terminal_excluded",
+        reason_code: "live_in_progress",
+      },
+    },
+  });
+  const fetched = [];
+  const result = await executeIncrementalVideo({
+    plan: { ...plan(), job_id: "incremental__throttled_live" },
+    runId: "incremental:throttled-live",
+    startedAt: "2026-07-20T01:00:00.000Z",
+    query: fixture.query,
+    withTransaction: fixture.withTransaction,
+    getChannelSnapshot: async () => ({
+      async scanUploads() {
+        return {
+          playlist_id: "UUvideo",
+          entries: [
+            {
+              id: "still-live",
+              position: 1,
+              content_type: "live",
+              is_live: true,
+              title: "Still live",
+            },
+            { id: "known-anchor", position: 2, title: "Known" },
+          ],
+          pages: 1,
+          item_count: 2,
+          parse_gap_count: 0,
+          anchor_matched: true,
+          matched_anchor_id: "known-anchor",
+          stop_reason: "anchor_matched",
+          terminal_reason: "anchor_matched",
+          complete: true,
+          raw: { engine: "youtubei.js@test" },
+        };
+      },
+    }),
+    fetchDetail: async (videoId) => {
+      fetched.push(videoId);
+      return detail(videoId, 100);
+    },
+  });
+
+  assert.equal(fetched.includes("still-live"), false);
+  assert.equal(result.lifecycle_status, "active");
+  assert.equal(fixture.state.channelStatus, "active");
+  assert.equal(fixture.state.candidateRows.length, 1);
+  assert.equal(
+    fixture.state.outbox[0].payload.activity_evidence.uncertain_content_count,
+    1,
+  );
 });
 
 test("Video discovery stores an unlisted detail without treating it as public", async () => {

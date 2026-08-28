@@ -2,12 +2,14 @@ import { spawn } from "node:child_process";
 import { ProxyAgent, fetch as undiciFetch } from "undici";
 import { persistentFetch } from "./httpClient.js";
 import { fetchWithFingerprint } from "./fingerprintFetch.js";
+import { combineAbortSignals, throwIfAborted } from "./abortSignal.js";
 import {
   currentManagedAbortSignal,
   currentProxyIdentity,
   runManagedProxyRequest,
 } from "./proxyIdentity.js";
 import {
+  currentChannelExecutionAbortSignal,
   recordChannelExecutionFailure,
   recordChannelExecutionRequest,
 } from "./channelExecutionContext.js";
@@ -442,6 +444,7 @@ for client in ("web_safari", "android"):
             "timestamp": info.get("timestamp"),
             "upload_date": info.get("upload_date"),
             "published_at": published_at,
+            "published_at_status": "exact" if published_at else "unresolved",
             "published_text": published_at[:10] if published_at else None,
             "published_at_precision": published_precision,
             "published_at_source": "yt_dlp_timestamp" if published_precision == "second" else "yt_dlp_upload_date" if published_precision == "date_only" else None,
@@ -800,7 +803,12 @@ function isUsableYoutubePage(text) {
     && /videoRenderer|channelRenderer|reelShelfRenderer|gridVideoRenderer|itemSectionRenderer|twoColumnSearchResultsRenderer|videoDetails|playerMicroformatRenderer/.test(body);
 }
 
-function runPythonJson(script, payload, { timeoutMs = 90000, maxBuffer = 20 * 1024 * 1024 } = {}) {
+function runPythonJson(script, payload, {
+  timeoutMs = 90000,
+  maxBuffer = 20 * 1024 * 1024,
+  signal = null,
+} = {}) {
+  throwIfAborted(signal);
   return new Promise((resolve, reject) => {
     const child = spawn("python3", ["-c", script], {
       stdio: ["pipe", "pipe", "pipe"],
@@ -811,42 +819,82 @@ function runPythonJson(script, payload, { timeoutMs = 90000, maxBuffer = 20 * 10
     });
     let stdout = "";
     let stderr = "";
-    const timer = setTimeout(() => {
-      child.kill("SIGKILL");
-      reject(new Error(`python helper timeout ${timeoutMs}ms`));
+    let settled = false;
+    let timer = null;
+    const cleanup = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+    };
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      callback(value);
+    };
+    const terminate = () => {
+      if (child.killed) return;
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        // The helper is already gone.
+      }
+    };
+    const onAbort = () => {
+      finish(reject, signal.reason);
+      terminate();
+    };
+    timer = setTimeout(() => {
+      const error = new Error(`python helper timeout ${timeoutMs}ms`);
+      finish(reject, error);
+      terminate();
     }, timeoutMs);
+    signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal?.aborted) {
+      onAbort();
+      return;
+    }
     child.stdout.on("data", (chunk) => {
       stdout += chunk.toString();
       if (stdout.length > maxBuffer) {
-        child.kill("SIGKILL");
-        reject(new Error("python helper stdout exceeded max buffer"));
+        finish(reject, new Error("python helper stdout exceeded max buffer"));
+        terminate();
       }
     });
     child.stderr.on("data", (chunk) => {
       stderr += chunk.toString();
       if (stderr.length > maxBuffer) {
-        child.kill("SIGKILL");
-        reject(new Error("python helper stderr exceeded max buffer"));
+        finish(reject, new Error("python helper stderr exceeded max buffer"));
+        terminate();
       }
     });
     child.on("error", (error) => {
-      clearTimeout(timer);
-      reject(error);
+      finish(reject, error);
     });
     child.on("close", (code) => {
-      clearTimeout(timer);
       if (code !== 0) {
-        reject(new Error(String(stderr || stdout || `python helper exited ${code}`).trim()));
+        finish(reject, new Error(String(stderr || stdout || `python helper exited ${code}`).trim()));
         return;
       }
       try {
-        resolve(JSON.parse(String(stdout || "{}")));
+        finish(resolve, JSON.parse(String(stdout || "{}")));
       } catch (error) {
-        reject(new Error(`python helper returned invalid JSON: ${error?.message || error}`));
+        finish(reject, new Error(`python helper returned invalid JSON: ${error?.message || error}`));
       }
     });
-    child.stdin.end(JSON.stringify(payload ?? {}));
+    try {
+      child.stdin.end(JSON.stringify(payload ?? {}));
+    } catch (error) {
+      finish(reject, error);
+    }
   });
+}
+
+function youtubeAdapterAbortSignal(signal) {
+  return combineAbortSignals(
+    signal,
+    currentManagedAbortSignal(),
+    currentChannelExecutionAbortSignal(),
+  );
 }
 
 function defaultHeaders(language = DEFAULT_LANGUAGE) {
@@ -967,6 +1015,24 @@ function isoToTimestamp(value) {
   if (!text) return null;
   const date = /^\d{4}-\d{2}-\d{2}$/.test(text) ? new Date(`${text}T00:00:00.000Z`) : new Date(text);
   return Number.isFinite(date.getTime()) ? date.toISOString() : null;
+}
+
+function unixSecondsToTimestamp(value) {
+  const raw = String(value ?? "").trim();
+  if (!/^[1-9]\d*$/.test(raw)) return null;
+  const seconds = Number(raw);
+  if (!Number.isSafeInteger(seconds)) return null;
+  const date = new Date(seconds * 1000);
+  return Number.isFinite(date.getTime()) ? date.toISOString() : null;
+}
+
+function compactUtcDateToTimestamp(value) {
+  const match = /^(\d{4})(\d{2})(\d{2})$/.exec(String(value ?? "").trim());
+  if (!match) return null;
+  const day = `${match[1]}-${match[2]}-${match[3]}`;
+  const date = new Date(`${day}T00:00:00.000Z`);
+  if (!Number.isFinite(date.getTime()) || date.toISOString().slice(0, 10) !== day) return null;
+  return date.toISOString();
 }
 
 function dateTextFromIsoLike(value) {
@@ -1116,18 +1182,19 @@ export function findContinuationToken(root) {
 export async function youtubeFetch(url, init = {}) {
   const timeoutMs = Number(init.timeoutMs ?? DEFAULT_TIMEOUT_MS);
   const startedAt = Date.now();
+  const externalSignal = combineAbortSignals(init.signal, currentManagedAbortSignal());
+  throwIfAborted(externalSignal);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(new Error(`timeout ${timeoutMs}ms`)), timeoutMs);
   const requestDispatcher = dispatcher();
   try {
-    const signals = [init.signal, currentManagedAbortSignal(), controller.signal].filter(Boolean);
     const requestInit = {
       ...init,
       headers: {
         ...defaultHeaders(init.language || DEFAULT_LANGUAGE),
         ...(init.headers ?? {}),
       },
-      signal: signals.length === 1 ? signals[0] : AbortSignal.any(signals),
+      signal: combineAbortSignals(externalSignal, controller.signal),
     };
     const response = await runManagedProxyRequest(() => fetchWithFingerprint(
       "youtubejs_chrome",
@@ -1135,6 +1202,7 @@ export async function youtubeFetch(url, init = {}) {
       requestInit,
       () => undiciFetch(url, { ...requestInit, dispatcher: requestDispatcher }),
     ));
+    throwIfAborted(externalSignal);
     recordChannelExecutionRequest({
       engine: "youtube_http",
       client: "WEB",
@@ -1146,6 +1214,7 @@ export async function youtubeFetch(url, init = {}) {
     });
     return response;
   } catch (error) {
+    if (externalSignal?.aborted) throw externalSignal.reason;
     const annotated = annotateYoutubeFailure(error, {
       source: "youtube_fetch_transport",
       targetUrl: String(url),
@@ -1558,6 +1627,7 @@ function detailFromPlayerResponse(player, url = null) {
     duration_source: details.lengthSeconds != null || microformat.lengthSeconds != null ? "youtubei_player" : null,
     published_text: dateTextFromIsoLike(publishedRaw),
     published_at: isoToTimestamp(publishedRaw),
+    published_at_status: publishedRaw ? "exact" : "unresolved",
     published_at_precision: publishedRaw && /T\d{2}:\d{2}/.test(String(publishedRaw)) ? "second" : publishedRaw ? "date_only" : "unknown",
     published_at_source: publishedRaw ? "youtubei_player_microformat" : null,
     playability_status: player.playabilityStatus?.status ?? null,
@@ -1736,6 +1806,8 @@ export function detailFromYtDlpResult(parsed, url = null) {
     duration_source: parsed.duration != null ? "yt_dlp" : null,
     published_text: dateTextFromIsoLike(parsed.published_text),
     published_at: isoToTimestamp(parsed.published_at ?? parsed.published_text),
+    published_at_status: parsed.published_at_status
+      ?? (parsed.published_at || parsed.published_text ? "exact" : "unresolved"),
     published_at_precision: parsed.published_at_precision,
     published_at_source: parsed.published_at_source,
     ytdlp_client: parsed.client,
@@ -1762,13 +1834,17 @@ export function detailFromYtDlpResult(parsed, url = null) {
     reason: parsed.playability_reason,
   });
   if (parsed.playability_status != null || parsed.playability_reason != null) {
+    const explicitAgeRestriction = playability.kind === "content"
+      && playability.reason_code === "age_restricted"
+      && parsedAccessStatus === "login_required";
     result.playability_kind = playability.kind;
     result.playability_reason_code = playability.reason_code;
     result.playability_retry_mode = playability.retry_mode;
-    result.access_status = parsedAccessStatus === "unknown"
+    result.access_status = parsedAccessStatus === "unknown" || explicitAgeRestriction
       ? playability.access_status
       : parsedAccessStatus;
-    if (parsedAvailability != null) result.availability = parsedAvailability;
+    if (explicitAgeRestriction) result.availability = playability.availability;
+    else if (parsedAvailability != null) result.availability = parsedAvailability;
     else if (playability.availability != null) result.availability = playability.availability;
     else if (playability.kind !== "content") delete result.availability;
   }
@@ -1781,24 +1857,66 @@ export function detailFromYtDlpResult(parsed, url = null) {
   return normalizeVideoTextMetadata(result);
 }
 
-export async function fetchChannelUploads(channelId, limit = 30, { language = DEFAULT_LANGUAGE } = {}) {
+export function channelUploadEntryFromYtDlpResult(entry, index = 0) {
+  const timestampPublishedAt = unixSecondsToTimestamp(entry?.timestamp);
+  const uploadDatePublishedAt = compactUtcDateToTimestamp(entry?.upload_date);
+  const publishedAt = timestampPublishedAt ?? uploadDatePublishedAt;
+  const liveStatus = String(entry?.live_status ?? "").trim().toLowerCase();
+  return {
+    video_id: String(entry?.id),
+    title: entry?.title ?? null,
+    url: `https://www.youtube.com/watch?v=${encodeURIComponent(entry?.id)}`,
+    source_url: entry?.url ?? null,
+    thumbnail_url: entry?.thumbnail_url ?? null,
+    duration_seconds: optionalPositiveInteger(entry?.duration),
+    view_count_text: entry?.view_count != null ? String(entry.view_count) : null,
+    published_text: dateTextFromIsoLike(publishedAt),
+    published_at: publishedAt,
+    published_at_status: publishedAt ? "exact" : "unresolved",
+    published_at_precision: timestampPublishedAt ? "second" : uploadDatePublishedAt ? "date_only" : "unknown",
+    published_at_source: timestampPublishedAt
+      ? "yt_dlp_flat_timestamp"
+      : uploadDatePublishedAt ? "yt_dlp_flat_upload_date" : null,
+    position: Number(entry?.position) || index + 1,
+    content_type: ["video", "short", "live"].includes(entry?.content_type) ? entry.content_type : null,
+    type_source: entry?.type_source ?? null,
+    type_membership: Array.isArray(entry?.type_membership) ? entry.type_membership : [],
+    is_live: entry?.is_live === true || liveStatus === "is_live",
+    is_upcoming: ["is_upcoming", "upcoming"].includes(liveStatus),
+    live_status: liveStatus || null,
+  };
+}
+
+export async function fetchChannelUploads(channelId, limit = 30, {
+  language = DEFAULT_LANGUAGE,
+  signal = null,
+} = {}) {
+  const effectiveSignal = youtubeAdapterAbortSignal(signal);
+  throwIfAborted(effectiveSignal);
   const cleanChannelId = String(channelId ?? "").trim();
   if (!cleanChannelId) throw new Error("channel_id is required for uploads playlist");
   const cleanLimit = Math.max(1, Math.min(Number(limit) || 30, 100));
   let parsed;
   try {
-    parsed = await persistentChannelUploads(cleanChannelId, cleanLimit, { timeoutMs: 180000 });
+    parsed = await persistentChannelUploads(cleanChannelId, cleanLimit, {
+      timeoutMs: 180000,
+      signal: effectiveSignal,
+    });
+    throwIfAborted(effectiveSignal);
     if (!parsed) {
       parsed = await runPythonJson(
         YTDLP_UPLOADS_PY,
         { channel_id: cleanChannelId, limit: cleanLimit, language },
-        { timeoutMs: 180000, maxBuffer: 16 * 1024 * 1024 },
+        { timeoutMs: 180000, maxBuffer: 16 * 1024 * 1024, signal: effectiveSignal },
       );
+      throwIfAborted(effectiveSignal);
     }
   } catch (error) {
+    throwIfAborted(effectiveSignal);
     const targetUrl = `https://www.youtube.com/channel/${encodeURIComponent(cleanChannelId)}`;
     throw annotateYtDlpFailure(error, targetUrl, "yt_dlp_uploads");
   }
+  throwIfAborted(effectiveSignal);
   if (!parsed?.ok || !Array.isArray(parsed.entries)) {
     const targetUrl = `https://www.youtube.com/channel/${encodeURIComponent(cleanChannelId)}`;
     throw annotateYtDlpFailure(
@@ -1819,38 +1937,7 @@ export async function fetchChannelUploads(channelId, limit = 30, { language = DE
     channel_id: cleanChannelId,
     playlist_id: parsed.playlist_id,
     playlist_url: parsed.playlist_url,
-    entries: parsed.entries.slice(0, cleanLimit).map((entry, index) => {
-      const compactUploadDate = /^\d{8}$/.test(String(entry.upload_date ?? ""))
-        ? `${String(entry.upload_date).slice(0, 4)}-${String(entry.upload_date).slice(4, 6)}-${String(entry.upload_date).slice(6, 8)}`
-        : null;
-      const timestampSeconds = Number(entry.timestamp);
-      const publishedAt = Number.isFinite(timestampSeconds) && timestampSeconds > 0
-        ? new Date(timestampSeconds * 1000).toISOString()
-        : isoToTimestamp(entry.timestamp ?? compactUploadDate);
-      const liveStatus = String(entry.live_status ?? "").trim().toLowerCase();
-      return {
-        video_id: String(entry.id),
-        title: entry.title ?? null,
-        url: `https://www.youtube.com/watch?v=${encodeURIComponent(entry.id)}`,
-        source_url: entry.url ?? null,
-        thumbnail_url: entry.thumbnail_url ?? null,
-        duration_seconds: optionalPositiveInteger(entry.duration),
-        view_count_text: entry.view_count != null ? String(entry.view_count) : null,
-        published_text: dateTextFromIsoLike(publishedAt),
-        published_at: publishedAt,
-        published_at_precision: entry.timestamp != null ? "second" : publishedAt ? "date_only" : "unknown",
-        published_at_source: entry.timestamp != null
-          ? "yt_dlp_flat_timestamp"
-          : publishedAt ? "yt_dlp_flat_upload_date" : null,
-        position: Number(entry.position) || index + 1,
-        content_type: ["video", "short", "live"].includes(entry.content_type) ? entry.content_type : null,
-        type_source: entry.type_source ?? null,
-        type_membership: Array.isArray(entry.type_membership) ? entry.type_membership : [],
-        is_live: entry.is_live === true || liveStatus === "is_live",
-        is_upcoming: ["is_upcoming", "upcoming"].includes(liveStatus),
-        live_status: liveStatus || null,
-      };
-    }),
+    entries: parsed.entries.slice(0, cleanLimit).map(channelUploadEntryFromYtDlpResult),
     tab_counts: parsed.tab_counts ?? {},
     uploads_missing: Boolean(parsed.uploads_missing),
     activity_evidence_complete: parseGapCount === 0
@@ -1896,21 +1983,30 @@ function needsYtDlpFallback(detail, needsLengthText = true) {
     || detail?.comment_count == null;
 }
 
-export async function fetchVideoYtDlpDetail(videoId, _itemUrl = null, { language = DEFAULT_LANGUAGE } = {}) {
+export async function fetchVideoYtDlpDetail(videoId, _itemUrl = null, {
+  language = DEFAULT_LANGUAGE,
+  signal = null,
+} = {}) {
+  const effectiveSignal = youtubeAdapterAbortSignal(signal);
+  throwIfAborted(effectiveSignal);
   const url = `https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}`;
   let parsed;
   try {
-    parsed = await persistentVideoDetail(url, { timeoutMs: 90000 });
+    parsed = await persistentVideoDetail(url, { timeoutMs: 90000, signal: effectiveSignal });
+    throwIfAborted(effectiveSignal);
     if (!parsed) {
       parsed = await runPythonJson(
         YTDLP_QUICK_DETAIL_PY,
         { url, video_id: videoId, language },
-        { timeoutMs: 90000, maxBuffer: 12 * 1024 * 1024 },
+        { timeoutMs: 90000, maxBuffer: 12 * 1024 * 1024, signal: effectiveSignal },
       );
+      throwIfAborted(effectiveSignal);
     }
   } catch (error) {
+    throwIfAborted(effectiveSignal);
     throw annotateYtDlpFailure(error, url, "yt_dlp_detail");
   }
+  throwIfAborted(effectiveSignal);
   if (!parsed?.ok) {
     throw annotateYtDlpFailure(
       new Error(String(parsed?.error ?? "yt-dlp returned no detail")),
@@ -2050,6 +2146,7 @@ export function detailFromDataApiItem(item, url = null) {
     duration_source: contentDetails.duration ? "youtube_data_api_content_details" : null,
     published_text: dateTextFromIsoLike(snippet.publishedAt),
     published_at: isoToTimestamp(snippet.publishedAt),
+    published_at_status: snippet.publishedAt ? "exact" : "unresolved",
     published_at_precision: snippet.publishedAt ? "second" : "unknown",
     published_at_source: snippet.publishedAt ? "youtube_data_api_snippet" : null,
     live_status: liveStatus,
@@ -2283,14 +2380,24 @@ export async function fetchChannelDataApiDetails(channelIds, apiKey, { timeoutMs
   };
 }
 
-export async function fetchChannelYtDlpMetadata(channelUrl, { language = DEFAULT_LANGUAGE } = {}) {
-  let parsed = await persistentChannelMetadata(channelUrl, { timeoutMs: 90000 });
+export async function fetchChannelYtDlpMetadata(channelUrl, {
+  language = DEFAULT_LANGUAGE,
+  signal = null,
+} = {}) {
+  const effectiveSignal = youtubeAdapterAbortSignal(signal);
+  throwIfAborted(effectiveSignal);
+  let parsed = await persistentChannelMetadata(channelUrl, {
+    timeoutMs: 90000,
+    signal: effectiveSignal,
+  });
+  throwIfAborted(effectiveSignal);
   if (!parsed) {
     parsed = await runPythonJson(
       YTDLP_CHANNEL_METADATA_PY,
       { url: channelUrl, language },
-      { timeoutMs: 90000, maxBuffer: 12 * 1024 * 1024 },
+      { timeoutMs: 90000, maxBuffer: 12 * 1024 * 1024, signal: effectiveSignal },
     );
+    throwIfAborted(effectiveSignal);
   }
   if (!parsed?.ok) throw new Error(String(parsed?.error ?? "yt-dlp returned no channel metadata"));
   const followerCount = optionalInteger(parsed.channel_follower_count);

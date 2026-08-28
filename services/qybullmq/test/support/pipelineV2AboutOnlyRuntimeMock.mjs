@@ -137,6 +137,7 @@ function unexpectedContentCollection() {
 }
 
 export async function fetchChannelInitial() {
+  state().legacyHeaderAttempts += 1;
   return unexpectedContentCollection();
 }
 
@@ -177,6 +178,10 @@ export function youtubeJsDetailEnabled() {
 }
 
 export async function openYoutubeJsChannel() {
+  if (state().scenario === "youtubejs_channel_cancelled") {
+    state().cancelChannel();
+    throw state().cancellationSignal.reason;
+  }
   return {
     metadata: {
       channel_id: channelId,
