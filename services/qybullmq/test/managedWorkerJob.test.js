@@ -7,8 +7,10 @@ import {
   RotaSlotDeferredError,
 } from "../src/rotaSlotAdapter.js";
 import {
+  activeChannelCandidateAttemptFence,
   channelCandidateFailureDisposition,
   clearChannelCandidateJobAttempt,
+  failedChannelCandidateAttemptFence,
   markChannelCandidateJobAttemptActive,
   processManagedWorkerJob,
   recordChannelCandidateJobFailure,
@@ -124,6 +126,27 @@ test("the failed listener preserves only a Business Run terminal budget state", 
   }), "failed");
 });
 
+test("Candidate attempt Fences use the active and failed BullMQ attempt clocks", () => {
+  const job = {
+    id: "channel-job-01",
+    attemptsMade: 2,
+    data: { candidate_id: 42, dispatch_generation: 7 },
+  };
+
+  assert.deepEqual(activeChannelCandidateAttemptFence(job), {
+    candidateId: 42,
+    dispatchGeneration: 7,
+    jobId: "channel-job-01",
+    bullmqAttempt: 3,
+  });
+  assert.deepEqual(failedChannelCandidateAttemptFence(job), {
+    candidateId: 42,
+    dispatchGeneration: 7,
+    jobId: "channel-job-01",
+    bullmqAttempt: 2,
+  });
+});
+
 test("a Candidate attempt claim is monotonic within one dispatch generation", async () => {
   let statement = null;
   const updated = await markChannelCandidateJobAttemptActive(async (sql, params) => {
@@ -138,7 +161,7 @@ test("a Candidate attempt claim is monotonic within one dispatch generation", as
   assert.equal(updated, true);
   assert.match(statement.sql, /snapshot_active_job_attempt<=\$3/);
   assert.match(statement.sql, /snapshot_dispatch_generation=\$4/);
-  assert.match(statement.sql, /status IN \('discovered','queued','validating'\)/);
+  assert.match(statement.sql, /status IN \('discovered','queued','validating','accepted'\)/);
   assert.deepEqual(statement.params, [42, "channel-job-01", 2, 7]);
 });
 

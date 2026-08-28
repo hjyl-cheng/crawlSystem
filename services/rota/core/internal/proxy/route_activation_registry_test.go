@@ -109,3 +109,23 @@ func TestRouteActivationRegistryRebuildIsAConnectionBarrier(t *testing.T) {
 		t.Fatal("committed reconstructed Route remained unavailable")
 	}
 }
+
+func TestClaimReplayDoesNotDowngradeRebuiltCommittedRoute(t *testing.T) {
+	handler := NewUpstreamProxyHandler(nil, nil, &models.RotationSettings{}, nil)
+	const username = "bullmq-channel-01-g3-replayed"
+
+	handler.requireRouteActivationRegistry()
+	if err := handler.rebuildRouteActivationRegistry(context.Background(), []proxycontrol.RouteActivationRegistryEntry{
+		{Username: username, Phase: proxycontrol.RouteActivationCommitted},
+	}); err != nil {
+		t.Fatalf("rebuild committed Claim route: %v", err)
+	}
+
+	replayed, err := handler.beginRouteActivation(username, "", "lease:replayed-lease")
+	if err != nil || !replayed.AlreadyCommitted {
+		t.Fatalf("replay rebuilt committed Claim route = %+v, err = %v", replayed, err)
+	}
+	if !handler.proxyUserReady(username) {
+		t.Fatal("Claim replay downgraded a rebuilt committed Route")
+	}
+}

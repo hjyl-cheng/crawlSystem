@@ -49,7 +49,7 @@ function normalizedCandidate(row) {
   };
 }
 
-export function channelSnapshotRedispatchPayload(candidate, batchId, {
+export function channelSnapshotJobPayload(candidate, batchId, {
   minSubscriberCount = 1000,
 } = {}) {
   const generation = positiveInteger(
@@ -79,13 +79,54 @@ export function channelSnapshotRedispatchPayload(candidate, batchId, {
   };
 }
 
+export function buildDiscoveredChannelSnapshotJob({
+  candidate,
+  channel,
+  dispatchBatchId,
+  pipelineCycleId = null,
+  queryId = null,
+  queryText = null,
+  minSubscriberCount = 1000,
+  jobId,
+} = {}) {
+  const normalizedBatchId = requiredText(dispatchBatchId, "dispatchBatchId");
+  const payload = channelSnapshotJobPayload({
+    candidate_id: positiveInteger(candidate?.candidate_id, "candidate.candidate_id"),
+    snapshot_dispatch_generation: positiveInteger(
+      candidate?.snapshot_dispatch_generation,
+      "candidate.snapshot_dispatch_generation",
+    ),
+    channel_id: requiredText(channel?.channel_id, "channel.channel_id"),
+    channel_url: requiredText(channel?.channel_url, "channel.channel_url"),
+    query_id: queryId,
+    query_text: queryText,
+    pipeline_cycle_id: pipelineCycleId || normalizedBatchId,
+    candidate_source: "youtube_search_discovery",
+  }, normalizedBatchId, { minSubscriberCount });
+  return Object.freeze({
+    name: CHANNEL_SNAPSHOT_JOB_NAME,
+    data: Object.freeze(payload),
+    opts: Object.freeze({ jobId: requiredText(jobId, "jobId") }),
+  });
+}
+
 export function buildChannelSnapshotRedispatchAllocation(candidate, batchId, {
   expectedGeneration,
   previousJobId = null,
+  previousJobAttempt = null,
   jobId,
   minSubscriberCount = 1000,
 } = {}) {
   const normalizedExpected = nonNegativeInteger(expectedGeneration, "expectedGeneration");
+  const normalizedPreviousJobId = previousJobId == null
+    ? null
+    : requiredText(previousJobId, "previousJobId");
+  const normalizedPreviousJobAttempt = previousJobAttempt == null
+    ? null
+    : nonNegativeInteger(previousJobAttempt, "previousJobAttempt");
+  if ((normalizedPreviousJobId == null) !== (normalizedPreviousJobAttempt == null)) {
+    throw new TypeError("previousJobId and previousJobAttempt must be provided together");
+  }
   const nextCandidate = {
     ...candidate,
     snapshot_dispatch_generation: normalizedExpected + 1,
@@ -93,11 +134,12 @@ export function buildChannelSnapshotRedispatchAllocation(candidate, batchId, {
   return Object.freeze({
     candidate: nextCandidate,
     expectedGeneration: normalizedExpected,
-    previousJobId: previousJobId == null ? null : requiredText(previousJobId, "previousJobId"),
+    previousJobId: normalizedPreviousJobId,
+    previousJobAttempt: normalizedPreviousJobAttempt,
     migrationIntentId: candidate?.migration_intent_id == null
       ? null
       : positiveInteger(candidate.migration_intent_id, "candidate.migration_intent_id"),
-    payload: channelSnapshotRedispatchPayload(nextCandidate, batchId, { minSubscriberCount }),
+    payload: channelSnapshotJobPayload(nextCandidate, batchId, { minSubscriberCount }),
     jobId: requiredText(jobId, "jobId"),
   });
 }
@@ -186,6 +228,35 @@ async function persistChannelSnapshotOutbox(client, expected) {
   return loadExactChannelSnapshotOutbox(client, expected);
 }
 
+async function validateMigrationIntentDispatchGeneration(client, {
+  migrationIntentId,
+  candidateId,
+  dispatchGeneration,
+}) {
+  const normalizedIntentId = positiveInteger(migrationIntentId, "migrationIntentId");
+  const intent = await client.query(
+    `SELECT migration_intent_id,target_candidate_id,dispatch_attempts
+     FROM crawler.migration_channel_intents
+     WHERE migration_intent_id=$1 AND target_candidate_id=$2 AND dispatch_attempts=$3
+     FOR SHARE`,
+    [normalizedIntentId, candidateId, dispatchGeneration],
+  );
+  const row = intent.rows?.[0];
+  if (intent.rowCount !== 1
+      || Number(row?.migration_intent_id) !== normalizedIntentId
+      || Number(row?.target_candidate_id) !== candidateId
+      || Number(row?.dispatch_attempts) !== dispatchGeneration) {
+    throw new ChannelSnapshotDispatchConflictError(
+      "Migration Intent conflicts with the allocated Channel snapshot generation",
+      {
+        migration_intent_id: normalizedIntentId,
+        candidate_id: candidateId,
+        dispatch_generation: dispatchGeneration,
+      },
+    );
+  }
+}
+
 export async function stageChannelSnapshotOutbox(client, {
   candidate,
   payload,
@@ -229,6 +300,7 @@ export async function allocateChannelSnapshotDispatchOutbox(client, {
   candidate,
   expectedGeneration,
   previousJobId = null,
+  previousJobAttempt = null,
   migrationIntentId = null,
   payload,
   jobId,
@@ -262,6 +334,13 @@ export async function allocateChannelSnapshotDispatchOutbox(client, {
   const currentGeneration = Number(current.snapshot_dispatch_generation);
   if (currentGeneration === nextGeneration) {
     const outbox = await loadExactChannelSnapshotOutbox(client, expected);
+    if (migrationIntentId != null) {
+      await validateMigrationIntentDispatchGeneration(client, {
+        migrationIntentId,
+        candidateId,
+        dispatchGeneration: nextGeneration,
+      });
+    }
     return { candidate: normalizedCandidate(current), outbox, created: false };
   }
   if (currentGeneration !== normalizedExpected) {
@@ -292,6 +371,12 @@ export async function allocateChannelSnapshotDispatchOutbox(client, {
   const normalizedPreviousJobId = previousJobId == null
     ? null
     : requiredText(previousJobId, "previousJobId");
+  const normalizedPreviousJobAttempt = previousJobAttempt == null
+    ? null
+    : nonNegativeInteger(previousJobAttempt, "previousJobAttempt");
+  if ((normalizedPreviousJobId == null) !== (normalizedPreviousJobAttempt == null)) {
+    throw new TypeError("previousJobId and previousJobAttempt must be provided together");
+  }
   const advanced = await client.query(
     `UPDATE crawler.channel_candidates
      SET status='queued',next_retry_at=NULL,validation_finished_at=NULL,
@@ -301,14 +386,20 @@ export async function allocateChannelSnapshotDispatchOutbox(client, {
      WHERE candidate_id=$1 AND snapshot_dispatch_generation=$2
        AND status IN ('discovered','queued','validating','failed')
        AND (
-         ($4::text IS NULL AND snapshot_active_job_id IS NULL
+         ($4::text IS NULL AND $5::int IS NULL AND snapshot_active_job_id IS NULL
            AND snapshot_active_job_attempt IS NULL)
-         OR (snapshot_active_job_id=$4 AND snapshot_active_job_attempt IS NOT NULL)
+         OR (snapshot_active_job_id=$4 AND snapshot_active_job_attempt=$5)
        )
      RETURNING candidate_id,dispatch_batch_id,pipeline_cycle_id,channel_id,channel_url,
                priority,status,snapshot_dispatch_generation,
                snapshot_active_job_id,snapshot_active_job_attempt`,
-    [candidateId, normalizedExpected, expected.deterministic_job_id, normalizedPreviousJobId],
+    [
+      candidateId,
+      normalizedExpected,
+      expected.deterministic_job_id,
+      normalizedPreviousJobId,
+      normalizedPreviousJobAttempt,
+    ],
   );
   if (advanced.rowCount !== 1) {
     throw new ChannelSnapshotDispatchConflictError(

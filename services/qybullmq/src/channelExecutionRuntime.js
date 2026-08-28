@@ -20,7 +20,7 @@ import {
   releaseYoutubeJs,
   youtubeJsState,
 } from "./youtubeJs.js";
-import { decideYoutubeFailure } from "./youtubeFailurePolicy.js";
+import { selectYoutubeFailure } from "./youtubeFailurePolicy.js";
 
 function cleanSessionRelease(value) {
   if (!value) return { summary: value, cookieState: undefined };
@@ -73,19 +73,24 @@ function failureDecisions(metrics, attemptError = null) {
   const output = [];
   for (const item of evidence) {
     const sourceError = item.error || errorFromEvidence(item);
-    const disposition = decideYoutubeFailure({
+    const selected = selectYoutubeFailure({
       error: sourceError,
       status: item.status,
       body: item.body,
       source: item.source,
+      targetUrl: item.target_url,
+      client: item.client,
     });
+    const disposition = selected.decision;
     const structuredEvidence = Object.hasOwn(disposition, "evidence")
       ? disposition.evidence
       : null;
     const decisionSource = structuredEvidence
       ? structuredEvidence.source
-      : item.source;
-    const key = [disposition.kind, decisionSource, item.status, item.error_message].join(":");
+      : selected.evidence.source;
+    const decisionStatus = selected.evidence.status ?? disposition.status ?? null;
+    const decisionMessage = String(selected.node?.message ?? item.error_message ?? "") || null;
+    const key = [disposition.kind, decisionSource, decisionStatus, decisionMessage].join(":");
     if (seen.has(key)) continue;
     seen.add(key);
     output.push({
@@ -93,11 +98,11 @@ function failureDecisions(metrics, attemptError = null) {
       evidence: {
         ...(structuredEvidence ?? {}),
         source: decisionSource || null,
-        target_url: item.target_url || null,
-        client: item.client || null,
-        status: item.status ?? disposition.status ?? null,
-        body: item.body || "",
-        error_message: item.error_message || null,
+        target_url: selected.evidence.target_url || null,
+        client: selected.evidence.client || null,
+        status: decisionStatus,
+        body: selected.evidence.body || "",
+        error_message: decisionMessage,
       },
     });
   }

@@ -156,3 +156,67 @@ test("a concurrent terminal write and newer dispatch generation reject a late fa
     await pool.end();
   }
 });
+
+test("an accepted Candidate can resume its Job without becoming mutable by failed events", {
+  skip: !integrationUrl,
+}, async () => {
+  const pool = new Pool({ connectionString: integrationUrl, max: 1 });
+  const client = await pool.connect();
+  const suffix = randomUUID();
+  const batchId = `managed-worker-accepted-retry:${suffix}`;
+  const jobId = `managed-worker-accepted-job:${suffix}`;
+
+  try {
+    await client.query("BEGIN");
+    await client.query(
+      `INSERT INTO crawler.query_dispatch_batches (
+         dispatch_batch_id,pipeline_cycle_id,status,result_json
+       ) VALUES ($1,$1,'running','{}'::jsonb)`,
+      [batchId],
+    );
+    const candidate = await client.query(
+      `INSERT INTO crawler.channel_candidates (
+         dispatch_batch_id,pipeline_cycle_id,channel_id,channel_url,status,accepted_at,
+         snapshot_dispatch_generation,snapshot_active_job_id,snapshot_active_job_attempt,
+         source_json
+       ) VALUES ($1,$1,$2,$3,'accepted',now(),3,$4,1,'{}'::jsonb)
+       RETURNING candidate_id`,
+      [
+        batchId,
+        `UC${suffix.replaceAll("-", "")}`,
+        `https://www.youtube.com/channel/UC${suffix}`,
+        jobId,
+      ],
+    );
+    const candidateId = Number(candidate.rows[0].candidate_id);
+    const retryJob = {
+      id: jobId,
+      attemptsMade: 1,
+      data: { candidate_id: candidateId, dispatch_generation: 3 },
+    };
+
+    assert.equal(
+      await markChannelCandidateJobAttemptActive(client.query.bind(client), retryJob),
+      true,
+    );
+    assert.equal(await recordChannelCandidateJobFailure(
+      client.query.bind(client),
+      { ...retryJob, attemptsMade: 2 },
+      { disposition: "queued", message: "retry failed after promotion" },
+    ), false);
+    assert.deepEqual((await client.query(
+      `SELECT status,snapshot_active_job_id,snapshot_active_job_attempt,error_message
+       FROM crawler.channel_candidates WHERE candidate_id=$1`,
+      [candidateId],
+    )).rows[0], {
+      status: "accepted",
+      snapshot_active_job_id: jobId,
+      snapshot_active_job_attempt: 2,
+      error_message: null,
+    });
+  } finally {
+    await client.query("ROLLBACK").catch(() => {});
+    client.release();
+    await pool.end();
+  }
+});

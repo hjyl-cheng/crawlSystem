@@ -47,6 +47,7 @@ func (m *Manager) Claim(ctx context.Context, request ClaimRequest) (Assignment, 
 	if err != nil {
 		return Assignment{}, err
 	}
+	expiredCredentialRotations := append([]credentialRotation(nil), credentialRotations...)
 
 	replayed, found, err := loadClaimLease(ctx, tx, m.options.WorkloadScope, request.ClaimRequestID)
 	if err != nil {
@@ -66,10 +67,16 @@ func (m *Manager) Claim(ctx context.Context, request ClaimRequest) (Assignment, 
 		if assignment.LeaseID != replayed.LeaseID || assignment.WorkerInstanceID != request.WorkerInstanceID {
 			return Assignment{}, ErrLeaseGone
 		}
+		if err := m.retireExpiredCredentialUsers(ctx, expiredCredentialRotations); err != nil {
+			return Assignment{}, err
+		}
 		if err := tx.Commit(ctx); err != nil {
 			return Assignment{}, fmt.Errorf("commit replayed proxy claim: %w", err)
 		}
 		m.invalidateCredentials(credentialRotations)
+		if err := m.publishClaimedRoute(ctx, assignment, ""); err != nil {
+			return Assignment{}, err
+		}
 		return assignment, nil
 	}
 
@@ -108,6 +115,9 @@ func (m *Manager) Claim(ctx context.Context, request ClaimRequest) (Assignment, 
 		FOR UPDATE OF s SKIP LOCKED
 	`, request.Role, eligibleIDs).Scan(&slotName)
 	if errors.Is(err, pgx.ErrNoRows) {
+		if err := m.retireExpiredCredentialUsers(ctx, expiredCredentialRotations); err != nil {
+			return Assignment{}, err
+		}
 		if err := tx.Commit(ctx); err != nil {
 			return Assignment{}, fmt.Errorf("commit empty proxy claim: %w", err)
 		}
@@ -132,11 +142,20 @@ func (m *Manager) Claim(ctx context.Context, request ClaimRequest) (Assignment, 
 	}
 
 	leaseID := uuid.NewString()
-	rotation, err := rotateSlotCredential(ctx, tx, slotName)
-	if err != nil {
-		return Assignment{}, err
+	var rotation credentialRotation
+	for _, expiredRotation := range credentialRotations {
+		if expiredRotation.SlotName == slotName {
+			rotation = expiredRotation
+			break
+		}
 	}
-	credentialRotations = append(credentialRotations, rotation)
+	if rotation.SlotName == "" {
+		rotation, err = rotateSlotCredential(ctx, tx, slotName)
+		if err != nil {
+			return Assignment{}, err
+		}
+		credentialRotations = append(credentialRotations, rotation)
+	}
 
 	var networkIdentityKey string
 	if err := tx.QueryRow(ctx, `
@@ -189,10 +208,16 @@ func (m *Manager) Claim(ctx context.Context, request ClaimRequest) (Assignment, 
 	if err != nil {
 		return Assignment{}, err
 	}
+	if err := m.retireExpiredCredentialUsers(ctx, expiredCredentialRotations); err != nil {
+		return Assignment{}, err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return Assignment{}, fmt.Errorf("commit proxy claim: %w", err)
 	}
 	m.invalidateCredentials(credentialRotations)
+	if err := m.publishClaimedRoute(ctx, assignment, rotation.OldUsername); err != nil {
+		return Assignment{}, err
+	}
 	return assignment, nil
 }
 

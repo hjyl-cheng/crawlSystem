@@ -227,6 +227,14 @@ test("read-only Migration Source reaches fresh Crawler and Business Current with
 
     const candidateId = Number(firstIntent.candidate.candidate_id);
     const promoted = await transaction(crawlerPool, async (client) => {
+      const dispatchGeneration = Number(firstIntent.candidate.snapshot_dispatch_generation);
+      const snapshotJobId = String(firstIntent.outbox.deterministic_job_id);
+      await client.query(
+        `UPDATE crawler.channel_candidates
+         SET snapshot_active_job_id=$2,snapshot_active_job_attempt=1
+         WHERE candidate_id=$1 AND snapshot_dispatch_generation=$3`,
+        [candidateId, snapshotJobId, dispatchGeneration],
+      );
       const result = await claimChannelRegistryPromotion(client, {
         candidateId,
         runId,
@@ -243,6 +251,12 @@ test("read-only Migration Source reaches fresh Crawler and Business Current with
         sourceJson: {
           migration_source: sourceSnapshot,
           channel_extractor: "isolated-integration-fixture",
+        },
+        candidateAttemptFence: {
+          candidateId,
+          dispatchGeneration,
+          jobId: snapshotJobId,
+          bullmqAttempt: 1,
         },
       });
       await prepareChannelRun(client, {

@@ -10,6 +10,150 @@ import { PUBLICATION_WRITER_VERSION } from "../src/publicationWriterVersion.js";
 const { Pool } = pg;
 const integrationUrl = process.env.PUBLICATION_POSTGRES_TEST_URL;
 
+test("a stale Snapshot attempt cannot claim the Channel Registry promotion", {
+  skip: !integrationUrl,
+}, async () => {
+  const pool = new Pool({
+    connectionString: integrationUrl,
+    max: 1,
+    options: `-c publication.writer_version=${PUBLICATION_WRITER_VERSION}`,
+  });
+  const client = await pool.connect();
+  const suffix = randomUUID().replaceAll("-", "");
+  const channelId = `UCregistrystale${suffix}`;
+  const dispatchBatchId = `registry-stale-${suffix}`;
+  try {
+    const identity = await client.query("SELECT current_database() AS database_name");
+    assert.match(identity.rows[0].database_name, /_test$/i, "Integration URL must target a *_test database");
+    await client.query("BEGIN");
+    await client.query(
+      `INSERT INTO crawler.query_dispatch_batches (
+         dispatch_batch_id,pipeline_cycle_id,status,discovery_closed_at
+       ) VALUES ($1,$1,'validation_closed',now())`,
+      [dispatchBatchId],
+    );
+    const inserted = await client.query(
+      `INSERT INTO crawler.channel_candidates (
+         dispatch_batch_id,pipeline_cycle_id,channel_id,channel_url,status,
+         snapshot_dispatch_generation,snapshot_active_job_id,snapshot_active_job_attempt
+       ) VALUES ($1,$1,$2,$3,'validating',2,'channel-snapshot:g2',1)
+       RETURNING candidate_id`,
+      [dispatchBatchId, channelId, `https://www.youtube.com/channel/${channelId}`],
+    );
+    const candidateId = Number(inserted.rows[0].candidate_id);
+
+    await client.query("SAVEPOINT stale_promotion");
+    await assert.rejects(
+      claimChannelRegistryPromotion(client, {
+        candidateId,
+        runId: `run:registry-stale:${suffix}`,
+        channelId,
+        channelUrl: `https://www.youtube.com/channel/${channelId}`,
+        title: "Stale Registry Claim",
+        subscriberCount: 100,
+        readyForAgent: true,
+        sourceJson: { source: "stale_attempt" },
+        candidateAttemptFence: {
+          candidateId,
+          dispatchGeneration: 1,
+          jobId: "channel-snapshot:g1",
+          bullmqAttempt: 1,
+        },
+      }),
+      /Candidate attempt Fence is stale/,
+    );
+    await client.query("ROLLBACK TO SAVEPOINT stale_promotion");
+
+    const state = await client.query(
+      `SELECT candidate.status,
+              EXISTS (SELECT 1 FROM crawler.channels WHERE channel_id=$2) AS channel_exists
+       FROM crawler.channel_candidates AS candidate
+       WHERE candidate.candidate_id=$1`,
+      [candidateId, channelId],
+    );
+    assert.deepEqual(state.rows[0], {
+      status: "validating",
+      channel_exists: false,
+    });
+  } finally {
+    await client.query("ROLLBACK").catch(() => {});
+    client.release();
+    await pool.end();
+  }
+});
+
+test("terminal Channel evidence does not overwrite a newer Candidate attempt", {
+  skip: !integrationUrl,
+}, async () => {
+  const pool = new Pool({
+    connectionString: integrationUrl,
+    max: 1,
+    options: `-c publication.writer_version=${PUBLICATION_WRITER_VERSION}`,
+  });
+  const client = await pool.connect();
+  const suffix = randomUUID().replaceAll("-", "");
+  const channelId = `UClifecyclestale${suffix}`;
+  const dispatchBatchId = `lifecycle-stale-${suffix}`;
+  try {
+    const identity = await client.query("SELECT current_database() AS database_name");
+    assert.match(identity.rows[0].database_name, /_test$/i, "Integration URL must target a *_test database");
+    await client.query("BEGIN");
+    await client.query(
+      `INSERT INTO crawler.query_dispatch_batches (
+         dispatch_batch_id,pipeline_cycle_id,status,discovery_closed_at
+       ) VALUES ($1,$1,'validation_closed',now())`,
+      [dispatchBatchId],
+    );
+    await client.query(
+      `INSERT INTO crawler.channels (channel_id,channel_url,title,status)
+       VALUES ($1,$2,'Lifecycle Fence','active')`,
+      [channelId, `https://www.youtube.com/channel/${channelId}`],
+    );
+    const inserted = await client.query(
+      `INSERT INTO crawler.channel_candidates (
+         dispatch_batch_id,pipeline_cycle_id,channel_id,channel_url,status,
+         snapshot_dispatch_generation,snapshot_active_job_id,snapshot_active_job_attempt
+       ) VALUES ($1,$1,$2,$3,'validating',2,'channel-snapshot:g2',1)
+       RETURNING candidate_id`,
+      [dispatchBatchId, channelId, `https://www.youtube.com/channel/${channelId}`],
+    );
+    const candidateId = Number(inserted.rows[0].candidate_id);
+
+    await markChannelRemoved(client, {
+      channelId,
+      candidateId,
+      candidateAttemptFence: {
+        candidateId,
+        dispatchGeneration: 1,
+        jobId: "channel-snapshot:g1",
+        bullmqAttempt: 1,
+      },
+      terminal: {
+        failure_kind: "channel_removed",
+        removed_reason: "channel_not_found",
+        removed_source: "integration_test",
+        evidence: "This channel does not exist.",
+      },
+    });
+
+    const state = await client.query(
+      `SELECT channel.status AS channel_status,candidate.status AS candidate_status
+       FROM crawler.channels AS channel
+       JOIN crawler.channel_candidates AS candidate ON candidate.candidate_id=$2
+       WHERE channel.channel_id=$1`,
+      [channelId, candidateId],
+    );
+    assert.deepEqual(state.rows[0], {
+      channel_status: "removed",
+      candidate_status: "validating",
+    });
+  } finally {
+    await client.query("ROLLBACK").catch(() => {});
+    client.release();
+    await pool.end();
+  }
+});
+
 test("the Registry primary key selects one immutable promotion winner and Repair cannot replace it", {
   skip: !integrationUrl,
 }, async () => {
@@ -39,16 +183,19 @@ test("the Registry primary key selects one immutable promotion winner and Repair
     );
     const candidates = await client.query(
       `INSERT INTO crawler.channel_candidates (
-         dispatch_batch_id,pipeline_cycle_id,channel_id,channel_url,status
+         dispatch_batch_id,pipeline_cycle_id,channel_id,channel_url,status,
+         snapshot_dispatch_generation,snapshot_active_job_id,snapshot_active_job_attempt
        ) VALUES
-         ($1,$1,$3,$4,'validating'),
-         ($2,$2,$3,$4,'validating')
+         ($1,$1,$3,$4,'validating',1,$5,1),
+         ($2,$2,$3,$4,'validating',1,$6,1)
        RETURNING candidate_id,dispatch_batch_id`,
       [
         winnerBatchId,
         loserBatchId,
         channelId,
         `https://www.youtube.com/channel/${channelId}`,
+        `channel-snapshot:winner:${suffix}`,
+        `channel-snapshot:loser:${suffix}`,
       ],
     );
     const candidateByBatch = new Map(
@@ -66,6 +213,12 @@ test("the Registry primary key selects one immutable promotion winner and Repair
       subscriberCountText: "1.23K subscribers",
       readyForAgent: true,
       sourceJson: { source: "integration_winner" },
+      candidateAttemptFence: {
+        candidateId: winnerCandidateId,
+        dispatchGeneration: 1,
+        jobId: `channel-snapshot:winner:${suffix}`,
+        bullmqAttempt: 1,
+      },
     });
     assert.equal(winner.status, "promoted");
     await prepareChannelRun(client, {
@@ -96,6 +249,12 @@ test("the Registry primary key selects one immutable promotion winner and Repair
       subscriberCountText: "1.23K subscribers",
       readyForAgent: true,
       sourceJson: { source: "integration_loser" },
+      candidateAttemptFence: {
+        candidateId: loserCandidateId,
+        dispatchGeneration: 1,
+        jobId: `channel-snapshot:loser:${suffix}`,
+        bullmqAttempt: 1,
+      },
     });
     assert.deepEqual(loser, {
       status: "existing",

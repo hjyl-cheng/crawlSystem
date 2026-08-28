@@ -198,6 +198,9 @@ func (m *Manager) reconcile(ctx context.Context) (reconcileSummary, error) {
 		}
 	}
 
+	if err := m.retireExpiredCredentialUsers(ctx, credentialRotations); err != nil {
+		return reconcileSummary{}, err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return reconcileSummary{}, fmt.Errorf("commit proxy reconciliation: %w", err)
 	}

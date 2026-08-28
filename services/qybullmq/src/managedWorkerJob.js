@@ -1,6 +1,15 @@
 import { queuesByRole } from "./queues.js";
 import { isBusinessRunBudgetExhausted } from "./businessRunBudgetRecovery.js";
 import { RotaSlotDeferredError } from "./rotaSlotAdapter.js";
+import {
+  activeChannelCandidateAttemptFence,
+  failedChannelCandidateAttemptFence,
+} from "./channelCandidateAttemptFence.js";
+
+export {
+  activeChannelCandidateAttemptFence,
+  failedChannelCandidateAttemptFence,
+} from "./channelCandidateAttemptFence.js";
 
 export function channelCandidateFailureDisposition({
   error,
@@ -15,37 +24,14 @@ export function channelCandidateFailureDisposition({
     : "queued";
 }
 
-function positiveInteger(value, field) {
-  const parsed = Number(value);
-  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
-    throw new TypeError(`${field} must be a positive integer`);
-  }
-  return parsed;
-}
-
-function requiredText(value, field) {
-  const normalized = String(value ?? "").trim();
-  if (!normalized) throw new TypeError(`${field} is required`);
-  return normalized;
-}
-
 export async function markChannelCandidateJobAttemptActive(query, job) {
   if (typeof query !== "function") throw new TypeError("query is required");
-  const candidateId = positiveInteger(job?.data?.candidate_id, "job.data.candidate_id");
-  const dispatchGeneration = positiveInteger(
-    job?.data?.dispatch_generation,
-    "job.data.dispatch_generation",
-  );
-  const jobId = requiredText(job?.id, "job.id");
-  const bullmqAttempt = positiveInteger(
-    Number(job?.attemptsMade ?? 0) + 1,
-    "BullMQ active attempt",
-  );
+  const fence = activeChannelCandidateAttemptFence(job);
   const updated = await query(
     `UPDATE crawler.channel_candidates
      SET snapshot_active_job_id=$2,snapshot_active_job_attempt=$3,updated_at=now()
      WHERE candidate_id=$1 AND snapshot_dispatch_generation=$4
-       AND status IN ('discovered','queued','validating')
+       AND status IN ('discovered','queued','validating','accepted')
        AND (
          snapshot_active_job_id IS NULL
          OR (
@@ -55,27 +41,21 @@ export async function markChannelCandidateJobAttemptActive(query, job) {
        )
      RETURNING candidate_id,snapshot_dispatch_generation,
                snapshot_active_job_id,snapshot_active_job_attempt`,
-    [candidateId, jobId, bullmqAttempt, dispatchGeneration],
+    [fence.candidateId, fence.jobId, fence.bullmqAttempt, fence.dispatchGeneration],
   );
   return updated?.rowCount === 1;
 }
 
 export async function clearChannelCandidateJobAttempt(query, job) {
   if (typeof query !== "function") throw new TypeError("query is required");
-  const candidateId = positiveInteger(job?.data?.candidate_id, "job.data.candidate_id");
-  const dispatchGeneration = positiveInteger(
-    job?.data?.dispatch_generation,
-    "job.data.dispatch_generation",
-  );
-  const jobId = requiredText(job?.id, "job.id");
-  const bullmqAttempt = positiveInteger(job?.attemptsMade, "job.attemptsMade");
+  const fence = failedChannelCandidateAttemptFence(job);
   const updated = await query(
     `UPDATE crawler.channel_candidates
      SET snapshot_active_job_id=NULL,snapshot_active_job_attempt=NULL,updated_at=now()
      WHERE candidate_id=$1 AND snapshot_dispatch_generation=$2
        AND snapshot_active_job_id=$3 AND snapshot_active_job_attempt=$4
      RETURNING candidate_id`,
-    [candidateId, dispatchGeneration, jobId, bullmqAttempt],
+    [fence.candidateId, fence.dispatchGeneration, fence.jobId, fence.bullmqAttempt],
   );
   return updated?.rowCount === 1;
 }
@@ -92,13 +72,7 @@ export async function recordChannelCandidateJobFailure(query, job, {
   if (!snapshotPatch || typeof snapshotPatch !== "object" || Array.isArray(snapshotPatch)) {
     throw new TypeError("Candidate failure snapshotPatch must be an object");
   }
-  const candidateId = positiveInteger(job?.data?.candidate_id, "job.data.candidate_id");
-  const dispatchGeneration = positiveInteger(
-    job?.data?.dispatch_generation,
-    "job.data.dispatch_generation",
-  );
-  const jobId = requiredText(job?.id, "job.id");
-  const bullmqAttempt = positiveInteger(job?.attemptsMade, "job.attemptsMade");
+  const fence = failedChannelCandidateAttemptFence(job);
   const updated = await query(
     `UPDATE crawler.channel_candidates candidate
      SET status=$2,error_message=$3,
@@ -116,13 +90,13 @@ export async function recordChannelCandidateJobFailure(query, job, {
        AND candidate.status IN ('discovered','queued','validating')
      RETURNING candidate_id,status,snapshot_dispatch_generation`,
     [
-      candidateId,
+      fence.candidateId,
       disposition,
       String(message ?? "unknown channel crawl failure"),
       JSON.stringify(snapshotPatch),
-      dispatchGeneration,
-      jobId,
-      bullmqAttempt,
+      fence.dispatchGeneration,
+      fence.jobId,
+      fence.bullmqAttempt,
     ],
   );
   return updated?.rowCount === 1;

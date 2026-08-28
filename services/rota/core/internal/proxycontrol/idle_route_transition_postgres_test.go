@@ -110,6 +110,10 @@ func TestFailedProxyOnExecutionLockedSlotFinishesBeforeIdleTransition(t *testing
 	if err != nil {
 		t.Fatalf("claim initial route: %v", err)
 	}
+	claimActivationCalls := dataPlane.activationCalls
+	if claimActivationCalls != 1 {
+		t.Fatalf("Claim data-plane activations = %d, want 1", claimActivationCalls)
+	}
 	task, err := manager.BeginTask(ctx, BeginTaskRequest{
 		SlotName: claim.SlotName, WorkerID: claim.WorkerID,
 		WorkerInstanceID: claim.WorkerInstanceID, LeaseID: claim.LeaseID,
@@ -154,7 +158,7 @@ func TestFailedProxyOnExecutionLockedSlotFinishesBeforeIdleTransition(t *testing
 		*renewed.ProxyID != failedProxyID ||
 		renewed.AssignmentVersion != claim.AssignmentVersion ||
 		renewed.CredentialGeneration != claim.CredentialGeneration ||
-		dataPlane.activationCalls != 0 {
+		dataPlane.activationCalls != claimActivationCalls {
 		t.Fatalf("execution-locked assignment = %+v", renewed)
 	}
 
@@ -197,7 +201,7 @@ func TestFailedProxyOnExecutionLockedSlotFinishesBeforeIdleTransition(t *testing
 	if !replaced.Ready || !replaced.RouteChanged || replaced.ProxyID == nil ||
 		*replaced.ProxyID != reserveProxyID ||
 		replaced.AssignmentVersion != claim.AssignmentVersion+1 ||
-		dataPlane.activationCalls != 1 {
+		dataPlane.activationCalls != claimActivationCalls+1 {
 		t.Fatalf("post-completion replacement = %+v", replaced)
 	}
 }
@@ -677,6 +681,10 @@ func TestFailedProxyOnLeaseOwnedIdleSlotRotatesToHealthyReserve(t *testing.T) {
 	if claim.ProxyID == nil || *claim.ProxyID != failedProxyID || !claim.Ready {
 		t.Fatalf("initial assignment = %+v", claim)
 	}
+	claimActivationCalls := dataPlane.activationCalls
+	if claimActivationCalls != 1 {
+		t.Fatalf("Claim data-plane activations = %d, want 1", claimActivationCalls)
+	}
 
 	if _, err := pool.Exec(ctx, `
 		UPDATE proxies
@@ -708,7 +716,7 @@ func TestFailedProxyOnLeaseOwnedIdleSlotRotatesToHealthyReserve(t *testing.T) {
 		renewed.ProxyUser == claim.ProxyUser || renewed.ControlState != "leased_idle" {
 		t.Fatalf("rotated idle assignment = %+v, initial = %+v", renewed, claim)
 	}
-	if dataPlane.activationCalls != 1 || dataPlane.oldUsername != claim.ProxyUser ||
+	if dataPlane.activationCalls != claimActivationCalls+1 || dataPlane.oldUsername != claim.ProxyUser ||
 		dataPlane.newUsername != renewed.ProxyUser || dataPlane.expectedProxyID != reserveProxyID {
 		t.Fatalf("data-plane activation = %+v", dataPlane)
 	}
@@ -730,7 +738,7 @@ func TestFailedProxyOnLeaseOwnedIdleSlotRotatesToHealthyReserve(t *testing.T) {
 	if !stable.Ready || stable.RouteChanged ||
 		stable.AssignmentVersion != renewed.AssignmentVersion ||
 		stable.CredentialGeneration != renewed.CredentialGeneration ||
-		dataPlane.activationCalls != 1 {
+		dataPlane.activationCalls != claimActivationCalls+1 {
 		t.Fatalf("stable assignment = %+v, activation calls = %d", stable, dataPlane.activationCalls)
 	}
 }
@@ -753,6 +761,10 @@ func TestFailedProxyOnLeaseOwnedIdleSlotPausesAndRecoversWhenReserveArrives(t *t
 	))
 	if err != nil {
 		t.Fatalf("claim initial route: %v", err)
+	}
+	claimActivationCalls := dataPlane.activationCalls
+	if claimActivationCalls != 1 {
+		t.Fatalf("Claim data-plane activations = %d, want 1", claimActivationCalls)
 	}
 
 	if _, err := pool.Exec(ctx, `
@@ -806,7 +818,7 @@ func TestFailedProxyOnLeaseOwnedIdleSlotPausesAndRecoversWhenReserveArrives(t *t
 	if stillPaused.Ready || stillPaused.RouteChanged ||
 		stillPaused.AssignmentVersion != paused.AssignmentVersion ||
 		stillPaused.CredentialGeneration != paused.CredentialGeneration ||
-		len(dataPlane.retiredUsers) != 1 {
+		dataPlane.activationCalls != claimActivationCalls || len(dataPlane.retiredUsers) != 1 {
 		t.Fatalf("stable paused assignment = %+v, retired users = %v", stillPaused, dataPlane.retiredUsers)
 	}
 
@@ -830,7 +842,7 @@ func TestFailedProxyOnLeaseOwnedIdleSlotPausesAndRecoversWhenReserveArrives(t *t
 		recovered.ControlState != "leased_idle" ||
 		recovered.AssignmentVersion != paused.AssignmentVersion+1 ||
 		recovered.CredentialGeneration != paused.CredentialGeneration+1 ||
-		dataPlane.activationCalls != 1 || dataPlane.oldUsername != paused.ProxyUser ||
+		dataPlane.activationCalls != claimActivationCalls+1 || dataPlane.oldUsername != paused.ProxyUser ||
 		dataPlane.newUsername != recovered.ProxyUser {
 		t.Fatalf("recovered idle assignment = %+v, data plane = %+v", recovered, dataPlane)
 	}
@@ -1318,6 +1330,10 @@ func TestAppliedHealthVerdictRacesRenewReconcileAndBeginTaskWithoutReusingFailed
 	if claim.ProxyID == nil || *claim.ProxyID != failedProxyID {
 		t.Fatalf("initial assignment = %+v, want proxy %d", claim, failedProxyID)
 	}
+	claimActivationCalls := dataPlane.activations()
+	if claimActivationCalls != 1 {
+		t.Fatalf("Claim data-plane activations = %d, want 1", claimActivationCalls)
+	}
 
 	const healthVerdictGate int64 = controlAdvisoryLock + 1
 	if _, err := pool.Exec(ctx, `
@@ -1497,7 +1513,7 @@ func TestAppliedHealthVerdictRacesRenewReconcileAndBeginTaskWithoutReusingFailed
 	if !stable.Ready || stable.ProxyID == nil || *stable.ProxyID != reserveProxyID ||
 		stable.AssignmentVersion != claim.AssignmentVersion+1 ||
 		stable.CredentialGeneration != claim.CredentialGeneration+1 ||
-		dataPlane.activations() != 1 {
+		dataPlane.activations() != claimActivationCalls+1 {
 		t.Fatalf("stable replacement = %+v, activations = %d", stable, dataPlane.activations())
 	}
 

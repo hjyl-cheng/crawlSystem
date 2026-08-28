@@ -167,6 +167,28 @@ test("a nested rate limit Observation does not borrow its wrapper source", () =>
   });
 });
 
+test("a recorded rate-limit Decision does not borrow Evidence from a 404 sibling", () => {
+  const missingContent = Object.assign(new Error("HTTP 404 video not found"), {
+    youtube_failure_evidence: {
+      status: 404,
+      source: "content_lookup",
+    },
+  });
+  const error = Object.assign(
+    new AggregateError([new Error("HTTP 429"), missingContent], "parallel requests failed"),
+    {
+      channel_execution_attempt: {
+        failure_decisions: [{ kind: "youtube_rate_limited" }],
+      },
+    },
+  );
+
+  assert.deepEqual(retryableRotaFailure(error), {
+    observation: "youtube_rate_limited",
+    source: "youtube_managed_request",
+  });
+});
+
 test("Discover search can finish while downstream qualification remains open", async () => {
   const result = await executeManagedWorkerAttempt({
     job: { queueName: "youtube-discover-page" },

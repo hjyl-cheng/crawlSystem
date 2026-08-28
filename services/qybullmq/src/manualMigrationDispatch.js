@@ -290,6 +290,7 @@ async function loadIntentForUpdate(client, snapshot) {
             candidate.dispatch_batch_id,candidate.pipeline_cycle_id,
             candidate.channel_url,candidate.priority,candidate.status,
             candidate.snapshot_attempts,candidate.snapshot_dispatch_generation,
+            candidate.snapshot_active_job_id,candidate.snapshot_active_job_attempt,
             candidate.source_json
      FROM crawler.migration_channel_intents intent
      LEFT JOIN crawler.channel_candidates candidate
@@ -482,6 +483,10 @@ function existingCandidate(intent) {
     status: intent.status,
     snapshot_attempts: intent.snapshot_attempts,
     snapshot_dispatch_generation: Number(intent.snapshot_dispatch_generation ?? 0),
+    snapshot_active_job_id: intent.snapshot_active_job_id,
+    snapshot_active_job_attempt: intent.snapshot_active_job_attempt == null
+      ? null
+      : Number(intent.snapshot_active_job_attempt),
     source_json: intent.source_json,
   };
 }
@@ -938,6 +943,7 @@ async function advanceTerminalManualMigrationDispatch(client, {
     candidate,
     expectedGeneration: currentGeneration,
     previousJobId: previous.jobId,
+    previousJobAttempt: prepared.candidate.snapshot_active_job_attempt,
     migrationIntentId: prepared.intentId,
     payload: next.payload,
     jobId: next.jobId,

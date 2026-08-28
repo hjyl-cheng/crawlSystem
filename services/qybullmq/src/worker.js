@@ -2,7 +2,10 @@ import { Worker } from "bullmq";
 import { nanoid } from "nanoid";
 import { ensureDefaultAgentConfig } from "./agentConfig.js";
 import { ChannelExecutionRuntimeAdapter } from "./channelExecutionRuntimeAdapter.js";
-import { allocateDiscoveredChannelSnapshotDispatches } from "./channelSnapshotDispatch.js";
+import {
+  allocateDiscoveredChannelSnapshotDispatches,
+  buildDiscoveredChannelSnapshotJob,
+} from "./channelSnapshotDispatch.js";
 import { deferJobForSlotPause } from "./channelJobDeferral.js";
 import { DiscoverExecutionRuntimeAdapter } from "./discoverExecutionRuntimeAdapter.js";
 import { buildDemoChannelCrawlJob } from "./demoChannelDispatch.js";
@@ -11,6 +14,11 @@ import {
   classifyTerminalChannelError,
   markChannelRemoved,
 } from "./channelLifecycle.js";
+import { activeChannelCandidateAttemptFence } from "./channelCandidateAttemptFence.js";
+import {
+  persistChannelCandidateParserContractFailure,
+  StaleChannelCandidateAttemptError,
+} from "./channelCandidateAttemptMutations.js";
 import { ensureSchema, closeDb, logTaskEvent, query, warmDb, withTransaction } from "./db.js";
 import { closePersistentHttpClient } from "./httpClient.js";
 import { youtubeErrorText } from "./detailPolicy.js";
@@ -654,30 +662,26 @@ async function processDiscoverPage(job, preparedPage) {
       const dispatches = snapshotCandidates.filter(({ row }) => (
         generationByCandidate.has(Number(row.candidate_id))
       ));
-      await queues[queuesByRole.channelCrawl].addBulk(dispatches.map(({ spec, row }) => ({
-        name: "channel-snapshot",
-        data: {
-          candidate_id: Number(row.candidate_id),
-          dispatch_generation: generationByCandidate.get(Number(row.candidate_id)),
-          dispatch_batch_id: dispatchBatchId,
-          channel_id: spec.channel_id,
-          channel_url: spec.channel_url,
-          crawl_mode: "full",
-          query_id: queryId,
-          query_text: queryText,
-          pipeline_cycle_id: pipelineCycleId,
-          enforce_min_subscribers: true,
-          min_subscriber_count: minSubscriberCount,
-        },
-        opts: {
+      await queues[queuesByRole.channelCrawl].addBulk(dispatches.map(({ spec, row }) => (
+        buildDiscoveredChannelSnapshotJob({
+          candidate: {
+            ...row,
+            snapshot_dispatch_generation: generationByCandidate.get(Number(row.candidate_id)),
+          },
+          channel: spec,
+          dispatchBatchId,
+          pipelineCycleId,
+          queryId,
+          queryText,
+          minSubscriberCount,
           jobId: safeJobId(
             "channel-snapshot",
             dispatchBatchId,
             spec.channel_id,
             `g${generationByCandidate.get(Number(row.candidate_id))}`,
           ),
-        },
-      })));
+        })
+      )));
     }
 
     await refreshDispatchCandidateCounts(dispatchBatchId);
@@ -1217,19 +1221,18 @@ async function persistParserContractFailure(queueName, job, error) {
   }
 
   if (queueName === queuesByRole.channelCrawl && job?.data?.candidate_id) {
-    await query(
-      `UPDATE crawler.channel_candidates
-       SET status=CASE WHEN status='accepted' THEN status ELSE 'failed' END,
-           error_message=CASE WHEN status='accepted' THEN error_message ELSE $2 END,
-           snapshot_json=COALESCE(snapshot_json,'{}'::jsonb)
-             || jsonb_build_object('parser_contract_error',$3::jsonb),
-           next_retry_at=NULL,
-           validation_finished_at=CASE WHEN status='accepted' THEN validation_finished_at ELSE now() END,
-           updated_at=now()
-       WHERE candidate_id=$1`,
-      [Number(job.data.candidate_id), message, JSON.stringify(details)],
-    );
-    if (job.data?.dispatch_batch_id) {
+    let candidateRecorded = false;
+    try {
+      await persistChannelCandidateParserContractFailure(
+        query,
+        activeChannelCandidateAttemptFence(job),
+        { message, details },
+      );
+      candidateRecorded = true;
+    } catch (candidateError) {
+      if (!(candidateError instanceof StaleChannelCandidateAttemptError)) throw candidateError;
+    }
+    if (candidateRecorded && job.data?.dispatch_batch_id) {
       await refreshDispatchCandidateCounts(String(job.data.dispatch_batch_id));
     }
   }
@@ -1353,6 +1356,10 @@ async function processJobInner(job, { resumeMode = "initial", prepared = null } 
           await withTransaction((client) => markChannelRemoved(client, {
             channelId: job.data?.channel_id,
             candidateId: job.data?.candidate_id ?? null,
+            candidateAttemptFence: job.queueName === queuesByRole.channelCrawl
+                && job.data?.candidate_id
+              ? activeChannelCandidateAttemptFence(job)
+              : null,
             runId: job.data?.run_id ?? null,
             terminal: terminalChannel,
           }));

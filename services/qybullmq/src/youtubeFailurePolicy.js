@@ -139,31 +139,7 @@ export function youtubeFailureEvidence(error, overrides = {}) {
     || nonEmptyText(overrides.targetUrl ?? overrides.target_url) != null
     || nonEmptyText(overrides.client) != null;
   if (explicitOverride) return youtubeFailureNodeEvidence(error, overrides);
-
-  const candidates = failureNodes(error).map((node) => {
-    const evidence = youtubeFailureNodeEvidence(node);
-    const score = (evidence.status != null ? 16 : 0)
-      + (nonEmptyText(evidence.body) != null ? 8 : 0)
-      + (nonEmptyText(evidence.source) != null ? 4 : 0)
-      + (nonEmptyText(evidence.target_url) != null ? 2 : 0)
-      + (nonEmptyText(evidence.client) != null ? 1 : 0);
-    return {
-      evidence,
-      priority: aggregateDecisionPriority(decideYoutubeFailureBranch({ error: node })),
-      score,
-    };
-  });
-  const selected = candidates.reduce((best, candidate) => (
-    !best
-      || candidate.priority > best.priority
-      || (candidate.priority === best.priority && candidate.score > best.score)
-      ? candidate
-      : best
-  ), null);
-  return {
-    ...(selected?.evidence ?? youtubeFailureNodeEvidence(error)),
-    error,
-  };
+  return selectYoutubeFailure({ error }).evidence;
 }
 
 export function annotateYoutubeFailure(error, evidence = {}) {
@@ -358,18 +334,39 @@ function failureNodes(error) {
   return nodes;
 }
 
-export function decideYoutubeFailure(input = {}) {
+export function selectYoutubeFailure(input = {}) {
   const nodes = failureNodes(input.error);
-  const candidates = [decideYoutubeFailureBranch(input)];
-  for (const node of nodes) {
-    if (node === input.error) continue;
-    candidates.push(decideYoutubeFailureBranch({ error: node }));
+  const candidates = [];
+  if (nodes.length === 0) {
+    candidates.push({
+      node: input.error ?? null,
+      decision: decideYoutubeFailureBranch(input),
+      evidence: youtubeFailureNodeEvidence(input.error, input),
+    });
+  } else {
+    for (const node of nodes) {
+      const root = node === input.error;
+      candidates.push({
+        node,
+        decision: decideYoutubeFailureBranch(root ? input : { error: node }),
+        evidence: youtubeFailureNodeEvidence(node, root ? input : {}),
+      });
+    }
   }
-  return candidates.reduce((selected, candidate) => (
-    aggregateDecisionPriority(candidate) > aggregateDecisionPriority(selected)
+  const selected = candidates.reduce((current, candidate) => (
+    aggregateDecisionPriority(candidate.decision) > aggregateDecisionPriority(current.decision)
       ? candidate
-      : selected
+      : current
   ));
+  return Object.freeze({
+    node: selected.node,
+    decision: selected.decision,
+    evidence: Object.freeze({ ...selected.evidence }),
+  });
+}
+
+export function decideYoutubeFailure(input = {}) {
+  return selectYoutubeFailure(input).decision;
 }
 
 export function shouldReportProxyFailure(value) {

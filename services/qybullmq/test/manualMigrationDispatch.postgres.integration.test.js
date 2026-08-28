@@ -72,6 +72,14 @@ test("Target SQL materializes one immutable idempotent intent without a Source w
     assert.equal(repeated.alreadyInProgress, true);
     assert.equal(repeated.intentId, first.intentId);
     assert.equal(repeated.candidate.candidate_id, first.candidate.candidate_id);
+    assert.equal(
+      repeated.candidate.snapshot_active_job_id,
+      first.candidate.snapshot_active_job_id,
+    );
+    assert.equal(
+      repeated.candidate.snapshot_active_job_attempt,
+      first.candidate.snapshot_active_job_attempt,
+    );
 
     const state = await client.query(
       `SELECT intent.source_id,intent.source_database,
@@ -125,6 +133,7 @@ test("Target SQL materializes one immutable idempotent intent without a Source w
       candidate: nextCandidate,
       expectedGeneration: 1,
       previousJobId: first.outbox.deterministic_job_id,
+      previousJobAttempt: first.candidate.snapshot_active_job_attempt,
       migrationIntentId: first.intentId,
       payload: nextPayload,
       jobId: nextJobId,
@@ -133,6 +142,7 @@ test("Target SQL materializes one immutable idempotent intent without a Source w
       candidate: nextCandidate,
       expectedGeneration: 1,
       previousJobId: first.outbox.deterministic_job_id,
+      previousJobAttempt: first.candidate.snapshot_active_job_attempt,
       migrationIntentId: first.intentId,
       payload: nextPayload,
       jobId: nextJobId,

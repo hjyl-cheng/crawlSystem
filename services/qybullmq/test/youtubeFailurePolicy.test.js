@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   annotateYoutubeFailure,
   decideYoutubeFailure,
+  selectYoutubeFailure,
   shouldReportProxyFailure,
   youtubeFailureEvidence,
   youtubeFailureText,
@@ -238,7 +239,7 @@ test("nested Fingerprint evidence does not borrow an outer YouTube HTTP status",
   assert.equal(evidence.source, "fingerprint_gateway");
 });
 
-test("failure evidence selects one complete cause node", () => {
+test("failure selection returns one complete cause node", () => {
   const rateLimit = annotateYoutubeFailure(new Error("Too many requests"), {
     status: 429,
     body: "YouTube rate limit",
@@ -250,8 +251,12 @@ test("failure evidence selects one complete cause node", () => {
     { source: "unrelated_wrapper" },
   );
 
+  const selected = selectYoutubeFailure({ error: wrapper });
   const evidence = youtubeFailureEvidence(wrapper);
-  assert.equal(evidence.error, wrapper);
+  assert.equal(selected.node, rateLimit);
+  assert.equal(selected.decision.kind, "youtube_rate_limited");
+  assert.equal(selected.evidence.error, rateLimit);
+  assert.equal(evidence.error, rateLimit);
   assert.equal(evidence.status, 429);
   assert.equal(evidence.body, "YouTube rate limit");
   assert.equal(evidence.source, "youtubejs_player");

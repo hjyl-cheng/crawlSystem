@@ -7,7 +7,7 @@ import {
 } from "../src/channelRegistryPromotion.js";
 
 function promotionInput(overrides = {}) {
-  return {
+  const input = {
     candidateId: 42,
     runId: "run:new",
     channelId: "UCnew",
@@ -22,6 +22,15 @@ function promotionInput(overrides = {}) {
     readyForAgent: true,
     sourceJson: { source: "query" },
     ...overrides,
+  };
+  return {
+    ...input,
+    candidateAttemptFence: overrides.candidateAttemptFence ?? {
+      candidateId: input.candidateId,
+      dispatchGeneration: 1,
+      jobId: `channel-snapshot:${input.candidateId}`,
+      bullmqAttempt: 1,
+    },
   };
 }
 
@@ -139,7 +148,7 @@ test("a Channel Registry primary-key conflict marks only the losing Candidate ex
   assert.match(loser.sql, /status IN \('discovered','queued','validating'\)/);
 });
 
-test("a failed Candidate status transition rolls back the Registry promotion", async () => {
+test("a stale Candidate attempt rolls back the Registry promotion", async () => {
   const client = {
     async query(sql) {
       const statement = String(sql);
@@ -155,6 +164,6 @@ test("a failed Candidate status transition rolls back the Registry promotion", a
 
   await assert.rejects(
     claimChannelRegistryPromotion(client, promotionInput()),
-    /Candidate is not claimable/,
+    /Candidate attempt Fence is stale/,
   );
 });

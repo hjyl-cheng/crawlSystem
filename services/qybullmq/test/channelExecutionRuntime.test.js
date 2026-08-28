@@ -213,6 +213,28 @@ test("channel runtime preserves the source attached to a nested structured failu
   );
 });
 
+test("channel runtime persists Decision and Evidence from the same nested failure", async () => {
+  const currentProxy = { value: { ...proxy } };
+  const { runtime, calls } = runtimeFixture();
+  const rateLimit = Object.assign(new Error("HTTP 429"), {
+    youtube_failure_evidence: { status: 429, source: "youtubejs_player" },
+  });
+  const wrapper = Object.assign(new Error("channel snapshot failed", { cause: rateLimit }), {
+    youtube_failure_evidence: { source: "unrelated_wrapper" },
+  });
+
+  await assert.rejects(
+    runtime.run(context(currentProxy), async () => { throw wrapper; }),
+    (error) => error === wrapper,
+  );
+
+  const persisted = calls.finishes[0].value.result.failure_decisions.find(
+    (item) => item.kind === "youtube_rate_limited",
+  );
+  assert.equal(persisted.evidence.source, "youtubejs_player");
+  assert.equal(persisted.evidence.status, 429);
+});
+
 test("channel runtime rejects a second attempt while the first is still preparing", async () => {
   let releaseLoad;
   const loading = new Promise((resolve) => { releaseLoad = resolve; });

@@ -10,6 +10,7 @@ import (
 )
 
 type credentialRotation struct {
+	SlotName    string
 	OldUsername string
 	NewUsername string
 }
@@ -52,7 +53,11 @@ func rotateSlotCredential(
 	`, slotName, generation); err != nil {
 		return credentialRotation{}, fmt.Errorf("persist slot credential generation %s: %w", slotName, err)
 	}
-	return credentialRotation{OldUsername: oldName, NewUsername: newName}, nil
+	return credentialRotation{
+		SlotName:    slotName,
+		OldUsername: oldName,
+		NewUsername: newName,
+	}, nil
 }
 
 func (m *Manager) invalidateCredentials(rotations []credentialRotation) {
@@ -70,6 +75,32 @@ func (m *Manager) invalidateCredentials(rotations []credentialRotation) {
 			m.invalidateUser(username)
 		}
 	}
+}
+
+func (m *Manager) retireExpiredCredentialUsers(
+	ctx context.Context,
+	rotations []credentialRotation,
+) error {
+	retireCtx, cancel := context.WithTimeout(
+		context.WithoutCancel(ctx),
+		routeActivationAttemptTimeout,
+	)
+	defer cancel()
+	seen := make(map[string]struct{}, len(rotations))
+	for _, rotation := range rotations {
+		username := strings.TrimSpace(rotation.OldUsername)
+		if username == "" {
+			continue
+		}
+		if _, found := seen[username]; found {
+			continue
+		}
+		seen[username] = struct{}{}
+		if !m.retireUser(retireCtx, username) {
+			return fmt.Errorf("retire expired proxy user %s", username)
+		}
+	}
+	return nil
 }
 
 func expireLeases(

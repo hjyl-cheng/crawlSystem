@@ -268,6 +268,10 @@ func (h *UpstreamProxyHandler) beginRouteActivation(
 		h.retiredUsers[username] = struct{}{}
 		return proxycontrol.RouteActivationBeginResult{}, nil
 	}
+	if found && current.claimID == "" && previousClaimID == "" &&
+		current.phase == proxycontrol.RouteActivationCommitted {
+		return proxycontrol.RouteActivationBeginResult{AlreadyCommitted: true}, nil
+	}
 	if found {
 		if current.claimID != previousClaimID {
 			return proxycontrol.RouteActivationBeginResult{}, fmt.Errorf(
