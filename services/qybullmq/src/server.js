@@ -13,9 +13,14 @@ import {
 } from "./agentConfig.js";
 import { closeDb, ensureSchema, pool, query, withTransaction } from "./db.js";
 import {
+  deliverExistingChannelSnapshotOutbox,
   dispatchManualMigrationBatch,
   dispatchManualMigrationChannel,
 } from "./manualMigrationDispatch.js";
+import {
+  listMigrationSystemRetryItems,
+  retryMigrationSystemFailure,
+} from "./migrationSystemRetry.js";
 import { assertMigrationChannelInventorySchema } from "./migrationInventorySchema.js";
 import {
   migrationInventoryForceSyncEnabled,
@@ -85,7 +90,11 @@ app.use(morgan("combined"));
 app.use((req, res, next) => {
   const controlled = String(process.env.CONTROLLED_MIGRATION_ONLY || "").toLowerCase() === "true";
   const readMethod = req.method === "GET" || req.method === "HEAD" || req.method === "OPTIONS";
-  if (!controlled || readMethod || req.path.startsWith("/api/migration/channels")) return next();
+  const controlledWrite = req.method === "POST" && (
+    req.path.startsWith("/api/migration/channels")
+    || /^\/api\/migration\/system-retries\/[^/]+\/retry$/.test(req.path)
+  );
+  if (!controlled || readMethod || controlledWrite) return next();
   return res.status(423).json({
     ok: false,
     code: "controlled_migration_only",
@@ -311,6 +320,30 @@ app.get("/api/queues", async (_req, res) => {
 app.post("/api/migration/channels/batch", asyncRoute(async (req, res) => {
   const result = await dispatchManualMigrationBatch({ selection: req.body?.selection });
   res.status(result.created ? 201 : 200).json(result);
+}));
+
+app.get("/api/migration/system-retries", asyncRoute(async (req, res) => {
+  const items = await listMigrationSystemRetryItems(query, {
+    limit: Number(req.query?.limit ?? 100),
+  });
+  res.json({ ok: true, count: items.length, items });
+}));
+
+app.post("/api/migration/system-retries/:systemRetryId/retry", asyncRoute(async (req, res) => {
+  const allocation = await retryMigrationSystemFailure({
+    systemRetryId: req.params.systemRetryId,
+    withTransaction,
+    minSubscriberCount: Number(process.env.MIN_SUBSCRIBER_COUNT || 1000),
+  });
+  const queued = await deliverExistingChannelSnapshotOutbox(
+    queues[queuesByRole.channelCrawl],
+    allocation.outbox,
+    { dbQuery: query },
+  );
+  res.status(allocation.created ? 201 : 200).json({
+    ...allocation,
+    job: { queue: queuesByRole.channelCrawl, id: queued.jobId, state: queued.state },
+  });
 }));
 
 app.post("/api/migration/channels/:channelId", asyncRoute(async (req, res) => {

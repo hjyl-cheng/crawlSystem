@@ -57,6 +57,12 @@ export const redisOptions = {
   enableReadyCheck: false,
 };
 
+export function bullmqPrefixFromEnvironment(environment = process.env) {
+  return String(environment.BULLMQ_PREFIX ?? "").trim() || undefined;
+}
+
+export const bullmqPrefix = bullmqPrefixFromEnvironment();
+
 export const defaultJobOptions = {
   attempts: 3,
   backoff: { type: "exponential", delay: 5000, jitter: 0.5 },
@@ -102,6 +108,7 @@ export function createQueues() {
       new Queue(name, {
         connection: redisOptions,
         defaultJobOptions,
+        ...(bullmqPrefix ? { prefix: bullmqPrefix } : {}),
       }),
     ]),
   );
@@ -109,7 +116,10 @@ export function createQueues() {
 
 export function createQueueEvents() {
   return Object.fromEntries(
-    queueNames.map((name) => [name, new QueueEvents(name, { connection: redisOptions })]),
+    queueNames.map((name) => [name, new QueueEvents(name, {
+      connection: redisOptions,
+      ...(bullmqPrefix ? { prefix: bullmqPrefix } : {}),
+    })]),
   );
 }
 

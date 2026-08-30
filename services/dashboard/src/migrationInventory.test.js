@@ -41,6 +41,8 @@ test("Migration list filters, orders, and paginates in the Target database befor
     return {
       rows: [{
         candidate_id: "51",
+        target_candidate_id: "482",
+        active_system_retry_id: "801",
         channel_id: "UC51",
         title: "Lisa",
         subscriber_count: "1200",
@@ -67,11 +69,15 @@ test("Migration list filters, orders, and paginates in the Target database befor
   assert.equal(calls.length, 3);
   assert.equal(result.total, 7);
   assert.equal(result.channels.length, 1);
+  assert.equal(result.channels[0].active_system_retry_id, "801");
   assert.equal(result.stats.total, 410000);
   assert.equal(result.stats.migration_done, 292);
   const page = calls.find((call) => call.sql.includes("filtered_page AS"));
   assert.ok(page);
   assert.match(page.sql, /FROM crawler\.migration_channel_inventory inventory/);
+  assert.match(page.sql, /crawler\.migration_system_retry_items/);
+  assert.match(page.sql, /system_retry\.candidate_id=intent\.target_candidate_id/);
+  assert.match(page.sql, /AS active_system_retry_id/);
   assert.match(page.sql, /WHERE [\s\S]*state\.candidate_status IN/);
   assert.match(
     page.sql,
@@ -130,7 +136,13 @@ test("Dashboard Migration list route cannot fall back to Source-side pagination"
   const listFunction = server.slice(start, end);
 
   assert.match(listFunction, /loadMigrationChannelInventory/);
+  assert.match(listFunction, /loadMigrationSystemRetriesSafely\(\{ read: db \}\)/);
   assert.match(listFunction, /intValue\(req\.query\.limit, 50, 1, 50\)/);
   assert.doesNotMatch(listFunction, /migrationRead|loadMigrationSource|limit:\s*500/);
   assert.match(server, /<th>源库订阅<\/th>/);
+  assert.match(server, /const hasActiveSystemRetry = channel\.active_system_retry_id != null/);
+  assert.match(
+    server,
+    /\["discovered", "failed"\]\.includes\(candidateStatus\) && !hasActiveSystemRetry/,
+  );
 });

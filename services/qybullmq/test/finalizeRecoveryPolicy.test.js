@@ -5,6 +5,7 @@ import {
   SUCCESSFUL_PUBLICATION_FINALIZE_STATUSES,
 } from "../src/finalizePolicy.js";
 import {
+  hasOpenPipelineCrawlerWork,
   loadFinalizeRecoveryCandidates,
   loadPipelineFinalizeBlockers,
 } from "../src/finalizeRecoveryPolicy.js";
@@ -51,4 +52,39 @@ test("pipeline completion counts an unfinalized dormant Promotion Run", async ()
   }, "cycle-7");
 
   assert.deepEqual(blockers, { agentOpen: 0, finalOpen: 1, publicationOpen: 0 });
+});
+
+test("a Batch-scoped system failure does not leave its materialized Channel Run open", async () => {
+  const batchId = "legacy-results-canary-1788072676068-25df5b5e";
+  const open = await hasOpenPipelineCrawlerWork(async (sql, params) => {
+    const statement = String(sql);
+    assert.deepEqual(params, [batchId, true]);
+    assert.match(statement, /FROM crawler\.channel_runs run/);
+    assert.match(statement, /FROM crawler\.migration_system_retry_items retry/);
+    assert.match(statement, /retry\.candidate_id=run\.candidate_id/);
+    assert.match(statement, /retry\.failed_dispatch_batch_id=\$1/);
+    return {
+      rows: [{
+        open_query_pages: false,
+        open_channel_runs: false,
+        open_channel_candidates: false,
+      }],
+    };
+  }, batchId);
+
+  assert.equal(open, false);
+});
+
+test("a Batch-scoped system failure does not block Agent or Publication settlement", async () => {
+  const batchId = "legacy-results-canary-1788072676068-25df5b5e";
+  const blockers = await loadPipelineFinalizeBlockers(async (sql, params) => {
+    const statement = String(sql);
+    assert.deepEqual(params, [batchId, SUCCESSFUL_PUBLICATION_FINALIZE_STATUSES]);
+    assert.match(statement, /FROM crawler\.migration_system_retry_items retry/);
+    assert.match(statement, /retry\.candidate_id=current_run\.candidate_id/);
+    assert.match(statement, /retry\.failed_dispatch_batch_id=\$1/);
+    return { rows: [{ agent_open: 0, final_open: 0, publication_open: 0 }] };
+  }, batchId);
+
+  assert.deepEqual(blockers, { agentOpen: 0, finalOpen: 0, publicationOpen: 0 });
 });

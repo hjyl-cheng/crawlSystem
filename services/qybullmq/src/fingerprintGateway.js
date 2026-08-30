@@ -29,14 +29,34 @@ function safeJson(text) {
   }
 }
 
+async function responseEvidence(response, limit = 2048) {
+  const bytes = typeof response?.arrayBuffer === "function"
+    ? Buffer.from(await response.arrayBuffer())
+    : Buffer.from(await response.text());
+  return Object.freeze({
+    detail: bytes.toString("utf8"),
+    bodySampleBase64: bytes.subarray(0, limit).toString("base64"),
+  });
+}
+
 export class FingerprintGatewayError extends Error {
   constructor({ gatewayStatus, payload = {}, detail = "", targetUrl = null } = {}) {
     const failureKind = String(payload.failure_kind || "unknown");
     const errorType = String(payload.error_type || "FingerprintGatewayError");
     const curlCode = Number.isInteger(Number(payload.curl_code)) ? Number(payload.curl_code) : null;
     const evidence = curlCode == null ? errorType : `${errorType} curl_code=${curlCode}`;
+    const normalizedDetail = String(detail).slice(0, 2000);
+    const targetStatusRaw = payload.target_status_raw ?? null;
+    const targetHeaders = payload.target_response_headers
+      && typeof payload.target_response_headers === "object"
+      && !Array.isArray(payload.target_response_headers)
+      ? { ...payload.target_response_headers }
+      : {};
+    const targetHeadersRaw = payload.target_response_headers_raw ?? null;
     super(
-      failureKind === "unknown"
+      failureKind === "invalid_target_status"
+        ? `fingerprint gateway invalid target HTTP status: ${String(targetStatusRaw)}`
+        : failureKind === "unknown"
         ? `fingerprint gateway request failed HTTP ${gatewayStatus}: ${String(detail).slice(0, 500)}`
         : `fingerprint gateway ${failureKind}: ${evidence}`,
     );
@@ -45,14 +65,31 @@ export class FingerprintGatewayError extends Error {
       ? "FINGERPRINT_PROXY_TRANSPORT"
       : failureKind === "upstream_transient"
         ? "FINGERPRINT_UPSTREAM_TRANSIENT"
+        : failureKind === "invalid_target_status"
+          ? "FINGERPRINT_INVALID_TARGET_STATUS"
         : "FINGERPRINT_GATEWAY_ERROR";
     this.curlCode = curlCode;
     this.gatewayStatus = Number(gatewayStatus) || null;
     this.failureKind = failureKind;
     this.sessionReset = payload.session_reset === true;
+    this.detail = normalizedDetail;
+    this.gatewayPayload = { ...payload };
+    this.targetStatusRaw = targetStatusRaw;
+    this.targetHeaders = targetHeaders;
+    this.targetHeadersRaw = targetHeadersRaw;
+    this.targetBodySampleBase64 = payload.target_body_sample_base64 ?? null;
     this.youtube_failure_evidence = {
       status: null,
-      body: evidence,
+      body: failureKind === "invalid_target_status"
+        ? JSON.stringify({
+          error_type: errorType,
+          target_status_raw: targetStatusRaw,
+          target_response_headers: targetHeaders,
+          target_response_headers_raw: targetHeadersRaw,
+          target_body_sample_base64: payload.target_body_sample_base64 ?? null,
+          detail: normalizedDetail,
+        })
+        : evidence,
       source: "fingerprint_gateway",
       target_url: targetUrl ? String(targetUrl) : null,
       client: null,
@@ -206,8 +243,9 @@ export class FingerprintGateway {
       body: request.body,
       signal: init.signal,
     });
-    if (!response.headers.get("x-fingerprint-response-status")) {
-      const detail = await response.text();
+    const rawTargetStatus = response.headers.get("x-fingerprint-response-status");
+    if (!rawTargetStatus) {
+      const { detail } = await responseEvidence(response);
       throw new FingerprintGatewayError({
         gatewayStatus: response.status,
         payload: safeJson(detail),
@@ -215,8 +253,32 @@ export class FingerprintGateway {
         targetUrl: request.url,
       });
     }
-    const targetHeaders = decodeGatewayMetadata(response.headers.get("x-fingerprint-response-headers"), {});
-    const targetStatus = Number(response.headers.get("x-fingerprint-response-status") || response.status);
+    const rawTargetHeaders = response.headers.get("x-fingerprint-response-headers");
+    const targetStatus = /^\d{3}$/.test(rawTargetStatus) ? Number(rawTargetStatus) : null;
+    if (!Number.isInteger(targetStatus) || targetStatus < 200 || targetStatus > 599) {
+      let targetHeaders = {};
+      try {
+        targetHeaders = decodeGatewayMetadata(rawTargetHeaders, {});
+      } catch {
+        // The raw metadata remains part of the structured invalid-status evidence.
+      }
+      const { detail, bodySampleBase64 } = await responseEvidence(response);
+      throw new FingerprintGatewayError({
+        gatewayStatus: response.status,
+        payload: {
+          error: "fingerprint target returned an invalid HTTP status",
+          error_type: "InvalidTargetHttpStatus",
+          failure_kind: "invalid_target_status",
+          target_status_raw: rawTargetStatus,
+          target_response_headers: targetHeaders,
+          target_response_headers_raw: rawTargetHeaders,
+          target_body_sample_base64: bodySampleBase64,
+        },
+        detail,
+        targetUrl: request.url,
+      });
+    }
+    const targetHeaders = decodeGatewayMetadata(rawTargetHeaders, {});
     const body = [101, 204, 205, 304].includes(targetStatus) ? null : response.body;
     return new Response(body, {
       status: targetStatus,

@@ -1006,7 +1006,8 @@ async function refreshDispatchCandidateCounts(dispatchBatchId) {
        FROM crawler.channel_candidates
        WHERE dispatch_batch_id=$1
      ) stats
-     WHERE batch.dispatch_batch_id=$1`,
+     WHERE batch.dispatch_batch_id=$1
+       AND batch.status<>'completed'`,
     [dispatchBatchId],
   );
 }

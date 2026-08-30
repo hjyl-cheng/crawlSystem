@@ -188,5 +188,14 @@ test("Migration detail route loads and renders persisted run diagnostics", async
   assert.match(server.slice(dataStart, dataEnd), /loadRotaBusinessRunBudget/);
   assert.match(server.slice(dataStart, dataEnd), /rotaProxyControlToken/);
   assert.match(server.slice(dataStart, dataEnd), /target_candidate_id/);
+  assert.match(
+    server.slice(dataStart, dataEnd),
+    /outcome,total_channel_count,accepted_channel_count,rejected_channel_count,failed_channel_count/,
+  );
   assert.match(server.slice(pageStart, pageEnd), /renderMigrationRunDiagnostics/);
+  assert.match(server.slice(pageStart, pageEnd), /dispatch_batch_outcome/);
+  assert.match(server.slice(pageStart, pageEnd), /dispatch_batch_total/);
+  assert.match(server.slice(pageStart, pageEnd), /dispatch_batch_accepted/);
+  assert.match(server.slice(pageStart, pageEnd), /dispatch_batch_rejected/);
+  assert.match(server.slice(pageStart, pageEnd), /dispatch_batch_failed/);
 });

@@ -15,6 +15,7 @@ import {
   withTransaction,
 } from "./db.js";
 import { createControllerLifecycle } from "./controllerLifecycle.js";
+import { dataApiCircuitState as loadDataApiCircuitState } from "./dataApiCircuit.js";
 import {
   reconcileChannelCandidateQueue as reconcileChannelCandidateQueueWithDependencies,
 } from "./channelSnapshotReconciliation.js";
@@ -64,11 +65,13 @@ import {
   PostgresMigrationRetryIntentRepository,
 } from "./migrationRetryIntent.js";
 import { ManagedPolicyUnavailableError } from "./managedJobIntents.js";
+import { settleCompletedMigrationBatch } from "./migrationBatchCompletion.js";
 import { loadIdentityPolicyCatalog } from "./identityPolicyCatalog.js";
 import { closeProxyControlClient, proxyControlClient } from "./proxyControlClient.js";
 import { normalizeRotaCapacity } from "./rotaCapacity.js";
 import {
   activeFinalRepairExclusions,
+  hasOpenPipelineCrawlerWork,
   loadFinalizeRecoveryCandidates,
   loadPublicationGapRepairCandidates,
   loadPipelineFinalizeBlockers,
@@ -637,29 +640,6 @@ async function getCrawlSettings() {
   }
 }
 
-async function dataApiCircuitState(proxyCapacity) {
-  const detailExecutionQueue = channelInlineDetails ? queuesByRole.channelCrawl : queuesByRole.contentDetail;
-  const detailExecutionRole = channelInlineDetails ? "channel" : "detail";
-  const rows = await query(
-    `SELECT count(*)::int AS failures
-     FROM crawler.task_events
-     WHERE queue_name=$1
-       AND status='failed'
-       AND created_at >= now() - interval '5 minutes'`,
-    [detailExecutionQueue],
-  );
-  const recentFailures = Number(rows.rows[0]?.failures ?? 0);
-  const detailReady = roleReady(proxyCapacity, detailExecutionRole);
-  const proxyCapacityLow = Number.isFinite(detailReady)
-    ? detailReady === 0
-    : Number.isFinite(proxyCapacity.active) && proxyCapacity.active < 3;
-  return {
-    open: proxyCapacityLow || recentFailures >= 5,
-    reason: proxyCapacityLow ? "proxy_capacity_low" : recentFailures >= 5 ? "detail_failure_spike" : null,
-    recent_detail_failures: recentFailures,
-  };
-}
-
 function backlog(stats, queueName) {
   const row = stats[queueName] ?? {};
   return Number(row.waiting ?? 0)
@@ -685,43 +665,6 @@ async function setPaused(queueName, paused, reason, actions) {
 
 function hasQueueBacklog(stats, queueName) {
   return backlog(stats, queueName) > 0;
-}
-
-async function hasOpenCrawlerWork(pipelineCycleId = null, { includeWaitingAgent = true } = {}) {
-  const rows = await query(
-    `SELECT
-       EXISTS (
-         SELECT 1
-         FROM crawler.query_pages
-         WHERE status IN ('queued', 'running')
-           AND ($1::text IS NULL OR result_json->>'pipeline_cycle_id'=$1::text)
-         LIMIT 1
-       ) AS open_query_pages,
-       EXISTS (
-         SELECT 1
-         FROM crawler.channel_runs run
-         JOIN crawler.channels channel
-           ON channel.latest_run_id=run.run_id
-          AND channel.status='active'
-         WHERE run.status IN ('queued', 'running', 'waiting_pages', 'waiting_detail', 'waiting_agent', 'finalizing')
-           AND ($1::text IS NULL OR run.result_json->>'pipeline_cycle_id'=$1::text)
-           AND ($2::boolean = true OR run.status<>'waiting_agent')
-         LIMIT 1
-       ) AS open_channel_runs,
-       EXISTS (
-         SELECT 1
-         FROM crawler.channel_candidates
-         WHERE status IN ('discovered','queued','validating')
-           AND ($1::text IS NULL OR dispatch_batch_id=$1::text)
-         LIMIT 1
-       ) AS open_channel_candidates`,
-    [pipelineCycleId, includeWaitingAgent],
-  );
-  return Boolean(
-    rows.rows[0]?.open_query_pages
-    || rows.rows[0]?.open_channel_runs
-    || rows.rows[0]?.open_channel_candidates
-  );
 }
 
 async function reconcileTerminalFinalizedRunStates(actions, pipelineCycleId) {
@@ -2042,7 +1985,7 @@ async function maybeCompleteAutomaticPipeline(actions, queryScheduler) {
     actions.push({ action: "wait-full-repair-targets", ...fullRepair });
     return false;
   }
-  if (await hasOpenCrawlerWork(queryScheduler.pipeline_cycle_id)) return false;
+  if (await hasOpenPipelineCrawlerWork(query, queryScheduler.pipeline_cycle_id)) return false;
   if (await hasPendingContentRepairs(
     query,
     CONTENT_COMPLETENESS_REPAIR_VERSION,
@@ -2063,19 +2006,25 @@ async function maybeCompleteAutomaticPipeline(actions, queryScheduler) {
   const blockers = await loadPipelineFinalizeBlockers(query, queryScheduler.pipeline_cycle_id);
   if (blockers.agentOpen > 0 || blockers.finalOpen > 0 || blockers.publicationOpen > 0) return false;
   const completedAt = new Date().toISOString();
-  await query(
-    `UPDATE crawler.query_dispatch_batches
-     SET status='completed',finished_at=COALESCE(finished_at,now()),updated_at=now()
-     WHERE dispatch_batch_id=$1`,
-    [queryScheduler.pipeline_cycle_id],
-  );
-  await updateSchedulerRuntime("stopped", {
-    stopped_at: completedAt,
-    completed_at: completedAt,
-    stop_reason: "pipeline_complete",
-    parser_failure_counts: parserFailures,
+  const completion = await settleCompletedMigrationBatch({
+    withTransaction,
+    batchId: queryScheduler.pipeline_cycle_id,
+    completedAt,
+    schedulerMetadata: { parser_failure_counts: parserFailures },
+    maxSnapshotAttempts: channelSnapshotMaxAttempts,
   });
-  actions.push({ action: "complete-automatic-pipeline", completed_at: completedAt });
+  if (!completion) return false;
+  actions.push({
+    action: "complete-automatic-pipeline",
+    completed_at: completedAt,
+    outcome: completion.outcome,
+    statistics: {
+      total: completion.total,
+      accepted: completion.accepted,
+      rejected: completion.rejected,
+      failed: completion.failed,
+    },
+  });
   return true;
 }
 
@@ -2548,7 +2497,14 @@ async function tick() {
   const proxyCapacity = await getProxyCapacity();
   const proxyAllocation = await applyProxyConcurrency(proxyCapacity, stats, actions);
   const channelPressure = await getChannelPressure(channelBacklog, proxyCapacity);
-  const dataApiCircuit = await dataApiCircuitState(proxyCapacity);
+  const dataApiCircuit = await loadDataApiCircuitState({
+    query,
+    proxyCapacity,
+    detailExecutionQueue: channelInlineDetails
+      ? queuesByRole.channelCrawl
+      : queuesByRole.contentDetail,
+    detailExecutionRole: channelInlineDetails ? "channel" : "detail",
+  });
 
   const agentConfigs = automaticLocalAgentConfigs(await listEnabledAgentConfigs());
   const agentCapacity = await syncAgentGlobalConcurrency(actions, agentConfigs);

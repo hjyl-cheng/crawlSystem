@@ -128,6 +128,25 @@ def transport_failure_kind(error: RequestException) -> str:
     return "upstream_transient"
 
 
+def valid_target_http_status(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and 200 <= value <= 599
+
+
+def json_evidence(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return repr(value)
+
+
+def response_body_sample_base64(response: Any, limit: int = 2048) -> str:
+    content = getattr(response, "content", b"")
+    if isinstance(content, str):
+        content = content.encode("utf-8", errors="replace")
+    elif not isinstance(content, (bytes, bytearray)):
+        content = repr(content).encode("utf-8", errors="replace")
+    return base64.b64encode(bytes(content[:limit])).decode("ascii")
+
+
 class Gateway:
     def __init__(self) -> None:
         self.profiles: dict[str, ProfileSession] = {}
@@ -203,6 +222,24 @@ class Gateway:
                     },
                     status=502,
                 )
+        if not valid_target_http_status(response.status_code):
+            response_headers = {
+                str(name): str(value)
+                for name, value in response.headers.items()
+                if str(name).lower() not in HOP_BY_HOP
+            }
+            return web.json_response(
+                {
+                    "error": "fingerprint target returned an invalid HTTP status",
+                    "error_type": "InvalidTargetHttpStatus",
+                    "failure_kind": "invalid_target_status",
+                    "target_status_raw": json_evidence(response.status_code),
+                    "target_url": url,
+                    "target_response_headers": response_headers,
+                    "target_body_sample_base64": response_body_sample_base64(response),
+                },
+                status=502,
+            )
         response_headers = {
             str(name): str(value)
             for name, value in response.headers.items()

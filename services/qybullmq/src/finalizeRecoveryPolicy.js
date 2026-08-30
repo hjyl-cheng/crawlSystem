@@ -346,6 +346,54 @@ export async function loadFinalizeRecoveryCandidates(queryValue, {
   return rows.rows;
 }
 
+export async function hasOpenPipelineCrawlerWork(
+  queryValue,
+  pipelineCycleId = null,
+  { includeWaitingAgent = true } = {},
+) {
+  const query = requiredQuery(queryValue);
+  const rows = await query(
+    `SELECT
+       EXISTS (
+         SELECT 1
+         FROM crawler.query_pages
+         WHERE status IN ('queued', 'running')
+           AND ($1::text IS NULL OR result_json->>'pipeline_cycle_id'=$1::text)
+         LIMIT 1
+       ) AS open_query_pages,
+       EXISTS (
+         SELECT 1
+         FROM crawler.channel_runs run
+         JOIN crawler.channels channel
+           ON channel.latest_run_id=run.run_id
+          AND channel.status='active'
+         WHERE run.status IN ('queued', 'running', 'waiting_pages', 'waiting_detail', 'waiting_agent', 'finalizing')
+           AND ($1::text IS NULL OR run.result_json->>'pipeline_cycle_id'=$1::text)
+           AND ($2::boolean = true OR run.status<>'waiting_agent')
+           AND NOT EXISTS (
+             SELECT 1
+             FROM crawler.migration_system_retry_items retry
+             WHERE retry.candidate_id=run.candidate_id
+               AND retry.failed_dispatch_batch_id=$1
+           )
+         LIMIT 1
+       ) AS open_channel_runs,
+       EXISTS (
+         SELECT 1
+         FROM crawler.channel_candidates
+         WHERE status IN ('discovered','queued','validating')
+           AND ($1::text IS NULL OR dispatch_batch_id=$1::text)
+         LIMIT 1
+       ) AS open_channel_candidates`,
+    [pipelineCycleId, includeWaitingAgent],
+  );
+  return Boolean(
+    rows.rows[0]?.open_query_pages
+    || rows.rows[0]?.open_channel_runs
+    || rows.rows[0]?.open_channel_candidates
+  );
+}
+
 export async function loadPipelineFinalizeBlockers(queryValue, pipelineCycleId = null) {
   const query = requiredQuery(queryValue);
   const rows = await query(
@@ -412,11 +460,22 @@ export async function loadPipelineFinalizeBlockers(queryValue, pipelineCycleId =
      LEFT JOIN crawler.channel_candidates promotion_candidate
        ON promotion_candidate.candidate_id=channel.registry_promotion_candidate_id
       AND promotion_candidate.channel_id=channel.channel_id
-     WHERE $1::text IS NULL
-        OR COALESCE(
-             current_run.result_json->>'dispatch_batch_id',
-             current_run.result_json->>'pipeline_cycle_id'
-           )=$1`,
+     WHERE (
+       $1::text IS NULL
+       OR COALESCE(
+            current_run.result_json->>'dispatch_batch_id',
+            current_run.result_json->>'pipeline_cycle_id'
+          )=$1
+     )
+       AND NOT EXISTS (
+         SELECT 1
+         FROM crawler.migration_system_retry_items retry
+         WHERE (
+           retry.candidate_id=current_run.candidate_id
+           OR retry.candidate_id=channel.registry_promotion_candidate_id
+         )
+           AND retry.failed_dispatch_batch_id=$1
+       )`,
     [optionalText(pipelineCycleId), SUCCESSFUL_PUBLICATION_FINALIZE_STATUSES],
   );
   return {

@@ -53,6 +53,7 @@ function inventoryStateCte() {
            inventory.search_subscriber_count,inventory.priority,
            inventory.source_candidate_status,inventory.source_updated_at,
            intent.migration_intent_id,intent.target_candidate_id,
+           system_retry.system_retry_id AS active_system_retry_id,
            candidate.status AS target_candidate_status,
            channel.status AS target_channel_status,
            channel.registry_promotion_candidate_id,
@@ -78,6 +79,9 @@ function inventoryStateCte() {
      AND intent.channel_id=inventory.channel_id
     LEFT JOIN crawler.channel_candidates candidate
       ON candidate.candidate_id=intent.target_candidate_id
+    LEFT JOIN crawler.migration_system_retry_items system_retry
+      ON system_retry.candidate_id=intent.target_candidate_id
+     AND system_retry.status IN ('retrying','pending','dispatched')
     LEFT JOIN crawler.channels channel ON channel.channel_id=intent.channel_id
     LEFT JOIN crawler.channel_runs run ON run.run_id=channel.latest_run_id
     LEFT JOIN crawler.finalized_profiles finalized ON finalized.channel_id=intent.channel_id
@@ -160,7 +164,7 @@ function inventoryPageQuery(sourceId, filters) {
     )
     SELECT page.source_candidate_id::text AS candidate_id,
            page.source_candidate_id::text AS source_candidate_id,
-           page.target_candidate_id,page.migration_intent_id,
+           page.target_candidate_id,page.migration_intent_id,page.active_system_retry_id,
            page.channel_id,page.channel_url,COALESCE(page.handle,'') AS handle,
            COALESCE(page.title,'') AS title,page.avatar_url,
            page.search_subscriber_count,

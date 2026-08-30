@@ -3,6 +3,7 @@ import { incrementalRunId, validateIncrementalPlan } from "./incrementalPlan.js"
 import { publicationGapRepairJobIntent } from "./publicationGapRepairExecution.js";
 import { queuesByRole } from "./queues.js";
 import { materializeCheckpointRepairRun } from "./checkpointRepair.js";
+import { MigrationRetryIntentConflictError } from "./migrationRetryIntent.js";
 
 const LEGACY_INCREMENTAL_RUNTIME_KEYS = Object.freeze([
   "run_id",
@@ -309,7 +310,10 @@ export class ProxyBusinessRunPreparer {
           || row.new_job_id !== String(job.id)
           || Number(row.dispatch_generation) !== Number(job.data?.dispatch_generation)
           || !["requested", "dispatched", "running"].includes(row.status)) {
-        throw new TypeError(`Recovery Intent identity mismatch: ${identity.retryIntentId}`);
+        throw new MigrationRetryIntentConflictError(
+          identity.retryIntentId,
+          "Recovery Intent identity mismatch",
+        );
       }
     }
     const lifecycle = await this.query(

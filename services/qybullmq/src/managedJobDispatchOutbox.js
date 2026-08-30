@@ -1,4 +1,5 @@
 import { canonicalJsonEqual } from "./canonicalJson.js";
+import { channelSnapshotQueueJobIdentityMatches } from "./channelSnapshotDispatch.js";
 
 const JOB_NAMES = Object.freeze({
   channel_snapshot: "channel-snapshot",
@@ -72,8 +73,12 @@ function assertExactPayloadKeys(payload, aggregateKind) {
   }
   const actual = Object.keys(payload).sort();
   const expected = PAYLOAD_KEYS[aggregateKind];
-  if (!expected || actual.length !== expected.length
-      || actual.some((key, index) => key !== expected[index])) {
+  const optional = aggregateKind === "channel_snapshot" && actual.includes("migration_intent_id")
+    ? ["migration_intent_id"]
+    : [];
+  const allowed = [...(expected ?? []), ...optional].sort();
+  if (!expected || actual.length !== allowed.length
+      || actual.some((key, index) => key !== allowed[index])) {
     throw new TypeError(`managed dispatch ${aggregateKind} payload has invalid fields`);
   }
 }
@@ -114,6 +119,9 @@ function assertDispatchPayload(row) {
       throw new TypeError("managed dispatch channel_snapshot payload conflicts with aggregate_id");
     }
     positiveInteger(payload.dispatch_generation, "dispatch_generation");
+    if (payload.migration_intent_id != null) {
+      positiveInteger(payload.migration_intent_id, "migration_intent_id");
+    }
     positiveInteger(payload.min_subscriber_count, "min_subscriber_count");
     if (payload.query_id !== null) positiveInteger(payload.query_id, "query_id");
     for (const field of [
@@ -157,9 +165,16 @@ function samePayload(left, right) {
 }
 
 function assertMatchingQueueJob(job, row, jobName) {
-  if (String(job?.id ?? "") !== String(row.deterministic_job_id)
-      || job?.name !== jobName
-      || !samePayload(job?.data, row.payload_json)) {
+  const matches = row.aggregate_kind === "channel_snapshot"
+    ? channelSnapshotQueueJobIdentityMatches(job, {
+      jobId: row.deterministic_job_id,
+      payload: row.payload_json,
+      intentHash: row.intent_hash,
+    })
+    : String(job?.id ?? "") === String(row.deterministic_job_id)
+      && job?.name === jobName
+      && samePayload(job?.data, row.payload_json);
+  if (!matches) {
     throw new Error(`deterministic BullMQ Job conflicts with managed dispatch ${row.dispatch_id}`);
   }
   return job;
@@ -338,11 +353,21 @@ async function updateAggregate(client, row, { status, jobId = null, reason = nul
     if (status !== "terminal") return;
     const candidate = await client.query(
       `UPDATE crawler.channel_candidates
-       SET status='failed',error_message=$2,validation_finished_at=now(),
-           snapshot_active_job_id=NULL,snapshot_active_job_attempt=NULL,updated_at=now()
+       SET status=CASE WHEN status='accepted' THEN 'accepted' ELSE 'failed' END,
+           error_message=$2,
+           validation_finished_at=CASE WHEN status='accepted' THEN validation_finished_at ELSE now() END,
+           snapshot_json=COALESCE(snapshot_json,'{}'::jsonb) || jsonb_build_object(
+             'failure_type','retryable_system_failure',
+             'system_failure',jsonb_build_object(
+               'category','outbox','code','OUTBOX_DELIVERY_EXHAUSTED',
+               'name','ManagedJobOutboxDispatchError','message',$2::text,
+               'retryable',true
+             )
+           ),
+           updated_at=now()
        WHERE candidate_id=$1 AND snapshot_dispatch_generation=$3
          AND snapshot_active_job_id=$4 AND snapshot_active_job_attempt=0
-         AND status='queued'`,
+         AND status IN ('queued','accepted')`,
       [
         Number(row.aggregate_id),
         reason,
@@ -353,6 +378,76 @@ async function updateAggregate(client, row, { status, jobId = null, reason = nul
     if (candidate.rowCount !== 1) {
       throw new Error(`Channel snapshot dispatch ${row.dispatch_id} lost its Candidate fence`);
     }
+    await client.query(
+      `WITH requeued_retry AS (
+         UPDATE crawler.migration_system_retry_items
+         SET failed_dispatch_batch_id=COALESCE(failed_dispatch_batch_id,$7),
+             status='pending',failure_code='OUTBOX_DELIVERY_EXHAUSTED',
+             failure_category='outbox',resolution=NULL,resolved_at=NULL,
+             failure_evidence=COALESCE(failure_evidence,'{}'::jsonb)
+               || jsonb_build_object(
+                 'retry_delivery_failure',jsonb_build_object(
+                   'category','outbox','code','OUTBOX_DELIVERY_EXHAUSTED',
+                   'name','ManagedJobOutboxDispatchError','message',$3::text,
+                   'dispatch_id',$4::text,'job_id',$5::text,'attempts',$6::int,
+                   'retryable',true
+                 )
+               ),
+             updated_at=now()
+         WHERE candidate_id=$1 AND retry_dispatch_generation=$2
+           AND status='dispatched'
+           AND (failed_dispatch_batch_id IS NULL OR failed_dispatch_batch_id=$7)
+         RETURNING system_retry_id
+       ), inserted_retry AS (
+         INSERT INTO crawler.migration_system_retry_items AS existing_retry (
+           migration_intent_id,candidate_id,failed_dispatch_batch_id,failed_dispatch_generation,
+           failed_job_id,failed_job_attempt,failure_code,failure_category,
+           failure_evidence,status,updated_at
+         )
+         SELECT intent.migration_intent_id,$1,$7,$2,$5,0,
+                'OUTBOX_DELIVERY_EXHAUSTED','outbox',
+                jsonb_build_object(
+                  'failure_type','retryable_system_failure',
+                  'system_failure',jsonb_build_object(
+                    'category','outbox','code','OUTBOX_DELIVERY_EXHAUSTED',
+                    'name','ManagedJobOutboxDispatchError','message',$3::text,
+                    'dispatch_id',$4::text,'job_id',$5::text,'attempts',$6::int,
+                    'dispatch_batch_id',$7::text,
+                    'retryable',true
+                  )
+                ),
+                'pending',now()
+         FROM crawler.migration_channel_intents intent
+         WHERE intent.target_candidate_id=$1
+           AND NOT EXISTS (SELECT 1 FROM requeued_retry)
+         ON CONFLICT (
+           migration_intent_id,failed_dispatch_generation,failed_job_id,failed_job_attempt
+         ) DO UPDATE
+         SET failed_dispatch_batch_id=COALESCE(
+               existing_retry.failed_dispatch_batch_id,
+               EXCLUDED.failed_dispatch_batch_id
+             ),
+             failure_code=EXCLUDED.failure_code,
+             failure_category=EXCLUDED.failure_category,
+             failure_evidence=EXCLUDED.failure_evidence,
+             status='pending',resolution=NULL,resolved_at=NULL,updated_at=now()
+         WHERE existing_retry.failed_dispatch_batch_id IS NULL
+            OR existing_retry.failed_dispatch_batch_id=EXCLUDED.failed_dispatch_batch_id
+         RETURNING system_retry_id
+       )
+       SELECT system_retry_id FROM requeued_retry
+       UNION ALL
+       SELECT system_retry_id FROM inserted_retry`,
+      [
+        Number(row.aggregate_id),
+        Number(row.payload_json?.dispatch_generation),
+        reason,
+        String(row.dispatch_id),
+        String(row.deterministic_job_id),
+        Number(row.attempts),
+        requiredText(row.payload_json?.dispatch_batch_id, "dispatch_batch_id"),
+      ],
+    );
     return;
   }
   throw new Error(`unsupported managed aggregate kind: ${row.aggregate_kind}`);

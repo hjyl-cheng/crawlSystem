@@ -2,12 +2,15 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   DEFAULT_MANUAL_MIGRATION_BATCH_ID,
+  deliverExistingChannelSnapshotOutbox,
   dispatchManualMigrationBatch,
   dispatchManualMigrationChannel,
   normalizeManualMigrationBatchSelection,
+  prepareManualMigration,
   schedulerConflict,
   validateMigrationSourceSnapshot,
 } from "../src/manualMigrationDispatch.js";
+import { channelSnapshotDispatchIntentHash } from "../src/channelSnapshotDispatch.js";
 import { sourceSnapshotHash } from "../src/migrationSource.js";
 
 function sourceSnapshot(overrides = {}) {
@@ -36,6 +39,53 @@ function sourceSnapshot(overrides = {}) {
   };
   return { ...value, snapshot_sha256: sourceSnapshotHash(value) };
 }
+
+test("direct Outbox delivery accepts an intent-bound Job after Worker enrichment", async () => {
+  const payload = {
+    candidate_id: 482,
+    migration_intent_id: 25,
+    dispatch_generation: 2,
+    dispatch_batch_id: "legacy-results-canary",
+    channel_id: "UC0NoarYHkSxek05QDqhtoYw",
+    channel_url: "https://www.youtube.com/channel/UC0NoarYHkSxek05QDqhtoYw",
+    crawl_mode: "full",
+    query_id: null,
+    query_text: "results.db migration",
+    pipeline_cycle_id: "legacy-results-canary",
+    enforce_min_subscribers: true,
+    min_subscriber_count: 1000,
+    reject_if_no_recent_content: true,
+  };
+  const outbox = {
+    dispatch_id: "channel-snapshot-dispatch:482:g2:intent-bound",
+    aggregate_kind: "channel_snapshot",
+    aggregate_id: "482",
+    deterministic_job_id: "channel-snapshot__legacy-results-canary__UC0Noar__g2",
+    intent_hash: channelSnapshotDispatchIntentHash(payload),
+    payload_json: payload,
+  };
+  const job = {
+    id: outbox.deterministic_job_id,
+    name: "channel-snapshot",
+    data: { ...payload, run_id: "run:worker-enriched", business_run_id: "run:proxy-control" },
+    async getState() { return "active"; },
+  };
+  let marked = false;
+
+  const result = await deliverExistingChannelSnapshotOutbox({
+    async getJob(jobId) { return jobId === job.id ? job : null; },
+    async add() { assert.fail("the persisted deterministic Job must be reused"); },
+  }, outbox, {
+    dbQuery: async () => {
+      marked = true;
+      return { rowCount: 1, rows: [{ dispatch_id: outbox.dispatch_id }] };
+    },
+  });
+
+  assert.equal(result.created, false);
+  assert.equal(result.job, job);
+  assert.equal(marked, true);
+});
 
 test("manual migration does not replace another active crawler pipeline", () => {
   assert.deepEqual(
@@ -147,6 +197,7 @@ test("one-channel dispatch closes Source before opening the independent Target t
   assert.equal(result.migration_intent_id, 7);
   assert.equal(queueAdds.length, 1);
   assert.equal(queueAdds[0].data.crawl_mode, "full");
+  assert.equal(queueAdds[0].data.migration_intent_id, 7);
   assert.equal(queueAdds[0].data.dispatch_generation, 4);
   assert.match(queueAdds[0].options.jobId, /__g4$/);
 });
@@ -280,6 +331,58 @@ test("batch dispatch reads Target exclusions, closes Source, then materializes o
   assert.equal(result.created, true);
 });
 
+test("an active Migration system retry item cannot be moved into a new batch", async () => {
+  const snapshot = sourceSnapshot();
+  const statements = [];
+  const client = {
+    async query(sql) {
+      statements.push(sql);
+      if (sql.includes("pg_advisory_xact_lock")) return { rowCount: 1, rows: [] };
+      if (sql.includes("FROM crawler.migration_channel_intents intent")) {
+        return {
+          rowCount: 1,
+          rows: [{
+            migration_intent_id: "25",
+            source_id: snapshot.source_id,
+            source_database: snapshot.source_database,
+            source_database_oid: snapshot.source_database_oid,
+            source_candidate_id: snapshot.source_candidate_id,
+            channel_id: snapshot.channel_id,
+            snapshot_sha256: snapshot.snapshot_sha256,
+            target_candidate_id: "482",
+            first_dispatch_batch_id: "legacy-results-canary-original",
+            dispatch_batch_id: "legacy-results-canary-original",
+            pipeline_cycle_id: "legacy-results-canary-original",
+            channel_url: snapshot.channel_url,
+            priority: 100,
+            status: "failed",
+            snapshot_attempts: 0,
+            snapshot_dispatch_generation: "1",
+            snapshot_active_job_id: "channel-snapshot__original__g1",
+            snapshot_active_job_attempt: 1,
+            source_json: { source: "legacy_results_db" },
+            system_retry_active: true,
+            system_retry_id: "801",
+          }],
+        };
+      }
+      throw new Error(`unexpected SQL: ${sql}`);
+    },
+  };
+
+  await assert.rejects(
+    prepareManualMigration(client, {
+      sourceSnapshot: snapshot,
+      batchId: "legacy-results-canary-next",
+    }),
+    (error) => error?.code === "migration_system_retry_pending"
+      && error?.details?.migration_intent_id === 25
+      && error?.details?.candidate_id === 482
+      && error?.details?.system_retry_id === 801,
+  );
+  assert.equal(statements.length, 2);
+});
+
 test("a Redis delivery failure records compensation only in the Target database", async () => {
   const snapshot = sourceSnapshot();
   const compensation = [];
@@ -332,6 +435,7 @@ test("an ambiguous queue delivery is recovered from the persisted deterministic 
     name: "channel-snapshot",
     data: {
       candidate_id: 91,
+      migration_intent_id: 7,
       dispatch_generation: 1,
       dispatch_batch_id: DEFAULT_MANUAL_MIGRATION_BATCH_ID,
       channel_id: snapshot.channel_id,
@@ -392,6 +496,7 @@ test("a matching terminal Job for the current exact Outbox is delivery, not anot
   const jobId = `channel-snapshot__${DEFAULT_MANUAL_MIGRATION_BATCH_ID}__${snapshot.channel_id}__g5`;
   const payload = {
     candidate_id: 91,
+    migration_intent_id: 7,
     dispatch_generation: 5,
     dispatch_batch_id: DEFAULT_MANUAL_MIGRATION_BATCH_ID,
     channel_id: snapshot.channel_id,
@@ -439,7 +544,7 @@ test("a matching terminal Job for the current exact Outbox is delivery, not anot
         dispatch_id: "channel-snapshot-dispatch:91:g5:test",
         aggregate_kind: "channel_snapshot",
         aggregate_id: "91",
-        intent_hash: "sha256:test",
+        intent_hash: channelSnapshotDispatchIntentHash(payload),
         queue_registry_key: "youtube-channel-crawl",
         deterministic_job_id: jobId,
         payload_json: payload,
@@ -520,6 +625,7 @@ test("all raced deterministic Job reuse paths reject conflicting identity", asyn
   await t.test("a matching terminal G Job is preserved while Target allocates G+1", async () => {
     const matchingPayload = {
       candidate_id: 91,
+      migration_intent_id: 7,
       dispatch_generation: 1,
       dispatch_batch_id: DEFAULT_MANUAL_MIGRATION_BATCH_ID,
       channel_id: snapshot.channel_id,
@@ -569,7 +675,7 @@ test("all raced deterministic Job reuse paths reject conflicting identity", asyn
               dispatch_id: "channel-snapshot-dispatch:91:g2:test",
               aggregate_kind: "channel_snapshot",
               aggregate_id: "91",
-              intent_hash: "sha256:test",
+              intent_hash: channelSnapshotDispatchIntentHash(nextPayload),
               queue_registry_key: "youtube-channel-crawl",
               deterministic_job_id: nextJobId,
               payload_json: nextPayload,

@@ -6,6 +6,7 @@ import pg from "pg";
 import {
   markChannelCandidateJobAttemptActive,
   recordChannelCandidateJobFailure,
+  recordChannelCandidateSystemFailure,
 } from "../src/managedWorkerJob.js";
 
 const { Pool } = pg;
@@ -213,6 +214,106 @@ test("an accepted Candidate can resume its Job without becoming mutable by faile
       snapshot_active_job_id: jobId,
       snapshot_active_job_attempt: 2,
       error_message: null,
+    });
+  } finally {
+    await client.query("ROLLBACK").catch(() => {});
+    client.release();
+    await pool.end();
+  }
+});
+
+test("replaying one accepted Candidate system failure keeps exactly one pending retry item", {
+  skip: !integrationUrl,
+}, async () => {
+  const pool = new Pool({ connectionString: integrationUrl, max: 1 });
+  const client = await pool.connect();
+  const suffix = randomUUID().replaceAll("-", "");
+  const batchId = `managed-worker-system-replay:${suffix}`;
+  const channelId = `UCsystemreplay${suffix}`;
+  const jobId = `channel-snapshot__${batchId}__${channelId}__g1`;
+
+  try {
+    await client.query("BEGIN");
+    const identity = await client.query("SELECT current_database() AS database_name");
+    assert.match(identity.rows[0].database_name, /test/i, "integration URL must target a test database");
+    await client.query(
+      `INSERT INTO crawler.query_dispatch_batches (
+         dispatch_batch_id,pipeline_cycle_id,status,result_json
+       ) VALUES ($1,$1,'running','{}'::jsonb)`,
+      [batchId],
+    );
+    const candidate = await client.query(
+      `INSERT INTO crawler.channel_candidates (
+         dispatch_batch_id,pipeline_cycle_id,channel_id,channel_url,status,accepted_at,
+         snapshot_dispatch_generation,snapshot_active_job_id,snapshot_active_job_attempt,
+         source_json
+       ) VALUES ($1,$1,$2,$3,'accepted',now(),1,$4,3,'{}'::jsonb)
+       RETURNING candidate_id`,
+      [batchId, channelId, `https://www.youtube.com/channel/${channelId}`, jobId],
+    );
+    const candidateId = Number(candidate.rows[0].candidate_id);
+    await client.query(
+      `INSERT INTO crawler.migration_channel_intents (
+         source_id,source_database,source_database_oid,source_candidate_id,
+         channel_id,source_snapshot,snapshot_sha256,target_candidate_id,
+         first_dispatch_batch_id,dispatch_attempts,last_dispatch_at
+       ) VALUES (
+         $1,current_database(),
+         (SELECT oid FROM pg_database WHERE datname=current_database()),$2,
+         $3,'{}'::jsonb,repeat('b',64),$2,$4,1,now()
+       )`,
+      [`managed-worker-system-replay:${suffix}`, candidateId, channelId, batchId],
+    );
+    const job = {
+      id: jobId,
+      attemptsMade: 3,
+      data: {
+        candidate_id: candidateId,
+        dispatch_generation: 1,
+        dispatch_batch_id: batchId,
+      },
+    };
+    const error = Object.assign(new Error("lease changed after acceptance"), {
+      code: "LEASE_CONFLICT",
+      status: 409,
+    });
+    const record = () => recordChannelCandidateSystemFailure(
+      client.query.bind(client),
+      job,
+      { message: error.message, error, systemFailureTerminal: true },
+    );
+
+    assert.deepEqual(await record(), {
+      recorded: true,
+      systemRetryRecorded: true,
+      fenceCleared: false,
+    });
+    assert.deepEqual(await record(), {
+      recorded: true,
+      systemRetryRecorded: true,
+      fenceCleared: false,
+    });
+
+    const state = (await client.query(
+      `SELECT candidate.status,
+              candidate.snapshot_json->>'failure_type' AS failure_type,
+              min(retry.failed_dispatch_batch_id) AS failed_dispatch_batch_id,
+              count(retry.system_retry_id)::int AS retry_count,
+              count(retry.system_retry_id) FILTER (WHERE retry.status='pending')::int
+                AS pending_retry_count
+       FROM crawler.channel_candidates candidate
+       LEFT JOIN crawler.migration_system_retry_items retry
+         ON retry.candidate_id=candidate.candidate_id
+       WHERE candidate.candidate_id=$1
+       GROUP BY candidate.candidate_id`,
+      [candidateId],
+    )).rows[0];
+    assert.deepEqual(state, {
+      status: "accepted",
+      failure_type: "retryable_system_failure",
+      failed_dispatch_batch_id: batchId,
+      retry_count: 1,
+      pending_retry_count: 1,
     });
   } finally {
     await client.query("ROLLBACK").catch(() => {});

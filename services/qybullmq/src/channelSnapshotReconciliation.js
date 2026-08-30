@@ -1,8 +1,9 @@
-import { canonicalJsonEqual } from "./canonicalJson.js";
 import {
   allocateChannelSnapshotDispatchOutbox,
   buildChannelSnapshotRedispatchAllocation,
+  channelSnapshotDispatchIntentHash,
   channelSnapshotJobPayload,
+  channelSnapshotQueueJobIdentityMatches,
   ChannelSnapshotDispatchConflictError,
 } from "./channelSnapshotDispatch.js";
 
@@ -41,7 +42,10 @@ export async function reconcileChannelCandidateQueue({
             candidate.snapshot_active_job_id,candidate.snapshot_active_job_attempt,
             candidate.source_json->>'source' AS candidate_source,
             source.query_id,source.query_text,
-            migration_intent.migration_intent_id
+            migration_intent.migration_intent_id,
+            snapshot_outbox.deterministic_job_id AS snapshot_outbox_job_id,
+            snapshot_outbox.payload_json AS snapshot_outbox_payload,
+            snapshot_outbox.intent_hash AS snapshot_outbox_intent_hash
      FROM crawler.channel_candidates candidate
      LEFT JOIN crawler.migration_channel_intents migration_intent
        ON migration_intent.target_candidate_id=candidate.candidate_id
@@ -52,8 +56,23 @@ export async function reconcileChannelCandidateQueue({
        ORDER BY candidate_source.created_at,candidate_source.candidate_source_id
        LIMIT 1
      ) source ON true
+     LEFT JOIN LATERAL (
+       SELECT outbox.deterministic_job_id,outbox.payload_json,outbox.intent_hash
+       FROM crawler.proxy_job_dispatch_outbox outbox
+       WHERE outbox.aggregate_kind='channel_snapshot'
+         AND outbox.aggregate_id=candidate.candidate_id::text
+         AND (outbox.payload_json->>'dispatch_generation')::bigint
+               =candidate.snapshot_dispatch_generation
+       LIMIT 1
+     ) snapshot_outbox ON true
      WHERE candidate.dispatch_batch_id=$1
        AND NOT (candidate.snapshot_json ? 'parser_contract_error')
+       AND NOT EXISTS (
+         SELECT 1
+         FROM crawler.migration_system_retry_items active_system_retry
+         WHERE active_system_retry.candidate_id=candidate.candidate_id
+           AND active_system_retry.status IN ('retrying','pending','dispatched')
+       )
        AND (
          (
            candidate.status IN ('discovered','queued')
@@ -86,14 +105,32 @@ export async function reconcileChannelCandidateQueue({
         snapshot_dispatch_generation: generation,
       }, dispatchBatchId, { minSubscriberCount })
       : null;
+    const persistedOutboxPayload = row.snapshot_outbox_payload
+      && typeof row.snapshot_outbox_payload === "object"
+      && !Array.isArray(row.snapshot_outbox_payload)
+      ? row.snapshot_outbox_payload
+      : currentPayload;
+    const persistedOutboxIntentHash = String(
+      row.snapshot_outbox_intent_hash
+        || (persistedOutboxPayload
+          ? channelSnapshotDispatchIntentHash(persistedOutboxPayload)
+          : ""),
+    );
+    const expectedJobId = String(row.snapshot_outbox_job_id ?? "").trim() || currentJobId;
     let represented = false;
     let terminalCurrentJob = null;
-    for (const existingJobId of new Set([currentJobId, legacyJobId])) {
+    for (const existingJobId of new Set([expectedJobId, currentJobId, legacyJobId])) {
       const existing = await queue.getJob(existingJobId);
       if (!existing) continue;
       const state = await existing.getState();
-      const currentIdentityMatches = existingJobId === currentJobId && generation > 0
-        ? existing.name === "channel-snapshot" && canonicalJsonEqual(existing.data, currentPayload)
+      const currentIdentityMatches = generation > 0
+        ? channelSnapshotQueueJobIdentityMatches(existing, {
+          jobId: expectedJobId,
+          payload: persistedOutboxPayload,
+          identityPayload: currentPayload,
+          intentHash: persistedOutboxIntentHash,
+          migrationIntentId: row.migration_intent_id,
+        })
         : true;
       if (!currentIdentityMatches) {
         actions.push({
@@ -110,11 +147,11 @@ export async function reconcileChannelCandidateQueue({
         represented = true;
         break;
       }
-      if (existingJobId === currentJobId) terminalCurrentJob = existing;
+      if (existingJobId === expectedJobId) terminalCurrentJob = existing;
     }
     if (represented) continue;
     const activeJobId = String(row.snapshot_active_job_id ?? "").trim() || null;
-    if (activeJobId && (activeJobId !== currentJobId || !terminalCurrentJob)) {
+    if (activeJobId && (activeJobId !== expectedJobId || !terminalCurrentJob)) {
       actions.push({
         action: "hold-channel-snapshot-active-job-fence",
         candidate_id: Number(row.candidate_id),

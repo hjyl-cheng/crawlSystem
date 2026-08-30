@@ -65,6 +65,46 @@ export async function verifyRotaWorkerV2Schema(client) {
        to_regclass('crawler.query_quality_chunk_members') IS NOT NULL AS query_quality_chunk_members,
        to_regclass('crawler.proxy_job_dispatch_outbox') IS NOT NULL AS proxy_job_dispatch_outbox,
        to_regclass('crawler.migration_retry_intents') IS NOT NULL AS migration_retry_intents,
+       to_regclass('crawler.migration_system_retry_items') IS NOT NULL
+         AS migration_system_retry_items,
+       EXISTS (
+         SELECT 1 FROM information_schema.columns
+         WHERE table_schema='crawler' AND table_name='migration_system_retry_items'
+           AND column_name='failed_dispatch_batch_id' AND data_type='text'
+       ) AS migration_system_retry_failed_dispatch_batch_id,
+       to_regclass('crawler.ux_crawler_migration_system_retry_active_candidate') IS NOT NULL
+         AS migration_system_retry_active_candidate_index,
+       to_regclass('crawler.idx_crawler_migration_system_retry_status') IS NOT NULL
+         AS migration_system_retry_status_index,
+       (
+         SELECT count(*)=2
+         FROM information_schema.columns
+         WHERE table_schema='crawler' AND table_name='query_dispatch_batches'
+           AND column_name IN ('failed_channel_count','total_channel_count')
+           AND data_type='integer' AND is_nullable='NO' AND column_default='0'
+       ) AS query_dispatch_batch_completion_count_columns,
+       EXISTS (
+         SELECT 1 FROM information_schema.columns
+         WHERE table_schema='crawler' AND table_name='query_dispatch_batches'
+           AND column_name='outcome' AND data_type='text' AND is_nullable='YES'
+       ) AS query_dispatch_batch_outcome_column,
+       EXISTS (
+         SELECT 1 FROM pg_constraint
+         WHERE conrelid=to_regclass('crawler.query_dispatch_batches')
+           AND conname='query_dispatch_batches_completion_count_check'
+           AND contype='c' AND convalidated
+           AND pg_get_constraintdef(oid) LIKE '%failed_channel_count%'
+           AND pg_get_constraintdef(oid) LIKE '%total_channel_count%'
+           AND pg_get_constraintdef(oid) LIKE '%accepted_channel_count%'
+           AND pg_get_constraintdef(oid) LIKE '%rejected_channel_count%'
+       ) AS query_dispatch_batch_completion_count_check,
+       EXISTS (
+         SELECT 1 FROM pg_constraint
+         WHERE conrelid=to_regclass('crawler.query_dispatch_batches')
+           AND conname='query_dispatch_batches_outcome_check'
+           AND contype='c' AND convalidated
+           AND pg_get_constraintdef(oid) LIKE '%completed_with_system_failures%'
+       ) AS query_dispatch_batch_outcome_check,
        EXISTS (
          SELECT 1 FROM information_schema.columns
          WHERE table_schema='crawler' AND table_name='channel_candidates'

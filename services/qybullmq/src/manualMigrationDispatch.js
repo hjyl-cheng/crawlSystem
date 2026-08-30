@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
-import { canonicalJsonEqual } from "./canonicalJson.js";
 import {
   allocateChannelSnapshotDispatchOutbox,
+  channelSnapshotQueueJobIdentityMatches,
   stageChannelSnapshotOutbox,
 } from "./channelSnapshotDispatch.js";
 import { channelSnapshotPayload } from "./migrationDispatchPolicy.js";
@@ -68,10 +68,12 @@ function safeJobId(...parts) {
   return (id || "job").slice(0, 240);
 }
 
-function assertMatchingMigrationJob(job, { jobId, payload }) {
-  if (String(job?.id ?? "") !== jobId
-      || job?.name !== "channel-snapshot"
-      || !canonicalJsonEqual(job?.data, payload)) {
+function assertMatchingMigrationJob(job, { jobId, payload, intentHash = null }) {
+  if (!channelSnapshotQueueJobIdentityMatches(job, {
+    jobId,
+    payload,
+    ...(intentHash == null ? {} : { intentHash }),
+  })) {
     throw new ManualMigrationDispatchError(
       `deterministic migration Job conflicts with ${jobId}`,
       {
@@ -291,10 +293,20 @@ async function loadIntentForUpdate(client, snapshot) {
             candidate.channel_url,candidate.priority,candidate.status,
             candidate.snapshot_attempts,candidate.snapshot_dispatch_generation,
             candidate.snapshot_active_job_id,candidate.snapshot_active_job_attempt,
-            candidate.source_json
+            candidate.source_json,
+            system_retry.system_retry_id,
+            system_retry.system_retry_id IS NOT NULL AS system_retry_active
      FROM crawler.migration_channel_intents intent
      LEFT JOIN crawler.channel_candidates candidate
        ON candidate.candidate_id=intent.target_candidate_id
+     LEFT JOIN LATERAL (
+       SELECT retry.system_retry_id
+       FROM crawler.migration_system_retry_items retry
+       WHERE retry.migration_intent_id=intent.migration_intent_id
+         AND retry.status IN ('retrying','pending','dispatched')
+       ORDER BY retry.requested_at DESC,retry.system_retry_id DESC
+       LIMIT 1
+     ) system_retry ON true
      WHERE intent.source_id=$1 AND intent.channel_id=$2
      FOR UPDATE OF intent`,
     [snapshot.source_id, snapshot.channel_id],
@@ -441,7 +453,8 @@ async function refreshBatchCounts(client, batchId) {
        FROM crawler.channel_candidates
        WHERE dispatch_batch_id=$1
      ) stats
-     WHERE batch.dispatch_batch_id=$1`,
+     WHERE batch.dispatch_batch_id=$1
+       AND batch.status<>'completed'`,
     [batchId],
   );
   await client.query(
@@ -475,6 +488,7 @@ function existingCandidate(intent) {
   if (!intent?.target_candidate_id) return null;
   return {
     candidate_id: positiveCandidateId(intent.target_candidate_id),
+    migration_intent_id: Number(intent.migration_intent_id),
     dispatch_batch_id: intent.dispatch_batch_id,
     pipeline_cycle_id: intent.pipeline_cycle_id,
     channel_id: intent.channel_id,
@@ -503,6 +517,20 @@ export async function prepareManualMigration(client, {
   let intent = await loadIntentForUpdate(client, snapshot);
   let candidate = existingCandidate(intent);
   if (intent && candidate) {
+    if (intent.system_retry_active === true) {
+      throw new ManualMigrationDispatchError(
+        "Migration system failure must be retried from its controlled retry item",
+        {
+          statusCode: 409,
+          code: "migration_system_retry_pending",
+          details: {
+            migration_intent_id: Number(intent.migration_intent_id),
+            candidate_id: Number(candidate.candidate_id),
+            system_retry_id: Number(intent.system_retry_id),
+          },
+        },
+      );
+    }
     if (IN_PROGRESS_CANDIDATE_STATUSES.has(candidate.status)
         || TERMINAL_CANDIDATE_STATUSES.has(candidate.status)) {
       return {
@@ -549,7 +577,11 @@ export async function prepareManualMigration(client, {
       snapshot,
       batchId: normalizedBatchId,
     });
-    candidate = { ...candidate, snapshot_dispatch_generation: dispatchGeneration };
+    candidate = {
+      ...candidate,
+      migration_intent_id: Number(intent.migration_intent_id),
+      snapshot_dispatch_generation: dispatchGeneration,
+    };
     const staged = await stagePreparedManualMigration(client, {
       candidate,
       batchId: normalizedBatchId,
@@ -612,7 +644,11 @@ export async function prepareManualMigration(client, {
     snapshot,
     batchId: normalizedBatchId,
   });
-  candidate = { ...candidate, snapshot_dispatch_generation: dispatchGeneration };
+  candidate = {
+    ...candidate,
+    migration_intent_id: Number(intent.migration_intent_id),
+    snapshot_dispatch_generation: dispatchGeneration,
+  };
   const staged = await stagePreparedManualMigration(client, {
     candidate,
     batchId: normalizedBatchId,
@@ -896,7 +932,11 @@ export async function deliverExistingChannelSnapshotOutbox(queue, outbox, {
   const payload = outbox?.payload_json;
   let persisted = await queue.getJob(jobId);
   const created = !persisted;
-  if (persisted) assertMatchingMigrationJob(persisted, { jobId, payload });
+  if (persisted) assertMatchingMigrationJob(persisted, {
+    jobId,
+    payload,
+    intentHash: outbox.intent_hash,
+  });
   if (!persisted) {
     try {
       await queue.add("channel-snapshot", payload, { jobId, priority: Number(priority ?? 100) });
@@ -913,7 +953,11 @@ export async function deliverExistingChannelSnapshotOutbox(queue, outbox, {
       details: { job_id: jobId },
     });
   }
-  const job = assertMatchingMigrationJob(persisted, { jobId, payload });
+  const job = assertMatchingMigrationJob(persisted, {
+    jobId,
+    payload,
+    intentHash: outbox.intent_hash,
+  });
   const state = await job.getState();
   await markChannelSnapshotOutboxSent(dbQuery, outbox);
   return { job, jobId, state, created };
@@ -977,11 +1021,18 @@ export async function dispatchManualMigrationChannel({
     candidateId: normalizedCandidateId,
   });
   validateMigrationSourceSnapshot(sourceSnapshot);
-  const prepared = await transaction((client) => targetPreparer(client, {
+  const preparedResult = await transaction((client) => targetPreparer(client, {
     sourceSnapshot,
     batchId,
     minSubscriberCount,
   }));
+  const prepared = {
+    ...preparedResult,
+    candidate: {
+      ...preparedResult.candidate,
+      migration_intent_id: Number(preparedResult.intentId),
+    },
+  };
 
   const responseBase = {
     ok: true,

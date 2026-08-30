@@ -106,6 +106,7 @@ export class ProxyIdentityChangedError extends Error {
   constructor(expected, actual) {
     super(`proxy identity changed during channel attempt: expected ${expected?.proxy_id ?? "none"}, received ${actual?.proxy_id ?? "none"}`);
     this.name = "ProxyIdentityChangedError";
+    this.code = "PROXY_IDENTITY_CHANGED";
     this.expected = expected || null;
     this.actual = actual || null;
   }

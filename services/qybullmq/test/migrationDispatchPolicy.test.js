@@ -4,6 +4,7 @@ import {
   channelDispatchCapacity,
   channelQueuePressure,
   channelSnapshotPayload,
+  migrationBatchCompletion,
   migrationBatchHasOpenWork,
 } from "../src/migrationDispatchPolicy.js";
 
@@ -34,14 +35,50 @@ test("migration watcher waits for the latest Full Run after Candidate validation
   assert.equal(migrationBatchHasOpenWork({ open_count: 0, open_run_count: 0 }), false);
 });
 
+test("99 accepted plus one system failure completes with explicit Batch outcome", () => {
+  assert.deepEqual(migrationBatchCompletion({
+    total: 100,
+    accepted: 99,
+    rejected: 0,
+    failed: 1,
+    systemFailures: 1,
+  }), {
+    status: "completed",
+    outcome: "completed_with_system_failures",
+    total: 100,
+    accepted: 99,
+    rejected: 0,
+    failed: 1,
+  });
+});
+
+test("an accepted Candidate can retain a system-failure Batch outcome", () => {
+  assert.deepEqual(migrationBatchCompletion({
+    total: 1,
+    accepted: 1,
+    rejected: 0,
+    failed: 0,
+    systemFailures: 1,
+  }), {
+    status: "completed",
+    outcome: "completed_with_system_failures",
+    total: 1,
+    accepted: 1,
+    rejected: 0,
+    failed: 0,
+  });
+});
+
 test("migration channel jobs start at the post-Discover channel snapshot contract", () => {
   assert.deepEqual(channelSnapshotPayload({
     candidate_id: "42",
+    migration_intent_id: "25",
     channel_id: "UC1234567890123456789012",
     channel_url: "https://www.youtube.com/channel/UC1234567890123456789012",
     snapshot_dispatch_generation: "3",
   }, "legacy-results-pilot-30-v1"), {
     candidate_id: 42,
+    migration_intent_id: 25,
     dispatch_generation: 3,
     dispatch_batch_id: "legacy-results-pilot-30-v1",
     channel_id: "UC1234567890123456789012",

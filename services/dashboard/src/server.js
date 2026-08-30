@@ -39,6 +39,11 @@ import { loadChannelCurrentContent } from "./channelCurrentContent.js";
 import { loadLatestContentEnrichOperational } from "./contentEnrichOperational.js";
 import { loadMigrationChannelInventory } from "./migrationInventory.js";
 import {
+  loadMigrationSystemRetriesSafely,
+  renderMigrationSystemRetries,
+  requestMigrationSystemRetry,
+} from "./migrationSystemRetries.js";
+import {
   loadMigrationRunDiagnostics,
   loadRotaBusinessRunBudget,
   renderMigrationRunDiagnostics,
@@ -1565,17 +1570,21 @@ async function migrationChannelListData(req) {
   }
 
   try {
-    const inventory = await loadMigrationChannelInventory({
-      read: db,
-      sourceId: migrationSourceId,
-      expectedSourceDatabase: expectedMigrationDatabase,
-      expectedSourceDatabaseOid: expectedMigrationDatabaseOid,
-      filters,
-    });
+    const [inventory, systemRetries] = await Promise.all([
+      loadMigrationChannelInventory({
+        read: db,
+        sourceId: migrationSourceId,
+        expectedSourceDatabase: expectedMigrationDatabase,
+        expectedSourceDatabaseOid: expectedMigrationDatabaseOid,
+        filters,
+      }),
+      loadMigrationSystemRetriesSafely({ read: db }),
+    ]);
     return {
       configured: true,
       available: true,
       ...inventory,
+      systemRetries,
     };
   } catch (error) {
     console.error("migration channel inventory read failed", error?.message || String(error));
@@ -1585,6 +1594,7 @@ async function migrationChannelListData(req) {
       channels: [],
       total: 0,
       stats: { total: 0 },
+      systemRetries: { count: 0, items: [] },
       filters,
       error: error?.code === "migration_inventory_not_ready"
         ? "迁移频道索引尚未就绪"
@@ -1623,7 +1633,8 @@ async function migrationChannelDetailData(channelId) {
       ORDER BY candidate_source_id
     `, [candidate.candidate_id]),
     migrationRead(`
-      SELECT dispatch_batch_id,status,discovered_candidate_count,result_json,started_at,finished_at
+      SELECT dispatch_batch_id,status,outcome,total_channel_count,accepted_channel_count,rejected_channel_count,failed_channel_count,
+             discovered_candidate_count,result_json,started_at,finished_at
       FROM crawler.query_dispatch_batches
       WHERE dispatch_batch_id=$1
       LIMIT 1
@@ -1758,6 +1769,10 @@ async function migrateChannelBatch(selection) {
     throw error;
   }
   return payload;
+}
+
+async function retryMigrationSystemItem(systemRetryId) {
+  return requestMigrationSystemRetry({ crawlerApiUrl, systemRetryId });
 }
 
 function utcDayOffset(offset = 0, now = new Date()) {
@@ -3422,9 +3437,10 @@ function channelTableRows(channels, {
       ? migrationCandidateSummary({ status: channel.candidate_status || channel.status })
       : completenessSummary(channel);
     const candidateStatus = String(channel.candidate_status || channel.status || "");
-    const canMigrate = ["discovered", "failed"].includes(candidateStatus);
+    const hasActiveSystemRetry = channel.active_system_retry_id != null;
+    const canMigrate = ["discovered", "failed"].includes(candidateStatus) && !hasActiveSystemRetry;
     const dormant = !candidateOnly && !migrationIncomplete && isDormantChannel(channel);
-    const migrateLabel = migrationIncomplete ? "待收尾" : "迁移";
+    const migrateLabel = hasActiveSystemRetry ? "系统重试中" : migrationIncomplete ? "待收尾" : "迁移";
     const migrateAction = migrationActions
       ? `<form class="inline-form" method="post" action="/migration-channels/${encodeURIComponent(channel.channel_id)}/migrate">
            <input type="hidden" name="candidate_id" value="${h(channel.candidate_id)}">
@@ -3543,6 +3559,7 @@ function migrationChannelListPage(migration) {
 </div>
 ${migration.notice ? `<div class="alert alert-good">${h(migration.notice)}</div>` : ""}
 ${migration.error ? `<div class="alert alert-bad">${h(migration.error)}</div>` : ""}
+${renderMigrationSystemRetries(migration.systemRetries)}
 ${table}`,
   });
 }
@@ -3572,6 +3589,11 @@ function migrationChannelDetailPage(data) {
     ["candidate_id", candidate.candidate_id],
     ["dispatch_batch_id", candidate.dispatch_batch_id],
     ["dispatch_batch_status", data.batch?.status || "-"],
+    ["dispatch_batch_outcome", data.batch?.outcome || "-"],
+    ["dispatch_batch_total", data.batch?.total_channel_count ?? "-"],
+    ["dispatch_batch_accepted", data.batch?.accepted_channel_count ?? "-"],
+    ["dispatch_batch_rejected", data.batch?.rejected_channel_count ?? "-"],
+    ["dispatch_batch_failed", data.batch?.failed_channel_count ?? "-"],
     ["source_database", candidate.source_database || "-"],
     ["source_database_sha256", candidate.source_database_sha256 || "-"],
   ];
@@ -4822,6 +4844,17 @@ app.post("/migration-channels/:channelId/migrate", async (req, res) => {
     return redirectWith(req, res, { notice });
   } catch (error) {
     return redirectWith(req, res, { error: `迁移启动失败：${error?.message || String(error)}` });
+  }
+});
+
+app.post("/migration-channels/system-retries/:systemRetryId/retry", async (req, res) => {
+  try {
+    const result = await retryMigrationSystemItem(req.params.systemRetryId);
+    return redirectWith(req, res, {
+      notice: `已提交系统重试：${result.channel_id} / Candidate ${result.candidate_id} / G${result.dispatch_generation}`,
+    });
+  } catch (error) {
+    return redirectWith(req, res, { error: `系统重试提交失败：${error?.message || String(error)}` });
   }
 });
 

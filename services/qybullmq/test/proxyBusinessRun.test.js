@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { validateIncrementalJob } from "../src/incrementalPlan.js";
+import { channelCandidateFailureDisposition } from "../src/managedWorkerJob.js";
 import { ProxyBusinessRunPreparer } from "../src/proxyBusinessRun.js";
 import { queuesByRole } from "../src/queues.js";
 
@@ -163,6 +164,68 @@ test("a controlled Recovery Job resolves a new Candidate Business Run boundary",
   assert.equal(store.calls[0].fullIntentId, retryIntentId);
   assert.equal(job.data.business_run_key, prepared.businessRunKey);
   assert.equal(job.data.run_id, "run:new");
+});
+
+test("a Recovery Intent identity mismatch is a retryable system failure", async () => {
+  const retryIntentId = "22222222-2222-4222-8222-222222222222";
+  const job = {
+    id: `channel-recovery__482__${retryIntentId}__g2`,
+    name: "channel-snapshot-recovery",
+    queueName: queuesByRole.channelCrawl,
+    attemptsMade: 2,
+    opts: { attempts: 3 },
+    data: {
+      candidate_id: 482,
+      retry_intent_id: retryIntentId,
+      recovery_business_run_id: "run:recovery:482",
+      dispatch_generation: 2,
+      channel_id: "UC0NoarYHkSxek05QDqhtoYw",
+      crawl_mode: "full",
+    },
+  };
+  const preparer = new ProxyBusinessRunPreparer({
+    queryFn: async (sql) => {
+      if (sql.includes("FROM crawler.migration_retry_intents")) {
+        return {
+          rows: [{
+            retry_intent_id: retryIntentId,
+            candidate_id: "999",
+            new_business_run_id: job.data.recovery_business_run_id,
+            new_business_run_key: `full-candidate:482:recovery:${retryIntentId}`,
+            new_job_id: job.id,
+            dispatch_generation: "2",
+            status: "running",
+          }],
+        };
+      }
+      throw new Error("identity mismatch must fail before Candidate lifecycle lookup");
+    },
+    withTransaction: async () => {},
+    resolvedPolicy,
+    bindingStore: bindingStore(),
+  });
+
+  const error = await preparer.prepareChannel(job).then(
+    () => null,
+    (caught) => caught,
+  );
+
+  assert.deepEqual({
+    name: error?.name,
+    code: error?.code,
+    message: error?.message,
+    disposition: channelCandidateFailureDisposition({
+      error,
+      attemptsMade: 3,
+      maxAttempts: 3,
+      permanentFailure: true,
+    }),
+  }, {
+    name: "MigrationRetryIntentConflictError",
+    code: "MIGRATION_RETRY_INTENT_CONFLICT",
+    message: `Recovery Intent identity mismatch: ${retryIntentId}`,
+    disposition: "retryable_system_failure",
+  });
 });
 
 test("an automatic Full Repair redelivery keeps its original Business Run identity", async () => {

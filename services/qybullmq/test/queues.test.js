@@ -2,10 +2,19 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   applyFailureRetryDecision,
+  bullmqPrefixFromEnvironment,
   hasQueryPipelineQueueBacklog,
   queueNames,
   queuesByRole,
 } from "../src/queues.js";
+
+test("BullMQ prefix defaults to the production namespace and accepts an isolated override", () => {
+  assert.equal(bullmqPrefixFromEnvironment({}), undefined);
+  assert.equal(
+    bullmqPrefixFromEnvironment({ BULLMQ_PREFIX: "  migration-worker-entry  " }),
+    "migration-worker-entry",
+  );
+});
 
 test("incremental Channel Plans have a queue isolated from Full crawling", () => {
   assert.equal(queuesByRole.channelIncremental, "youtube-channel-incremental");

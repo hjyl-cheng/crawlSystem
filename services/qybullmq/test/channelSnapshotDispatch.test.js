@@ -226,6 +226,67 @@ test("the terminal-Job CAS winner allocates G+1 and persists its exact Outbox", 
   assert.match(candidateUpdate.sql, /snapshot_dispatch_generation=\$2/);
 });
 
+test("G+1 allocation preserves an already accepted Candidate business terminal", async () => {
+  const calls = [];
+  const current = {
+    ...snapshotCandidate(3),
+    migration_intent_id: 7,
+    status: "accepted",
+    snapshot_active_job_id: "channel-snapshot__manual-batch__UCsnapshot__g3",
+    snapshot_active_job_attempt: 2,
+  };
+  const next = { ...current, snapshot_dispatch_generation: 4 };
+  const payload = channelSnapshotPayload(next, "manual-batch");
+  const client = {
+    async query(sql, params) {
+      calls.push({ sql, params });
+      if (sql.includes("FROM crawler.channel_candidates") && sql.includes("FOR UPDATE")) {
+        return { rowCount: 1, rows: [current] };
+      }
+      if (sql.includes("UPDATE crawler.migration_channel_intents")) {
+        return { rowCount: 1, rows: [{ dispatch_attempts: 4 }] };
+      }
+      if (sql.includes("UPDATE crawler.channel_candidates")) {
+        return {
+          rowCount: 1,
+          rows: [{
+            ...next,
+            status: "accepted",
+            snapshot_active_job_id: "channel-snapshot__manual-batch__UCsnapshot__g4",
+            snapshot_active_job_attempt: 0,
+          }],
+        };
+      }
+      if (sql.includes("INSERT INTO crawler.proxy_job_dispatch_outbox")) {
+        return { rowCount: 1, rows: [{ dispatch_id: params[0] }] };
+      }
+      throw new Error(`unexpected SQL: ${sql}`);
+    },
+  };
+
+  const allocated = await allocateChannelSnapshotDispatchOutbox(client, {
+    candidate: next,
+    expectedGeneration: 3,
+    previousJobId: current.snapshot_active_job_id,
+    previousJobAttempt: current.snapshot_active_job_attempt,
+    migrationIntentId: 7,
+    payload,
+    jobId: "channel-snapshot__manual-batch__UCsnapshot__g4",
+  });
+
+  assert.equal(allocated.candidate.status, "accepted");
+  const candidateUpdate = calls.find(({ sql }) => sql.includes("UPDATE crawler.channel_candidates"));
+  assert.match(
+    candidateUpdate.sql,
+    /status=CASE WHEN status='accepted' THEN 'accepted' ELSE 'queued' END/,
+  );
+  assert.match(
+    candidateUpdate.sql,
+    /validation_finished_at=CASE WHEN status='accepted' THEN validation_finished_at ELSE NULL END/,
+  );
+  assert.match(candidateUpdate.sql, /status IN \('discovered','queued','validating','failed','accepted'\)/);
+});
+
 test("a generation CAS loser reuses only the exact G+1 Outbox", async () => {
   const outbox = buildChannelSnapshotOutbox({
     candidate: snapshotCandidate(4),

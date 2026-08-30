@@ -32,6 +32,23 @@ test("Rota Worker V2 deployment extracts the complete additive integration schem
     /SET snapshot_dispatch_generation = expectation\.expected_generation,[\s\S]*snapshot_active_job_id = NULL,[\s\S]*snapshot_active_job_attempt = NULL/,
   );
   assert.match(block, /CREATE TABLE IF NOT EXISTS crawler\.migration_retry_intents/);
+  assert.match(block, /CREATE TABLE IF NOT EXISTS crawler\.migration_system_retry_items/);
+  assert.match(block, /failed_dispatch_batch_id TEXT NOT NULL/);
+  assert.match(
+    block,
+    /ALTER TABLE crawler\.migration_system_retry_items\s+ADD COLUMN IF NOT EXISTS failed_dispatch_batch_id TEXT/,
+  );
+  assert.doesNotMatch(
+    block,
+    /UPDATE crawler\.migration_system_retry_items[\s\S]*channel_candidates/,
+  );
+  assert.match(block, /ux_crawler_migration_system_retry_active_candidate/);
+  assert.match(block, /idx_crawler_migration_system_retry_status/);
+  assert.match(block, /ADD COLUMN IF NOT EXISTS failed_channel_count INTEGER NOT NULL DEFAULT 0/);
+  assert.match(block, /ADD COLUMN IF NOT EXISTS total_channel_count INTEGER NOT NULL DEFAULT 0/);
+  assert.match(block, /ADD COLUMN IF NOT EXISTS outcome TEXT/);
+  assert.match(block, /query_dispatch_batches_completion_count_check/);
+  assert.match(block, /query_dispatch_batches_outcome_check/);
   assert.match(block, /channel_execution_attempts[\s\S]*dispatch_generation BIGINT/);
   assert.match(block, /UNIQUE \(candidate_id,dispatch_generation\)/);
   assert.match(block, /ux_crawler_migration_retry_intents_active_candidate/);
@@ -51,6 +68,13 @@ test("Crawler bootstrap includes the Candidate attempt Fence shape", async () =>
   assert.match(bootstrap, /snapshot_active_job_attempt >= 0/);
   assert.match(bootstrap, /ux_crawler_proxy_job_dispatch_outbox_channel_snapshot_generation/);
   assert.match(bootstrap, /channel_execution_attempts[\s\S]*dispatch_generation bigint/);
+  assert.match(bootstrap, /CREATE TABLE crawler\.migration_system_retry_items/);
+  assert.match(bootstrap, /failed_dispatch_batch_id text NOT NULL/);
+  assert.match(bootstrap, /ux_crawler_migration_system_retry_active_candidate/);
+  assert.match(bootstrap, /idx_crawler_migration_system_retry_status/);
+  assert.match(bootstrap, /failed_channel_count integer DEFAULT 0 NOT NULL/);
+  assert.match(bootstrap, /total_channel_count integer DEFAULT 0 NOT NULL/);
+  assert.match(bootstrap, /query_dispatch_batches_completion_count_check/);
 });
 
 test("Rota Worker V2 deployment requires explicit database and row-count confirmation", () => {

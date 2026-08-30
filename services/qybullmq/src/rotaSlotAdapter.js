@@ -82,6 +82,15 @@ function isLeaseGone(error) {
   return false;
 }
 
+function isLeaseConflict(error) {
+  const seen = new Set();
+  for (let current = error; current && !seen.has(current); current = current?.cause) {
+    seen.add(current);
+    if (String(current?.code ?? "").trim().toUpperCase() === "LEASE_CONFLICT") return true;
+  }
+  return false;
+}
+
 function proxyUrl({ baseUrl, proxyUser, password }) {
   const url = new URL(baseUrl);
   if (!["http:", "https:"].includes(url.protocol)) {
@@ -268,10 +277,23 @@ export class RotaSlotAdapter {
       const executionId = jobExecutionId(job);
       let routeSwitches = 0;
       let resumeMode = prepared.initialResumeMode ?? "initial";
+      let beginTaskLeaseConflictRecovered = false;
       while (!this.closing) {
         this.#requireLeaseSafety();
         const frozen = this.assignment;
-        const task = await this.#beginTask({ prepared, executionId, frozen });
+        let task;
+        try {
+          task = await this.#beginTask({ prepared, executionId, frozen });
+        } catch (error) {
+          if (!isLeaseConflict(error)) throw error;
+          if (beginTaskLeaseConflictRecovered) {
+            this.#fenceSlot("LEASE_CONFLICT_UNRESOLVED", error, { preserveLeaseSafety: true });
+            throw new RotaSlotDeferredError("lease_conflict_recovery");
+          }
+          beginTaskLeaseConflictRecovered = true;
+          await this.#recoverBeginTaskLeaseConflict(frozen, error);
+          continue;
+        }
         this.activeTask = task;
         const controller = new AbortController();
         this.activeAttemptController = controller;
@@ -520,6 +542,47 @@ export class RotaSlotAdapter {
       }
       throw error;
     }
+  }
+
+  async #recoverBeginTaskLeaseConflict(frozen, conflict) {
+    if (this.activeTask || this.pendingCompletion) {
+      throw new RotaSlotContractError("BeginTask Lease conflict occurred after a Task became active");
+    }
+    this.#fenceSlot("LEASE_CONFLICT", conflict, { preserveLeaseSafety: true });
+
+    let renewed;
+    try {
+      renewed = await this.#renewAssignment(frozen);
+    } catch (error) {
+      if (isLeaseGone(error)) {
+        const reclaimed = await this.#reclaimAssignment(frozen);
+        if (reclaimed && this.slotReady) return;
+        throw new RotaSlotDeferredError("lease_reclaiming");
+      }
+      if (isLeaseConflict(error)) {
+        throw new RotaSlotDeferredError("lease_conflict_recovery");
+      }
+      if (error?.retryable === true) {
+        throw new RotaSlotDeferredError("lease_conflict_recovery");
+      }
+      throw error;
+    }
+
+    const current = this.assignment;
+    if (current?.slot_name !== frozen.slot_name || current?.lease_id !== frozen.lease_id) {
+      if (this.slotReady) return;
+      throw new RotaSlotDeferredError("lease_reclaiming");
+    }
+    if (renewed?.ready === true && this.slotReady) {
+      return;
+    }
+    if (renewed?.ready === true) {
+      this.#fenceSlot("LEASE_CONFLICT_UNRESOLVED", conflict, { preserveLeaseSafety: true });
+      throw new RotaSlotDeferredError("lease_conflict_recovery");
+    }
+    throw new RotaSlotDeferredError("lease_conflict_recovery", {
+      retryAfterMs: Math.max(1000, Number(renewed?.retry_after_ms) || 1000),
+    });
   }
 
   async #observe({ prepared, frozen, task, result }) {
@@ -843,7 +906,12 @@ export class RotaSlotAdapter {
   }
 
   async #reclaimGoneAssignment(frozen) {
-    const activeJob = this.activeJobCompletion?.promise ?? null;
+    const mustWaitForActiveTask = this.activeTask !== null
+      || this.activeRuntime !== null
+      || this.pendingCompletion !== null;
+    const activeJob = mustWaitForActiveTask
+      ? this.activeJobCompletion?.promise ?? null
+      : null;
     if (activeJob) await activeJob;
     if (this.closing
         || this.assignment?.slot_name !== frozen.slot_name
@@ -913,7 +981,7 @@ export class RotaSlotAdapter {
           }
           return;
         }
-        retryable = error?.retryable === true;
+        retryable = error?.retryable === true || isLeaseConflict(error);
         if (this.assignment?.slot_name === frozen.slot_name
             && this.assignment?.lease_id === frozen.lease_id) {
           this.#fenceSlot("RENEW_FAILED", error);

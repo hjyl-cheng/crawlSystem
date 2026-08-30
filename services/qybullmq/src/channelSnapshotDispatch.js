@@ -29,10 +29,62 @@ function requiredText(value, field) {
   return normalized;
 }
 
-function dispatchIntentHash(payload) {
+export function channelSnapshotDispatchIntentHash(payload) {
   return `sha256:${createHash("sha256")
     .update(canonicalJsonString({ job_name: CHANNEL_SNAPSHOT_JOB_NAME, payload }))
     .digest("hex")}`;
+}
+
+function projectedChannelSnapshotPayload(jobData, persistedPayload) {
+  return Object.fromEntries(
+    Object.keys(persistedPayload).map((key) => [key, jobData?.[key]]),
+  );
+}
+
+export function channelSnapshotQueueJobIdentityMatches(job, {
+  jobId,
+  payload,
+  identityPayload = payload,
+  intentHash = channelSnapshotDispatchIntentHash(payload),
+  migrationIntentId = null,
+} = {}) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)
+      || !identityPayload || typeof identityPayload !== "object"
+      || Array.isArray(identityPayload)) return false;
+  const payloadHasMigrationIntent = Object.prototype.hasOwnProperty.call(
+    payload,
+    "migration_intent_id",
+  );
+  const jobHasMigrationIntent = Object.prototype.hasOwnProperty.call(
+    job?.data ?? {},
+    "migration_intent_id",
+  );
+  const expectedMigrationIntent = migrationIntentId != null
+    ? Number(migrationIntentId)
+    : payloadHasMigrationIntent ? Number(payload.migration_intent_id) : null;
+  const actualMigrationIntent = jobHasMigrationIntent
+    ? Number(job.data.migration_intent_id)
+    : payloadHasMigrationIntent ? null : expectedMigrationIntent;
+  const projectedPayload = projectedChannelSnapshotPayload(job?.data, payload);
+  return canonicalJsonEqual({
+    job_id: String(job?.id ?? ""),
+    name: String(job?.name ?? ""),
+    candidate_id: Number(job?.data?.candidate_id),
+    dispatch_generation: Number(job?.data?.dispatch_generation),
+    migration_intent_id: actualMigrationIntent,
+    channel_id: String(job?.data?.channel_id ?? ""),
+    pipeline_cycle_id: String(job?.data?.pipeline_cycle_id ?? ""),
+    outbox_intent_hash: channelSnapshotDispatchIntentHash(projectedPayload),
+  }, {
+    job_id: String(jobId ?? ""),
+    name: CHANNEL_SNAPSHOT_JOB_NAME,
+    candidate_id: Number(identityPayload.candidate_id),
+    dispatch_generation: Number(identityPayload.dispatch_generation),
+    migration_intent_id: expectedMigrationIntent,
+    channel_id: String(identityPayload.channel_id ?? ""),
+    pipeline_cycle_id: String(identityPayload.pipeline_cycle_id ?? ""),
+    outbox_intent_hash: String(intentHash ?? ""),
+  });
 }
 
 function normalizedCandidate(row) {
@@ -161,7 +213,7 @@ export function buildChannelSnapshotOutbox({ candidate, payload, jobId } = {}) {
     );
   }
   const deterministicJobId = requiredText(jobId, "jobId");
-  const intentHash = dispatchIntentHash(payload);
+  const intentHash = channelSnapshotDispatchIntentHash(payload);
   const digest = intentHash.replace(/^sha256:/, "").slice(0, 24);
   return Object.freeze({
     dispatch_id: `channel-snapshot-dispatch:${candidateId}:g${generation}:${digest}`,
@@ -379,12 +431,14 @@ export async function allocateChannelSnapshotDispatchOutbox(client, {
   }
   const advanced = await client.query(
     `UPDATE crawler.channel_candidates
-     SET status='queued',next_retry_at=NULL,validation_finished_at=NULL,
+     SET status=CASE WHEN status='accepted' THEN 'accepted' ELSE 'queued' END,
+         next_retry_at=NULL,
+         validation_finished_at=CASE WHEN status='accepted' THEN validation_finished_at ELSE NULL END,
          snapshot_dispatch_generation=$2 + 1,
          snapshot_active_job_id=$3,snapshot_active_job_attempt=0,
          updated_at=now()
      WHERE candidate_id=$1 AND snapshot_dispatch_generation=$2
-       AND status IN ('discovered','queued','validating','failed')
+       AND status IN ('discovered','queued','validating','failed','accepted')
        AND (
          ($4::text IS NULL AND $5::int IS NULL AND snapshot_active_job_id IS NULL
            AND snapshot_active_job_attempt IS NULL)

@@ -73,7 +73,7 @@ function candidateQuery(candidate) {
       return { rowCount: 1, rows: [{ candidate_id: candidateId }] };
     }
 
-    if (sql.includes("snapshot_active_job_id=NULL,snapshot_active_job_attempt=NULL")) {
+    if (sql.includes("SET status=$2,error_message=$3")) {
       const [candidateId, disposition, message, , dispatchGeneration, jobId, failedAttempt] = params;
       const eligible = candidate.candidateId === candidateId
         && candidate.dispatchGeneration === dispatchGeneration
@@ -83,8 +83,10 @@ function candidateQuery(candidate) {
       if (!eligible) return { rowCount: 0, rows: [] };
       candidate.status = disposition;
       candidate.errorMessage = message;
-      candidate.activeJobId = null;
-      candidate.activeAttempt = null;
+      if (disposition !== "failed") {
+        candidate.activeJobId = null;
+        candidate.activeAttempt = null;
+      }
       return { rowCount: 1, rows: [{ candidate_id: candidateId, status: disposition }] };
     }
 

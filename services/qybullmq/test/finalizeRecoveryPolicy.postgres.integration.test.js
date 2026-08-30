@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import test from "node:test";
 import pg from "pg";
 import {
+  hasOpenPipelineCrawlerWork,
   loadPipelineFinalizeBlockers,
   loadPublicationGapRepairCandidates,
 } from "../src/finalizeRecoveryPolicy.js";
@@ -11,6 +12,115 @@ import { PUBLICATION_WRITER_VERSION } from "../src/publicationWriterVersion.js";
 
 const { Pool } = pg;
 const integrationUrl = process.env.PUBLICATION_POSTGRES_TEST_URL;
+
+test("Batch-scoped system retry evidence releases only its materialized open Channel Run", {
+  skip: !integrationUrl,
+}, async () => {
+  const pool = new Pool({ connectionString: integrationUrl, max: 1 });
+  const client = await pool.connect();
+  const suffix = randomUUID().replaceAll("-", "");
+  const batchId = `migration-finalize-blocker-${suffix}`;
+  const historicalBatchId = `historical-migration-finalize-blocker-${suffix}`;
+  const channelId = `UCmigrationfinalizeblocker${suffix}`;
+  const runId = `run:migration-finalize-blocker:${suffix}`;
+  try {
+    const identity = await client.query("SELECT current_database() AS database_name");
+    assert.match(identity.rows[0].database_name, /_test$/i, "Integration URL must target a *_test database");
+    await client.query("BEGIN");
+    await client.query(
+      `INSERT INTO crawler.query_dispatch_batches (
+         dispatch_batch_id,pipeline_cycle_id,status,discovery_closed_at
+       ) VALUES ($1,$1,'finishing',now())`,
+      [batchId],
+    );
+    const candidate = await client.query(
+      `INSERT INTO crawler.channel_candidates (
+         dispatch_batch_id,pipeline_cycle_id,channel_id,channel_url,status,
+         snapshot_dispatch_generation,validation_finished_at,accepted_at
+       ) VALUES ($1,$1,$2,$3,'accepted',2,now(),now())
+       RETURNING candidate_id`,
+      [batchId, channelId, `https://www.youtube.com/channel/${channelId}`],
+    );
+    const candidateId = Number(candidate.rows[0].candidate_id);
+    const intent = await client.query(
+      `INSERT INTO crawler.migration_channel_intents (
+         source_id,source_database,source_database_oid,source_candidate_id,
+         channel_id,source_snapshot,snapshot_sha256,target_candidate_id,
+         first_dispatch_batch_id,dispatch_attempts,last_dispatch_at
+       ) VALUES (
+         $1,current_database(),
+         (SELECT oid FROM pg_database WHERE datname=current_database()),$2,
+         $3,'{}'::jsonb,repeat('c',64),$2,$4,2,now()
+       ) RETURNING migration_intent_id`,
+      [`migration-finalize-blocker:${suffix}`, candidateId, channelId, batchId],
+    );
+    const migrationIntentId = Number(intent.rows[0].migration_intent_id);
+    await client.query(
+      `INSERT INTO crawler.channels (
+         channel_id,channel_url,title,status,agent_status,latest_run_id
+       ) VALUES ($1,$2,'Migration finalize blocker','active','pending',$3)`,
+      [channelId, `https://www.youtube.com/channel/${channelId}`, runId],
+    );
+    await client.query(
+      `INSERT INTO crawler.channel_runs (
+         run_id,channel_id,candidate_id,status,crawl_mode,detail_status,
+         started_at,result_json
+       ) VALUES ($1,$2,$3,'waiting_agent','full','done',now(),$4::jsonb)`,
+      [
+        runId,
+        channelId,
+        candidateId,
+        JSON.stringify({ dispatch_batch_id: batchId, pipeline_cycle_id: batchId }),
+      ],
+    );
+
+    const hasOpenWork = () => hasOpenPipelineCrawlerWork(
+      client.query.bind(client),
+      batchId,
+    );
+    const loadBlockers = () => loadPipelineFinalizeBlockers(
+      client.query.bind(client),
+      batchId,
+    );
+    const expectedBlockers = { agentOpen: 1, finalOpen: 1, publicationOpen: 0 };
+
+    assert.equal(await hasOpenWork(), true);
+    assert.deepEqual(await loadBlockers(), expectedBlockers);
+
+    await client.query(
+      `INSERT INTO crawler.migration_system_retry_items (
+         migration_intent_id,candidate_id,failed_dispatch_batch_id,
+         failed_dispatch_generation,failed_job_id,failed_job_attempt,
+         failure_code,failure_category,failure_evidence,status,resolved_at,resolution
+       ) VALUES ($1,$2,$3,1,$4,0,'LEASE_CONFLICT','lease','{}'::jsonb,
+                 'resolved',now(),'historical test evidence')`,
+      [migrationIntentId, candidateId, historicalBatchId, `historical-job-${suffix}`],
+    );
+
+    assert.equal(await hasOpenWork(), true);
+    assert.deepEqual(await loadBlockers(), expectedBlockers);
+
+    await client.query(
+      `INSERT INTO crawler.migration_system_retry_items (
+         migration_intent_id,candidate_id,failed_dispatch_batch_id,
+         failed_dispatch_generation,failed_job_id,failed_job_attempt,
+         failure_code,failure_category,failure_evidence,status
+       ) VALUES ($1,$2,$3,2,$4,0,'LEASE_CONFLICT','lease','{}'::jsonb,'pending')`,
+      [migrationIntentId, candidateId, batchId, `current-job-${suffix}`],
+    );
+
+    assert.equal(await hasOpenWork(), false);
+    assert.deepEqual(await loadBlockers(), {
+      agentOpen: 0,
+      finalOpen: 0,
+      publicationOpen: 0,
+    });
+  } finally {
+    await client.query("ROLLBACK").catch(() => {});
+    client.release();
+    await pool.end();
+  }
+});
 
 test("Publication completion blocks only for an eligible online automatic stream", {
   skip: !integrationUrl,

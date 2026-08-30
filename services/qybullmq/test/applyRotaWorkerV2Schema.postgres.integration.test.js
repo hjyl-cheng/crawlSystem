@@ -35,8 +35,11 @@ test("Rota Worker V2 schema block applies transactionally and is idempotent", {
   await client.query(crawlerRuntimeSchema(schema));
   await client.query(
     `INSERT INTO crawler.query_dispatch_batches (
-       dispatch_batch_id,pipeline_cycle_id,status
-     ) VALUES ('schema-backfill-batch','schema-backfill-cycle','discovery_closed')`,
+       dispatch_batch_id,pipeline_cycle_id,status,discovered_candidate_count,
+       accepted_channel_count,rejected_channel_count,total_channel_count
+     ) VALUES (
+       'schema-backfill-batch','schema-backfill-cycle','discovery_closed',3,2,1,3
+     )`,
   );
   await client.query(
     `INSERT INTO crawler.channel_candidates (
@@ -64,6 +67,13 @@ test("Rota Worker V2 schema block applies transactionally and is idempotent", {
   );
   // Reproduce a production database from before generation-fenced recovery shipped.
   await client.query("DROP TABLE crawler.migration_retry_intents");
+  await client.query("DROP TABLE crawler.migration_system_retry_items");
+  await client.query(
+    `ALTER TABLE crawler.query_dispatch_batches
+     DROP COLUMN IF EXISTS failed_channel_count,
+     DROP COLUMN IF EXISTS total_channel_count,
+     DROP COLUMN IF EXISTS outcome`,
+  );
   await client.query(
     `ALTER TABLE crawler.channel_candidates
      DROP COLUMN IF EXISTS snapshot_dispatch_generation,
@@ -93,6 +103,12 @@ test("Rota Worker V2 schema block applies transactionally and is idempotent", {
        to_regclass('crawler.business_run_bindings') IS NOT NULL AS binding,
        to_regclass('crawler.proxy_job_dispatch_outbox') IS NOT NULL AS outbox,
        to_regclass('crawler.migration_retry_intents') IS NOT NULL AS retry_intents,
+       to_regclass('crawler.migration_system_retry_items') IS NOT NULL AS system_retry_items,
+       EXISTS (
+         SELECT 1 FROM information_schema.columns
+         WHERE table_schema='crawler' AND table_name='migration_system_retry_items'
+           AND column_name='failed_dispatch_batch_id'
+       ) AS system_retry_batch_id,
        EXISTS (
          SELECT 1 FROM information_schema.columns
          WHERE table_schema='crawler' AND table_name='channel_candidates'
@@ -137,6 +153,22 @@ test("Rota Worker V2 schema block applies transactionally and is idempotent", {
          AS active_retry_intent_key,
        to_regclass('crawler.idx_crawler_migration_retry_intents_status') IS NOT NULL
          AS retry_intent_status_index,
+       to_regclass('crawler.ux_crawler_migration_system_retry_active_candidate') IS NOT NULL
+         AS active_system_retry_key,
+       to_regclass('crawler.idx_crawler_migration_system_retry_status') IS NOT NULL
+         AS system_retry_status_index,
+       EXISTS (
+         SELECT 1 FROM pg_constraint
+         WHERE conrelid=to_regclass('crawler.query_dispatch_batches')
+           AND conname='query_dispatch_batches_completion_count_check'
+           AND contype='c' AND convalidated
+       ) AS batch_completion_count_check,
+       EXISTS (
+         SELECT 1 FROM pg_constraint
+         WHERE conrelid=to_regclass('crawler.query_dispatch_batches')
+           AND conname='query_dispatch_batches_outcome_check'
+           AND contype='c' AND convalidated
+       ) AS batch_outcome_check,
        EXISTS (
          SELECT 1 FROM pg_trigger
          WHERE tgname='trg_guard_query_quality_chunk_members' AND NOT tgisinternal
@@ -148,6 +180,8 @@ test("Rota Worker V2 schema block applies transactionally and is idempotent", {
     binding: true,
     outbox: true,
     retry_intents: true,
+    system_retry_items: true,
+    system_retry_batch_id: true,
     candidate_generation: true,
     candidate_generation_check: true,
     candidate_active_job_id: true,
@@ -158,8 +192,26 @@ test("Rota Worker V2 schema block applies transactionally and is idempotent", {
     execution_dispatch_generation_check: true,
     active_retry_intent_key: true,
     retry_intent_status_index: true,
+    active_system_retry_key: true,
+    system_retry_status_index: true,
+    batch_completion_count_check: true,
+    batch_outcome_check: true,
     member_guard: true,
     legacy_parent_key_repaired: true,
+  });
+
+  assert.deepEqual((await client.query(
+    `SELECT discovered_candidate_count,accepted_channel_count,rejected_channel_count,
+            failed_channel_count,total_channel_count,outcome
+     FROM crawler.query_dispatch_batches
+     WHERE dispatch_batch_id='schema-backfill-batch'`,
+  )).rows[0], {
+    discovered_candidate_count: 3,
+    accepted_channel_count: 2,
+    rejected_channel_count: 1,
+    failed_channel_count: 0,
+    total_channel_count: 3,
+    outcome: null,
   });
 
   const generations = await client.query(
@@ -173,6 +225,28 @@ test("Rota Worker V2 schema block applies transactionally and is idempotent", {
     { channel_id: "UCschemaintent", generation: "4" },
     { channel_id: "UCschemaqueued", generation: "1" },
   ]);
+
+  await client.query(
+    "ALTER TABLE crawler.migration_system_retry_items DROP COLUMN failed_dispatch_batch_id",
+  );
+  await client.query(
+    `INSERT INTO crawler.migration_system_retry_items (
+       migration_intent_id,candidate_id,failed_dispatch_generation,
+       failed_job_id,failed_job_attempt,failure_code,failure_category,
+       failure_evidence,status
+     )
+     SELECT intent.migration_intent_id,intent.target_candidate_id,4,
+            'historical-system-failure',1,'LEASE_CONFLICT','lease','{}'::jsonb,'resolved'
+     FROM crawler.migration_channel_intents intent
+     WHERE intent.channel_id='UCschemaintent'`,
+  );
+  await client.query(block);
+  assert.deepEqual((await client.query(
+    `SELECT failed_dispatch_batch_id
+     FROM crawler.migration_system_retry_items
+     WHERE failed_job_id='historical-system-failure'`,
+  )).rows[0], { failed_dispatch_batch_id: null });
+  await verifyRotaWorkerV2Schema(client);
 
   await client.query(
     `UPDATE crawler.migration_channel_intents
@@ -228,6 +302,84 @@ test("Rota Worker V2 schema block applies transactionally and is idempotent", {
   await assert.rejects(
     verifyRotaWorkerV2Schema(client),
     /missing: migration_retry_intents_status_index/,
+  );
+  await client.query("ROLLBACK");
+
+  await client.query("BEGIN");
+  await client.query(
+    "ALTER TABLE crawler.migration_system_retry_items DROP COLUMN failed_dispatch_batch_id",
+  );
+  await assert.rejects(
+    verifyRotaWorkerV2Schema(client),
+    /missing: migration_system_retry_failed_dispatch_batch_id/,
+  );
+  await client.query("ROLLBACK");
+
+  await client.query("BEGIN");
+  await client.query("DROP TABLE crawler.migration_system_retry_items");
+  await assert.rejects(
+    verifyRotaWorkerV2Schema(client),
+    /missing: migration_system_retry_items/,
+  );
+  await client.query("ROLLBACK");
+
+  await client.query("BEGIN");
+  await client.query(
+    "DROP INDEX crawler.ux_crawler_migration_system_retry_active_candidate",
+  );
+  await assert.rejects(
+    verifyRotaWorkerV2Schema(client),
+    /missing: migration_system_retry_active_candidate_index/,
+  );
+  await client.query("ROLLBACK");
+
+  await client.query("BEGIN");
+  await client.query("DROP INDEX crawler.idx_crawler_migration_system_retry_status");
+  await assert.rejects(
+    verifyRotaWorkerV2Schema(client),
+    /missing: migration_system_retry_status_index/,
+  );
+  await client.query("ROLLBACK");
+
+  await client.query("BEGIN");
+  await client.query(
+    `ALTER TABLE crawler.query_dispatch_batches
+     DROP CONSTRAINT query_dispatch_batches_completion_count_check`,
+  );
+  await assert.rejects(
+    verifyRotaWorkerV2Schema(client),
+    /missing: query_dispatch_batch_completion_count_check/,
+  );
+  await client.query("ROLLBACK");
+
+  await client.query("BEGIN");
+  await client.query(
+    `ALTER TABLE crawler.query_dispatch_batches
+     DROP CONSTRAINT query_dispatch_batches_outcome_check`,
+  );
+  await assert.rejects(
+    verifyRotaWorkerV2Schema(client),
+    /missing: query_dispatch_batch_outcome_check/,
+  );
+  await client.query("ROLLBACK");
+
+  await client.query("BEGIN");
+  await client.query(
+    "ALTER TABLE crawler.query_dispatch_batches DROP COLUMN total_channel_count",
+  );
+  await assert.rejects(
+    verifyRotaWorkerV2Schema(client),
+    /missing: query_dispatch_batch_completion_count_columns/,
+  );
+  await client.query("ROLLBACK");
+
+  await client.query("BEGIN");
+  await client.query(
+    "ALTER TABLE crawler.query_dispatch_batches DROP COLUMN outcome",
+  );
+  await assert.rejects(
+    verifyRotaWorkerV2Schema(client),
+    /missing: query_dispatch_batch_outcome_column/,
   );
   await client.query("ROLLBACK");
 

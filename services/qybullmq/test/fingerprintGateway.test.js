@@ -4,6 +4,7 @@ import {
   decodeGatewayMetadata,
   encodeGatewayMetadata,
   FingerprintGateway,
+  FingerprintGatewayError,
 } from "../src/fingerprintGateway.js";
 
 test("fingerprint gateway metadata survives an HTTP-header round trip", () => {
@@ -74,5 +75,74 @@ test("fingerprint gateway distinguishes local transport failures from target HTT
   await assert.rejects(
     gateway.fetch({ profile_id: "chrome", user_agent: "UA" }, "https://www.youtube.com"),
     /gateway request failed HTTP 500/,
+  );
+});
+
+test("an invalid target HTTP status becomes structured evidence instead of a Response RangeError", async () => {
+  const rawTargetBody = Buffer.from([0xff, 0x00, 0x41]);
+  const gateway = new FingerprintGateway({
+    fetchFn: async () => ({
+      status: 200,
+      headers: new Headers({
+        "x-fingerprint-response-status": "700",
+        "x-fingerprint-response-headers": encodeGatewayMetadata({
+          "content-type": "text/plain",
+          "x-target-evidence": "invalid-status",
+        }),
+      }),
+      async arrayBuffer() { return rawTargetBody; },
+      body: null,
+    }),
+  });
+  gateway.start = async () => {};
+
+  await assert.rejects(
+    gateway.fetch(
+      { profile_id: "chrome", user_agent: "UA" },
+      "https://www.youtube.com/watch?v=invalid-status",
+    ),
+    (error) => {
+      assert.equal(error instanceof RangeError, false);
+      assert.equal(error instanceof FingerprintGatewayError, true);
+      assert.equal(error.code, "FINGERPRINT_INVALID_TARGET_STATUS");
+      assert.equal(error.failureKind, "invalid_target_status");
+      assert.equal(error.gatewayStatus, 200);
+      assert.equal(error.targetStatusRaw, "700");
+      assert.equal(error.detail, rawTargetBody.toString("utf8"));
+      assert.equal(error.targetBodySampleBase64, rawTargetBody.toString("base64"));
+      assert.deepEqual(error.targetHeaders, {
+        "content-type": "text/plain",
+        "x-target-evidence": "invalid-status",
+      });
+      assert.equal(error.youtube_failure_evidence.source, "fingerprint_gateway");
+      assert.equal(
+        error.youtube_failure_evidence.target_url,
+        "https://www.youtube.com/watch?v=invalid-status",
+      );
+      return true;
+    },
+  );
+});
+
+test("invalid target status remains structured when target header metadata is malformed", async () => {
+  const gateway = new FingerprintGateway({
+    fetchFn: async () => ({
+      status: 200,
+      headers: new Headers({
+        "x-fingerprint-response-status": "999",
+        "x-fingerprint-response-headers": "not-base64url-json",
+      }),
+      async arrayBuffer() { return Buffer.from("raw-invalid-response"); },
+      body: null,
+    }),
+  });
+  gateway.start = async () => {};
+
+  await assert.rejects(
+    gateway.fetch({ profile_id: "chrome", user_agent: "UA" }, "https://www.youtube.com"),
+    (error) => error instanceof FingerprintGatewayError
+      && error.code === "FINGERPRINT_INVALID_TARGET_STATUS"
+      && error.targetStatusRaw === "999"
+      && error.targetHeadersRaw === "not-base64url-json",
   );
 });

@@ -168,6 +168,11 @@ CREATE TABLE IF NOT EXISTS crawler.query_dispatch_batches (
   discovered_candidate_count INTEGER NOT NULL DEFAULT 0,
   accepted_channel_count INTEGER NOT NULL DEFAULT 0,
   rejected_channel_count INTEGER NOT NULL DEFAULT 0,
+  failed_channel_count INTEGER NOT NULL DEFAULT 0,
+  total_channel_count INTEGER NOT NULL DEFAULT 0,
+  outcome TEXT CHECK (
+    outcome IS NULL OR outcome IN ('completed','completed_with_system_failures')
+  ),
   discovery_closed_at TIMESTAMPTZ,
   validation_closed_at TIMESTAMPTZ,
   agent_tail_flushed_at TIMESTAMPTZ,
@@ -458,6 +463,48 @@ CREATE INDEX IF NOT EXISTS idx_crawler_channel_runs_channel
 ON crawler.channel_runs (channel_id, created_at DESC);
 
 -- qy-rota-worker-v2-schema:start
+ALTER TABLE crawler.query_dispatch_batches
+ADD COLUMN IF NOT EXISTS failed_channel_count INTEGER NOT NULL DEFAULT 0;
+
+ALTER TABLE crawler.query_dispatch_batches
+ADD COLUMN IF NOT EXISTS total_channel_count INTEGER NOT NULL DEFAULT 0;
+
+ALTER TABLE crawler.query_dispatch_batches
+ADD COLUMN IF NOT EXISTS outcome TEXT;
+
+UPDATE crawler.query_dispatch_batches
+SET total_channel_count = GREATEST(
+      total_channel_count,
+      discovered_candidate_count,
+      accepted_channel_count + rejected_channel_count + failed_channel_count
+    ),
+    updated_at = now()
+WHERE total_channel_count < GREATEST(
+  discovered_candidate_count,
+  accepted_channel_count + rejected_channel_count + failed_channel_count
+);
+
+ALTER TABLE crawler.query_dispatch_batches
+DROP CONSTRAINT IF EXISTS query_dispatch_batches_outcome_check;
+
+ALTER TABLE crawler.query_dispatch_batches
+ADD CONSTRAINT query_dispatch_batches_outcome_check
+CHECK (outcome IS NULL OR outcome IN ('completed','completed_with_system_failures'));
+
+ALTER TABLE crawler.query_dispatch_batches
+DROP CONSTRAINT IF EXISTS query_dispatch_batches_completion_count_check;
+
+ALTER TABLE crawler.query_dispatch_batches
+ADD CONSTRAINT query_dispatch_batches_completion_count_check
+CHECK (
+  failed_channel_count >= 0
+  AND total_channel_count >= 0
+  AND accepted_channel_count >= 0
+  AND rejected_channel_count >= 0
+  AND accepted_channel_count + rejected_channel_count + failed_channel_count
+      <= total_channel_count
+);
+
 ALTER TABLE crawler.channel_candidates
 ADD COLUMN IF NOT EXISTS snapshot_dispatch_generation BIGINT NOT NULL DEFAULT 0;
 
@@ -571,6 +618,47 @@ WHERE status IN ('requested','dispatched','running');
 
 CREATE INDEX IF NOT EXISTS idx_crawler_migration_retry_intents_status
 ON crawler.migration_retry_intents (status,requested_at);
+
+CREATE TABLE IF NOT EXISTS crawler.migration_system_retry_items (
+  system_retry_id BIGSERIAL PRIMARY KEY,
+  migration_intent_id BIGINT NOT NULL
+    REFERENCES crawler.migration_channel_intents(migration_intent_id) ON DELETE RESTRICT,
+  candidate_id BIGINT NOT NULL
+    REFERENCES crawler.channel_candidates(candidate_id) ON DELETE RESTRICT,
+  failed_dispatch_batch_id TEXT NOT NULL,
+  failed_dispatch_generation BIGINT NOT NULL CHECK (failed_dispatch_generation > 0),
+  failed_job_id TEXT NOT NULL,
+  failed_job_attempt INTEGER NOT NULL CHECK (failed_job_attempt >= 0),
+  failure_code TEXT NOT NULL,
+  failure_category TEXT NOT NULL,
+  failure_evidence JSONB NOT NULL DEFAULT '{}'::jsonb,
+  status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('retrying','pending','dispatched','resolved','cancelled')),
+  retry_dispatch_generation BIGINT,
+  resolution TEXT,
+  requested_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  dispatched_at TIMESTAMPTZ,
+  resolved_at TIMESTAMPTZ,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (
+    migration_intent_id,failed_dispatch_generation,failed_job_id,failed_job_attempt
+  ),
+  CHECK (
+    retry_dispatch_generation IS NULL
+    OR retry_dispatch_generation > failed_dispatch_generation
+  )
+);
+
+-- Historical rows predate immutable Batch evidence and must remain unknown rather than guessed.
+ALTER TABLE crawler.migration_system_retry_items
+ADD COLUMN IF NOT EXISTS failed_dispatch_batch_id TEXT;
+
+CREATE UNIQUE INDEX IF NOT EXISTS ux_crawler_migration_system_retry_active_candidate
+ON crawler.migration_system_retry_items (candidate_id)
+WHERE status IN ('retrying','pending','dispatched');
+
+CREATE INDEX IF NOT EXISTS idx_crawler_migration_system_retry_status
+ON crawler.migration_system_retry_items (status,requested_at,system_retry_id);
 
 ALTER TABLE crawler.channel_runs ADD COLUMN IF NOT EXISTS identity_policy_id TEXT;
 ALTER TABLE crawler.channel_runs ADD COLUMN IF NOT EXISTS identity_policy_version INTEGER;
