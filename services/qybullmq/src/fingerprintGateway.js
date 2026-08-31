@@ -39,14 +39,22 @@ async function responseEvidence(response, limit = 2048) {
   });
 }
 
+function isMissingTargetHttpStatus(value) {
+  return value === 0 || value === "0";
+}
+
 export class FingerprintGatewayError extends Error {
   constructor({ gatewayStatus, payload = {}, detail = "", targetUrl = null } = {}) {
-    const failureKind = String(payload.failure_kind || "unknown");
+    const originalFailureKind = String(payload.failure_kind || "unknown");
     const errorType = String(payload.error_type || "FingerprintGatewayError");
     const curlCode = Number.isInteger(Number(payload.curl_code)) ? Number(payload.curl_code) : null;
     const evidence = curlCode == null ? errorType : `${errorType} curl_code=${curlCode}`;
     const normalizedDetail = String(detail).slice(0, 2000);
     const targetStatusRaw = payload.target_status_raw ?? null;
+    const missingTargetHttp = isMissingTargetHttpStatus(targetStatusRaw);
+    const failureKind = originalFailureKind === "invalid_target_status" && missingTargetHttp
+      ? "proxy_transport"
+      : originalFailureKind;
     const targetHeaders = payload.target_response_headers
       && typeof payload.target_response_headers === "object"
       && !Array.isArray(payload.target_response_headers)
@@ -54,7 +62,9 @@ export class FingerprintGatewayError extends Error {
       : {};
     const targetHeadersRaw = payload.target_response_headers_raw ?? null;
     super(
-      failureKind === "invalid_target_status"
+      missingTargetHttp
+        ? `fingerprint gateway proxy_transport: ${errorType} target_status_raw=${String(targetStatusRaw)}`
+        : failureKind === "invalid_target_status"
         ? `fingerprint gateway invalid target HTTP status: ${String(targetStatusRaw)}`
         : failureKind === "unknown"
         ? `fingerprint gateway request failed HTTP ${gatewayStatus}: ${String(detail).slice(0, 500)}`
@@ -80,7 +90,7 @@ export class FingerprintGatewayError extends Error {
     this.targetBodySampleBase64 = payload.target_body_sample_base64 ?? null;
     this.youtube_failure_evidence = {
       status: null,
-      body: failureKind === "invalid_target_status"
+      body: originalFailureKind === "invalid_target_status" || missingTargetHttp
         ? JSON.stringify({
           error_type: errorType,
           target_status_raw: targetStatusRaw,
@@ -246,9 +256,15 @@ export class FingerprintGateway {
     const rawTargetStatus = response.headers.get("x-fingerprint-response-status");
     if (!rawTargetStatus) {
       const { detail } = await responseEvidence(response);
+      const payload = safeJson(detail);
       throw new FingerprintGatewayError({
         gatewayStatus: response.status,
-        payload: safeJson(detail),
+        payload: {
+          ...payload,
+          failure_kind: isMissingTargetHttpStatus(payload.target_status_raw)
+            ? "proxy_transport"
+            : (payload.failure_kind || "unknown"),
+        },
         detail,
         targetUrl: request.url,
       });
@@ -268,7 +284,9 @@ export class FingerprintGateway {
         payload: {
           error: "fingerprint target returned an invalid HTTP status",
           error_type: "InvalidTargetHttpStatus",
-          failure_kind: "invalid_target_status",
+          failure_kind: isMissingTargetHttpStatus(rawTargetStatus)
+            ? "proxy_transport"
+            : "invalid_target_status",
           target_status_raw: rawTargetStatus,
           target_response_headers: targetHeaders,
           target_response_headers_raw: rawTargetHeaders,

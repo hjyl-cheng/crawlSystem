@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { FingerprintGatewayError } from "../src/fingerprintGateway.js";
 import {
   executeManagedWorkerAttempt,
   retryableRotaFailure,
@@ -79,6 +80,19 @@ test("only structured proxy transport, rate-limit, and challenge failures switch
   assert.equal(retryableRotaFailure(Object.assign(new Error("HTTP 503"), {
     youtube_failure_decision: { kind: "upstream_transient" },
   })), null);
+  const missingHttp = new FingerprintGatewayError({
+    gatewayStatus: 502,
+    payload: {
+      failure_kind: "invalid_target_status",
+      error_type: "InvalidTargetHttpStatus",
+      target_status_raw: 0,
+    },
+    targetUrl: "https://www.youtube.com/channel/UC_mQGbdrG8_dOZRmX5PHzNw",
+  });
+  assert.deepEqual(retryableRotaFailure(missingHttp), {
+    observation: "proxy_transport",
+    source: "fingerprint_gateway",
+  });
   const error = Object.assign(new Error("outer aggregate error"), {
     channel_execution_attempt: {
       failure_decisions: [

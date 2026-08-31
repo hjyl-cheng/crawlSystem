@@ -49,8 +49,23 @@ function systemFailureNodes(error) {
   return output;
 }
 
+function isMissingTargetHttpStatus(value) {
+  return value === 0 || value === "0";
+}
+
+function fingerprintMissingHttpStatus(node) {
+  if (isMissingTargetHttpStatus(node?.targetStatusRaw) || isMissingTargetHttpStatus(node?.target_status_raw)) {
+    return true;
+  }
+  const body = String(node?.youtube_failure_evidence?.body ?? node?.body ?? "");
+  return /"target_status_raw"\s*:\s*0\b/.test(body);
+}
+
 function failureCategory(node) {
   const code = String(node?.code ?? "").trim().toUpperCase();
+  if (code === "FINGERPRINT_INVALID_TARGET_STATUS" && fingerprintMissingHttpStatus(node)) {
+    return null;
+  }
   if (SYSTEM_FAILURE_CODES.has(code)) return SYSTEM_FAILURE_CODES.get(code);
   const name = String(node?.name ?? "").trim();
   if (name === "ProxyControlRequestError") return "proxy_control";
@@ -58,6 +73,7 @@ function failureCategory(node) {
   if (name === "StaleChannelCandidateAttemptError") return "fence";
   if (name === "ChannelSnapshotDispatchConflictError") return "outbox";
   if (name === "AbortError") return "cancellation";
+  if (name === "TimeoutError") return null;
   const message = String(node?.message ?? "");
   if (/\b(?:job|run|intent|candidate|dispatch)\b.{0,80}\bidentity conflicts?\b/i.test(message)) {
     return "identity";

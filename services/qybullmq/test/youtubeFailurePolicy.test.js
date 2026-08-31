@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { FingerprintGatewayError } from "../src/fingerprintGateway.js";
 import {
   annotateYoutubeFailure,
   decideYoutubeFailure,
@@ -237,6 +238,74 @@ test("nested Fingerprint evidence does not borrow an outer YouTube HTTP status",
   const evidence = youtubeFailureEvidence(outerFailure);
   assert.equal(evidence.status, null);
   assert.equal(evidence.source, "fingerprint_gateway");
+});
+
+test("fingerprint status_code=0 is a proxy transport failure that keeps the raw status", () => {
+  const error = new FingerprintGatewayError({
+    gatewayStatus: 502,
+    payload: {
+      failure_kind: "invalid_target_status",
+      error_type: "InvalidTargetHttpStatus",
+      target_status_raw: 0,
+    },
+    targetUrl: "https://www.youtube.com/channel/UC_mQGbdrG8_dOZRmX5PHzNw",
+  });
+  const result = decideYoutubeFailure({ error });
+
+  assert.equal(error.failureKind, "proxy_transport");
+  assert.equal(error.code, "FINGERPRINT_PROXY_TRANSPORT");
+  assert.equal(error.targetStatusRaw, 0);
+  assert.equal(result.kind, "proxy_transport");
+  assert.equal(result.retry_mode, "new_identity");
+  assert.equal(result.proxy_action, "cooldown_network");
+  assert.equal(result.evidence.source, "fingerprint_gateway");
+  assert.match(String(error.youtube_failure_evidence.body), /"target_status_raw":0/);
+});
+
+test("a trusted YouTube.js request timeout rotates the proxy instead of keeping the same identity", () => {
+  const timeout = annotateYoutubeFailure(
+    new DOMException("The operation was aborted due to timeout", "TimeoutError"),
+    { source: "youtubejs_fetch", targetUrl: "https://www.youtube.com/youtubei/v1/browse" },
+  );
+  const result = decideYoutubeFailure({ error: timeout });
+
+  assert.equal(result.kind, "proxy_transport");
+  assert.equal(result.retry_mode, "new_identity");
+  assert.equal(result.proxy_action, "cooldown_network");
+  assert.equal(result.evidence.source, "youtubejs_fetch");
+});
+
+test("an unmarked timeout keeps the same identity", () => {
+  const result = decideYoutubeFailure({ error: new Error("timeout 30000ms") });
+  assert.equal(result.kind, "upstream_transient");
+  assert.equal(result.retry_mode, "same_identity");
+  assert.equal(result.proxy_action, "none");
+});
+
+test("an aggregated scrape failure still rotates when one layer is fingerprint status 0", () => {
+  const fingerprint = new FingerprintGatewayError({
+    gatewayStatus: 502,
+    payload: {
+      failure_kind: "invalid_target_status",
+      error_type: "InvalidTargetHttpStatus",
+      target_status_raw: 0,
+    },
+    targetUrl: "https://www.youtube.com/channel/UC_mQGbdrG8_dOZRmX5PHzNw",
+  });
+  const aggregate = new AggregateError(
+    [
+      new Error("youtubejs channel request timed out"),
+      fingerprint,
+      new Error("yt-dlp returned no channel metadata"),
+    ],
+    "channel scrape failed",
+  );
+  const result = decideYoutubeFailure({ error: aggregate });
+
+  assert.equal(result.kind, "proxy_transport");
+  assert.equal(result.retry_mode, "new_identity");
+  assert.equal(result.proxy_action, "cooldown_network");
+  assert.equal(result.evidence.source, "fingerprint_gateway");
 });
 
 test("failure selection returns one complete cause node", () => {

@@ -124,6 +124,37 @@ test("an invalid target HTTP status becomes structured evidence instead of a Res
   );
 });
 
+test("a missing target HTTP status is a proxy transport failure that keeps status 0", async () => {
+  const gateway = new FingerprintGateway({
+    fetchFn: async () => ({
+      status: 502,
+      headers: new Headers({ "content-type": "application/json" }),
+      async arrayBuffer() {
+        return Buffer.from(JSON.stringify({
+          error: "fingerprint target returned an invalid HTTP status",
+          error_type: "InvalidTargetHttpStatus",
+          failure_kind: "invalid_target_status",
+          target_status_raw: 0,
+        }));
+      },
+      body: null,
+    }),
+  });
+  gateway.start = async () => {};
+
+  await assert.rejects(
+    gateway.fetch({ profile_id: "chrome", user_agent: "UA" }, "https://www.youtube.com/channel/UC0"),
+    (error) => {
+      assert.equal(error instanceof FingerprintGatewayError, true);
+      assert.equal(error.failureKind, "proxy_transport");
+      assert.equal(error.code, "FINGERPRINT_PROXY_TRANSPORT");
+      assert.equal(error.targetStatusRaw, 0);
+      assert.match(String(error.youtube_failure_evidence.body), /"target_status_raw":0/);
+      return true;
+    },
+  );
+});
+
 test("invalid target status remains structured when target header metadata is malformed", async () => {
   const gateway = new FingerprintGateway({
     fetchFn: async () => ({

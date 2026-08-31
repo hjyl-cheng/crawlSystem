@@ -238,6 +238,18 @@ const incrementalAgentResultStore = new IncrementalAgentResultStore({
 function throwIfChannelExecutionAborted() {
   throwIfAborted(currentChannelExecutionAbortSignal());
 }
+
+class ChannelScrapeAggregateError extends AggregateError {
+  constructor(errors, { channelId } = {}) {
+    const layers = [...new Set((Array.isArray(errors) ? errors : []).filter(Boolean))];
+    super(
+      layers,
+      `channel scrape failed for ${channelId}: ${layers.map((error) => String(error?.message ?? error)).join("; ")}`,
+    );
+    this.name = "ChannelScrapeAggregateError";
+    this.channel_id = channelId ?? null;
+  }
+}
 const localOfflineProfileExecutor = new LocalOfflineProfileExecutor({
   loadLatestRunIds: async (channelIds) => {
     if (!Array.isArray(channelIds) || channelIds.length === 0) return new Map();
@@ -1417,8 +1429,13 @@ export async function processChannelCrawlV2(job, { resumeMode = "initial" } = {}
       });
     } catch (error) {
       throwIfChannelExecutionAborted();
-      if (primaryError) throw primaryError;
       fallback = { error: String(error?.message ?? error) };
+      if (!youtubeJsChannel && !fetched) {
+        throw new ChannelScrapeAggregateError(
+          [youtubeJsChannelError, legacyHeaderError ?? primaryError, error],
+          { channelId },
+        );
+      }
     }
     phaseTimingsMs.channel_metadata_fallback = Date.now() - phaseStartedAt;
   } else {

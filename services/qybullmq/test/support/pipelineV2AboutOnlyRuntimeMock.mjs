@@ -1,3 +1,5 @@
+import { FingerprintGatewayError } from "../../src/fingerprintGateway.js";
+
 const channelId = "UCaboutOnlyRegression";
 const runId = "run:promotion";
 
@@ -17,6 +19,17 @@ export async function query(sqlValue) {
     return result([{ expected_content_count: 30 }]);
   }
   if (sql.includes("FROM crawler.channel_candidates WHERE candidate_id")) {
+    if (state().scenario === "channel_scrape_transport_exhausted") {
+      return result([{
+        candidate_id: 42,
+        channel_id: channelId,
+        channel_url: `https://www.youtube.com/channel/${channelId}`,
+        status: "queued",
+        title: "Search result title",
+        search_subscriber_count: null,
+        search_subscriber_count_text: null,
+      }]);
+    }
     return result([{
       candidate_id: 42,
       channel_id: channelId,
@@ -25,7 +38,11 @@ export async function query(sqlValue) {
       title: "About-only regression",
     }]);
   }
+  if (sql.includes("SET status='validating'")) {
+    return result([{ candidate_id: 42, status: "validating", snapshot_attempts: 1 }]);
+  }
   if (sql.includes("SELECT * FROM crawler.channels WHERE channel_id")) {
+    if (state().scenario === "channel_scrape_transport_exhausted") return result([]);
     return result([{
       channel_id: channelId,
       channel_url: `https://www.youtube.com/channel/${channelId}`,
@@ -138,14 +155,32 @@ function unexpectedContentCollection() {
 
 export async function fetchChannelInitial() {
   state().legacyHeaderAttempts += 1;
+  if (state().scenario === "channel_scrape_transport_exhausted") {
+    throw new FingerprintGatewayError({
+      gatewayStatus: 502,
+      payload: {
+        failure_kind: "invalid_target_status",
+        error_type: "InvalidTargetHttpStatus",
+        target_status_raw: 0,
+      },
+      targetUrl: `https://www.youtube.com/channel/${channelId}`,
+    });
+  }
   return unexpectedContentCollection();
 }
 
 export async function fetchChannelYtDlpMetadata() {
+  if (state().scenario === "channel_scrape_transport_exhausted") {
+    throw new Error("yt-dlp returned no channel metadata");
+  }
   return unexpectedContentCollection();
 }
 
 export async function fetchChannelDataApiDetails() {
+  state().dataApiCalls += 1;
+  if (state().scenario === "channel_scrape_transport_exhausted") {
+    throw new Error("channel data API must not run after scrape layers failed");
+  }
   return null;
 }
 
@@ -181,6 +216,9 @@ export async function openYoutubeJsChannel() {
   if (state().scenario === "youtubejs_channel_cancelled") {
     state().cancelChannel();
     throw state().cancellationSignal.reason;
+  }
+  if (state().scenario === "channel_scrape_transport_exhausted") {
+    throw new Error("youtubejs channel request timed out");
   }
   return {
     metadata: {

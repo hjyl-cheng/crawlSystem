@@ -89,6 +89,29 @@ function trustedProxyTlsTransport(error, { source = "", body = "" } = {}) {
     : null;
 }
 
+function isMissingTargetHttpStatus(value) {
+  return value === 0 || value === "0";
+}
+
+function missingTargetHttpStatus(error, nodeEvidence) {
+  if (isMissingTargetHttpStatus(error?.targetStatusRaw) || isMissingTargetHttpStatus(error?.target_status_raw)) {
+    return true;
+  }
+  const body = String(nodeEvidence?.body ?? error?.youtube_failure_evidence?.body ?? "");
+  return /"target_status_raw"\s*:\s*0\b/.test(body);
+}
+
+function isRequestTimeoutFailure(error, text) {
+  const name = String(error?.name || "");
+  if (name === "TimeoutError") return true;
+  return /timeout|timed out|aborted due to timeout/i.test(String(text || ""));
+}
+
+function trustedTimeoutSource(source) {
+  const nodeSource = nonEmptyText(source)?.toLowerCase() ?? "";
+  return TRUSTED_FINGERPRINT_SOURCES.has(nodeSource) || TRUSTED_PROXY_TLS_SOURCES.has(nodeSource);
+}
+
 export function youtubeFailureText(error) {
   const parts = [];
   const pending = [error];
@@ -228,6 +251,33 @@ function decideYoutubeFailureBranch({
         failure_kind: "proxy_transport",
         code: null,
         source: legacyFingerprintSource,
+      },
+    });
+  }
+  if (
+    (errorCode === "FINGERPRINT_INVALID_TARGET_STATUS" || error?.failureKind === "invalid_target_status")
+    && missingTargetHttpStatus(error, evidence)
+  ) {
+    return decision("proxy_transport", {
+      retryMode: "new_identity",
+      proxyAction: "cooldown_network",
+      status: httpStatus,
+      evidence: {
+        failure_kind: "proxy_transport",
+        code: "FINGERPRINT_PROXY_TRANSPORT",
+        source: nonEmptyText(evidence.source) ?? "fingerprint_gateway",
+      },
+    });
+  }
+  if (isRequestTimeoutFailure(error, text) && trustedTimeoutSource(evidence.source)) {
+    return decision("proxy_transport", {
+      retryMode: "new_identity",
+      proxyAction: "cooldown_network",
+      status: httpStatus,
+      evidence: {
+        failure_kind: "proxy_transport",
+        code: errorCode || null,
+        source: nonEmptyText(evidence.source),
       },
     });
   }

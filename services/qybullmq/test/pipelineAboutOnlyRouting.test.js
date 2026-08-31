@@ -68,3 +68,28 @@ test("channel crawl does not fall back to legacy metadata after YouTube.js cance
   assert.equal(observed.reason_preserved, true);
   assert.equal(observed.state.legacyHeaderAttempts, 0);
 });
+
+test("exhausted scrape layers keep their own errors and do not force Channel Data API", () => {
+  const observed = runScenario("channel_scrape_transport_exhausted");
+
+  assert.equal(observed.outcome, "rejected");
+  assert.equal(observed.state.dataApiCalls, 0);
+  assert.equal(observed.state.legacyHeaderAttempts, 1);
+  assert.equal(observed.error_name, "ChannelScrapeAggregateError");
+  assert.equal(observed.primary_error_only, false);
+  assert.equal(
+    observed.state.rawObjects.some((object) => object.objectType === "youtube_channel_data_api_json"),
+    false,
+  );
+  assert.match(observed.error, /youtubejs/i);
+  assert.match(observed.error, /legacy_html|fingerprint/i);
+  assert.match(observed.error, /yt-dlp/i);
+  assert.equal(
+    observed.layer_errors.some((message) => /target_status_raw|status(?:_code)?[=:]?\s*0/i.test(message)),
+    true,
+  );
+  assert.equal(
+    observed.layer_errors.some((message) => /yt-dlp returned no channel metadata/i.test(message)),
+    true,
+  );
+});

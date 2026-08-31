@@ -62,6 +62,31 @@ class FingerprintGatewayStatusTest(unittest.TestCase):
             {"content-type": "text/plain", "x-target-evidence": "invalid-status"},
         )
 
+    def test_python_gateway_treats_status_zero_as_proxy_transport(self):
+        class ZeroStatusResponse:
+            status_code = 0
+            headers = {}
+            content = b""
+
+        class ZeroStatusSession:
+            async def request(self, *args, **kwargs):
+                return ZeroStatusResponse()
+
+        gateway = FINGERPRINT_GATEWAY.Gateway()
+        gateway.profiles["chrome"] = types.SimpleNamespace(
+            user_agent="UA",
+            semaphore=asyncio.Semaphore(1),
+            session=ZeroStatusSession(),
+            proxy_url="http://proxy.invalid",
+            impersonate_target="chrome",
+        )
+
+        response = asyncio.run(gateway.fetch(FakeRequest()))
+        self.assertEqual(response.status, 502)
+        payload = json.loads(response.text)
+        self.assertEqual(payload["failure_kind"], "proxy_transport")
+        self.assertEqual(payload["target_status_raw"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

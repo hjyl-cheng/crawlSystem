@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { applyFailureRetryDecision, queuesByRole } from "../src/queues.js";
+import { FingerprintGatewayError } from "../src/fingerprintGateway.js";
 import { ProxyIdentityChangedError } from "../src/channelExecutionContext.js";
 import {
   RotaBusinessRunBudgetExhaustedError,
@@ -188,6 +189,27 @@ test("a control-plane failure cannot be discarded before the failed listener cla
     requires_new_identity: false,
   });
   assert.equal(discarded, false);
+});
+
+test("fingerprint status_code=0 is not a control-plane system retry", () => {
+  const error = new FingerprintGatewayError({
+    gatewayStatus: 502,
+    payload: {
+      failure_kind: "invalid_target_status",
+      error_type: "InvalidTargetHttpStatus",
+      target_status_raw: 0,
+    },
+    targetUrl: "https://www.youtube.com/channel/UC_mQGbdrG8_dOZRmX5PHzNw",
+  });
+
+  assert.equal(classifyRetryableSystemFailure(error), null);
+  assert.equal(retryableSystemFailureDecision(error), null);
+  assert.equal(channelCandidateFailureDisposition({
+    error,
+    attemptsMade: 3,
+    maxAttempts: 3,
+    permanentFailure: false,
+  }), "failed");
 });
 
 test("proxy identity drift is a structured retryable system failure", () => {

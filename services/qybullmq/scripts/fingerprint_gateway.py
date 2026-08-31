@@ -228,11 +228,12 @@ class Gateway:
                 for name, value in response.headers.items()
                 if str(name).lower() not in HOP_BY_HOP
             }
+            missing_target_http = response.status_code == 0
             return web.json_response(
                 {
                     "error": "fingerprint target returned an invalid HTTP status",
                     "error_type": "InvalidTargetHttpStatus",
-                    "failure_kind": "invalid_target_status",
+                    "failure_kind": "proxy_transport" if missing_target_http else "invalid_target_status",
                     "target_status_raw": json_evidence(response.status_code),
                     "target_url": url,
                     "target_response_headers": response_headers,
