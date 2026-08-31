@@ -17,7 +17,12 @@ import {
 import { loadIdentityPolicyCatalog } from "../src/identityPolicyCatalog.js";
 import { markChannelCandidateJobAttemptActive } from "../src/managedWorkerJob.js";
 import {
+  claimMigrationSystemRetryAgentJobFence,
+  lockMigrationSystemRetryAgentJobFence,
+  lockMigrationSystemRetryFinalizeJobFence,
   MigrationSystemRetryRecoveryReconciler,
+  migrationSystemRetryAgentJobFence,
+  migrationSystemRetryFinalizeJobFence,
   settleContentDetailRecoveryTerminalFailure,
 } from "../src/migrationSystemRetryRecovery.js";
 import { retryMigrationSystemFailure } from "../src/migrationSystemRetry.js";
@@ -1020,6 +1025,14 @@ test("a controlled system retry remains owned through deterministic Agent and Fi
     agent_status: "pending",
   });
 
+  await query(
+    `UPDATE crawler.migration_system_retry_items
+     SET status='retrying',failed_dispatch_generation=2,
+         retry_dispatch_generation=NULL,dispatched_at=NULL,updated_at=now()
+     WHERE system_retry_id=$1`,
+    [scenario.systemRetryId],
+  );
+
   const firstDetailRecovery = await reconciler.reconcileAvailable({ limit: 10 });
   assert.ok(firstDetailRecovery.requiredQueues.includes(queuesByRole.contentDetail));
   assert.equal(firstDetailRecovery.detailEnqueued, 1);
@@ -1094,7 +1107,7 @@ test("a controlled system retry remains owned through deterministic Agent and Fi
      WHERE retry.system_retry_id=$1`,
     [scenario.systemRetryId],
   )).rows[0], {
-    status: "dispatched",
+    status: "retrying",
     resolution: null,
     failure_kind: "retryable_system_failure",
     requeue_allowed: true,
@@ -1215,7 +1228,7 @@ test("a controlled system retry remains owned through deterministic Agent and Fi
   assert.equal((await query(
     `SELECT status FROM crawler.migration_system_retry_items WHERE system_retry_id=$1`,
     [scenario.systemRetryId],
-  )).rows[0].status, "dispatched");
+  )).rows[0].status, "retrying");
   const agentJobs = await queues[queuesByRole.agentBatch].getJobs(["waiting"], 0, 10, true);
   assert.equal(agentJobs.length, 1);
   const firstAllocatedAgentJobId = safeJobId(
@@ -1249,7 +1262,12 @@ test("a controlled system retry remains owned through deterministic Agent and Fi
 
   agentWorker = new Worker(queuesByRole.agentBatch, async (job) => {
     assert.equal(job.data.migration_system_retry_id, scenario.systemRetryId);
+    const fence = migrationSystemRetryAgentJobFence(job);
+    assert.equal(await withTransaction((client) => (
+      claimMigrationSystemRetryAgentJobFence(client, fence)
+    )), true);
     await withTransaction(async (client) => {
+      assert.equal(await lockMigrationSystemRetryAgentJobFence(client, fence), true);
       await client.query(
         `INSERT INTO crawler.agent_profiles (
            channel_id,agent_mode,input_url,status,metrics_json,prompt_variant,
@@ -1367,7 +1385,9 @@ test("a controlled system retry remains owned through deterministic Agent and Fi
 
   const finalizeProcessor = async (job) => {
     assert.equal(job.data.run_id, runId);
+    const fence = migrationSystemRetryFinalizeJobFence(job);
     await withTransaction(async (client) => {
+      assert.equal(await lockMigrationSystemRetryFinalizeJobFence(client, fence), true);
       await client.query(
         `INSERT INTO crawler.finalized_profiles (
            channel_id,run_id,status,profile_json,quality_json,finalized_at,updated_at
@@ -1415,7 +1435,7 @@ test("a controlled system retry remains owned through deterministic Agent and Fi
   assert.equal((await query(
     `SELECT status FROM crawler.migration_system_retry_items WHERE system_retry_id=$1`,
     [scenario.systemRetryId],
-  )).rows[0].status, "dispatched");
+  )).rows[0].status, "retrying");
   const refreshedFinalizeJobs = await queues[queuesByRole.finalize].getJobs(
     ["waiting"],
     0,

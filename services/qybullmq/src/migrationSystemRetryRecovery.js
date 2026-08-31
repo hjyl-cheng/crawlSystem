@@ -150,10 +150,19 @@ export async function settleContentDetailRecoveryTerminalFailure(client, job, {
      FROM released
      WHERE retry.system_retry_id=$1
        AND retry.candidate_id=$2
-       AND retry.retry_dispatch_generation=$3
        AND retry.failed_dispatch_batch_id=$4
        AND retry.recovery_run_id=released.run_id
-       AND retry.status='dispatched'
+       AND (
+         (
+           retry.status='retrying'
+           AND retry.retry_dispatch_generation IS NULL
+           AND retry.failed_dispatch_generation=$3
+         )
+         OR (
+           retry.status='dispatched'
+           AND retry.retry_dispatch_generation=$3
+         )
+       )
      RETURNING retry.system_retry_id,retry.status,retry.resolution`,
     [
       fence.migrationSystemRetryId,
@@ -204,13 +213,16 @@ function finalizeDispatchState(row) {
 
 function exactCandidateFence(row) {
   const generation = expectedGeneration(row);
+  const retryGenerationMatches = row.status === "retrying"
+    ? row.retry_dispatch_generation == null
+      && Number(row.failed_dispatch_generation) === generation
+    : row.status === "dispatched"
+      ? Number(row.retry_dispatch_generation) === generation
+      : true;
   return generation != null
     && Number(row.snapshot_dispatch_generation) === generation
     && text(row.candidate_dispatch_batch_id) === text(row.failed_dispatch_batch_id)
-    && (
-      row.status !== "dispatched"
-      || Number(row.retry_dispatch_generation) === generation
-    );
+    && retryGenerationMatches;
 }
 
 function terminalBusinessOutcome(row) {
@@ -403,11 +415,20 @@ async function lockMigrationSystemRetryTuple(client, fence, {
             retry.recovery_agent_active_job_id,retry.recovery_agent_active_job_attempt
      FROM crawler.migration_system_retry_items retry
      WHERE retry.system_retry_id=$1
-       AND retry.status='dispatched'
        AND retry.candidate_id=$2
-       AND retry.retry_dispatch_generation=$3
        AND retry.failed_dispatch_batch_id=$4
        AND retry.recovery_run_id=$5
+       AND (
+         (
+           retry.status='retrying'
+           AND retry.retry_dispatch_generation IS NULL
+           AND retry.failed_dispatch_generation=$3
+         )
+         OR (
+           retry.status='dispatched'
+           AND retry.retry_dispatch_generation=$3
+         )
+       )
        ${retryConditions.map((condition) => `AND ${condition}`).join("\n       ")}
      ORDER BY retry.system_retry_id
      FOR UPDATE OF retry`,
@@ -461,15 +482,24 @@ export async function claimMigrationSystemRetryAgentJobFence(clientValue, fence)
           crawler.channels channel,
           crawler.channel_runs run
      WHERE retry.system_retry_id=$1
-       AND retry.status='dispatched'
        AND retry.candidate_id=$2
-       AND retry.retry_dispatch_generation=$3
        AND retry.failed_dispatch_batch_id=$4
        AND retry.recovery_run_id=$5
        AND retry.recovery_agent_job_epoch=$9
+       AND (
+         (
+           retry.status='retrying'
+           AND retry.retry_dispatch_generation IS NULL
+           AND retry.failed_dispatch_generation=$3
+         )
+         OR (
+           retry.status='dispatched'
+           AND retry.retry_dispatch_generation=$3
+         )
+       )
        AND candidate.candidate_id=retry.candidate_id
        AND candidate.dispatch_batch_id=retry.failed_dispatch_batch_id
-       AND candidate.snapshot_dispatch_generation=retry.retry_dispatch_generation
+       AND candidate.snapshot_dispatch_generation=$3
        AND candidate.status='accepted'
        AND candidate.snapshot_active_job_id IS NULL
        AND candidate.snapshot_active_job_attempt IS NULL
@@ -633,11 +663,22 @@ export async function lockMigrationSystemRetryFinalizeJobFence(client, fence) {
        ON candidate.candidate_id=retry.candidate_id
      JOIN crawler.channels channel ON channel.channel_id=candidate.channel_id
      JOIN crawler.channel_runs run ON run.run_id=retry.recovery_run_id
-     WHERE retry.system_retry_id=$1 AND retry.status='dispatched'
-       AND retry.candidate_id=$2 AND retry.retry_dispatch_generation=$3
+     WHERE retry.system_retry_id=$1
+       AND retry.candidate_id=$2
        AND retry.failed_dispatch_batch_id=$4 AND retry.recovery_run_id=$5
+       AND (
+         (
+           retry.status='retrying'
+           AND retry.retry_dispatch_generation IS NULL
+           AND retry.failed_dispatch_generation=$3
+         )
+         OR (
+           retry.status='dispatched'
+           AND retry.retry_dispatch_generation=$3
+         )
+       )
        AND candidate.dispatch_batch_id=retry.failed_dispatch_batch_id
-       AND candidate.snapshot_dispatch_generation=retry.retry_dispatch_generation
+       AND candidate.snapshot_dispatch_generation=$3
        AND candidate.status='accepted'
        AND candidate.snapshot_active_job_id IS NULL
        AND candidate.snapshot_active_job_attempt IS NULL

@@ -242,12 +242,16 @@ function inlineCandidateMatches(candidate, fence) {
 }
 
 function exactRecoveryMatches({ run, candidate, retry, fence }) {
+  const retryOwnsGeneration = retry?.status === "retrying"
+    ? retry.retry_dispatch_generation == null
+      && Number(retry.failed_dispatch_generation) === fence.dispatchGeneration
+    : retry?.status === "dispatched"
+      && Number(retry.retry_dispatch_generation) === fence.dispatchGeneration;
   return retry
     && candidate
     && Number(retry.system_retry_id) === fence.migrationSystemRetryId
     && Number(retry.candidate_id) === fence.candidateId
-    && retry.status === "dispatched"
-    && Number(retry.retry_dispatch_generation) === fence.dispatchGeneration
+    && retryOwnsGeneration
     && text(retry.failed_dispatch_batch_id) === fence.pipelineCycleId
     && text(retry.recovery_run_id) === fence.runId
     && Number(run.candidate_id) === fence.candidateId

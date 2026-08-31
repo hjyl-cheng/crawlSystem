@@ -296,4 +296,30 @@ test("PostgreSQL gives one physical Recovery Agent attempt exclusive write owner
     await genericGuard?.catch(() => {});
     throw error;
   }
+
+  await client.query(
+    `UPDATE crawler.migration_system_retry_items
+     SET status='retrying',failed_dispatch_generation=2,
+         retry_dispatch_generation=NULL,
+         recovery_agent_active_job_id=NULL,
+         recovery_agent_active_job_attempt=NULL,
+         recovery_agent_job_epoch=0,updated_at=now()
+     WHERE system_retry_id=$1`,
+    [systemRetryId],
+  );
+  const orphanedOriginalAttempt = fence(1);
+  assert.equal(
+    await transaction(client, (tx) => (
+      claimMigrationSystemRetryAgentJobFence(tx, orphanedOriginalAttempt)
+    )),
+    true,
+    "an accepted original generation can resume downstream work from an orphaned retrying marker",
+  );
+  assert.equal(
+    await transaction(client, (tx) => (
+      lockMigrationSystemRetryAgentJobFence(tx, orphanedOriginalAttempt)
+    )),
+    true,
+    "the orphaned original generation retains its Recovery Agent write Fence",
+  );
 });
