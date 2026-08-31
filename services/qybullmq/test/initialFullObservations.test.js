@@ -7,6 +7,31 @@ import {
 } from "../src/initialFullObservations.js";
 import { observationFactsHash } from "../src/crawlObservationStore.js";
 
+test("initial Full observations lock their Run before their Channel", async () => {
+  const locks = [];
+  const client = {
+    async query(sql) {
+      if (sql.includes("initial-full-observations-lock:")) {
+        locks.push(sql.includes("lock:run") ? "run" : "channel");
+        return { rowCount: 1, rows: [{}] };
+      }
+      if (sql.includes("row_to_json(channel)")) return { rows: [] };
+      return { rowCount: 0, rows: [] };
+    },
+  };
+
+  await assert.rejects(
+    recordInitialFullObservations({
+      withTransaction: (action) => action(client),
+      channelId: "UClock-order",
+      runId: "run:lock-order",
+      observedAt: "2026-08-31T12:00:00.000Z",
+    }),
+    /full Crawl source not found/,
+  );
+  assert.deepEqual(locks, ["run", "channel"]);
+});
+
 function publicationReadyVideo(id, overrides = {}) {
   const channelId = "UCpublication-repair";
   return {
@@ -944,7 +969,7 @@ test("initial Full observations keep staged About data while Agent is incomplete
     reason: "full_crawl_not_complete",
     observations: {},
   });
-  assert.equal(calls.length, 1);
+  assert.equal(calls.length, 3);
 });
 
 test("dormant initial Full observations consume About and reuse the Activity Gate Video", async () => {

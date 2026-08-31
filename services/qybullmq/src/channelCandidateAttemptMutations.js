@@ -20,6 +20,22 @@ function requireMutation(result, operation, fence) {
   return result.rows?.[0] ?? null;
 }
 
+export async function lockChannelCandidateAttempt(queryValue, fenceValue) {
+  const query = activeQuery(queryValue);
+  const fence = normalizeChannelCandidateAttemptFence(fenceValue);
+  const locked = await query(
+    `SELECT candidate_id
+     FROM crawler.channel_candidates
+     WHERE candidate_id=$1
+       AND snapshot_dispatch_generation=$2
+       AND snapshot_active_job_id=$3
+       AND snapshot_active_job_attempt=$4
+     FOR UPDATE`,
+    [fence.candidateId, fence.dispatchGeneration, fence.jobId, fence.bullmqAttempt],
+  );
+  return requireMutation(locked, "lock snapshot persistence", fence);
+}
+
 export async function beginChannelCandidateValidation(queryValue, fenceValue) {
   const query = activeQuery(queryValue);
   const fence = normalizeChannelCandidateAttemptFence(fenceValue);

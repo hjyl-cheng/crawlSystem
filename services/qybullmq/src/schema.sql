@@ -535,21 +535,38 @@ ALTER TABLE crawler.channel_runs
 ADD COLUMN IF NOT EXISTS detail_active_scope_key TEXT;
 
 ALTER TABLE crawler.channel_runs
+ADD COLUMN IF NOT EXISTS detail_job_epoch BIGINT NOT NULL DEFAULT 0;
+
+ALTER TABLE crawler.channel_runs
+ADD COLUMN IF NOT EXISTS detail_active_job_epoch BIGINT;
+
+UPDATE crawler.channel_runs
+SET detail_active_job_epoch=detail_job_epoch
+WHERE detail_active_job_id IS NOT NULL
+  AND detail_active_job_epoch IS NULL;
+
+ALTER TABLE crawler.channel_runs
 DROP CONSTRAINT IF EXISTS channel_runs_detail_active_job_check;
 
 ALTER TABLE crawler.channel_runs
 ADD CONSTRAINT channel_runs_detail_active_job_check
 CHECK (
-  (
-    detail_active_job_id IS NULL
-    AND detail_active_job_attempt IS NULL
-    AND detail_active_scope_key IS NULL
-  )
-  OR (
-    detail_active_job_id IS NOT NULL
-    AND detail_active_job_attempt IS NOT NULL
-    AND detail_active_job_attempt > 0
-    AND detail_active_scope_key IS NOT NULL
+  detail_job_epoch >= 0
+  AND (
+    (
+      detail_active_job_id IS NULL
+      AND detail_active_job_attempt IS NULL
+      AND detail_active_scope_key IS NULL
+      AND detail_active_job_epoch IS NULL
+    )
+    OR (
+      detail_active_job_id IS NOT NULL
+      AND detail_active_job_attempt IS NOT NULL
+      AND detail_active_job_attempt > 0
+      AND detail_active_scope_key IS NOT NULL
+      AND detail_active_job_epoch IS NOT NULL
+      AND detail_active_job_epoch = detail_job_epoch
+    )
   )
 );
 
@@ -655,10 +672,28 @@ CREATE TABLE IF NOT EXISTS crawler.migration_retry_intents (
   requested_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   dispatched_at TIMESTAMPTZ,
   finished_at TIMESTAMPTZ,
+  terminal_job_attempt BIGINT CHECK (terminal_job_attempt > 0),
   last_error TEXT,
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   UNIQUE (candidate_id,dispatch_generation)
 );
+
+ALTER TABLE crawler.migration_retry_intents
+ADD COLUMN IF NOT EXISTS terminal_job_attempt BIGINT;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid='crawler.migration_retry_intents'::regclass
+      AND conname='migration_retry_intents_terminal_job_attempt_check'
+  ) THEN
+    ALTER TABLE crawler.migration_retry_intents
+    ADD CONSTRAINT migration_retry_intents_terminal_job_attempt_check
+    CHECK (terminal_job_attempt IS NULL OR terminal_job_attempt > 0);
+  END IF;
+END
+$$;
 
 CREATE UNIQUE INDEX IF NOT EXISTS ux_crawler_migration_retry_intents_active_candidate
 ON crawler.migration_retry_intents (candidate_id)

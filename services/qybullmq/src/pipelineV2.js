@@ -52,6 +52,7 @@ import {
 import { activeChannelCandidateAttemptFence } from "./channelCandidateAttemptFence.js";
 import {
   beginChannelCandidateValidation,
+  lockChannelCandidateAttempt,
   markChannelCandidateAlreadyPromoted,
   recordAcceptedChannelCandidateSnapshot,
   rejectChannelCandidateAdmission,
@@ -129,7 +130,6 @@ import {
   finalizedProfileIsCurrent,
   finalizeDispatchRevision,
   finalizePublicationContext,
-  finalizeSourceRevision,
   finalizeStatusCanAdvance,
   isFinalizableChannelStatus,
   isSuccessfulPublicationFinalize,
@@ -148,6 +148,10 @@ import {
   commitFinalizedProfile,
   synchronizeFinalizedRun,
 } from "./finalizedProfileStore.js";
+import {
+  lockFinalizeCommitSource,
+  readFinalizeSource,
+} from "./finalizeSourceFence.js";
 import { runAgentBatch } from "./llmAgent.js";
 import { LocalOfflineProfileExecutor } from "./localOfflineProfileExecutor.js";
 import { AGENT_TAXONOMY_VERSION } from "./publicationContract.js";
@@ -201,6 +205,7 @@ import {
 } from "./youtubeDataApiEvidence.js";
 import {
   finishCheckpointRepairExecution,
+  lockCheckpointRepairTarget,
   prepareCheckpointRepairCandidates,
 } from "./checkpointRepair.js";
 import {
@@ -879,56 +884,123 @@ async function signalRunDetailStatusWakeup(migrationActivity) {
   });
 }
 
-async function updateRunDetailStatus(runId, { client = null } = {}) {
+async function updateRunDetailStatus(runId, {
+  client = null,
+  candidateAttemptFence = null,
+} = {}) {
+  const reconcile = async (transactionClient) => {
+    if (candidateAttemptFence) {
+      await lockChannelCandidateAttempt(
+        transactionClient.query.bind(transactionClient),
+        candidateAttemptFence,
+      );
+    }
+    return reconcileRunDetailStatus(transactionClient, runId);
+  };
   const summary = client
-    ? await reconcileRunDetailStatus(client, runId)
-    : await withTransaction((transactionClient) => (
-      reconcileRunDetailStatus(transactionClient, runId)
-    ));
+    ? await reconcile(client)
+    : await withTransaction(reconcile);
   if (!client) await signalRunDetailStatusWakeup(summary.migration_activity_gate);
   return summary;
 }
 
 async function applyMigrationActivityGate(runId, detailStatus, options = {}) {
-  return withTransaction((client) => applyMigrationActivityGateTransaction(client, {
-    runId,
-    detailStatus,
-    ...options,
-  }));
+  const { candidateAttemptFence = null, ...activityOptions } = options;
+  return withTransaction(async (client) => {
+    if (candidateAttemptFence) {
+      await lockChannelCandidateAttempt(client.query.bind(client), candidateAttemptFence);
+    }
+    return applyMigrationActivityGateTransaction(client, {
+      runId,
+      detailStatus,
+      ...activityOptions,
+    });
+  });
 }
 
-async function queueFinalize(channelId, runId, reason) {
-  const revisionRows = await query(
-    `SELECT
-       c.channel_id,c.latest_run_id,c.status AS channel_status,c.agent_status,c.updated_at AS channel_updated_at,
-       r.detail_status,r.expected_content_count,r.result_json->>'pipeline_cycle_id' AS pipeline_cycle_id,
-       (SELECT count(*)::int FROM crawler.content_candidates cc WHERE cc.run_id=$2) AS candidate_count,
-       (SELECT max(cc.updated_at) FROM crawler.content_candidates cc WHERE cc.run_id=$2) AS candidate_updated_at,
-       (SELECT count(*)::int FROM crawler.contents ct WHERE ct.channel_id=$1 AND ct.run_id=$2) AS content_count,
-       (SELECT max(COALESCE(ct.last_enriched_at,ct.last_seen_at))
-        FROM crawler.contents ct WHERE ct.channel_id=$1 AND ct.run_id=$2) AS content_updated_at,
-       (SELECT ap.updated_at FROM crawler.agent_profiles ap
-        WHERE ap.channel_id=$1 AND ap.agent_mode='basic' AND ap.status='success' LIMIT 1) AS agent_updated_at
-     FROM crawler.channels c
-     LEFT JOIN crawler.channel_runs r ON r.run_id=$2
-     WHERE c.channel_id=$1
-     LIMIT 1`,
-    [channelId, runId],
+async function queueFinalize(channelId, runId, reason, { candidateAttemptFence = null } = {}) {
+  const enqueue = async (activeQuery) => {
+    const revisionRows = await activeQuery(
+      `SELECT
+         c.channel_id,c.latest_run_id,c.status AS channel_status,c.agent_status,c.updated_at AS channel_updated_at,
+         r.detail_status,r.expected_content_count,
+         r.result_json->'final_repair' AS run_final_repair,
+         r.result_json->>'pipeline_cycle_id' AS pipeline_cycle_id,
+         (SELECT count(*)::int FROM crawler.content_candidates cc WHERE cc.run_id=$2) AS candidate_count,
+         (SELECT max(cc.updated_at) FROM crawler.content_candidates cc WHERE cc.run_id=$2) AS candidate_updated_at,
+         (SELECT count(*)::int FROM crawler.contents ct WHERE ct.channel_id=$1 AND ct.run_id=$2) AS content_count,
+         (SELECT max(COALESCE(ct.last_enriched_at,ct.last_seen_at))
+          FROM crawler.contents ct WHERE ct.channel_id=$1 AND ct.run_id=$2) AS content_updated_at,
+         (SELECT ap.updated_at FROM crawler.agent_profiles ap
+          WHERE ap.channel_id=$1 AND ap.agent_mode='basic' AND ap.status='success' LIMIT 1) AS agent_updated_at
+       FROM crawler.channels c
+       LEFT JOIN crawler.channel_runs r ON r.run_id=$2
+       WHERE c.channel_id=$1
+       LIMIT 1`,
+      [channelId, runId],
+    );
+    const sourceRevision = finalizeDispatchRevision(
+      revisionRows.rows[0] ?? { channel_id: channelId, run_id: runId },
+    );
+    await queues[queuesByRole.finalize].add(
+      "finalize-channel",
+      {
+        channel_id: channelId,
+        run_id: runId,
+        reason,
+        source_revision: sourceRevision,
+        pipeline_cycle_id: revisionRows.rows[0]?.pipeline_cycle_id ?? null,
+      },
+      { jobId: safeJobId("finalize", runId || channelId, sourceRevision) },
+    );
+  };
+  if (!candidateAttemptFence) return enqueue(query);
+  return withTransaction(async (client) => {
+    const transactionQuery = client.query.bind(client);
+    await lockChannelCandidateAttempt(transactionQuery, candidateAttemptFence);
+    return enqueue(transactionQuery);
+  });
+}
+
+async function queueContentDetailFromSnapshot({
+  channelId,
+  runId,
+  pipelineCycleId,
+  contentMaxAgeDays,
+  candidateAttemptFence = null,
+}) {
+  const payload = {
+    channel_id: channelId,
+    run_id: runId,
+    pipeline_cycle_id: pipelineCycleId,
+    content_max_age_days: contentMaxAgeDays,
+    ...(candidateAttemptFence
+      ? {
+          origin_candidate_id: candidateAttemptFence.candidateId,
+          origin_dispatch_generation: candidateAttemptFence.dispatchGeneration,
+          origin_snapshot_job_id: candidateAttemptFence.jobId,
+          origin_snapshot_job_attempt: candidateAttemptFence.bullmqAttempt,
+        }
+      : {}),
+  };
+  const jobId = candidateAttemptFence
+    ? safeJobId(
+        "content-detail",
+        runId,
+        `g${candidateAttemptFence.dispatchGeneration}`,
+        `a${candidateAttemptFence.bullmqAttempt}`,
+      )
+    : safeJobId("content-detail", runId);
+  const enqueue = () => queues[queuesByRole.contentDetail].add(
+    "content-detail-batch",
+    payload,
+    { jobId },
   );
-  const sourceRevision = finalizeDispatchRevision(
-    revisionRows.rows[0] ?? { channel_id: channelId, run_id: runId },
-  );
-  await queues[queuesByRole.finalize].add(
-    "finalize-channel",
-    {
-      channel_id: channelId,
-      run_id: runId,
-      reason,
-      source_revision: sourceRevision,
-      pipeline_cycle_id: revisionRows.rows[0]?.pipeline_cycle_id ?? null,
-    },
-    { jobId: safeJobId("finalize", runId || channelId, sourceRevision) },
-  );
+  if (!candidateAttemptFence) return enqueue();
+  return withTransaction(async (client) => {
+    await lockChannelCandidateAttempt(client.query.bind(client), candidateAttemptFence);
+    return enqueue();
+  });
 }
 
 async function refreshDispatchCandidateCounts(dispatchBatchId) {
@@ -1129,6 +1201,9 @@ export async function processChannelCrawlV2(job, { resumeMode = "initial" } = {}
       job,
       runId,
       prepare: () => withTransaction(async (client) => {
+        if (candidateAttemptFence) {
+          await lockChannelCandidateAttempt(client.query.bind(client), candidateAttemptFence);
+        }
         await prepareChannelRun(client, {
           runId,
           channelId,
@@ -1169,21 +1244,28 @@ export async function processChannelCrawlV2(job, { resumeMode = "initial" } = {}
       assertInlineContentDetailExecutionCurrent(detailResult, candidateAttemptFence);
       phaseTimingsMs.content_detail_resume = Date.now() - phaseStartedAt;
       phaseStartedAt = Date.now();
+      await withTransaction(async (client) => {
+        if (candidateAttemptFence) {
+          await lockChannelCandidateAttempt(client.query.bind(client), candidateAttemptFence);
+        }
+        await client.query(
+          `UPDATE crawler.channel_runs
+           SET result_json=result_json || jsonb_build_object(
+                 'resumed_job_attempt', $2::int,
+                 'resumed_candidate_count', $3::int,
+                 'resumed_at', now()
+               ),
+               updated_at=now()
+           WHERE run_id=$1`,
+          [runId, Number(job.attemptsMade), candidateCount],
+        );
+      });
+      phaseTimingsMs.resume_metadata = Date.now() - phaseStartedAt;
+      phaseStartedAt = Date.now();
       if (migrationActivityCanFinalize(detailResult.migration_activity_gate)) {
-        await queueFinalize(channelId, runId, "channel-full-resumed");
+        await queueFinalize(channelId, runId, "channel-full-resumed", { candidateAttemptFence });
       }
       phaseTimingsMs.queue_finalize = Date.now() - phaseStartedAt;
-      await query(
-        `UPDATE crawler.channel_runs
-         SET result_json=result_json || jsonb_build_object(
-               'resumed_job_attempt', $2::int,
-               'resumed_candidate_count', $3::int,
-               'resumed_at', now()
-             ),
-             updated_at=now()
-         WHERE run_id=$1`,
-        [runId, Number(job.attemptsMade), candidateCount],
-      );
       if (Number(detailResult?.failed ?? 0) > 0) {
         throw contentDetailFailureError(
           `${detailResult.failed} content candidates failed during resumed inline channel crawl`,
@@ -1711,7 +1793,12 @@ export async function processChannelCrawlV2(job, { resumeMode = "initial" } = {}
   if (aboutOnlyPublicationGapRepair) {
     phaseStartedAt = Date.now();
     const repair = await completeAboutOnlyPublicationGapRepair(
-      (sql, params) => withTransaction((client) => client.query(sql, params)),
+      (sql, params) => withTransaction(async (client) => {
+        if (candidateAttemptFence) {
+          await lockChannelCandidateAttempt(client.query.bind(client), candidateAttemptFence);
+        }
+        return client.query(sql, params);
+      }),
       {
         jobData: job.data,
         runId,
@@ -1719,7 +1806,7 @@ export async function processChannelCrawlV2(job, { resumeMode = "initial" } = {}
         aboutOutcome: aboutMetrics?.outcome ?? null,
         aboutObservationCommand,
         enqueueFinalize: ({ channelId: targetChannelId, runId: targetRunId, reason }) => (
-          queueFinalize(targetChannelId, targetRunId, reason)
+          queueFinalize(targetChannelId, targetRunId, reason, { candidateAttemptFence })
         ),
       },
     );
@@ -1801,6 +1888,7 @@ export async function processChannelCrawlV2(job, { resumeMode = "initial" } = {}
     : null;
   if (uploadsActivity.dormant) {
     const migrationActivity = await applyMigrationActivityGate(runId, "done", {
+      candidateAttemptFence,
       evaluatedAt: checkedAt,
       activityEvidence: {
         complete: true,
@@ -1821,7 +1909,7 @@ export async function processChannelCrawlV2(job, { resumeMode = "initial" } = {}
     phaseTimingsMs.channel_candidates_persist = 0;
     phaseTimingsMs.content_detail = 0;
     const finalizeStartedAt = Date.now();
-    await queueFinalize(channelId, runId, "migration-activity-dormant");
+    await queueFinalize(channelId, runId, "migration-activity-dormant", { candidateAttemptFence });
     phaseTimingsMs.queue_finalize = Date.now() - finalizeStartedAt;
     return {
       ok: true,
@@ -1863,6 +1951,9 @@ export async function processChannelCrawlV2(job, { resumeMode = "initial" } = {}
     };
   });
   await withTransaction(async (client) => {
+    if (candidateAttemptFence) {
+      await lockChannelCandidateAttempt(client.query.bind(client), candidateAttemptFence);
+    }
     await client.query(
     `WITH stale_contents AS (
        UPDATE crawler.contents SET is_recent=false WHERE channel_id=$2 RETURNING content_key
@@ -1946,18 +2037,15 @@ export async function processChannelCrawlV2(job, { resumeMode = "initial" } = {}
     });
     assertInlineContentDetailExecutionCurrent(detailResult, candidateAttemptFence);
   } else if (uploads.entries.length > 0) {
-    await queues[queuesByRole.contentDetail].add(
-      "content-detail-batch",
-      {
-        channel_id: channelId,
-        run_id: runId,
-        pipeline_cycle_id: text(job.data?.pipeline_cycle_id),
-        content_max_age_days: contentMaxAgeDays,
-      },
-      { jobId: safeJobId("content-detail", runId) },
-    );
+    await queueContentDetailFromSnapshot({
+      channelId,
+      runId,
+      pipelineCycleId: text(job.data?.pipeline_cycle_id),
+      contentMaxAgeDays,
+      candidateAttemptFence,
+    });
   } else {
-    detailResult = await updateRunDetailStatus(runId);
+    detailResult = await updateRunDetailStatus(runId, { candidateAttemptFence });
   }
   phaseTimingsMs.content_detail = Date.now() - phaseStartedAt;
   phaseStartedAt = Date.now();
@@ -1966,6 +2054,7 @@ export async function processChannelCrawlV2(job, { resumeMode = "initial" } = {}
       channelId,
       runId,
       channelInlineDetails ? "channel-full-complete" : "channel-crawl-complete",
+      { candidateAttemptFence },
     );
   }
   phaseTimingsMs.queue_finalize = Date.now() - phaseStartedAt;
@@ -2920,11 +3009,22 @@ async function processContentDetailRun({
   apiFallbackMode = null,
   contentMaxAgeDays = null,
   executionFence = null,
+  transactionGuard = null,
 }) {
   if (!runId || !channelId) throw new Error("run_id and channel_id are required");
+  if (transactionGuard != null && typeof transactionGuard !== "function") {
+    throw new TypeError("Content Detail transactionGuard must be a function");
+  }
   const commit = executionFence
     ? (action) => commitContentDetailExecution(executionFence, action)
-    : (action) => withTransaction(action);
+    : transactionGuard
+      ? (action) => withTransaction(async (client) => {
+          if (await transactionGuard(client) !== true) {
+            throw new Error(`Content Detail transaction Fence is stale: ${runId}`);
+          }
+          return action(client);
+        })
+      : (action) => withTransaction(action);
   try {
     if (executionFence) {
       const claimed = await withTransaction(async (client) => {
@@ -2940,12 +3040,12 @@ async function processContentDetailRun({
       });
       if (!claimed) return contentDetailFenceStaleResult(executionFence);
     } else {
-      await query(
+      await commit((client) => client.query(
         `UPDATE crawler.channel_runs
          SET detail_status='running',status='waiting_detail',updated_at=now()
          WHERE run_id=$1`,
         [runId],
-      );
+      ));
     }
     const rows = await query(
       `SELECT candidate.*,run.started_at AS crawl_started_at,
@@ -3106,10 +3206,19 @@ export async function processCheckpointRepairV2(job) {
   if (repairRunId === targetRunId) {
     throw new Error("checkpoint repair cannot reuse an exhausted Business Run");
   }
-  const prepared = await prepareCheckpointRepairCandidates(query, {
+  const transactionGuard = (client) => lockCheckpointRepairTarget(client, {
     targetRunId,
-    repairRunId,
-    repairRound,
+    channelId,
+  });
+  const prepared = await withTransaction(async (client) => {
+    if (await transactionGuard(client) !== true) {
+      throw new Error(`checkpoint repair target disappeared: ${targetRunId}`);
+    }
+    return prepareCheckpointRepairCandidates(client.query.bind(client), {
+      targetRunId,
+      repairRunId,
+      repairRound,
+    });
   });
   try {
     const result = await processContentDetailRun({
@@ -3121,6 +3230,7 @@ export async function processCheckpointRepairV2(job) {
       publishedAtRequiredPrecision: text(job.data?.published_at_required_precision),
       apiFallbackMode: text(job.data?.api_fallback_mode) ?? "emergency",
       contentMaxAgeDays: job.data?.content_max_age_days,
+      transactionGuard,
     });
     if (Number(result.failed ?? 0) > 0) {
       throw contentDetailFailureError(
@@ -4504,11 +4614,11 @@ export async function processFinalizeV2(job) {
     requested_run_id: runId,
   });
   const runRows = runId ? await query("SELECT * FROM crawler.channel_runs WHERE run_id=$1 LIMIT 1", [runId]) : { rows: [] };
-  const run = runRows.rows[0] ?? null;
-  const candidates = runId
+  let run = runRows.rows[0] ?? null;
+  let candidates = runId
     ? await query("SELECT * FROM crawler.content_candidates WHERE run_id=$1 ORDER BY position", [runId])
     : { rows: [] };
-  const contents = runId
+  let contents = runId
     ? await query(
         `SELECT * FROM crawler.contents WHERE channel_id=$1 AND run_id=$2 ORDER BY position ASC NULLS LAST`,
         [channelId, runId],
@@ -4542,23 +4652,35 @@ export async function processFinalizeV2(job) {
     transactionGuard,
   });
   if (initialObservations.fenceRejected === true) return rejectedFinalizeGuardResult();
-  [channel, agent] = await Promise.all([
-    query("SELECT * FROM crawler.channels WHERE channel_id=$1 LIMIT 1", [channelId])
-      .then((result) => result.rows[0]),
-    query(
-      `SELECT * FROM crawler.agent_profiles
-       WHERE channel_id=$1 AND agent_mode='basic' AND status='success' LIMIT 1`,
-      [channelId],
-    ),
-  ]);
-  if (!channel) throw new Error(`channel disappeared during finalize: ${channelId}`);
-  agentProfile = agent.rows[0] ?? null;
-  const sourceRevision = finalizeSourceRevision({
-    channel,
-    run: runRows.rows[0] ?? null,
-    candidates: candidates.rows,
-    contents: contents.rows,
-    agent: agentProfile,
+  const source = await readFinalizeSource(query, { channelId, runId });
+  if (!source) throw new Error(`Finalize source disappeared: ${channelId}/${runId}`);
+  channel = source.channel;
+  run = source.run;
+  candidates = { rows: source.candidates };
+  contents = { rows: source.contents };
+  agentProfile = source.agent;
+  agent = { rows: agentProfile ? [agentProfile] : [] };
+  const sourceRevision = source.sourceRevision;
+  const dispatchRevision = text(job.data?.source_revision);
+  const rejectedFinalizeSourceResult = (reason) => ({
+    ok: true,
+    skipped: true,
+    skip_reason: recoveryFence
+      ? "migration_system_retry_finalize_fence_stale"
+      : "finalize_source_revision_stale",
+    stale_reason: reason,
+    channel_id: channelId,
+    requested_run_id: runId,
+  });
+  if (!dispatchRevision || source.dispatchRevision !== dispatchRevision) {
+    return rejectedFinalizeSourceResult("dispatch_revision_stale");
+  }
+  const commitSource = (client) => lockFinalizeCommitSource(client, {
+    channelId,
+    runId,
+    expectedSourceRevision: sourceRevision,
+    expectedDispatchRevision: dispatchRevision,
+    transactionGuard,
   });
   const existingFinalized = await query(
     "SELECT run_id,status,quality_json FROM crawler.finalized_profiles WHERE channel_id=$1 LIMIT 1",
@@ -4571,9 +4693,8 @@ export async function processFinalizeV2(job) {
     initialObservations.outcomes,
   )) {
     const committed = await withTransaction(async (client) => {
-      if (transactionGuard && !(await transactionGuard(client))) {
-        return { fenceRejected: true };
-      }
+      const lockedSource = await commitSource(client);
+      if (!lockedSource.accepted) return { sourceRejected: lockedSource.reason };
       return commitFinalizedProfile(client, {
         channelId,
         runId,
@@ -4583,7 +4704,7 @@ export async function processFinalizeV2(job) {
         publicationRevisionType,
       });
     });
-    if (committed.fenceRejected === true) return rejectedFinalizeGuardResult();
+    if (committed.sourceRejected) return rejectedFinalizeSourceResult(committed.sourceRejected);
     return {
       ok: true,
       deduplicated: true,
@@ -4633,16 +4754,17 @@ export async function processFinalizeV2(job) {
     String(existingFinalizedRow?.run_id ?? "") === String(runId ?? ""),
   )) {
     const synchronized = await withTransaction(async (client) => {
-      if (transactionGuard && !(await transactionGuard(client))) {
-        return { fenceRejected: true };
-      }
+      const lockedSource = await commitSource(client);
+      if (!lockedSource.accepted) return { sourceRejected: lockedSource.reason };
       await synchronizeFinalizedRun(client, {
         runId,
         finalizedStatus: existingFinalizedRow.status,
       });
-      return { fenceRejected: false };
+      return { sourceRejected: null };
     });
-    if (synchronized.fenceRejected === true) return rejectedFinalizeGuardResult();
+    if (synchronized.sourceRejected) {
+      return rejectedFinalizeSourceResult(synchronized.sourceRejected);
+    }
     return {
       ok: true,
       skipped: true,
@@ -4706,9 +4828,8 @@ export async function processFinalizeV2(job) {
   };
   let rawObject = null;
   if (isSuccessfulPublicationFinalize(status)) {
-    if (transactionGuard && !(await withTransaction(transactionGuard))) {
-      return rejectedFinalizeGuardResult();
-    }
+    const preflight = await withTransaction(commitSource);
+    if (!preflight.accepted) return rejectedFinalizeSourceResult(preflight.reason);
     rawObject = await saveJsonRaw({
       objectType: "youtube_final_profile_json",
       entityType: "channel",
@@ -4719,9 +4840,8 @@ export async function processFinalizeV2(job) {
     });
   }
   const committed = await withTransaction(async (client) => {
-    if (transactionGuard && !(await transactionGuard(client))) {
-      return { fenceRejected: true };
-    }
+    const lockedSource = await commitSource(client);
+    if (!lockedSource.accepted) return { sourceRejected: lockedSource.reason };
     return commitFinalizedProfile(client, {
       channelId,
       runId,
@@ -4732,7 +4852,7 @@ export async function processFinalizeV2(job) {
       publicationRevisionType,
     });
   });
-  if (committed.fenceRejected === true) return rejectedFinalizeGuardResult();
+  if (committed.sourceRejected) return rejectedFinalizeSourceResult(committed.sourceRejected);
   if (!committed.applied) {
     return {
       ok: true,

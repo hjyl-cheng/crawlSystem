@@ -345,15 +345,18 @@ export class PostgresMigrationRetryIntentRepository {
   finish(intent, outcome) {
     return this.withTransaction((client) => finishMigrationRetryIntent(
       client.query.bind(client),
-      migrationRetryJobFence(intent),
+      migrationRetryJobFence(intent, { jobAttempt: outcome?.jobAttempt }),
       outcome,
     ));
   }
 }
 
-function migrationRetryJobFence(intent) {
+function migrationRetryJobFence(intent, { jobAttempt = null } = {}) {
   return {
     id: requiredText(intent?.new_job_id, "intent.new_job_id"),
+    ...(jobAttempt == null ? {} : {
+      attemptsStarted: positiveInteger(jobAttempt, "jobAttempt"),
+    }),
     data: {
       retry_intent_id: requiredText(intent?.retry_intent_id, "intent.retry_intent_id"),
       dispatch_generation: positiveInteger(
@@ -403,7 +406,10 @@ export class MigrationRetryIntentJobReconciler {
       assertRecoveryJobMatchesIntent(job, intent);
       const state = await job.getState();
       if (state === "completed") {
-        if (!await this.repository.finish(intent, { outcome: "finished" })) {
+        if (!await this.repository.finish(intent, {
+          outcome: "finished",
+          jobAttempt: positiveInteger(job.attemptsStarted, "job.attemptsStarted"),
+        })) {
           throw new MigrationRetryIntentConflictError(
             intent.retry_intent_id,
             "Recovery Intent lost its terminal replay fence",
@@ -412,7 +418,11 @@ export class MigrationRetryIntentJobReconciler {
         summary.finished += 1;
       } else if (state === "failed") {
         const error = new Error(String(job.failedReason || "BullMQ Recovery Job failed"));
-        if (!await this.repository.finish(intent, { outcome: "failed", error })) {
+        if (!await this.repository.finish(intent, {
+          outcome: "failed",
+          error,
+          jobAttempt: positiveInteger(job.attemptsStarted, "job.attemptsStarted"),
+        })) {
           throw new MigrationRetryIntentConflictError(
             intent.retry_intent_id,
             "Recovery Intent lost its terminal replay fence",
@@ -470,13 +480,18 @@ export async function finishMigrationRetryIntent(query, job, {
   if (!["finished", "failed"].includes(normalizedOutcome)) {
     throw new TypeError("outcome must be finished or failed");
   }
+  const jobAttempt = positiveInteger(job?.attemptsStarted, "job.attemptsStarted");
   const message = error == null ? null : String(error?.message ?? error).slice(0, 2000);
   const result = await query(
     `UPDATE crawler.migration_retry_intents
      SET status=$4,dispatch_status='terminal',finished_at=COALESCE(finished_at,now()),
+         terminal_job_attempt=COALESCE(terminal_job_attempt,$6),
          last_error=$5,updated_at=now()
      WHERE retry_intent_id=$1 AND new_job_id=$2 AND dispatch_generation=$3
-       AND (status IN ('requested','dispatched','running') OR status=$4)
+       AND (
+         status IN ('requested','dispatched','running')
+         OR (status=$4 AND terminal_job_attempt=$6)
+       )
      RETURNING retry_intent_id`,
     [
       fence.retryIntentId,
@@ -484,9 +499,35 @@ export async function finishMigrationRetryIntent(query, job, {
       fence.dispatchGeneration,
       normalizedOutcome,
       message,
+      jobAttempt,
     ],
   );
   return result.rowCount === 1;
+}
+
+export async function enterMigrationRetryIntentWorkerJob(query, job) {
+  if (typeof query !== "function") throw new TypeError("query is required");
+  const fence = recoveryJobFence(job);
+  if (!fence) return Object.freeze({ action: "not_applicable" });
+  if (await markMigrationRetryIntentRunning(query, job)) {
+    return Object.freeze({ action: "execute" });
+  }
+  const jobAttempt = positiveInteger(job?.attemptsStarted, "job.attemptsStarted");
+  const completed = await query(
+    `SELECT terminal_job_attempt
+     FROM crawler.migration_retry_intents
+     WHERE retry_intent_id=$1 AND new_job_id=$2 AND dispatch_generation=$3
+       AND status='finished' AND dispatch_status='terminal'
+       AND terminal_job_attempt IS NOT NULL AND terminal_job_attempt<=$4`,
+    [fence.retryIntentId, fence.jobId, fence.dispatchGeneration, jobAttempt],
+  );
+  if (completed.rowCount === 1) {
+    return Object.freeze({
+      action: "finished_replay",
+      terminalJobAttempt: Number(completed.rows[0].terminal_job_attempt),
+    });
+  }
+  return Object.freeze({ action: "rejected" });
 }
 
 export class InMemoryMigrationRetryIntentRepository {

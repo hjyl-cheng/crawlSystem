@@ -42,6 +42,7 @@ function finalizeState(overrides = {}) {
     detail_status: "done",
     expected_content_count: 1,
     pipeline_cycle_id: "batch-19",
+    run_final_repair: null,
     candidate_count: 1,
     candidate_updated_at: new Date("2026-08-30T10:01:00.000Z"),
     content_count: 1,
@@ -373,6 +374,57 @@ test("terminal generic Job identity is replaced by the fenced recovery Job", asy
   assert.equal(result.conflict, false);
   assert.equal(addCalls, 1);
   assert.deepEqual(existing.data, expected.data);
+});
+
+test("a represented failed or completed Content Detail Job waits for durable replay evidence", async () => {
+  for (const terminalState of ["failed", "completed"]) {
+    let removed = false;
+    let addCalls = 0;
+    let observedState = null;
+    const existing = {
+      id: "content-detail:run-19",
+      name: "content-detail-batch",
+      data: { migration_system_retry_id: 19, content_detail_job_epoch: 0 },
+      getState: async () => terminalState,
+      remove: async () => { removed = true; },
+    };
+    const queue = {
+      getJob: async () => existing,
+      add: async () => { addCalls += 1; },
+    };
+    const reconciler = new MigrationSystemRetryRecoveryReconciler({
+      query: async () => ({ rows: [] }),
+      withTransaction: async (action) => action({ query: async () => ({ rows: [] }) }),
+      queues: { [queuesByRole.contentDetail]: queue },
+    });
+    const expected = {
+      id: existing.id,
+      name: existing.name,
+      data: { ...existing.data },
+    };
+
+    const result = await reconciler.ensureQueueJob(
+      queuesByRole.contentDetail,
+      expected,
+      (job, recovery) => (
+        job.name === recovery.name
+        && job.data.migration_system_retry_id === recovery.data.migration_system_retry_id
+        && job.data.content_detail_job_epoch === recovery.data.content_detail_job_epoch
+      ),
+      {
+        allowTerminalRequeue: async ({ state }) => {
+          observedState = state;
+          return false;
+        },
+      },
+    );
+
+    assert.equal(observedState, terminalState);
+    assert.equal(result.terminalBlocked, true);
+    assert.equal(result.conflict, false);
+    assert.equal(removed, false);
+    assert.equal(addCalls, 0);
+  }
 });
 
 test("active and legacy recovery scans are both selected under a permanent active backlog", async () => {

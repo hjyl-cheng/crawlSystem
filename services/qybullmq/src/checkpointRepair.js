@@ -14,6 +14,37 @@ function positiveInteger(value, field) {
   return number;
 }
 
+export async function lockCheckpointRepairTarget(client, {
+  targetRunId,
+  channelId,
+} = {}) {
+  if (!client || typeof client.query !== "function") {
+    throw new TypeError("an active PostgreSQL client is required");
+  }
+  const targetId = requiredText(targetRunId, "targetRunId");
+  const channel = requiredText(channelId, "channelId");
+  const runRows = await client.query(
+    `/* checkpoint-repair-lock:run */
+     SELECT run_id
+     FROM crawler.channel_runs
+     WHERE run_id=$1 AND channel_id=$2
+     ORDER BY run_id
+     FOR UPDATE`,
+    [targetId, channel],
+  );
+  if (runRows.rowCount !== 1) return false;
+  const channelRows = await client.query(
+    `/* checkpoint-repair-lock:channel */
+     SELECT channel_id
+     FROM crawler.channels
+     WHERE channel_id=$1
+     ORDER BY channel_id
+     FOR UPDATE`,
+    [channel],
+  );
+  return channelRows.rowCount === 1;
+}
+
 export async function materializeCheckpointRepairRun(client, {
   repairRunId,
   targetRunId,

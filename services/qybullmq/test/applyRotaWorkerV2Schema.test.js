@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import {
   guardedRotaWorkerSchemaConfig,
+  normalizedCheckExpression,
   rotaWorkerV2SchemaBlock,
 } from "../scripts/applyRotaWorkerV2Schema.mjs";
 
@@ -32,6 +33,8 @@ test("Rota Worker V2 deployment extracts the complete additive integration schem
     /SET snapshot_dispatch_generation = expectation\.expected_generation,[\s\S]*snapshot_active_job_id = NULL,[\s\S]*snapshot_active_job_attempt = NULL/,
   );
   assert.match(block, /CREATE TABLE IF NOT EXISTS crawler\.migration_retry_intents/);
+  assert.match(block, /ADD COLUMN IF NOT EXISTS terminal_job_attempt BIGINT/);
+  assert.match(block, /migration_retry_intents_terminal_job_attempt_check/);
   assert.match(block, /CREATE TABLE IF NOT EXISTS crawler\.migration_system_retry_items/);
   assert.match(block, /failed_dispatch_batch_id TEXT NOT NULL/);
   assert.match(
@@ -73,8 +76,16 @@ test("Rota Worker V2 deployment extracts the complete additive integration schem
   assert.match(block, /ADD COLUMN IF NOT EXISTS detail_active_job_id TEXT/);
   assert.match(block, /ADD COLUMN IF NOT EXISTS detail_active_job_attempt BIGINT/);
   assert.match(block, /ADD COLUMN IF NOT EXISTS detail_active_scope_key TEXT/);
+  assert.match(block, /ADD COLUMN IF NOT EXISTS detail_job_epoch BIGINT NOT NULL DEFAULT 0/);
+  assert.match(block, /ADD COLUMN IF NOT EXISTS detail_active_job_epoch BIGINT/);
+  assert.match(
+    block,
+    /UPDATE crawler\.channel_runs\s+SET detail_active_job_epoch=detail_job_epoch/,
+  );
   assert.match(block, /channel_runs_detail_active_job_check/);
   assert.match(block, /detail_active_job_attempt > 0/);
+  assert.match(block, /detail_job_epoch >= 0/);
+  assert.match(block, /detail_active_job_epoch = detail_job_epoch/);
   assert.match(block, /channel_execution_attempts[\s\S]*dispatch_generation BIGINT/);
   assert.match(block, /UNIQUE \(candidate_id,dispatch_generation\)/);
   assert.match(block, /ux_crawler_migration_retry_intents_active_candidate/);
@@ -94,6 +105,7 @@ test("Crawler bootstrap includes the Candidate attempt Fence shape", async () =>
   assert.match(bootstrap, /snapshot_active_job_attempt >= 0/);
   assert.match(bootstrap, /ux_crawler_proxy_job_dispatch_outbox_channel_snapshot_generation/);
   assert.match(bootstrap, /channel_execution_attempts[\s\S]*dispatch_generation bigint/);
+  assert.match(bootstrap, /migration_retry_intents[\s\S]*terminal_job_attempt bigint/);
   assert.match(bootstrap, /CREATE TABLE crawler\.migration_system_retry_items/);
   assert.match(bootstrap, /failed_dispatch_batch_id text NOT NULL/);
   assert.match(bootstrap, /recovery_run_id text/);
@@ -118,7 +130,10 @@ test("Crawler bootstrap includes the Candidate attempt Fence shape", async () =>
   assert.match(bootstrap, /detail_active_job_id text/);
   assert.match(bootstrap, /detail_active_job_attempt bigint/);
   assert.match(bootstrap, /detail_active_scope_key text/);
+  assert.match(bootstrap, /detail_job_epoch bigint DEFAULT 0 NOT NULL/);
+  assert.match(bootstrap, /detail_active_job_epoch bigint/);
   assert.match(bootstrap, /channel_runs_detail_active_job_check/);
+  assert.match(bootstrap, /detail_active_job_epoch = detail_job_epoch/);
 });
 
 test("Rota Worker V2 deployment requires explicit database and row-count confirmation", () => {
@@ -129,6 +144,8 @@ test("Rota Worker V2 deployment requires explicit database and row-count confirm
     POSTGRES_USER: "bullmq",
     POSTGRES_PASSWORD: "secret",
     POSTGRES_DB: "crawler_production",
+    EXPECTED_CRAWLER_DATABASE: "crawler_production",
+    FORBIDDEN_CRAWLER_DATABASE: "bullmq_crawler_migration",
     CONFIRM_ROTA_WORKER_V2_DATABASE: "crawler_production",
     EXPECTED_CRAWLER_CHANNEL_COUNT: "22000",
   };
@@ -142,10 +159,65 @@ test("Rota Worker V2 deployment requires explicit database and row-count confirm
       ...base,
       CONFIRM_ROTA_WORKER_V2_DATABASE: "another_database",
     }),
-    /must equal POSTGRES_DB/,
+    /must equal EXPECTED_CRAWLER_DATABASE/,
+  );
+  assert.throws(
+    () => guardedRotaWorkerSchemaConfig({
+      ...base,
+      POSTGRES_DB: "bullmq_crawler_migration",
+      EXPECTED_CRAWLER_DATABASE: "bullmq_crawler_migration",
+      CONFIRM_ROTA_WORKER_V2_DATABASE: "bullmq_crawler_migration",
+    }),
+    /refusing forbidden Crawler database/,
+  );
+  assert.throws(
+    () => guardedRotaWorkerSchemaConfig({
+      ...base,
+      EXPECTED_CRAWLER_DATABASE: "another_database",
+    }),
+    /POSTGRES_DB must equal EXPECTED_CRAWLER_DATABASE/,
   );
   assert.throws(
     () => guardedRotaWorkerSchemaConfig({ ...base, EXPECTED_CRAWLER_CHANNEL_COUNT: "" }),
     /explicit non-negative integer/,
+  );
+});
+
+test("Rota Worker V2 detail ownership constraint comparison rejects a weak OR shape", () => {
+  const required = `
+    detail_job_epoch >= 0 AND (
+      (detail_active_job_id IS NULL AND detail_active_job_attempt IS NULL
+       AND detail_active_scope_key IS NULL AND detail_active_job_epoch IS NULL)
+      OR
+      (detail_active_job_id IS NOT NULL AND detail_active_job_attempt IS NOT NULL
+       AND detail_active_job_attempt > 0 AND detail_active_scope_key IS NOT NULL
+       AND detail_active_job_epoch IS NOT NULL
+       AND detail_active_job_epoch = detail_job_epoch)
+    )`;
+  const weak = `
+    detail_job_epoch >= 0 OR detail_active_job_attempt > 0
+    OR detail_active_scope_key IS NOT NULL
+    OR detail_active_job_epoch = detail_job_epoch`;
+  assert.notEqual(normalizedCheckExpression(required), normalizedCheckExpression(weak));
+});
+
+test("Rota Worker V2 catalog expressions reject weak checks with the same keywords", () => {
+  const requiredOutcome = `
+    ((outcome IS NULL)
+      OR (outcome = ANY (ARRAY['completed'::text,'completed_with_system_failures'::text])))`;
+  const weakOutcome = `
+    outcome IS NULL OR outcome='completed_with_system_failures' OR TRUE`;
+  const requiredActiveIndex = `
+    (status = ANY (ARRAY['retrying'::text,'pending'::text,'dispatched'::text]))`;
+  const wrongActiveIndex = `
+    (status = ANY (ARRAY['pending'::text,'dispatched'::text]))`;
+
+  assert.notEqual(
+    normalizedCheckExpression(requiredOutcome),
+    normalizedCheckExpression(weakOutcome),
+  );
+  assert.notEqual(
+    normalizedCheckExpression(requiredActiveIndex),
+    normalizedCheckExpression(wrongActiveIndex),
   );
 });

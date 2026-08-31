@@ -16,7 +16,10 @@ import {
 } from "../src/contentDetailExecutionFence.js";
 import { loadIdentityPolicyCatalog } from "../src/identityPolicyCatalog.js";
 import { markChannelCandidateJobAttemptActive } from "../src/managedWorkerJob.js";
-import { MigrationSystemRetryRecoveryReconciler } from "../src/migrationSystemRetryRecovery.js";
+import {
+  MigrationSystemRetryRecoveryReconciler,
+  settleContentDetailRecoveryTerminalFailure,
+} from "../src/migrationSystemRetryRecovery.js";
 import { retryMigrationSystemFailure } from "../src/migrationSystemRetry.js";
 import {
   crawlerRuntimeSchema,
@@ -68,6 +71,16 @@ async function waitFor(check, label, timeoutMs = 20_000) {
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
   throw new Error(`timed out waiting for ${label}`);
+}
+
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
 }
 
 function captureChildOutput(child) {
@@ -256,6 +269,352 @@ async function initializeScenario(client, {
     systemRetryId: Number(retry.rows[0].system_retry_id),
   };
 }
+
+test("a recreated Content Detail Job fences the still-running first incarnation", {
+  skip: databaseUrl && redisUrl
+    ? false
+    : "MANAGED_JOB_TEST_DATABASE_URL and MANAGED_JOB_TEST_REDIS_URL are not configured",
+  timeout: 60_000,
+}, async (t) => {
+  assertDedicatedLocalTestDatabase(databaseUrl);
+  const suffix = randomUUID().replaceAll("-", "");
+  const batchId = `content-detail-incarnation:${suffix}`;
+  const candidateId = 482;
+  const channelId = `UCdetailincarnation${suffix}`;
+  const runId = `run:content-detail-incarnation:${suffix}`;
+  const queueName = queuesByRole.contentDetail;
+  const prefix = `content-detail-incarnation-${suffix}`;
+  const connection = redisConnection(redisUrl);
+  const setup = new Client({ connectionString: databaseUrl });
+  const pool = new Pool({ connectionString: databaseUrl, max: 6 });
+  const query = pool.query.bind(pool);
+  const withTransaction = async (action) => {
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      const result = await action(client);
+      await client.query("COMMIT");
+      return result;
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => {});
+      throw error;
+    } finally {
+      client.release();
+    }
+  };
+  const queue = new Queue(queueName, { connection, prefix });
+  const queueEvents = new QueueEvents(queueName, { connection, prefix });
+  const queues = { [queueName]: queue };
+  const firstStarted = deferred();
+  const releaseFirst = deferred();
+  const replacementStarted = deferred();
+  const recreatedStarted = deferred();
+  const releaseRecreated = deferred();
+  const staleCommit = deferred();
+  let firstWorker;
+  let replacementWorker;
+  let recreatedWorker;
+
+  await setup.connect();
+  t.after(async () => {
+    releaseFirst.resolve();
+    releaseRecreated.resolve();
+    await Promise.all([
+      firstWorker?.close(true).catch(() => {}),
+      replacementWorker?.close(true).catch(() => {}),
+      recreatedWorker?.close(true).catch(() => {}),
+    ]);
+    await queue.obliterate({ force: true }).catch(() => {});
+    await Promise.all([queue.close().catch(() => {}), queueEvents.close().catch(() => {})]);
+    await setup.query("DROP SCHEMA IF EXISTS publication CASCADE").catch(() => {});
+    await setup.query("DROP SCHEMA IF EXISTS crawler CASCADE").catch(() => {});
+    await setup.end().catch(() => {});
+    await pool.end().catch(() => {});
+  });
+
+  await setup.query("DROP SCHEMA IF EXISTS publication CASCADE");
+  await setup.query("DROP SCHEMA IF EXISTS crawler CASCADE");
+  const schema = await readFile(new URL("../src/schema.sql", import.meta.url), "utf8");
+  await setup.query(crawlerRuntimeSchema(schema));
+  await setup.query(
+    `INSERT INTO crawler.query_dispatch_batches (
+       dispatch_batch_id,pipeline_cycle_id,status,outcome,total_channel_count,
+       discovered_candidate_count,accepted_channel_count,rejected_channel_count,
+       failed_channel_count,discovery_closed_at,validation_closed_at,finished_at
+     ) VALUES ($1,$1,'completed','completed_with_system_failures',1,1,0,0,1,now(),now(),now())`,
+    [batchId],
+  );
+  await setup.query(
+    `INSERT INTO crawler.channel_candidates (
+       candidate_id,dispatch_batch_id,pipeline_cycle_id,channel_id,channel_url,status,
+       snapshot_dispatch_generation,snapshot_json,source_json,accepted_at,validation_finished_at
+     ) VALUES ($1,$2,$2,$3,$4,'accepted',2,'{}'::jsonb,
+               '{"source":"legacy_results_db"}'::jsonb,now(),now())`,
+    [candidateId, batchId, channelId, `https://www.youtube.com/channel/${channelId}`],
+  );
+  const migrationIntentId = Number((await setup.query(
+    `INSERT INTO crawler.migration_channel_intents (
+       source_id,source_database,source_database_oid,source_candidate_id,
+       channel_id,source_snapshot,snapshot_sha256,target_candidate_id,
+       first_dispatch_batch_id,dispatch_attempts,last_dispatch_at
+     ) VALUES ($1,current_database(),
+               (SELECT oid FROM pg_database WHERE datname=current_database()),$2,
+               $3,'{}'::jsonb,repeat('a',64),$2,$4,2,now())
+     RETURNING migration_intent_id`,
+    [`content-detail-incarnation:${suffix}`, candidateId, channelId, batchId],
+  )).rows[0].migration_intent_id);
+  await setup.query("BEGIN");
+  try {
+    await setup.query(
+      `INSERT INTO crawler.channels (
+         channel_id,channel_url,title,subscriber_count,status,ready_for_agent,
+         agent_status,latest_run_id,registry_promotion_candidate_id,registry_promotion_run_id
+       ) VALUES ($1,$2,'Content Detail Incarnation',2000,'active',true,
+                 'pending',$3,$4,$3)`,
+      [channelId, `https://www.youtube.com/channel/${channelId}`, runId, candidateId],
+    );
+    await setup.query(
+      `INSERT INTO crawler.channel_runs (
+         run_id,channel_id,candidate_id,status,crawl_mode,detail_status,
+         expected_content_count,started_at,result_json
+       ) VALUES ($1,$2,$3,'waiting_detail','full','queued',1,now(),$4::jsonb)`,
+      [runId, channelId, candidateId, JSON.stringify({
+        pipeline_cycle_id: batchId,
+        dispatch_batch_id: batchId,
+        content_max_age_days: 90,
+      })],
+    );
+    await setup.query("COMMIT");
+  } catch (error) {
+    await setup.query("ROLLBACK").catch(() => {});
+    throw error;
+  }
+  const systemRetryId = Number((await setup.query(
+    `INSERT INTO crawler.migration_system_retry_items (
+       migration_intent_id,candidate_id,failed_dispatch_batch_id,
+       failed_dispatch_generation,failed_job_id,failed_job_attempt,
+       failure_code,failure_category,failure_evidence,status,
+       retry_dispatch_generation,recovery_run_id,dispatched_at
+     ) VALUES ($1,$2,$3,1,$4,1,'LEASE_CONFLICT','lease','{}'::jsonb,
+               'dispatched',2,$5,now())
+     RETURNING system_retry_id`,
+    [migrationIntentId, candidateId, batchId, `failed-channel:${suffix}`, runId],
+  )).rows[0].system_retry_id);
+
+  await Promise.all([queue.waitUntilReady(), queueEvents.waitUntilReady()]);
+  const reconciler = new MigrationSystemRetryRecoveryReconciler({
+    query,
+    withTransaction,
+    queues,
+  });
+  const initial = await reconciler.reconcileAvailable({ limit: 10 });
+  assert.equal(initial.detailEnqueued, 1);
+  const detailJobId = safeJobId("content-detail", runId);
+  const initialJob = await queue.getJob(detailJobId);
+  assert.ok(initialJob);
+  assert.equal(initialJob.data.content_detail_job_epoch, 0);
+
+  firstWorker = new Worker(queueName, async (job) => {
+    const fence = contentDetailExecutionFence(job);
+    assert.equal(job.attemptsStarted, 1);
+    assert.ok(await withTransaction((client) => claimContentDetailExecution(client, fence)));
+    firstStarted.resolve();
+    await releaseFirst.promise;
+    const authorized = await withTransaction((client) => lockContentDetailExecution(client, fence));
+    staleCommit.resolve(authorized);
+    return { incarnation: "old" };
+  }, {
+    connection,
+    prefix,
+    concurrency: 1,
+    lockDuration: 300,
+    stalledInterval: 100,
+    skipLockRenewal: true,
+  });
+  firstWorker.on("error", () => {});
+  await firstWorker.waitUntilReady();
+  await within(firstStarted.promise, "first Content Detail incarnation");
+
+  replacementWorker = new Worker(queueName, async (job) => {
+    assert.equal(job.attemptsStarted, 2);
+    const fence = contentDetailExecutionFence(job);
+    assert.ok(await withTransaction((client) => claimContentDetailExecution(client, fence)));
+    assert.equal((await withTransaction((client) => (
+      settleContentDetailRecoveryTerminalFailure(client, job, {
+        failureDecision: {
+          kind: "retryable_system_failure",
+          retry_mode: "system_retry",
+          evidence: {
+            failure_type: "retryable_system_failure",
+            retryable: true,
+            category: "lease",
+            code: "LEASE_CONFLICT",
+          },
+        },
+        errorMessage: "synthetic terminal replacement failure",
+      })
+    ))).action, "requeue_allowed");
+    replacementStarted.resolve(job);
+    throw new Error("synthetic terminal replacement failure");
+  }, {
+    connection,
+    prefix,
+    concurrency: 1,
+    lockDuration: 5_000,
+    stalledInterval: 100,
+  });
+  replacementWorker.on("error", () => {});
+  await replacementWorker.waitUntilReady();
+  await within(replacementStarted.promise, "stalled Content Detail replacement", 30_000);
+  await waitFor(async () => (await initialJob.getState()) === "failed", "terminal replacement failure");
+  await replacementWorker.close();
+  replacementWorker = null;
+
+  let failedAddCalls = 0;
+  const failedAddReconciler = new MigrationSystemRetryRecoveryReconciler({
+    query,
+    withTransaction,
+    queues: {
+      [queueName]: {
+        getJob: queue.getJob.bind(queue),
+        add: async () => {
+          failedAddCalls += 1;
+          assert.equal((await setup.query(
+            "SELECT detail_job_epoch FROM crawler.channel_runs WHERE run_id=$1",
+            [runId],
+          )).rows[0].detail_job_epoch, "1", "the DB epoch must commit before Redis dispatch");
+          throw new Error("synthetic Redis dispatch interruption after DB commit");
+        },
+      },
+    },
+  });
+  await assert.rejects(
+    failedAddReconciler.reconcileAvailable({ limit: 10 }),
+    /synthetic Redis dispatch interruption after DB commit/,
+  );
+  assert.equal(failedAddCalls, 1);
+  assert.equal(await queue.getJob(detailJobId), undefined);
+
+  const requeued = await reconciler.reconcileAvailable({ limit: 10 });
+  assert.equal(requeued.detailEnqueued, 1);
+  assert.equal(requeued.terminalJobsRequeued, 0);
+  const recreatedJob = await queue.getJob(detailJobId);
+  assert.ok(recreatedJob);
+  assert.equal(await recreatedJob.getState(), "waiting");
+  assert.equal(recreatedJob.data.content_detail_job_epoch, 1);
+
+  recreatedWorker = new Worker(queueName, async (job) => {
+    assert.equal(job.attemptsStarted, 1);
+    const fence = contentDetailExecutionFence(job);
+    assert.ok(await withTransaction((client) => claimContentDetailExecution(client, fence)));
+    recreatedStarted.resolve(job);
+    await releaseRecreated.promise;
+    assert.equal((await withTransaction((client) => (
+      settleContentDetailRecoveryTerminalFailure(client, job, {
+        failureDecision: {
+          kind: "parser_contract",
+          retry_mode: "none",
+          terminal: true,
+        },
+        errorMessage: "synthetic parser contract failure",
+        parserContractError: { field: "published_at", reason: "invalid test value" },
+      })
+    ))).action, "resolved");
+    const error = new Error("synthetic parser contract failure");
+    error.name = "ParserContractError";
+    throw error;
+  }, { connection, prefix, concurrency: 1, lockDuration: 5_000 });
+  recreatedWorker.on("error", () => {});
+  await recreatedWorker.waitUntilReady();
+  const recreatedWorkerJob = await within(
+    recreatedStarted.promise,
+    "recreated Content Detail incarnation",
+  );
+  assert.deepEqual((await setup.query(
+    `SELECT detail_job_epoch,detail_active_job_epoch
+     FROM crawler.channel_runs WHERE run_id=$1`,
+    [runId],
+  )).rows[0], {
+    detail_job_epoch: "1",
+    detail_active_job_epoch: "1",
+  });
+
+  releaseFirst.resolve();
+  assert.equal(
+    await within(staleCommit.promise, "stale Content Detail commit"),
+    null,
+    "the first incarnation must not regain ownership after Job recreation resets attemptsStarted",
+  );
+  releaseRecreated.resolve();
+  await assert.rejects(
+    within(
+      recreatedJob.waitUntilFinished(queueEvents),
+      "recreated Content Detail terminal failure",
+    ),
+    /synthetic parser contract failure/,
+  );
+  assert.deepEqual((await setup.query(
+    `SELECT status,resolution,
+            failure_evidence#>>'{content_detail_recovery,1,failure_kind}' AS failure_kind,
+            failure_evidence#>>'{content_detail_recovery,1,retry_mode}' AS retry_mode
+     FROM crawler.migration_system_retry_items WHERE system_retry_id=$1`,
+    [systemRetryId],
+  )).rows[0], {
+    status: "resolved",
+    resolution: "recovery_content_detail_terminal_failure",
+    failure_kind: "parser_contract",
+    retry_mode: "none",
+  });
+  const recreatedFence = contentDetailExecutionFence({
+    id: recreatedJob.id,
+    name: recreatedJob.name,
+    attemptsStarted: Number(recreatedWorkerJob.attemptsStarted),
+    data: recreatedJob.data,
+  });
+  await withTransaction(async (client) => {
+    await client.query(
+      `UPDATE crawler.migration_system_retry_items
+       SET status='dispatched',resolution=NULL,resolved_at=NULL,
+           failure_evidence=failure_evidence-'content_detail_recovery',updated_at=now()
+       WHERE system_retry_id=$1`,
+      [systemRetryId],
+    );
+    await client.query(
+      `UPDATE crawler.channel_runs
+       SET status='waiting_detail',detail_status='queued',error_message=NULL,finished_at=NULL,
+           result_json=result_json-'content_detail_recovery_terminal',
+           detail_active_job_id=$2,detail_active_job_attempt=$3,
+           detail_active_scope_key=$4,detail_active_job_epoch=$5,updated_at=now()
+       WHERE run_id=$1`,
+      [
+        runId,
+        recreatedFence.jobId,
+        recreatedFence.jobAttempt,
+        recreatedFence.scopeKey,
+        recreatedFence.jobEpoch,
+      ],
+    );
+  });
+  const exhausted = await reconciler.reconcileAvailable({ limit: 10 });
+  assert.equal(exhausted.detailEnqueued, 0);
+  assert.equal(exhausted.resolved, 1);
+  assert.deepEqual((await setup.query(
+    `SELECT status,resolution,
+            failure_evidence#>>'{content_detail_recovery,1,failure_kind}' AS failure_kind,
+            (failure_evidence#>>'{content_detail_recovery,1,budget_exhausted}')::boolean
+              AS budget_exhausted
+     FROM crawler.migration_system_retry_items WHERE system_retry_id=$1`,
+    [systemRetryId],
+  )).rows[0], {
+    status: "resolved",
+    resolution: "recovery_content_detail_retry_budget_exhausted",
+    failure_kind: "retryable_system_failure",
+    budget_exhausted: true,
+  });
+  const held = await reconciler.reconcileAvailable({ limit: 10 });
+  assert.equal(held.detailEnqueued, 0);
+  assert.equal(await recreatedJob.getState(), "failed");
+});
 
 test("a controlled system retry remains owned through deterministic Agent and Finalize recovery", {
   skip: databaseUrl && redisUrl
@@ -677,6 +1036,7 @@ test("a controlled system retry remains owned through deterministic Agent and Fi
     dispatch_batch_id: batchId,
     pipeline_cycle_id: batchId,
     content_max_age_days: 90,
+    content_detail_job_epoch: 0,
   });
   await runControllerTick(controllerEnv);
   assert.equal(await queues[queuesByRole.contentDetail].isPaused(), false);
@@ -696,19 +1056,52 @@ test("a controlled system retry remains owned through deterministic Agent and Fi
   await contentDetailWorker.close();
   contentDetailWorker = null;
 
+  const terminalDetailJob = await queues[queuesByRole.contentDetail].getJob(detailJobId);
+  assert.ok(terminalDetailJob);
+  const terminalDetailAttempt = Number(terminalDetailJob.attemptsStarted);
+  assert.ok(Number.isSafeInteger(terminalDetailAttempt) && terminalDetailAttempt > 0);
   const orphanedDetailFence = contentDetailExecutionFence({
-    id: firstDetailJob.id,
-    name: firstDetailJob.name,
-    attemptsStarted: 2,
-    data: firstDetailJob.data,
+    id: terminalDetailJob.id,
+    name: terminalDetailJob.name,
+    attemptsStarted: terminalDetailAttempt,
+    data: terminalDetailJob.data,
   });
   await query(
     `UPDATE crawler.channel_runs
      SET detail_active_job_id=$2,detail_active_job_attempt=$3,
-         detail_active_scope_key=$4,updated_at=now()
+         detail_active_scope_key=$4,detail_active_job_epoch=$5,updated_at=now()
      WHERE run_id=$1`,
-    [runId, orphanedDetailFence.jobId, 2, orphanedDetailFence.scopeKey],
+    [
+      runId,
+      orphanedDetailFence.jobId,
+      terminalDetailAttempt,
+      orphanedDetailFence.scopeKey,
+      orphanedDetailFence.jobEpoch,
+    ],
   );
+  const unclassifiedTerminal = await reconciler.reconcileAvailable({ limit: 10 });
+  assert.equal(unclassifiedTerminal.detailEnqueued, 0);
+  assert.equal(unclassifiedTerminal.terminalJobsRequeued, 0);
+  assert.equal(unclassifiedTerminal.resolved, 0);
+  assert.deepEqual((await query(
+    `SELECT retry.status,retry.resolution,
+            retry.failure_evidence#>>'{content_detail_recovery,0,failure_kind}' AS failure_kind,
+            (retry.failure_evidence#>>'{content_detail_recovery,0,requeue_allowed}')::boolean
+              AS requeue_allowed,
+            run.status AS run_status,run.detail_status,run.detail_active_job_id
+     FROM crawler.migration_system_retry_items retry
+     JOIN crawler.channel_runs run ON run.run_id=retry.recovery_run_id
+     WHERE retry.system_retry_id=$1`,
+    [scenario.systemRetryId],
+  )).rows[0], {
+    status: "dispatched",
+    resolution: null,
+    failure_kind: "retryable_system_failure",
+    requeue_allowed: true,
+    run_status: "waiting_detail",
+    detail_status: "queued",
+    detail_active_job_id: null,
+  });
 
   const terminalDetailRecovery = await reconciler.reconcileAvailable({ limit: 10 });
   assert.equal(terminalDetailRecovery.detailEnqueued, 1);
@@ -717,13 +1110,16 @@ test("a controlled system retry remains owned through deterministic Agent and Fi
   assert.ok(requeuedDetailJob);
   assert.equal(await requeuedDetailJob.getState(), "waiting");
   assert.deepEqual((await query(
-    `SELECT detail_active_job_id,detail_active_job_attempt,detail_active_scope_key
+    `SELECT detail_active_job_id,detail_active_job_attempt,detail_active_scope_key,
+            detail_job_epoch,detail_active_job_epoch
      FROM crawler.channel_runs WHERE run_id=$1`,
     [runId],
   )).rows[0], {
     detail_active_job_id: null,
     detail_active_job_attempt: null,
     detail_active_scope_key: null,
+    detail_job_epoch: "1",
+    detail_active_job_epoch: null,
   });
   const idempotentDetailRecovery = await reconciler.reconcileAvailable({ limit: 10 });
   assert.equal(idempotentDetailRecovery.detailEnqueued, 0);
@@ -736,7 +1132,10 @@ test("a controlled system retry remains owned through deterministic Agent and Fi
 
   contentDetailWorker = new Worker(queuesByRole.contentDetail, async (job) => {
     assert.equal(job.id, detailJobId);
-    assert.deepEqual(job.data, firstDetailJob.data);
+    assert.deepEqual(job.data, {
+      ...firstDetailJob.data,
+      content_detail_job_epoch: 1,
+    });
     assert.equal(job.attemptsStarted, 1);
     const executionFence = contentDetailExecutionFence(job);
     assert.ok(await withTransaction((client) => (

@@ -150,6 +150,21 @@ test("Publication runtime roles require an explicit dual-database plan and apply
   assert.doesNotMatch(administrator, /--apply/);
 });
 
+test("Rota Worker V2 schema publication is an isolated direct-database operation", async () => {
+  const compose = await readFile(new URL("../../../deploy/compose.yml", import.meta.url), "utf8");
+  const publisher = serviceBlock(compose, "rota-worker-v2-schema-publisher");
+  assert.match(publisher, /profiles: \[manual-rota-worker-v2-schema\]/);
+  assert.match(publisher, /applyRotaWorkerV2Schema\.mjs/);
+  assert.match(publisher, /POSTGRES_HOST: crawler-postgres/);
+  assert.match(publisher, /POSTGRES_PORT: 5432/);
+  assert.match(publisher, /EXPECTED_CRAWLER_DATABASE:/);
+  assert.match(publisher, /FORBIDDEN_CRAWLER_DATABASE: bullmq_crawler_migration/);
+  assert.match(publisher, /CONFIRM_ROTA_WORKER_V2_DATABASE:/);
+  assert.match(publisher, /EXPECTED_CRAWLER_CHANNEL_COUNT:/);
+  assert.doesNotMatch(publisher, /crawler-pgbouncer/);
+  assert.doesNotMatch(publisher, /migration_database_url/);
+});
+
 test("Creator Search storage administration uses the standard Business admin secret", async () => {
   const compose = await readFile(new URL("../../../deploy/compose.yml", import.meta.url), "utf8");
   const administrator = serviceBlock(compose, "business-creator-search-storage-admin");

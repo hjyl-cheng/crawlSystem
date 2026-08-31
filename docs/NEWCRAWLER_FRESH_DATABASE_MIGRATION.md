@@ -278,6 +278,28 @@ or invalid. The check verifies the exact column types, nullability and defaults,
 primary/unique/foreign-key/CHECK constraints, and the complete page-index
 contract.
 
+Before deploying a QYBullMQ image that uses the Rota Worker V2 execution
+fences, publish that additive schema through its separate one-shot admin
+service. Record the current Target Channel count immediately before the run and
+pass that exact value. The service connects directly to
+`crawler-postgres:5432`, verifies the writable Crawler identity marker, rejects
+the legacy Source database, and runs the DDL plus exact postflight in one
+transaction:
+
+```bash
+EXPECTED_CRAWLER_CHANNEL_COUNT='<exact current count>' \
+./scripts/compose.sh production \
+  --profile manual-rota-worker-v2-schema run --rm \
+  -e CONFIRM_ROTA_WORKER_V2_DATABASE=newcrawler_crawler \
+  rota-worker-v2-schema-publisher
+```
+
+Archive the JSON and require `ok=true`, `database=newcrawler_crawler`, and the
+exact Channel count. Rerun the same command once to prove the migration is
+idempotent. Only after both postflights pass may Workers be replaced; replace
+Worker processes before the Controller so no new-generation Job reaches an old
+consumer.
+
 Run the dedicated runtime-role administrator as a plan:
 
 ```bash

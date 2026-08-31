@@ -359,6 +359,7 @@ test("an active Recovery Job survives terminal Outbox delivery rollback and late
     const job = {
       id: jobId,
       name: "channel-snapshot-recovery",
+      attemptsStarted: 1,
       data: payload,
       async getState() { return jobState; },
     };
@@ -400,10 +401,15 @@ test("an active Recovery Job survives terminal Outbox delivery rollback and late
       missing: 0,
     });
     assert.deepEqual((await client.query(
-      `SELECT status,dispatch_status FROM crawler.migration_retry_intents
+      `SELECT status,dispatch_status,terminal_job_attempt::int
+       FROM crawler.migration_retry_intents
        WHERE retry_intent_id=$1`,
       [created.intent.retry_intent_id],
-    )).rows[0], { status: "finished", dispatch_status: "terminal" });
+    )).rows[0], {
+      status: "finished",
+      dispatch_status: "terminal",
+      terminal_job_attempt: 1,
+    });
   } finally {
     await client.query("ROLLBACK").catch(() => {});
     client.release();

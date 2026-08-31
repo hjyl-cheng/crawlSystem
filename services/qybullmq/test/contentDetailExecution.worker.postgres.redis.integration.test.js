@@ -3,10 +3,11 @@ import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
-import { Queue, QueueEvents } from "bullmq";
+import { Queue, QueueEvents, Worker } from "bullmq";
 import pg from "pg";
 
 import { crawlerRuntimeSchema } from "../src/publicationCurrentSchema.js";
+import { MigrationSystemRetryRecoveryReconciler } from "../src/migrationSystemRetryRecovery.js";
 import { queuesByRole } from "../src/queues.js";
 
 const { Client } = pg;
@@ -436,6 +437,142 @@ test("a real stalled Content Detail Worker cannot commit after attemptsStarted t
   assert.equal(takeoverWorker.exitCode, 0, takeoverOutput.output());
 });
 
+test("a real queued Detail Worker rejects an older Snapshot origin after attempt takeover", {
+  skip: databaseUrl && redisUrl
+    ? false
+    : "MANAGED_JOB_TEST_DATABASE_URL and MANAGED_JOB_TEST_REDIS_URL are not configured",
+  timeout: 60_000,
+}, async (t) => {
+  assertDedicatedLocalTestDatabase(databaseUrl);
+  const connection = localRedisConfiguration(redisUrl);
+  const setup = new Client({ connectionString: databaseUrl, connectionTimeoutMillis: 3000 });
+  const queue = new Queue(queuesByRole.contentDetail, { connection, prefix });
+  const finalizeQueue = new Queue(queuesByRole.finalize, { connection, prefix });
+  const queueEvents = new QueueEvents(queuesByRole.contentDetail, { connection, prefix });
+  let workerProcess = null;
+  let schemaInitialized = false;
+  let redisReady = false;
+  t.after(async () => {
+    await stopChild(workerProcess).catch(() => {});
+    if (redisReady) {
+      await Promise.all([
+        queue.obliterate({ force: true }).catch(() => {}),
+        finalizeQueue.obliterate({ force: true }).catch(() => {}),
+      ]);
+    }
+    await Promise.all([
+      queue.close().catch(() => {}),
+      finalizeQueue.close().catch(() => {}),
+      queueEvents.close().catch(() => {}),
+    ]);
+    if (schemaInitialized) {
+      await setup.query("DROP SCHEMA IF EXISTS publication CASCADE").catch(() => {});
+      await setup.query("DROP SCHEMA IF EXISTS crawler CASCADE").catch(() => {});
+    }
+    await setup.end().catch(() => {});
+  });
+
+  await setup.connect();
+  await setup.query("DROP SCHEMA IF EXISTS publication CASCADE");
+  await setup.query("DROP SCHEMA IF EXISTS crawler CASCADE");
+  const schema = await readFile(new URL("../src/schema.sql", import.meta.url), "utf8");
+  await setup.query(crawlerRuntimeSchema(schema));
+  schemaInitialized = true;
+  await Promise.all([
+    queue.obliterate({ force: true }),
+    finalizeQueue.obliterate({ force: true }),
+  ]);
+  await Promise.all([
+    queue.waitUntilReady(),
+    finalizeQueue.waitUntilReady(),
+    queueEvents.waitUntilReady(),
+  ]);
+  redisReady = true;
+  const scenario = await seedInlineRetryScenario(setup);
+  await transaction(setup, async (client) => {
+    await client.query(
+      `UPDATE crawler.channel_candidates
+       SET snapshot_active_job_attempt=2,updated_at=now()
+       WHERE candidate_id=$1`,
+      [scenario.candidateId],
+    );
+    await client.query(
+      `UPDATE crawler.channel_runs
+       SET result_json=result_json || jsonb_build_object('job_id',$2::text),updated_at=now()
+       WHERE run_id=$1`,
+      [scenario.runId, scenario.jobId],
+    );
+  });
+
+  const payload = (originAttempt) => ({
+    channel_id: scenario.channelId,
+    run_id: scenario.runId,
+    pipeline_cycle_id: scenario.pipelineCycleId,
+    content_max_age_days: 90,
+    api_fallback_mode: "disabled",
+    origin_candidate_id: scenario.candidateId,
+    origin_dispatch_generation: 1,
+    origin_snapshot_job_id: scenario.jobId,
+    origin_snapshot_job_attempt: originAttempt,
+  });
+  const stale = await queue.add("content-detail-batch", payload(1), {
+    jobId: `content-detail__${scenario.runId}__g1__a1`,
+    attempts: 1,
+    removeOnComplete: false,
+    removeOnFail: false,
+  });
+  const current = await queue.add("content-detail-batch", payload(2), {
+    jobId: `content-detail__${scenario.runId}__g1__a2`,
+    attempts: 1,
+    removeOnComplete: false,
+    removeOnFail: false,
+  });
+
+  workerProcess = spawn(process.execPath, ["src/worker.js"], {
+    cwd: new URL("..", import.meta.url),
+    env: workerEnvironment(),
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const workerOutput = captureChildOutput(workerProcess);
+  await workerOutput.waitFor(`worker started queue=${queuesByRole.contentDetail}`);
+  const staleResult = await within(
+    stale.waitUntilFinished(queueEvents),
+    "stale queued Detail completion",
+    30_000,
+  );
+  assert.equal(staleResult.ok, true);
+  assert.equal(staleResult.skipped, true);
+  assert.equal(staleResult.reason, "content_detail_execution_fence_stale");
+  assert.equal(staleResult.run_id, scenario.runId);
+  assert.equal(staleResult.channel_id, scenario.channelId);
+  const currentResult = await within(
+    current.waitUntilFinished(queueEvents),
+    "current queued Detail completion",
+    30_000,
+  );
+  assert.equal(currentResult.ok, true);
+  assert.equal(currentResult.skipped, undefined);
+  assert.deepEqual((await setup.query(
+    `SELECT run.detail_active_job_id,run.detail_status AS run_detail_status,
+            content.attempts AS content_attempts,content.detail_status AS content_detail_status,
+            content.disposition,content.result_json#>>'{scope,reason}' AS scope_reason
+     FROM crawler.channel_runs run
+     JOIN crawler.content_candidates content ON content.candidate_id=$2
+     WHERE run.run_id=$1`,
+    [scenario.runId, scenario.contentCandidateId],
+  )).rows[0], {
+    detail_active_job_id: current.id,
+    run_detail_status: "done",
+    content_attempts: 1,
+    content_detail_status: "done",
+    disposition: "terminal_excluded",
+    scope_reason: "older_than_max_age",
+  });
+
+  await stopChild(workerProcess);
+  assert.equal(workerProcess.exitCode, 0, workerOutput.output());
+});
+
 test("a real standalone Detail Job remains authorized while its parent Job is retrying", {
   skip: databaseUrl && redisUrl
     ? false
@@ -557,6 +694,140 @@ test("a real standalone Detail Job remains authorized while its parent Job is re
   assert.equal(workerProcess.exitCode, 0, workerOutput.output());
 });
 
+test("a real recovery Detail terminal database failure settles once without recreation", {
+  skip: databaseUrl && redisUrl
+    ? false
+    : "MANAGED_JOB_TEST_DATABASE_URL and MANAGED_JOB_TEST_REDIS_URL are not configured",
+  timeout: 60_000,
+}, async (t) => {
+  assertDedicatedLocalTestDatabase(databaseUrl);
+  const connection = localRedisConfiguration(redisUrl);
+  const setup = new Client({ connectionString: databaseUrl, connectionTimeoutMillis: 3000 });
+  const queue = new Queue(queuesByRole.contentDetail, { connection, prefix });
+  const finalizeQueue = new Queue(queuesByRole.finalize, { connection, prefix });
+  const queueEvents = new QueueEvents(queuesByRole.contentDetail, { connection, prefix });
+  let workerProcess = null;
+  let schemaInitialized = false;
+  let redisReady = false;
+  t.after(async () => {
+    await stopChild(workerProcess).catch(() => {});
+    if (redisReady) {
+      await Promise.all([
+        queue.obliterate({ force: true }).catch(() => {}),
+        finalizeQueue.obliterate({ force: true }).catch(() => {}),
+      ]);
+    }
+    await Promise.all([
+      queue.close().catch(() => {}),
+      finalizeQueue.close().catch(() => {}),
+      queueEvents.close().catch(() => {}),
+    ]);
+    if (schemaInitialized) {
+      await setup.query("DROP SCHEMA IF EXISTS publication CASCADE").catch(() => {});
+      await setup.query("DROP SCHEMA IF EXISTS crawler CASCADE").catch(() => {});
+    }
+    await setup.end().catch(() => {});
+  });
+
+  await setup.connect();
+  await setup.query("DROP SCHEMA IF EXISTS publication CASCADE");
+  await setup.query("DROP SCHEMA IF EXISTS crawler CASCADE");
+  const schema = await readFile(new URL("../src/schema.sql", import.meta.url), "utf8");
+  await setup.query(crawlerRuntimeSchema(schema));
+  schemaInitialized = true;
+  await Promise.all([
+    queue.obliterate({ force: true }),
+    finalizeQueue.obliterate({ force: true }),
+  ]);
+  await Promise.all([
+    queue.waitUntilReady(),
+    finalizeQueue.waitUntilReady(),
+    queueEvents.waitUntilReady(),
+  ]);
+  redisReady = true;
+  const scenario = await seedInlineRetryScenario(setup);
+  await transaction(setup, async (client) => {
+    await client.query(
+      `UPDATE crawler.channel_candidates
+       SET snapshot_dispatch_generation=2,
+           snapshot_active_job_id=NULL,snapshot_active_job_attempt=NULL,updated_at=now()
+       WHERE candidate_id=$1`,
+      [scenario.candidateId],
+    );
+    await client.query(
+      `UPDATE crawler.migration_system_retry_items
+       SET status='dispatched',retry_dispatch_generation=2,recovery_run_id=$2,
+           dispatched_at=now(),updated_at=now()
+       WHERE system_retry_id=$1`,
+      [scenario.systemRetryId, scenario.runId],
+    );
+  });
+  await setup.query(
+    "ALTER TABLE crawler.content_candidates ADD CONSTRAINT test_attempts_stay_zero CHECK (attempts=0)",
+  );
+  const queued = await queue.add("content-detail-batch", {
+    channel_id: scenario.channelId,
+    run_id: scenario.runId,
+    migration_system_retry_id: scenario.systemRetryId,
+    candidate_id: scenario.candidateId,
+    dispatch_generation: 2,
+    dispatch_batch_id: scenario.pipelineCycleId,
+    pipeline_cycle_id: scenario.pipelineCycleId,
+    content_max_age_days: 90,
+    content_detail_job_epoch: 0,
+    api_fallback_mode: "disabled",
+  }, {
+    jobId: `content-detail__${scenario.runId}`,
+    attempts: 1,
+    removeOnComplete: false,
+    removeOnFail: false,
+  });
+
+  workerProcess = spawn(process.execPath, ["src/worker.js"], {
+    cwd: new URL("..", import.meta.url),
+    env: workerEnvironment(),
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const workerOutput = captureChildOutput(workerProcess);
+  await workerOutput.waitFor(`worker started queue=${queuesByRole.contentDetail}`);
+  await assert.rejects(
+    within(queued.waitUntilFinished(queueEvents), "terminal Detail database failure", 30_000),
+    /test_attempts_stay_zero|check constraint/i,
+  );
+  const failed = await queue.getJob(queued.id);
+  assert.equal(await failed.getState(), "failed");
+  assert.equal(failed.attemptsStarted, 1);
+  assert.deepEqual((await setup.query(
+    `SELECT retry.status,retry.resolution,
+            retry.failure_evidence#>>'{content_detail_recovery,0,retry_mode}' AS retry_mode,
+            run.status AS run_status,run.detail_status,content.attempts
+     FROM crawler.migration_system_retry_items retry
+     JOIN crawler.channel_runs run ON run.run_id=retry.recovery_run_id
+     JOIN crawler.content_candidates content ON content.candidate_id=$2
+     WHERE retry.system_retry_id=$1`,
+    [scenario.systemRetryId, scenario.contentCandidateId],
+  )).rows[0], {
+    status: "resolved",
+    resolution: "recovery_content_detail_terminal_failure",
+    retry_mode: "none",
+    run_status: "failed",
+    detail_status: "failed",
+    attempts: 0,
+  });
+
+  const reconciler = new MigrationSystemRetryRecoveryReconciler({
+    query: setup.query.bind(setup),
+    withTransaction: (action) => transaction(setup, action),
+    queues: { [queuesByRole.contentDetail]: queue },
+  });
+  const held = await reconciler.reconcileAvailable({ limit: 10 });
+  assert.equal(held.detailEnqueued, 0);
+  assert.equal(await failed.getState(), "failed");
+
+  await stopChild(workerProcess);
+  assert.equal(workerProcess.exitCode, 0, workerOutput.output());
+});
+
 test("a real Channel Worker resumes inline Detail on the same Job after a retrying system failure", {
   skip: databaseUrl && redisUrl
     ? false
@@ -571,10 +842,18 @@ test("a real Channel Worker resumes inline Detail on the same Job after a retryi
   const finalizeQueue = new Queue(queuesByRole.finalize, { connection, prefix });
   const queueEvents = new QueueEvents(queuesByRole.channelCrawl, { connection, prefix });
   let workerProcess = null;
+  let finalizeObserver = null;
   let schemaInitialized = false;
   let redisReady = false;
+  let resolveObservedFinalize;
+  let rejectObservedFinalize;
+  const observedFinalize = new Promise((resolve, reject) => {
+    resolveObservedFinalize = resolve;
+    rejectObservedFinalize = reject;
+  });
   t.after(async () => {
     await stopChild(workerProcess).catch(() => {});
+    await finalizeObserver?.close().catch(() => {});
     if (redisReady) {
       await Promise.all([
         queue.obliterate({ force: true }).catch(() => {}),
@@ -610,6 +889,39 @@ test("a real Channel Worker resumes inline Detail on the same Job after a retryi
   ]);
   redisReady = true;
   const scenario = await seedInlineRetryScenario(setup);
+  await setup.query(
+    `CREATE OR REPLACE FUNCTION crawler.test_delay_resumed_metadata()
+     RETURNS trigger LANGUAGE plpgsql AS $function$
+     BEGIN
+       IF NEW.result_json ? 'resumed_job_attempt'
+          AND NOT OLD.result_json ? 'resumed_job_attempt' THEN
+         PERFORM pg_sleep(1);
+       END IF;
+       RETURN NEW;
+     END
+     $function$`,
+  );
+  await setup.query(
+    `CREATE TRIGGER test_delay_resumed_metadata
+     BEFORE UPDATE ON crawler.channel_runs
+     FOR EACH ROW EXECUTE FUNCTION crawler.test_delay_resumed_metadata()`,
+  );
+  finalizeObserver = new Worker(queuesByRole.finalize, async (job) => {
+    const row = (await observer.query(
+      `SELECT result_json->>'resumed_job_attempt' AS resumed_job_attempt,
+              result_json->>'resumed_candidate_count' AS resumed_candidate_count
+       FROM crawler.channel_runs WHERE run_id=$1`,
+      [scenario.runId],
+    )).rows[0];
+    resolveObservedFinalize({
+      reason: job.data?.reason ?? null,
+      resumed_job_attempt: row?.resumed_job_attempt ?? null,
+      resumed_candidate_count: row?.resumed_candidate_count ?? null,
+    });
+    return { observed: true };
+  }, { connection, prefix, concurrency: 1 });
+  finalizeObserver.on("error", rejectObservedFinalize);
+  await finalizeObserver.waitUntilReady();
   const queued = await queue.add("channel-snapshot", {
     candidate_id: scenario.candidateId,
     migration_intent_id: scenario.migrationIntentId,
@@ -644,6 +956,14 @@ test("a real Channel Worker resumes inline Detail on the same Job after a retryi
   );
   assert.equal(result.ok, true);
   assert.equal(result.resumed, true);
+  assert.deepEqual(
+    await within(observedFinalize, "Finalize dispatch after resumed metadata", 30_000),
+    {
+      reason: "channel-full-resumed",
+      resumed_job_attempt: "1",
+      resumed_candidate_count: "1",
+    },
+  );
 
   const state = (await observer.query(
     `SELECT candidate.status AS candidate_status,
@@ -684,5 +1004,6 @@ test("a real Channel Worker resumes inline Detail on the same Job after a retryi
   assert.equal(completed.attemptsMade, 2);
 
   await stopChild(workerProcess);
+  await finalizeObserver.close();
   assert.equal(workerProcess.exitCode, 0, workerOutput.output());
 });

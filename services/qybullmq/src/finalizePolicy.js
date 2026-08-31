@@ -32,6 +32,15 @@ function sortedStrings(values) {
   return [...(values ?? [])].map(String).sort();
 }
 
+function revisionValue(value) {
+  if (value == null) return null;
+  if (value instanceof Date) return timestamp(value);
+  if (Array.isArray(value)) return value.map(revisionValue);
+  if (typeof value !== "object") return value;
+  return Object.fromEntries(Object.keys(value).sort()
+    .map((key) => [key, revisionValue(value[key])]));
+}
+
 function text(value) {
   const output = String(value ?? "").trim();
   return output || null;
@@ -111,47 +120,42 @@ export function isCurrentChannelRun(channel, runId) {
 
 export function finalizeSourceRevision({ channel, run, candidates = [], contents = [], agent = null }) {
   const source = {
-    channel: {
-      channel_id: channel?.channel_id ?? null,
-      latest_run_id: channel?.latest_run_id ?? null,
-      status: channel?.status ?? null,
-      agent_status: channel?.agent_status ?? null,
-      updated_at: timestamp(channel?.updated_at),
-    },
+    channel: revisionValue(channel ?? {}),
     run: {
       run_id: run?.run_id ?? null,
       detail_status: run?.detail_status ?? null,
       expected_content_count: Number(run?.expected_content_count ?? 0),
+      result_json: revisionValue(run?.result_json ?? {}),
     },
-    candidates: candidates.map((item) => ({
+    candidates: candidates.map((item) => revisionValue({
+      ...item,
       candidate_id: Number(item.candidate_id),
-      content_type: item.content_type ?? null,
-      content_key: item.content_key ?? null,
-      detail_status: item.detail_status ?? null,
-      api_status: item.api_status ?? null,
       missing_fields: sortedStrings(item.missing_fields),
-      updated_at: timestamp(item.updated_at),
     })),
-    contents: contents.map((item) => ({
-      content_key: item.content_key ?? null,
-      content_type: item.content_type ?? null,
-      source_content_id: item.source_content_id ?? null,
-      revision_at: timestamp(item.last_enriched_at ?? item.last_seen_at),
-    })),
-    agent: agent
-      ? {
-          status: agent.status ?? null,
-          prompt_hash: agent.prompt_hash ?? null,
-          attempts: Number(agent.attempts ?? 0),
-          updated_at: timestamp(agent.updated_at),
-        }
-      : null,
+    contents: contents.map(revisionValue),
+    agent: agent ? revisionValue(agent) : null,
   };
   return createHash("sha256").update(JSON.stringify(source)).digest("hex");
 }
 
 export function finalizeDispatchRevision(state) {
-  return createHash("sha256").update(JSON.stringify(state ?? {})).digest("hex");
+  const value = record(state);
+  const source = {
+    channel_id: value.channel_id ?? null,
+    latest_run_id: value.latest_run_id ?? null,
+    channel_status: value.channel_status ?? null,
+    agent_status: value.agent_status ?? null,
+    detail_status: value.detail_status ?? null,
+    expected_content_count: Number(value.expected_content_count ?? 0),
+    pipeline_cycle_id: value.pipeline_cycle_id ?? null,
+    run_final_repair: value.run_final_repair ?? value.run_result_json?.final_repair ?? null,
+    candidate_count: Number(value.candidate_count ?? 0),
+    candidate_updated_at: value.candidate_updated_at ?? null,
+    content_count: Number(value.content_count ?? 0),
+    content_updated_at: value.content_updated_at ?? null,
+    agent_updated_at: value.agent_updated_at ?? null,
+  };
+  return createHash("sha256").update(JSON.stringify(revisionValue(source))).digest("hex");
 }
 
 export function finalizedProfileIsCurrent(existing, runId, sourceRevision, observationOutcomes = null) {

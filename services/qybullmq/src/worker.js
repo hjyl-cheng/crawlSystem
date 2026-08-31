@@ -16,17 +16,12 @@ import {
   markChannelRemoved,
 } from "./channelLifecycle.js";
 import {
-  completeChannelCandidateWorkerJob,
   describeChannelCandidateWorkerFailure,
   failChannelCandidateWorkerJob,
   runChannelCandidateWorkerJobWithDurableSettlement,
 } from "./channelCandidateWorkerLifecycle.js";
 import { activeChannelCandidateAttemptFence } from "./channelCandidateAttemptFence.js";
 import { settleTerminalDataApiBatchJob } from "./dataApiBatchJobRecovery.js";
-import {
-  persistChannelCandidateParserContractFailure,
-  StaleChannelCandidateAttemptError,
-} from "./channelCandidateAttemptMutations.js";
 import { ensureSchema, closeDb, logTaskEvent, query, warmDb, withTransaction } from "./db.js";
 import { closePersistentHttpClient } from "./httpClient.js";
 import { youtubeErrorText } from "./detailPolicy.js";
@@ -77,8 +72,8 @@ import {
   retryableSystemFailureDecision,
 } from "./managedWorkerJob.js";
 import {
+  enterMigrationRetryIntentWorkerJob,
   finishMigrationRetryIntent,
-  markMigrationRetryIntentRunning,
 } from "./migrationRetryIntent.js";
 import {
   applyFailureRetryDecision,
@@ -90,6 +85,7 @@ import {
   redisOptions,
   safeJobId,
 } from "./queues.js";
+import { settleContentDetailRecoveryTerminalFailure } from "./migrationSystemRetryRecovery.js";
 import { closeStorage, putRawObject } from "./storage.js";
 import { RotaSlotAdapter } from "./rotaSlotAdapter.js";
 import { warmPersistentYtDlp } from "./ytdlpSession.js";
@@ -1238,24 +1234,11 @@ async function persistParserContractFailure(queueName, job, error) {
     }
   }
 
-  if (queueName === queuesByRole.channelCrawl && job?.data?.candidate_id) {
-    let candidateRecorded = false;
-    try {
-      await persistChannelCandidateParserContractFailure(
-        query,
-        activeChannelCandidateAttemptFence(job),
-        { message, details },
-      );
-      candidateRecorded = true;
-    } catch (candidateError) {
-      if (!(candidateError instanceof StaleChannelCandidateAttemptError)) throw candidateError;
-    }
-    if (candidateRecorded && job.data?.dispatch_batch_id) {
-      await refreshDispatchCandidateCounts(String(job.data.dispatch_batch_id));
-    }
-  }
-
-  if (queueName === queuesByRole.channelCrawl && job?.data?.run_id) {
+  if (
+    queueName === queuesByRole.channelCrawl
+    && job?.data?.run_id
+    && !job?.data?.candidate_id
+  ) {
     await query(
       `UPDATE crawler.channel_runs
        SET status='failed',detail_status='failed',error_message=$2,
@@ -1341,7 +1324,6 @@ async function processJobInner(job, { resumeMode = "initial", prepared = null } 
     const failureDecision = retryableSystemFailureDecision(error)
       ?? decideYoutubeFailure({ error });
     error.youtube_failure_decision = failureDecision;
-    applyFailureRetryDecision(job, failureDecision);
     if (!configuredForProxySlot()
         && failureDecision.client_action === "refresh_or_fallback"
         && usesChannelExecution(job)) {
@@ -1403,6 +1385,33 @@ async function processJobInner(job, { resumeMode = "initial", prepared = null } 
         error: persistenceError?.message || String(persistenceError),
       }));
     }
+    const maxAttempts = Math.max(1, Number(job?.opts?.attempts ?? 1));
+    const terminalAttempt = failureDecision.retry_mode === "none"
+      || Number(job?.attemptsStarted ?? 0) >= maxAttempts;
+    if (
+      terminalAttempt
+      && job?.queueName === queuesByRole.contentDetail
+      && job?.data?.migration_system_retry_id != null
+    ) {
+      try {
+        await withTransaction((client) => settleContentDetailRecoveryTerminalFailure(client, job, {
+          failureDecision,
+          errorMessage: error?.message ?? String(error),
+          parserContractError: isParserContractError(error)
+            ? parserContractDetails(error)
+            : null,
+        }));
+      } catch (settlementError) {
+        const durabilityError = new AggregateError(
+          [error, settlementError],
+          `Content Detail recovery failure was not durably settled: ${settlementError.message}`,
+        );
+        durabilityError.code = "TASK_COMPLETION_CONFLICT";
+        durabilityError.cause = settlementError;
+        throw durabilityError;
+      }
+    }
+    applyFailureRetryDecision(job, failureDecision);
     throw error;
   }
 
@@ -1508,8 +1517,23 @@ async function persistManagedRetryCheckpoint({ job, prepared, error, failure }) 
 
 async function processJob(job, token) {
   if (job?.data?.retry_intent_id) {
-    const marked = await markMigrationRetryIntentRunning(query, job);
-    if (!marked) {
+    const entry = await enterMigrationRetryIntentWorkerJob(query, job);
+    if (entry.action === "finished_replay") {
+      console.log(JSON.stringify({
+        event: "migration_retry_intent_post_commit_replayed",
+        job_id: job.id,
+        job_attempt: Number(job.attemptsStarted),
+        terminal_job_attempt: entry.terminalJobAttempt,
+        retry_intent_id: String(job.data.retry_intent_id),
+        dispatch_generation: Number(job.data.dispatch_generation),
+      }));
+      return {
+        recovered_post_commit: true,
+        retry_intent_id: String(job.data.retry_intent_id),
+        terminal_job_attempt: entry.terminalJobAttempt,
+      };
+    }
+    if (entry.action !== "execute") {
       const error = new Error(`Recovery Intent fence rejected Job: ${job.id}`);
       error.code = "MIGRATION_RETRY_INTENT_FENCE_STALE";
       throw error;
@@ -1547,7 +1571,13 @@ async function processJob(job, token) {
     });
   };
   if (job?.queueName === queuesByRole.channelCrawl && job?.data?.candidate_id) {
-    return runChannelCandidateWorkerJobWithDurableSettlement({ query, job, execute });
+    return runChannelCandidateWorkerJobWithDurableSettlement({
+      query,
+      withTransaction,
+      finishMigrationRetryIntent,
+      job,
+      execute,
+    });
   }
   return execute();
 }
@@ -1657,28 +1687,6 @@ async function startWorkerRuntime() {
         } catch (eventError) {
           console.error(JSON.stringify({
             event: "data_api_batch_execution_orphan_recovery_failed",
-            job_id: job.id,
-            error: eventError?.message || String(eventError),
-          }));
-        }
-      }
-      if (queueName === queuesByRole.channelCrawl && job?.data?.candidate_id) {
-        try {
-          await completeChannelCandidateWorkerJob(query, job);
-        } catch (eventError) {
-          console.error(JSON.stringify({
-            event: "candidate_attempt_fence_release_failed",
-            job_id: job.id,
-            error: eventError?.message || String(eventError),
-          }));
-        }
-      }
-      if (job?.data?.retry_intent_id) {
-        try {
-          await finishMigrationRetryIntent(query, job, { outcome: "finished" });
-        } catch (eventError) {
-          console.error(JSON.stringify({
-            event: "migration_retry_intent_finish_failed",
             job_id: job.id,
             error: eventError?.message || String(eventError),
           }));
@@ -1839,6 +1847,7 @@ async function startWorkerRuntime() {
         if (
           queueName === queuesByRole.channelCrawl
           && job?.data?.run_id
+          && !job?.data?.candidate_id
           && !terminalChannel
           && !businessRunBudgetTerminal
           && !systemFailure

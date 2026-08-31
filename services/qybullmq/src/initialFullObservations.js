@@ -316,12 +316,29 @@ export async function recordInitialFullObservations({
         fenceRejected: true,
       };
     }
+    await client.query(
+      `/* initial-full-observations-lock:run */
+       SELECT run_id
+       FROM crawler.channel_runs
+       WHERE run_id=$1 AND channel_id=$2
+       ORDER BY run_id
+       FOR UPDATE`,
+      [runId, channelId],
+    );
+    await client.query(
+      `/* initial-full-observations-lock:channel */
+       SELECT channel_id
+       FROM crawler.channels
+       WHERE channel_id=$1
+       ORDER BY channel_id
+       FOR UPDATE`,
+      [channelId],
+    );
     const sourceRows = await client.query(
       `SELECT row_to_json(channel) AS channel,row_to_json(run) AS run
        FROM crawler.channels channel
        JOIN crawler.channel_runs run ON run.channel_id=channel.channel_id
-       WHERE channel.channel_id=$1 AND run.run_id=$2
-       FOR UPDATE OF channel,run`,
+       WHERE channel.channel_id=$1 AND run.run_id=$2`,
       [channelId, runId],
     );
     const source = sourceRows.rows[0];

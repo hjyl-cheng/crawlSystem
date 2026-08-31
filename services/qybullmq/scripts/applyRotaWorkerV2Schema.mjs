@@ -1,10 +1,67 @@
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
+import { verifyCrawlerWriterDatabase } from "../src/databaseIdentity.js";
 
 const { Client } = pg;
 const START_MARKER = "-- qy-rota-worker-v2-schema:start";
 const END_MARKER = "-- qy-rota-worker-v2-schema:end";
+const CONTENT_DETAIL_ACTIVE_JOB_CONSTRAINT = `
+  ((detail_job_epoch >= 0) AND (
+    ((detail_active_job_id IS NULL)
+      AND (detail_active_job_attempt IS NULL)
+      AND (detail_active_scope_key IS NULL)
+      AND (detail_active_job_epoch IS NULL))
+    OR
+    ((detail_active_job_id IS NOT NULL)
+      AND (detail_active_job_attempt IS NOT NULL)
+      AND (detail_active_job_attempt > 0)
+      AND (detail_active_scope_key IS NOT NULL)
+      AND (detail_active_job_epoch IS NOT NULL)
+      AND (detail_active_job_epoch = detail_job_epoch))
+  ))
+`;
+const REQUIRED_CHECK_EXPRESSIONS = Object.freeze({
+  migration_system_retry_recovery_agent_active_job_check: `
+    ((recovery_agent_job_epoch >= 0) AND (
+      ((recovery_agent_active_job_id IS NULL)
+        AND (recovery_agent_active_job_attempt IS NULL))
+      OR
+      ((recovery_agent_active_job_id IS NOT NULL)
+        AND (recovery_agent_active_job_attempt IS NOT NULL)
+        AND (recovery_agent_active_job_attempt > 0))
+    ))
+  `,
+  query_dispatch_batch_completion_count_check: `
+    ((failed_channel_count >= 0)
+      AND (total_channel_count >= 0)
+      AND (accepted_channel_count >= 0)
+      AND (rejected_channel_count >= 0)
+      AND (((accepted_channel_count + rejected_channel_count) + failed_channel_count)
+        <= total_channel_count))
+  `,
+  query_dispatch_batch_outcome_check: `
+    ((outcome IS NULL)
+      OR (outcome = ANY (ARRAY['completed'::text,'completed_with_system_failures'::text])))
+  `,
+  data_api_batch_active_job_check: `
+    (((active_job_id IS NULL) AND (active_job_attempt IS NULL))
+      OR ((active_job_id IS NOT NULL)
+        AND (active_job_attempt IS NOT NULL)
+        AND (active_job_attempt > 0)))
+  `,
+  content_detail_active_job_check: CONTENT_DETAIL_ACTIVE_JOB_CONSTRAINT,
+});
+const ACTIVE_SYSTEM_RETRY_PREDICATE = `
+  (status = ANY (ARRAY['retrying'::text,'pending'::text,'dispatched'::text]))
+`;
+
+export function normalizedCheckExpression(value) {
+  return String(value ?? "")
+    .toLowerCase()
+    .replace(/::(?:bigint|integer|text|boolean)/g, "")
+    .replace(/\s+/g, "");
+}
 
 function nonNegativeInteger(value, field) {
   if (value === null || value === undefined || String(value).trim() === "") {
@@ -31,11 +88,25 @@ export function guardedRotaWorkerSchemaConfig(environment = process.env) {
     throw new Error("ROTA_WORKER_V2_SCHEMA_APPLY=true is required");
   }
   const database = String(environment.POSTGRES_DB ?? "").trim();
+  const expectedDatabase = String(environment.EXPECTED_CRAWLER_DATABASE ?? "").trim();
+  const forbiddenDatabase = String(
+    environment.FORBIDDEN_CRAWLER_DATABASE ?? "bullmq_crawler_migration",
+  ).trim();
   const confirmedDatabase = String(
     environment.CONFIRM_ROTA_WORKER_V2_DATABASE ?? "",
   ).trim();
-  if (!database || confirmedDatabase !== database) {
-    throw new Error("CONFIRM_ROTA_WORKER_V2_DATABASE must equal POSTGRES_DB");
+  if (!expectedDatabase) throw new Error("EXPECTED_CRAWLER_DATABASE is required");
+  if (!forbiddenDatabase) throw new Error("FORBIDDEN_CRAWLER_DATABASE is required");
+  if (!database || database !== expectedDatabase) {
+    throw new Error("POSTGRES_DB must equal EXPECTED_CRAWLER_DATABASE");
+  }
+  if (database === forbiddenDatabase) {
+    throw new Error(`refusing forbidden Crawler database ${database}`);
+  }
+  if (confirmedDatabase !== expectedDatabase) {
+    throw new Error(
+      "CONFIRM_ROTA_WORKER_V2_DATABASE must equal EXPECTED_CRAWLER_DATABASE",
+    );
   }
   const host = String(environment.POSTGRES_HOST ?? "").trim();
   if (!host) throw new Error("POSTGRES_HOST is required");
@@ -51,6 +122,8 @@ export function guardedRotaWorkerSchemaConfig(environment = process.env) {
       environment.EXPECTED_CRAWLER_CHANNEL_COUNT,
       "EXPECTED_CRAWLER_CHANNEL_COUNT",
     ),
+    expectedDatabase,
+    forbiddenDatabase,
   });
 }
 
@@ -119,11 +192,8 @@ export async function verifyRotaWorkerV2Schema(client) {
          WHERE conrelid=to_regclass('crawler.migration_system_retry_items')
            AND conname='migration_system_retry_items_recovery_agent_active_job_check'
            AND contype='c' AND convalidated
-           AND pg_get_constraintdef(oid) LIKE '%recovery_agent_active_job_attempt > 0%'
-           AND pg_get_constraintdef(oid) LIKE '%recovery_agent_job_epoch >= 0%'
        ) AS migration_system_retry_recovery_agent_active_job_check,
-       to_regclass('crawler.ux_crawler_migration_system_retry_active_candidate') IS NOT NULL
-         AS migration_system_retry_active_candidate_index,
+       FALSE AS migration_system_retry_active_candidate_index,
        to_regclass('crawler.idx_crawler_migration_system_retry_status') IS NOT NULL
          AS migration_system_retry_status_index,
        (
@@ -143,17 +213,12 @@ export async function verifyRotaWorkerV2Schema(client) {
          WHERE conrelid=to_regclass('crawler.query_dispatch_batches')
            AND conname='query_dispatch_batches_completion_count_check'
            AND contype='c' AND convalidated
-           AND pg_get_constraintdef(oid) LIKE '%failed_channel_count%'
-           AND pg_get_constraintdef(oid) LIKE '%total_channel_count%'
-           AND pg_get_constraintdef(oid) LIKE '%accepted_channel_count%'
-           AND pg_get_constraintdef(oid) LIKE '%rejected_channel_count%'
        ) AS query_dispatch_batch_completion_count_check,
        EXISTS (
          SELECT 1 FROM pg_constraint
          WHERE conrelid=to_regclass('crawler.query_dispatch_batches')
            AND conname='query_dispatch_batches_outcome_check'
            AND contype='c' AND convalidated
-           AND pg_get_constraintdef(oid) LIKE '%completed_with_system_failures%'
        ) AS query_dispatch_batch_outcome_check,
        EXISTS (
          SELECT 1 FROM information_schema.columns
@@ -172,7 +237,6 @@ export async function verifyRotaWorkerV2Schema(client) {
          WHERE conrelid=to_regclass('crawler.youtube_api_batches')
            AND conname='youtube_api_batches_active_job_check'
            AND contype='c' AND convalidated
-           AND pg_get_constraintdef(oid) LIKE '%active_job_attempt > 0%'
        ) AS data_api_batch_active_job_check,
        EXISTS (
          SELECT 1 FROM information_schema.columns
@@ -193,12 +257,26 @@ export async function verifyRotaWorkerV2Schema(client) {
            AND is_nullable='YES' AND column_default IS NULL
        ) AS content_detail_active_scope_key,
        EXISTS (
+         SELECT 1 FROM information_schema.columns
+         WHERE table_schema='crawler' AND table_name='channel_runs'
+           AND column_name='detail_job_epoch' AND data_type='bigint'
+           AND is_nullable='NO' AND column_default='0'
+       ) AS content_detail_job_epoch,
+       EXISTS (
+         SELECT 1 FROM information_schema.columns
+         WHERE table_schema='crawler' AND table_name='channel_runs'
+           AND column_name='detail_active_job_epoch' AND data_type='bigint'
+           AND is_nullable='YES' AND column_default IS NULL
+       ) AS content_detail_active_job_epoch,
+       EXISTS (
          SELECT 1 FROM pg_constraint
          WHERE conrelid=to_regclass('crawler.channel_runs')
            AND conname='channel_runs_detail_active_job_check'
            AND contype='c' AND convalidated
            AND pg_get_constraintdef(oid) LIKE '%detail_active_job_attempt > 0%'
            AND pg_get_constraintdef(oid) LIKE '%detail_active_scope_key%'
+           AND pg_get_constraintdef(oid) LIKE '%detail_job_epoch >= 0%'
+           AND pg_get_constraintdef(oid) LIKE '%detail_active_job_epoch = detail_job_epoch%'
        ) AS content_detail_active_job_check,
        EXISTS (
          SELECT 1 FROM information_schema.columns
@@ -270,6 +348,18 @@ export async function verifyRotaWorkerV2Schema(client) {
            AND conname='migration_retry_intents_candidate_id_dispatch_generation_key'
            AND contype='u' AND convalidated
        ) AS migration_retry_intents_generation_key,
+       EXISTS (
+         SELECT 1 FROM information_schema.columns
+         WHERE table_schema='crawler' AND table_name='migration_retry_intents'
+           AND column_name='terminal_job_attempt' AND data_type='bigint'
+           AND is_nullable='YES' AND column_default IS NULL
+       ) AS migration_retry_intents_terminal_job_attempt,
+       EXISTS (
+         SELECT 1 FROM pg_constraint
+         WHERE conrelid=to_regclass('crawler.migration_retry_intents')
+           AND conname='migration_retry_intents_terminal_job_attempt_check'
+           AND contype='c' AND convalidated
+       ) AS migration_retry_intents_terminal_job_attempt_check,
        to_regclass('crawler.ux_crawler_migration_retry_intents_active_candidate') IS NOT NULL
          AS migration_retry_intents_active_candidate_index,
        to_regclass('crawler.idx_crawler_migration_retry_intents_status') IS NOT NULL
@@ -289,6 +379,74 @@ export async function verifyRotaWorkerV2Schema(client) {
        ) AS query_quality_member_guard`,
   );
   const state = verified.rows[0] ?? {};
+  const checkExpressions = await client.query(
+    `WITH required(state_key,relation_name,constraint_name) AS (
+       VALUES
+         ('migration_system_retry_recovery_agent_active_job_check',
+          'crawler.migration_system_retry_items',
+          'migration_system_retry_items_recovery_agent_active_job_check'),
+         ('query_dispatch_batch_completion_count_check',
+          'crawler.query_dispatch_batches',
+          'query_dispatch_batches_completion_count_check'),
+         ('query_dispatch_batch_outcome_check',
+          'crawler.query_dispatch_batches',
+          'query_dispatch_batches_outcome_check'),
+         ('data_api_batch_active_job_check',
+          'crawler.youtube_api_batches',
+          'youtube_api_batches_active_job_check'),
+         ('content_detail_active_job_check',
+          'crawler.channel_runs',
+          'channel_runs_detail_active_job_check')
+     )
+     SELECT required.state_key,
+            pg_get_expr(constraint_state.conbin,constraint_state.conrelid) AS expression
+     FROM required
+     LEFT JOIN pg_constraint AS constraint_state
+       ON constraint_state.conrelid=to_regclass(required.relation_name)
+      AND constraint_state.conname=required.constraint_name
+      AND constraint_state.contype='c'
+      AND constraint_state.convalidated`,
+  );
+  for (const { state_key: stateKey, expression } of checkExpressions.rows) {
+    state[stateKey] = expression !== null
+      && normalizedCheckExpression(expression)
+        === normalizedCheckExpression(REQUIRED_CHECK_EXPRESSIONS[stateKey]);
+  }
+  const activeSystemRetryIndex = await client.query(
+    `SELECT
+       index_state.indisunique AS is_unique,
+       index_state.indisvalid AS is_valid,
+       index_state.indisready AS is_ready,
+       index_state.indnatts AS attribute_count,
+       index_state.indnkeyatts AS key_attribute_count,
+       ARRAY(
+         SELECT attribute.attname::text
+         FROM unnest(index_state.indkey) WITH ORDINALITY AS index_key(attnum,position)
+         LEFT JOIN pg_attribute AS attribute
+           ON attribute.attrelid=index_state.indrelid
+          AND attribute.attnum=index_key.attnum
+          AND NOT attribute.attisdropped
+         ORDER BY index_key.position
+       ) AS columns,
+       pg_get_expr(index_state.indpred,index_state.indrelid) AS predicate
+     FROM pg_index AS index_state
+     WHERE index_state.indexrelid=
+       to_regclass('crawler.ux_crawler_migration_system_retry_active_candidate')
+       AND index_state.indrelid=to_regclass('crawler.migration_system_retry_items')`,
+  );
+  const activeIndex = activeSystemRetryIndex.rows[0];
+  state.migration_system_retry_active_candidate_index = Boolean(
+    activeIndex?.is_unique
+      && activeIndex?.is_valid
+      && activeIndex?.is_ready
+      && Number(activeIndex?.attribute_count) === 1
+      && Number(activeIndex?.key_attribute_count) === 1
+      && Array.isArray(activeIndex?.columns)
+      && activeIndex.columns.length === 1
+      && activeIndex.columns[0] === "candidate_id"
+      && normalizedCheckExpression(activeIndex?.predicate)
+        === normalizedCheckExpression(ACTIVE_SYSTEM_RETRY_PREDICATE),
+  );
   const missing = Object.entries(state)
     .filter(([, present]) => present !== true)
     .map(([name]) => name);
@@ -326,6 +484,16 @@ async function main() {
       throw new Error(
         `Channel count mismatch: expected ${guarded.expectedChannelCount}, got ${actual.channel_count}`,
       );
+    }
+    const identity = await verifyCrawlerWriterDatabase(
+      client.query.bind(client),
+      {
+        EXPECTED_CRAWLER_DATABASE: guarded.expectedDatabase,
+        FORBIDDEN_CRAWLER_DATABASE: guarded.forbiddenDatabase,
+      },
+    );
+    if (identity.database !== guarded.expectedDatabase) {
+      throw new Error(`database confirmation mismatch: ${identity.database}`);
     }
     await client.query(ddl);
     await verifyRotaWorkerV2Schema(client);

@@ -89,7 +89,9 @@ test("Rota Worker V2 schema block applies transactionally and is idempotent", {
     `ALTER TABLE crawler.channel_runs
      DROP COLUMN IF EXISTS detail_active_job_id,
      DROP COLUMN IF EXISTS detail_active_job_attempt,
-     DROP COLUMN IF EXISTS detail_active_scope_key`,
+     DROP COLUMN IF EXISTS detail_active_scope_key,
+     DROP COLUMN IF EXISTS detail_job_epoch,
+     DROP COLUMN IF EXISTS detail_active_job_epoch`,
   );
   await client.query(
     "ALTER TABLE crawler.channel_execution_attempts DROP COLUMN IF EXISTS dispatch_generation",
@@ -213,6 +215,18 @@ test("Rota Worker V2 schema block applies transactionally and is idempotent", {
            AND column_name='detail_active_scope_key' AND data_type='text'
        ) AS content_detail_active_scope_key,
        EXISTS (
+         SELECT 1 FROM information_schema.columns
+         WHERE table_schema='crawler' AND table_name='channel_runs'
+           AND column_name='detail_job_epoch' AND data_type='bigint'
+           AND is_nullable='NO' AND column_default='0'
+       ) AS content_detail_job_epoch,
+       EXISTS (
+         SELECT 1 FROM information_schema.columns
+         WHERE table_schema='crawler' AND table_name='channel_runs'
+           AND column_name='detail_active_job_epoch' AND data_type='bigint'
+           AND is_nullable='YES' AND column_default IS NULL
+       ) AS content_detail_active_job_epoch,
+       EXISTS (
          SELECT 1 FROM pg_constraint
          WHERE conrelid=to_regclass('crawler.channel_runs')
            AND conname='channel_runs_detail_active_job_check'
@@ -243,6 +257,17 @@ test("Rota Worker V2 schema block applies transactionally and is idempotent", {
            AND conname='channel_execution_attempts_dispatch_generation_check'
            AND contype='c' AND convalidated
        ) AS execution_dispatch_generation_check,
+       EXISTS (
+         SELECT 1 FROM information_schema.columns
+         WHERE table_schema='crawler' AND table_name='migration_retry_intents'
+           AND column_name='terminal_job_attempt' AND data_type='bigint'
+       ) AS retry_intent_terminal_job_attempt,
+       EXISTS (
+         SELECT 1 FROM pg_constraint
+         WHERE conrelid=to_regclass('crawler.migration_retry_intents')
+           AND conname='migration_retry_intents_terminal_job_attempt_check'
+           AND contype='c' AND convalidated
+       ) AS retry_intent_terminal_job_attempt_check,
        to_regclass('crawler.ux_crawler_migration_retry_intents_active_candidate') IS NOT NULL
          AS active_retry_intent_key,
        to_regclass('crawler.idx_crawler_migration_retry_intents_status') IS NOT NULL
@@ -291,12 +316,16 @@ test("Rota Worker V2 schema block applies transactionally and is idempotent", {
     content_detail_active_job_id: true,
     content_detail_active_job_attempt: true,
     content_detail_active_scope_key: true,
+    content_detail_job_epoch: true,
+    content_detail_active_job_epoch: true,
     content_detail_active_job_check: true,
     candidate_active_job_attempt: true,
     candidate_active_job_check: true,
     channel_snapshot_outbox_key: true,
     execution_dispatch_generation: true,
     execution_dispatch_generation_check: true,
+    retry_intent_terminal_job_attempt: true,
+    retry_intent_terminal_job_attempt_check: true,
     active_retry_intent_key: true,
     retry_intent_status_index: true,
     active_system_retry_key: true,
@@ -439,6 +468,19 @@ test("Rota Worker V2 schema block applies transactionally and is idempotent", {
   await client.query("ROLLBACK");
 
   await client.query("BEGIN");
+  await client.query(
+    `ALTER TABLE crawler.migration_system_retry_items
+     DROP CONSTRAINT migration_system_retry_items_recovery_agent_active_job_check,
+     ADD CONSTRAINT migration_system_retry_items_recovery_agent_active_job_check
+       CHECK (recovery_agent_job_epoch >= 0 OR recovery_agent_active_job_attempt > 0 OR TRUE)`,
+  );
+  await assert.rejects(
+    verifyRotaWorkerV2Schema(client),
+    /missing: migration_system_retry_recovery_agent_active_job_check/,
+  );
+  await client.query("ROLLBACK");
+
+  await client.query("BEGIN");
   await assert.rejects(
     client.query(
       `UPDATE crawler.migration_system_retry_items
@@ -502,10 +544,41 @@ test("Rota Worker V2 schema block applies transactionally and is idempotent", {
   await client.query("ROLLBACK");
 
   await client.query("BEGIN");
+  await client.query(
+    `DROP INDEX crawler.ux_crawler_migration_system_retry_active_candidate;
+     CREATE INDEX ux_crawler_migration_system_retry_active_candidate
+       ON crawler.migration_system_retry_items (system_retry_id)
+       WHERE status IN ('pending','dispatched')`,
+  );
+  await assert.rejects(
+    verifyRotaWorkerV2Schema(client),
+    /missing: migration_system_retry_active_candidate_index/,
+  );
+  await client.query("ROLLBACK");
+
+  await client.query("BEGIN");
   await client.query("DROP INDEX crawler.idx_crawler_migration_system_retry_status");
   await assert.rejects(
     verifyRotaWorkerV2Schema(client),
     /missing: migration_system_retry_status_index/,
+  );
+  await client.query("ROLLBACK");
+
+  await client.query("BEGIN");
+  await client.query(
+    `ALTER TABLE crawler.query_dispatch_batches
+     DROP CONSTRAINT query_dispatch_batches_completion_count_check,
+     ADD CONSTRAINT query_dispatch_batches_completion_count_check CHECK (
+       failed_channel_count >= 0
+       OR total_channel_count >= 0
+       OR accepted_channel_count >= 0
+       OR rejected_channel_count >= 0
+       OR TRUE
+     )`,
+  );
+  await assert.rejects(
+    verifyRotaWorkerV2Schema(client),
+    /missing: query_dispatch_batch_completion_count_check/,
   );
   await client.query("ROLLBACK");
 
@@ -523,11 +596,39 @@ test("Rota Worker V2 schema block applies transactionally and is idempotent", {
   await client.query("BEGIN");
   await client.query(
     `ALTER TABLE crawler.query_dispatch_batches
+     DROP CONSTRAINT query_dispatch_batches_outcome_check,
+     ADD CONSTRAINT query_dispatch_batches_outcome_check CHECK (
+       outcome IS NULL OR outcome='completed_with_system_failures' OR TRUE
+     )`,
+  );
+  await assert.rejects(
+    verifyRotaWorkerV2Schema(client),
+    /missing: query_dispatch_batch_outcome_check/,
+  );
+  await client.query("ROLLBACK");
+
+  await client.query("BEGIN");
+  await client.query(
+    `ALTER TABLE crawler.query_dispatch_batches
      DROP CONSTRAINT query_dispatch_batches_outcome_check`,
   );
   await assert.rejects(
     verifyRotaWorkerV2Schema(client),
     /missing: query_dispatch_batch_outcome_check/,
+  );
+  await client.query("ROLLBACK");
+
+  await client.query("BEGIN");
+  await client.query(
+    `ALTER TABLE crawler.youtube_api_batches
+     DROP CONSTRAINT youtube_api_batches_active_job_check,
+     ADD CONSTRAINT youtube_api_batches_active_job_check CHECK (
+       active_job_id IS NULL OR active_job_attempt > 0 OR TRUE
+     )`,
+  );
+  await assert.rejects(
+    verifyRotaWorkerV2Schema(client),
+    /missing: data_api_batch_active_job_check/,
   );
   await client.query("ROLLBACK");
 
@@ -574,8 +675,45 @@ test("Rota Worker V2 schema block applies transactionally and is idempotent", {
 
   await client.query("BEGIN");
   await client.query(
+    "ALTER TABLE crawler.channel_runs DROP COLUMN detail_active_job_epoch",
+  );
+  await assert.rejects(
+    verifyRotaWorkerV2Schema(client),
+    /missing: content_detail_active_job_epoch, content_detail_active_job_check/,
+  );
+  await client.query("ROLLBACK");
+
+  await client.query("BEGIN");
+  await client.query(
+    "ALTER TABLE crawler.channel_runs DROP COLUMN detail_job_epoch",
+  );
+  await assert.rejects(
+    verifyRotaWorkerV2Schema(client),
+    /missing: content_detail_job_epoch, content_detail_active_job_check/,
+  );
+  await client.query("ROLLBACK");
+
+  await client.query("BEGIN");
+  await client.query(
     `ALTER TABLE crawler.channel_runs
      DROP CONSTRAINT channel_runs_detail_active_job_check`,
+  );
+  await assert.rejects(
+    verifyRotaWorkerV2Schema(client),
+    /missing: content_detail_active_job_check/,
+  );
+  await client.query("ROLLBACK");
+
+  await client.query("BEGIN");
+  await client.query(
+    `ALTER TABLE crawler.channel_runs
+     DROP CONSTRAINT channel_runs_detail_active_job_check,
+     ADD CONSTRAINT channel_runs_detail_active_job_check CHECK (
+       detail_job_epoch >= 0
+       OR detail_active_job_attempt > 0
+       OR detail_active_scope_key IS NOT NULL
+       OR detail_active_job_epoch = detail_job_epoch
+     )`,
   );
   await assert.rejects(
     verifyRotaWorkerV2Schema(client),

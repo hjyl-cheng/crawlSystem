@@ -10,6 +10,10 @@ import {
   lockContentDetailExecution,
   prepareContentDetailExecutionRequeue,
 } from "../src/contentDetailExecutionFence.js";
+import {
+  lockMigrationSystemRetryFinalizeJobFence,
+  migrationSystemRetryFinalizeJobFence,
+} from "../src/migrationSystemRetryRecovery.js";
 import { crawlerRuntimeSchema } from "../src/publicationCurrentSchema.js";
 
 const { Client } = pg;
@@ -41,9 +45,22 @@ function detailJob({
   systemRetryId = null,
   candidateId = null,
   dispatchGeneration = null,
+  jobEpoch = 0,
+  originCandidateId = null,
+  originDispatchGeneration = null,
+  originSnapshotJobId = null,
+  originSnapshotJobAttempt = null,
 }) {
+  const origin = originCandidateId == null
+    ? {}
+    : {
+        origin_candidate_id: originCandidateId,
+        origin_dispatch_generation: originDispatchGeneration,
+        origin_snapshot_job_id: originSnapshotJobId,
+        origin_snapshot_job_attempt: originSnapshotJobAttempt,
+      };
   return {
-    id: `content-detail__${runId}`,
+    id: `content-detail__${runId}${originCandidateId == null ? "" : `__g${originDispatchGeneration}__a${originSnapshotJobAttempt}`}`,
     name: "content-detail-batch",
     queueName: "youtube-content-detail",
     attemptsStarted,
@@ -51,6 +68,8 @@ function detailJob({
       run_id: runId,
       channel_id: channelId,
       pipeline_cycle_id: pipelineCycleId,
+      content_detail_job_epoch: jobEpoch,
+      ...origin,
       ...(systemRetryId == null
         ? {}
         : {
@@ -62,6 +81,102 @@ function detailJob({
     },
   };
 }
+
+test("queued Content Detail follows the originating Snapshot attempt Fence", {
+  skip: databaseUrl ? false : "MANAGED_JOB_TEST_DATABASE_URL is not configured",
+  timeout: 30_000,
+}, async (t) => {
+  assertDedicatedLocalTestDatabase(databaseUrl);
+  const client = new Client({ connectionString: databaseUrl, connectionTimeoutMillis: 3000 });
+  let schemaInitialized = false;
+  t.after(async () => {
+    if (schemaInitialized) {
+      await client.query("DROP SCHEMA IF EXISTS publication CASCADE").catch(() => {});
+      await client.query("DROP SCHEMA IF EXISTS crawler CASCADE").catch(() => {});
+    }
+    await client.end().catch(() => {});
+  });
+
+  await client.connect();
+  await client.query("DROP SCHEMA IF EXISTS publication CASCADE");
+  await client.query("DROP SCHEMA IF EXISTS crawler CASCADE");
+  const schema = await readFile(new URL("../src/schema.sql", import.meta.url), "utf8");
+  await client.query(crawlerRuntimeSchema(schema));
+  schemaInitialized = true;
+
+  const candidateId = 481;
+  const channelId = "UCqueuedDetailOriginFence";
+  const batchId = "queued-detail-origin-fence";
+  const runId = "run-queued-detail-origin-fence";
+  const snapshotJobId = "channel-snapshot-origin-fence";
+  await client.query(
+    `INSERT INTO crawler.query_dispatch_batches (
+       dispatch_batch_id,pipeline_cycle_id,status,discovered_candidate_count,total_channel_count
+     ) VALUES ($1,$1,'running',1,1)`,
+    [batchId],
+  );
+  await client.query(
+    `INSERT INTO crawler.channel_candidates (
+       candidate_id,dispatch_batch_id,pipeline_cycle_id,channel_id,channel_url,status,
+       snapshot_dispatch_generation,snapshot_active_job_id,snapshot_active_job_attempt,
+       snapshot_json,source_json,accepted_at,validation_finished_at
+     ) VALUES ($1,$2,$2,$3,$4,'accepted',1,$5,2,'{}'::jsonb,'{}'::jsonb,now(),now())`,
+    [candidateId, batchId, channelId, `https://www.youtube.com/channel/${channelId}`, snapshotJobId],
+  );
+  await transaction(client, async (tx) => {
+    await tx.query(
+      `INSERT INTO crawler.channels (
+         channel_id,channel_url,title,subscriber_count,status,ready_for_agent,
+         agent_status,latest_run_id,registry_promotion_candidate_id,registry_promotion_run_id
+       ) VALUES ($1,$2,'Queued Detail Origin Fence',2000,'active',true,'pending',$3,$4,$3)`,
+      [channelId, `https://www.youtube.com/channel/${channelId}`, runId, candidateId],
+    );
+    await tx.query(
+      `INSERT INTO crawler.channel_runs (
+         run_id,channel_id,candidate_id,status,crawl_mode,detail_status,
+         expected_content_count,started_at,result_json
+       ) VALUES ($1,$2,$3,'waiting_detail','full','queued',1,now(),$4::jsonb)`,
+      [runId, channelId, candidateId, JSON.stringify({ pipeline_cycle_id: batchId })],
+    );
+  });
+
+  const queuedFence = (originAttempt) => contentDetailExecutionFence(detailJob({
+    runId,
+    channelId,
+    pipelineCycleId: batchId,
+    attemptsStarted: 1,
+    originCandidateId: candidateId,
+    originDispatchGeneration: 1,
+    originSnapshotJobId: snapshotJobId,
+    originSnapshotJobAttempt: originAttempt,
+  }));
+  const stale = queuedFence(1);
+  const current = queuedFence(2);
+  assert.equal(
+    await transaction(client, (tx) => claimContentDetailExecution(tx, stale)),
+    null,
+    "attempt 1 Detail cannot write after Snapshot attempt 2 takes over",
+  );
+  assert.ok(await transaction(client, (tx) => claimContentDetailExecution(tx, current)));
+
+  await client.query(
+    `UPDATE crawler.channel_runs
+     SET detail_active_job_id=NULL,detail_active_job_attempt=NULL,
+         detail_active_scope_key=NULL,detail_active_job_epoch=NULL
+     WHERE run_id=$1`,
+    [runId],
+  );
+  await client.query(
+    `UPDATE crawler.channel_candidates
+     SET snapshot_active_job_id=NULL,snapshot_active_job_attempt=NULL
+     WHERE candidate_id=$1`,
+    [candidateId],
+  );
+  assert.ok(
+    await transaction(client, (tx) => claimContentDetailExecution(tx, current)),
+    "the queued Detail remains valid after its parent Snapshot completes",
+  );
+});
 
 test("an inline stale Detail result stops the parent Candidate before follow-up writes", () => {
   const candidateAttemptFence = {
@@ -84,6 +199,78 @@ test("an inline stale Detail result stops the parent Candidate before follow-up 
     assertInlineContentDetailExecutionCurrent(current, candidateAttemptFence),
     current,
   );
+});
+
+test("Migration recovery Content Detail uses Candidate to Retry to Run to Channel lock order", async () => {
+  const statements = [];
+  const job = detailJob({
+    runId: "run-lock-order",
+    channelId: "UClockorder",
+    pipelineCycleId: "batch-lock-order",
+    attemptsStarted: 1,
+    systemRetryId: 19,
+    candidateId: 482,
+    dispatchGeneration: 2,
+  });
+  const fence = contentDetailExecutionFence(job);
+  const client = {
+    async query(sql, params) {
+      statements.push({ sql: String(sql), params });
+      if (String(sql).includes("content-detail-lock:candidate")) {
+        return { rows: [{
+          candidate_id: "482",
+          status: "accepted",
+          dispatch_batch_id: "batch-lock-order",
+          pipeline_cycle_id: "batch-lock-order",
+          snapshot_dispatch_generation: "2",
+          snapshot_active_job_id: null,
+          snapshot_active_job_attempt: null,
+        }], rowCount: 1 };
+      }
+      if (String(sql).includes("content-detail-lock:retry")) {
+        return { rows: [{
+          system_retry_id: "19",
+          candidate_id: "482",
+          failed_dispatch_batch_id: "batch-lock-order",
+          failed_dispatch_generation: "1",
+          status: "dispatched",
+          retry_dispatch_generation: "2",
+          recovery_run_id: "run-lock-order",
+        }], rowCount: 1 };
+      }
+      if (String(sql).includes("content-detail-lock:run")) {
+        return { rows: [{
+          run_id: "run-lock-order",
+          channel_id: "UClockorder",
+          candidate_id: "482",
+          status: "waiting_detail",
+          detail_status: "queued",
+          result_json: {
+            dispatch_batch_id: "batch-lock-order",
+            pipeline_cycle_id: "batch-lock-order",
+          },
+          detail_active_job_id: null,
+          detail_active_job_attempt: null,
+          detail_active_scope_key: null,
+          detail_job_epoch: "0",
+          detail_active_job_epoch: null,
+        }], rowCount: 1 };
+      }
+      if (String(sql).includes("content-detail-lock:channel")) {
+        return { rows: [{ latest_run_id: "run-lock-order", channel_status: "active" }], rowCount: 1 };
+      }
+      if (String(sql).includes("UPDATE crawler.channel_runs")) {
+        return { rows: [{ run_id: "run-lock-order" }], rowCount: 1 };
+      }
+      throw new Error(`unexpected SQL: ${sql}`);
+    },
+  };
+
+  assert.ok(await claimContentDetailExecution(client, fence));
+  assert.match(statements[0].sql, /content-detail-lock:candidate[\s\S]*FOR UPDATE/);
+  assert.match(statements[1].sql, /content-detail-lock:retry[\s\S]*FOR UPDATE/);
+  assert.match(statements[2].sql, /content-detail-lock:run[\s\S]*FOR UPDATE/);
+  assert.match(statements[3].sql, /content-detail-lock:channel[\s\S]*FOR UPDATE/);
 });
 
 async function seedCandidate(client, {
@@ -220,6 +407,38 @@ test("Content Detail ownership rejects superseded ordinary and stalled execution
     [systemRetryId],
   );
 
+  const finalizeFence = migrationSystemRetryFinalizeJobFence({
+    name: "finalize-channel",
+    data: {
+      migration_system_retry_id: systemRetryId,
+      candidate_id: candidateId,
+      dispatch_generation: 2,
+      dispatch_batch_id: batchId,
+      run_id: recoveryRunId,
+      channel_id: channelId,
+      source_revision: "content-detail-lock-order-test",
+    },
+  });
+  const ordinaryClient = new Client({ connectionString: databaseUrl, connectionTimeoutMillis: 3000 });
+  const finalizeClient = new Client({ connectionString: databaseUrl, connectionTimeoutMillis: 3000 });
+  await Promise.all([ordinaryClient.connect(), finalizeClient.connect()]);
+  try {
+    await Promise.all([
+      transaction(ordinaryClient, async (tx) => {
+        await tx.query("SET LOCAL deadlock_timeout='50ms'");
+        await tx.query("SET LOCAL statement_timeout='3s'");
+        return lockContentDetailExecution(tx, ordinary);
+      }),
+      transaction(finalizeClient, async (tx) => {
+        await tx.query("SET LOCAL deadlock_timeout='50ms'");
+        await tx.query("SET LOCAL statement_timeout='3s'");
+        return lockMigrationSystemRetryFinalizeJobFence(tx, finalizeFence);
+      }),
+    ]);
+  } finally {
+    await Promise.all([ordinaryClient.end(), finalizeClient.end()]);
+  }
+
   const firstRecovery = contentDetailExecutionFence(detailJob({
     runId: recoveryRunId,
     channelId,
@@ -244,7 +463,7 @@ test("Content Detail ownership rejects superseded ordinary and stalled execution
       firstRecovery,
       { findExistingJob: async () => null },
     )),
-    { ready: true, cleared: false, existingJob: null },
+    { ready: true, cleared: false, existingJob: null, jobEpoch: 0 },
     "a recovery Job may supersede a different ordinary execution scope without clearing it",
   );
   assert.ok(await transaction(client, (tx) => claimContentDetailExecution(tx, firstRecovery)));
@@ -266,6 +485,7 @@ test("Content Detail ownership rejects superseded ordinary and stalled execution
     ready: false,
     cleared: false,
     existingJob: representedJob,
+    jobEpoch: 0,
   });
   assert.ok(
     await transaction(client, (tx) => lockContentDetailExecution(tx, takeover)),
@@ -281,20 +501,39 @@ test("Content Detail ownership rejects superseded ordinary and stalled execution
     ready: true,
     cleared: true,
     existingJob: null,
+    jobEpoch: 1,
   });
+  const recreatedRecovery = contentDetailExecutionFence(detailJob({
+    runId: recoveryRunId,
+    channelId,
+    pipelineCycleId: batchId,
+    attemptsStarted: 1,
+    systemRetryId,
+    candidateId,
+    dispatchGeneration: 2,
+    jobEpoch: prepared.jobEpoch,
+  }));
+  assert.equal(
+    await transaction(client, (tx) => lockContentDetailExecution(tx, takeover)),
+    null,
+    "advancing the Job epoch must fence the terminal incarnation",
+  );
   assert.ok(
-    await transaction(client, (tx) => claimContentDetailExecution(tx, firstRecovery)),
+    await transaction(client, (tx) => claimContentDetailExecution(tx, recreatedRecovery)),
     "a terminal Job recreated at attemptsStarted=1 must claim after its orphan is cleared",
   );
 
   const persisted = (await client.query(
-    `SELECT detail_active_job_id,detail_active_job_attempt
+    `SELECT detail_active_job_id,detail_active_job_attempt,
+            detail_job_epoch,detail_active_job_epoch
      FROM crawler.channel_runs WHERE run_id=$1`,
     [recoveryRunId],
   )).rows[0];
   assert.deepEqual(persisted, {
     detail_active_job_id: `content-detail__${recoveryRunId}`,
     detail_active_job_attempt: "1",
+    detail_job_epoch: "1",
+    detail_active_job_epoch: "1",
   });
 });
 

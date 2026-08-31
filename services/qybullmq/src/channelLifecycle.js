@@ -1,6 +1,7 @@
 import { retractPublicationChannel } from "./publicationReconciler.js";
 import { normalizeChannelCandidateAttemptFence } from "./channelCandidateAttemptFence.js";
 import { StaleChannelCandidateAttemptError } from "./channelCandidateAttemptMutations.js";
+import { lockPublicationChannelMutation } from "./publicationChannelMutationLock.js";
 
 const TERMINAL_EVIDENCE_MAX_LENGTH = 2000;
 
@@ -98,6 +99,70 @@ export async function markChannelRemoved(client, {
     .slice(0, TERMINAL_EVIDENCE_MAX_LENGTH);
   const requestedAt = timestamp(observedAt);
 
+  let normalizedCandidateId = null;
+  let attemptFence = null;
+  if (candidateId != null) {
+    normalizedCandidateId = Number(candidateId);
+    if (!Number.isSafeInteger(normalizedCandidateId) || normalizedCandidateId <= 0) {
+      throw new TypeError("candidateId must be a positive integer");
+    }
+    attemptFence = candidateAttemptFence == null
+      ? null
+      : normalizeChannelCandidateAttemptFence(candidateAttemptFence, {
+          candidateId: normalizedCandidateId,
+        });
+  }
+
+  await lockPublicationChannelMutation(client, normalizedChannelId);
+  if (normalizedCandidateId != null) {
+    const lockedCandidate = await client.query(
+      `/* channel-removal-lock:candidate */
+       SELECT candidate_id
+       FROM crawler.channel_candidates
+       WHERE candidate_id=$1
+         AND (
+           $2::bigint IS NULL
+           OR (
+             snapshot_dispatch_generation=$2
+             AND snapshot_active_job_id=$3
+             AND snapshot_active_job_attempt=$4
+           )
+         )
+       ORDER BY candidate_id
+       FOR UPDATE`,
+      [
+        normalizedCandidateId,
+        attemptFence?.dispatchGeneration ?? null,
+        attemptFence?.jobId ?? null,
+        attemptFence?.bullmqAttempt ?? null,
+      ],
+    );
+    if (attemptFence != null && Number(lockedCandidate.rowCount || 0) !== 1) {
+      throw new StaleChannelCandidateAttemptError(
+        "lock Channel removal Candidate",
+        normalizedCandidateId,
+      );
+    }
+  }
+  await client.query(
+    `/* channel-removal-lock:runs */
+     SELECT run_id
+     FROM crawler.channel_runs
+     WHERE channel_id=$1
+     ORDER BY run_id
+     FOR UPDATE`,
+    [normalizedChannelId],
+  );
+  await client.query(
+    `/* channel-removal-lock:channel */
+     SELECT channel_id
+     FROM crawler.channels
+     WHERE channel_id=$1
+     ORDER BY channel_id
+     FOR UPDATE`,
+    [normalizedChannelId],
+  );
+
   const channel = await client.query(
     `UPDATE crawler.channels
      SET status='removed',reject_reason=COALESCE(removed_reason,$2),ready_for_agent=false,
@@ -129,16 +194,7 @@ export async function markChannelRemoved(client, {
   ).slice(0, TERMINAL_EVIDENCE_MAX_LENGTH);
 
   let candidate = { rowCount: 0, rows: [] };
-  if (candidateId != null) {
-    const normalizedCandidateId = Number(candidateId);
-    if (!Number.isSafeInteger(normalizedCandidateId) || normalizedCandidateId <= 0) {
-      throw new TypeError("candidateId must be a positive integer");
-    }
-    const attemptFence = candidateAttemptFence == null
-      ? null
-      : normalizeChannelCandidateAttemptFence(candidateAttemptFence, {
-          candidateId: normalizedCandidateId,
-        });
+  if (normalizedCandidateId != null) {
     candidate = await client.query(
       `UPDATE crawler.channel_candidates AS candidate
        SET status=CASE WHEN promotion.is_registry_promotion

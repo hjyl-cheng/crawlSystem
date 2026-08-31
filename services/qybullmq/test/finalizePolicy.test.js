@@ -170,6 +170,37 @@ test("finalize revision changes only when profile source data changes", () => {
   const enriched = structuredClone(first);
   enriched.contents[0].last_enriched_at = "2026-07-11T00:01:00Z";
   assert.notEqual(finalizeSourceRevision(first), finalizeSourceRevision(enriched));
+
+  const repaired = structuredClone(first);
+  repaired.run.result_json = {
+    final_repair: { parent_run_id: "run-parent", rounds: 2, mode: "channel" },
+  };
+  assert.notEqual(finalizeSourceRevision(first), finalizeSourceRevision(repaired));
+
+  const contentChangedWithoutClock = structuredClone(first);
+  contentChangedWithoutClock.contents[0].description = "newly enriched description";
+  assert.notEqual(
+    finalizeSourceRevision(first),
+    finalizeSourceRevision(contentChangedWithoutClock),
+  );
+
+  const candidateChangedWithoutClock = structuredClone(first);
+  candidateChangedWithoutClock.candidates[0].result_json = {
+    scope: { status: "excluded", reason: "older_than_max_age" },
+  };
+  assert.notEqual(
+    finalizeSourceRevision(first),
+    finalizeSourceRevision(candidateChangedWithoutClock),
+  );
+
+  const agentChangedWithoutClock = structuredClone(first);
+  agentChangedWithoutClock.agent.metrics_json = {
+    audience_profile_agent: { creator_language: { value: "Portuguese" } },
+  };
+  assert.notEqual(
+    finalizeSourceRevision(first),
+    finalizeSourceRevision(agentChangedWithoutClock),
+  );
 });
 
 test("finalize accepts only the channel latest run", () => {
@@ -208,9 +239,18 @@ test("a later complete source observation invalidates a ready_partial Finalize",
 });
 
 test("dispatch revision is stable for an unchanged queue source snapshot", () => {
-  const state = { channel_id: "UC1", run_id: "run-1", candidate_count: 30 };
+  const state = {
+    channel_id: "UC1",
+    run_id: "run-1",
+    candidate_count: 30,
+    run_final_repair: { rounds: 1 },
+  };
   assert.equal(finalizeDispatchRevision(state), finalizeDispatchRevision(structuredClone(state)));
   assert.notEqual(finalizeDispatchRevision(state), finalizeDispatchRevision({ ...state, candidate_count: 31 }));
+  assert.notEqual(finalizeDispatchRevision(state), finalizeDispatchRevision({
+    ...state,
+    run_final_repair: { rounds: 2 },
+  }));
 });
 
 test("Finalize reconciliation recognizes every in-flight run exactly once", () => {

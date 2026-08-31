@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   InMemoryMigrationRetryIntentRepository,
+  enterMigrationRetryIntentWorkerJob,
   MigrationRetryIntentConflictError,
   MigrationRetryIntentJobReconciler,
   MigrationRetryIntentStore,
@@ -151,6 +152,7 @@ test("Worker lifecycle updates are fenced by Intent, Job, and dispatch generatio
   };
   const job = {
     id: "channel-recovery__42__intent-1__g5",
+    attemptsStarted: 2,
     data: { retry_intent_id: "intent-1", dispatch_generation: 5 },
   };
 
@@ -158,7 +160,44 @@ test("Worker lifecycle updates are fenced by Intent, Job, and dispatch generatio
   assert.equal(await finishMigrationRetryIntent(query, job, { outcome: "finished" }), true);
   assert.equal(calls.length, 2);
   assert.deepEqual(calls[0].params, ["intent-1", job.id, 5]);
-  assert.deepEqual(calls[1].params, ["intent-1", job.id, 5, "finished", null]);
+  assert.match(calls[1].sql, /terminal_job_attempt=COALESCE\(terminal_job_attempt,\$6\)/);
+  assert.match(calls[1].sql, /status=\$4 AND terminal_job_attempt=\$6/);
+  assert.deepEqual(calls[1].params, ["intent-1", job.id, 5, "finished", null, 2]);
+});
+
+test("Worker entry replays only the exact finished Intent identity without executing", async () => {
+  const calls = [];
+  const job = {
+    id: "channel-recovery__42__intent-1__g5",
+    attemptsStarted: 3,
+    data: { retry_intent_id: "intent-1", dispatch_generation: 5 },
+  };
+  const result = await enterMigrationRetryIntentWorkerJob(async (sql, params) => {
+    calls.push({ sql, params });
+    if (sql.includes("UPDATE crawler.migration_retry_intents")) {
+      return { rowCount: 0, rows: [] };
+    }
+    return { rowCount: 1, rows: [{ terminal_job_attempt: "2" }] };
+  }, job);
+
+  assert.deepEqual(result, { action: "finished_replay", terminalJobAttempt: 2 });
+  assert.equal(calls.length, 2);
+  assert.match(calls[1].sql, /retry_intent_id=\$1 AND new_job_id=\$2 AND dispatch_generation=\$3/);
+  assert.match(calls[1].sql, /terminal_job_attempt<=\$4/);
+  assert.deepEqual(calls[1].params, ["intent-1", job.id, 5, 3]);
+});
+
+test("Worker entry fails closed when the finished Intent identity is not exact", async () => {
+  const result = await enterMigrationRetryIntentWorkerJob(async () => ({
+    rowCount: 0,
+    rows: [],
+  }), {
+    id: "channel-recovery__42__wrong-job__g5",
+    attemptsStarted: 3,
+    data: { retry_intent_id: "intent-1", dispatch_generation: 5 },
+  });
+
+  assert.deepEqual(result, { action: "rejected" });
 });
 
 test("terminal BullMQ Jobs replay a missed Recovery Intent lifecycle event", async () => {
@@ -190,6 +229,7 @@ test("terminal BullMQ Jobs replay a missed Recovery Intent lifecycle event", asy
   };
   const jobs = new Map(terminal.map((item) => [item.new_job_id, {
     id: item.new_job_id,
+    attemptsStarted: 2,
     data: {
       retry_intent_id: item.retry_intent_id,
       dispatch_generation: item.dispatch_generation,

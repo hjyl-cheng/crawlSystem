@@ -2,9 +2,29 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   finishCheckpointRepairExecution,
+  lockCheckpointRepairTarget,
   materializeCheckpointRepairRun,
   prepareCheckpointRepairCandidates,
 } from "../src/checkpointRepair.js";
+
+test("checkpoint repair locks its target Run before its Channel", async () => {
+  const calls = [];
+  const accepted = await lockCheckpointRepairTarget({
+    async query(sql, params) {
+      calls.push({ sql, params });
+      return { rowCount: 1, rows: [{}] };
+    },
+  }, {
+    targetRunId: "run:parent",
+    channelId: "UCtest",
+  });
+
+  assert.equal(accepted, true);
+  assert.match(calls[0].sql, /checkpoint-repair-lock:run/);
+  assert.match(calls[1].sql, /checkpoint-repair-lock:channel/);
+  assert.deepEqual(calls[0].params, ["run:parent", "UCtest"]);
+  assert.deepEqual(calls[1].params, ["UCtest"]);
+});
 
 test("checkpoint repair materializes a new budget Run without replacing the target Run", async () => {
   const calls = [];

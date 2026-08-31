@@ -353,6 +353,7 @@ async function productionFinalizeIdentity(query, { channelId, runId }) {
        c.updated_at AS channel_updated_at,
        r.detail_status,r.expected_content_count,
        r.result_json->>'pipeline_cycle_id' AS pipeline_cycle_id,
+       r.result_json->'final_repair' AS run_final_repair,
        (SELECT count(*)::int FROM crawler.content_candidates cc WHERE cc.run_id=$2)
          AS candidate_count,
        (SELECT max(cc.updated_at) FROM crawler.content_candidates cc WHERE cc.run_id=$2)

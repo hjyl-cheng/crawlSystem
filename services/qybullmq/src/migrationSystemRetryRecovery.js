@@ -3,7 +3,9 @@ import {
   SUCCESSFUL_PUBLICATION_FINALIZE_STATUSES,
 } from "./finalizePolicy.js";
 import {
+  claimContentDetailExecution,
   contentDetailExecutionFence,
+  lockContentDetailExecution,
   prepareContentDetailExecutionRequeue,
 } from "./contentDetailExecutionFence.js";
 import { queuesByRole, safeJobId } from "./queues.js";
@@ -19,6 +21,7 @@ const REPRESENTED_JOB_STATES = new Set([
 ]);
 const REPRESENTED_JOB_STATE_LIST = Object.freeze([...REPRESENTED_JOB_STATES]);
 const RECOVERY_SCAN_PATTERN = Object.freeze(["active", "active", "active", "active", "legacy"]);
+export const CONTENT_DETAIL_RECOVERY_MAX_JOB_EPOCH = 1;
 const QUEUE_ORDER = Object.freeze([
   queuesByRole.channelCrawl,
   queuesByRole.contentDetail,
@@ -49,6 +52,132 @@ function recoveryAgentJobEpoch(value) {
   return value == null ? 0 : nonNegativeInteger(value);
 }
 
+function contentDetailJobEpoch(value) {
+  return value == null ? 0 : nonNegativeInteger(value);
+}
+
+function retryableSystemFailureDecision(decision) {
+  return decision?.kind === "retryable_system_failure"
+    && decision?.evidence?.failure_type === "retryable_system_failure"
+    && decision?.evidence?.retryable === true;
+}
+
+function contentDetailRecoveryEvidence(row, expected) {
+  const jobEpoch = contentDetailJobEpoch(expected?.data?.content_detail_job_epoch);
+  if (jobEpoch == null || jobEpoch >= CONTENT_DETAIL_RECOVERY_MAX_JOB_EPOCH) return null;
+  const evidence = row?.failure_evidence?.content_detail_recovery?.[String(jobEpoch)] ?? null;
+  if (!evidence || typeof evidence !== "object") return null;
+  return evidence.job_id === expected.id
+    && Number(evidence.job_epoch) === jobEpoch
+    && evidence.retryable_system_failure === true
+    && evidence.requeue_allowed === true
+    ? evidence
+    : null;
+}
+
+export async function settleContentDetailRecoveryTerminalFailure(client, job, {
+  failureDecision,
+  errorMessage = null,
+  parserContractError = null,
+  maxJobEpoch = CONTENT_DETAIL_RECOVERY_MAX_JOB_EPOCH,
+} = {}) {
+  requiredPostgresClient(client);
+  const normalizedMaxEpoch = nonNegativeInteger(maxJobEpoch);
+  if (normalizedMaxEpoch == null) {
+    throw new TypeError("Content Detail recovery max Job epoch must be a non-negative integer");
+  }
+  const fence = contentDetailExecutionFence(job);
+  if (!fence.recovery) return Object.freeze({ action: "not_recovery" });
+  if (!(await lockContentDetailExecution(client, fence))) {
+    return Object.freeze({ action: "stale" });
+  }
+
+  const retryableSystemFailure = retryableSystemFailureDecision(failureDecision);
+  const budgetExhausted = retryableSystemFailure && fence.jobEpoch >= normalizedMaxEpoch;
+  const resolution = retryableSystemFailure
+    ? budgetExhausted ? "recovery_content_detail_retry_budget_exhausted" : null
+    : "recovery_content_detail_terminal_failure";
+  const evidence = {
+    job_id: fence.jobId,
+    job_attempt: fence.jobAttempt,
+    job_epoch: fence.jobEpoch,
+    failure_kind: text(failureDecision?.kind) ?? "unknown",
+    retry_mode: text(failureDecision?.retry_mode) ?? "unknown",
+    retryable_system_failure: retryableSystemFailure,
+    requeue_allowed: retryableSystemFailure && !budgetExhausted,
+    budget_exhausted: budgetExhausted,
+    error_message: text(errorMessage)?.slice(0, 2000) ?? null,
+    ...(parserContractError ? { parser_contract_error: parserContractError } : {}),
+  };
+  const settled = await client.query(
+     `WITH released AS (
+       UPDATE crawler.channel_runs
+       SET status=CASE WHEN $11::text IS NULL THEN 'waiting_detail' ELSE 'failed' END,
+           detail_status=CASE WHEN $11::text IS NULL THEN 'queued' ELSE 'failed' END,
+           error_message=CASE WHEN $11::text IS NULL THEN error_message ELSE $12::text END,
+           result_json=jsonb_set(
+             result_json,
+             '{content_detail_recovery_terminal}',
+             $10::jsonb,
+             true
+           ),
+           finished_at=CASE WHEN $11::text IS NULL THEN NULL ELSE now() END,
+           detail_active_job_id=NULL,detail_active_job_attempt=NULL,
+           detail_active_scope_key=NULL,detail_active_job_epoch=NULL,updated_at=now()
+       WHERE run_id=$5
+         AND detail_job_epoch=$6
+         AND detail_active_job_id=$7
+         AND detail_active_job_attempt=$8
+         AND detail_active_scope_key=$9
+         AND detail_active_job_epoch=$6
+       RETURNING run_id
+     )
+     UPDATE crawler.migration_system_retry_items retry
+     SET failure_evidence=jsonb_set(
+           retry.failure_evidence,
+           '{content_detail_recovery}',
+           COALESCE(retry.failure_evidence->'content_detail_recovery','{}'::jsonb)
+             || jsonb_build_object($6::text,$10::jsonb),
+           true
+         ),
+         status=CASE WHEN $11::text IS NULL THEN retry.status ELSE 'resolved' END,
+         resolution=COALESCE($11::text,retry.resolution),
+         resolved_at=CASE
+           WHEN $11::text IS NULL THEN retry.resolved_at
+           ELSE COALESCE(retry.resolved_at,now())
+         END,
+         updated_at=now()
+     FROM released
+     WHERE retry.system_retry_id=$1
+       AND retry.candidate_id=$2
+       AND retry.retry_dispatch_generation=$3
+       AND retry.failed_dispatch_batch_id=$4
+       AND retry.recovery_run_id=released.run_id
+       AND retry.status='dispatched'
+     RETURNING retry.system_retry_id,retry.status,retry.resolution`,
+    [
+      fence.migrationSystemRetryId,
+      fence.candidateId,
+      fence.dispatchGeneration,
+      fence.pipelineCycleId,
+      fence.runId,
+      fence.jobEpoch,
+      fence.jobId,
+      fence.jobAttempt,
+      fence.scopeKey,
+      JSON.stringify(evidence),
+      resolution,
+      evidence.error_message,
+    ],
+  );
+  if (settled.rowCount !== 1) return Object.freeze({ action: "stale" });
+  return Object.freeze({
+    action: resolution == null ? "requeue_allowed" : "resolved",
+    resolution,
+    evidence: Object.freeze(evidence),
+  });
+}
+
 function expectedGeneration(row) {
   return positiveInteger(row.retry_dispatch_generation)
     ?? positiveInteger(row.failed_dispatch_generation);
@@ -64,6 +193,7 @@ function finalizeDispatchState(row) {
     detail_status: row.run_detail_status ?? row.detail_status,
     expected_content_count: Number(row.expected_content_count ?? 0),
     pipeline_cycle_id: row.run_pipeline_cycle_id ?? row.pipeline_cycle_id,
+    run_final_repair: row.run_final_repair ?? null,
     candidate_count: Number(row.candidate_count ?? 0),
     candidate_updated_at: row.candidate_updated_at,
     content_count: Number(row.content_count ?? 0),
@@ -161,7 +291,9 @@ function representedContentDetailJob(job, expected) {
     && sameInteger(job.data?.dispatch_generation, expected.data.dispatch_generation)
     && sameText(job.data?.dispatch_batch_id, expected.data.dispatch_batch_id)
     && sameText(job.data?.pipeline_cycle_id, expected.data.pipeline_cycle_id)
-    && sameInteger(job.data?.content_max_age_days, expected.data.content_max_age_days);
+    && sameInteger(job.data?.content_max_age_days, expected.data.content_max_age_days)
+    && contentDetailJobEpoch(job.data?.content_detail_job_epoch)
+      === contentDetailJobEpoch(expected.data.content_detail_job_epoch);
 }
 
 function representedFinalizeJob(job, expected) {
@@ -475,6 +607,7 @@ export async function lockMigrationSystemRetryFinalizeJobFence(client, fence) {
             channel.status AS channel_status,channel.agent_status,
             channel.updated_at AS channel_updated_at,
             run.detail_status,run.expected_content_count,
+            run.result_json->'final_repair' AS run_final_repair,
             run.result_json->>'pipeline_cycle_id' AS pipeline_cycle_id,
             (SELECT count(*)::int
              FROM crawler.content_candidates source_candidate
@@ -631,6 +764,7 @@ export class MigrationSystemRetryRecoveryReconciler {
               retry.failed_dispatch_batch_id,retry.failed_dispatch_generation,
               retry.failed_job_id,retry.failed_job_attempt,retry.status,
               retry.retry_dispatch_generation,retry.resolution,retry.recovery_run_id,
+              retry.failure_evidence,
               retry.recovery_agent_job_epoch,
               candidate.dispatch_batch_id AS candidate_dispatch_batch_id,
               candidate.pipeline_cycle_id AS candidate_pipeline_cycle_id,
@@ -645,7 +779,8 @@ export class MigrationSystemRetryRecoveryReconciler {
               channel.updated_at AS channel_updated_at,
               run.run_id,run.channel_id AS run_channel_id,run.candidate_id AS run_candidate_id,
               run.status AS run_status,run.detail_status AS run_detail_status,
-              run.expected_content_count,
+              run.expected_content_count,run.detail_job_epoch AS run_content_detail_job_epoch,
+              run.result_json->'final_repair' AS run_final_repair,
               run.result_json->>'pipeline_cycle_id' AS run_pipeline_cycle_id,
               run.result_json->>'content_max_age_days' AS run_content_max_age_days,
               COALESCE(run.result_json->>'dispatch_batch_id',
@@ -968,6 +1103,7 @@ export class MigrationSystemRetryRecoveryReconciler {
   async ensureQueueJob(queueName, expected, matches, {
     adoptEquivalent = false,
     createJob = null,
+    allowTerminalRequeue = null,
   } = {}) {
     const queue = this.queues[queueName];
     if (!queue || typeof queue.getJob !== "function" || typeof queue.add !== "function") {
@@ -975,6 +1111,9 @@ export class MigrationSystemRetryRecoveryReconciler {
     }
     if (createJob != null && typeof createJob !== "function") {
       throw new TypeError("createJob must be a function");
+    }
+    if (allowTerminalRequeue != null && typeof allowTerminalRequeue !== "function") {
+      throw new TypeError("allowTerminalRequeue must be a function");
     }
     if (
       queueName === queuesByRole.agentBatch
@@ -1001,6 +1140,27 @@ export class MigrationSystemRetryRecoveryReconciler {
         return { created: false, represented: true, conflict: false, state, job: existing };
       }
       if (["completed", "failed"].includes(state)) {
+        const terminalDisposition = allowTerminalRequeue
+          ? await allowTerminalRequeue({
+              expected,
+              job: existing,
+              represented,
+              state,
+            })
+          : true;
+        const terminalAllowed = terminalDisposition === true
+          || terminalDisposition?.allow === true;
+        if (!terminalAllowed) {
+          return {
+            created: false,
+            represented,
+            conflict: false,
+            state,
+            terminalBlocked: true,
+            terminalSettled: terminalDisposition?.settled === true,
+            job: existing,
+          };
+        }
         try {
           await existing.remove();
           existing = null;
@@ -1019,7 +1179,7 @@ export class MigrationSystemRetryRecoveryReconciler {
       return { created: false, represented: false, conflict: true, job: existing };
     }
     const created = createJob
-      ? await createJob({ queue, expected })
+      ? await createJob({ queue, expected, terminalRequeued })
       : await queue.add(expected.name, expected.data, { jobId: expected.id });
     const job = created?.createdJob ?? created;
     const createdExpected = created?.createdExpected ?? expected;
@@ -1035,7 +1195,7 @@ export class MigrationSystemRetryRecoveryReconciler {
     };
   }
 
-  async createContentDetailRecoveryJob(expected) {
+  async createContentDetailRecoveryJob(expected, { advanceEpoch = false } = {}) {
     const queue = this.queues[queuesByRole.contentDetail];
     const fence = contentDetailExecutionFence({
       id: expected.id,
@@ -1043,13 +1203,49 @@ export class MigrationSystemRetryRecoveryReconciler {
       attemptsStarted: 1,
       data: expected.data,
     });
-    return this.withTransaction(async (client) => {
+    const prepared = await this.withTransaction(async (client) => {
       const prepared = await prepareContentDetailExecutionRequeue(client, fence, {
         findExistingJob: () => queue.getJob(expected.id),
+        advanceEpoch,
       });
-      if (prepared.existingJob) return prepared.existingJob;
-      if (!prepared.ready) return null;
-      return queue.add(expected.name, expected.data, { jobId: expected.id });
+      return prepared;
+    });
+    if (prepared?.jobEpoch == null) return null;
+    const createdExpected = this.contentDetailJobFromData(expected.data, prepared.jobEpoch);
+    if (prepared.existingJob) {
+      return { createdJob: prepared.existingJob, createdExpected };
+    }
+    if (!prepared.ready) return null;
+    const createdJob = await queue.add(
+      createdExpected.name,
+      createdExpected.data,
+      { jobId: createdExpected.id },
+    );
+    return { createdJob, createdExpected };
+  }
+
+  async settleUnclassifiedContentDetailTerminalJob(job) {
+    return this.withTransaction(async (client) => {
+      const options = {
+        failureDecision: {
+          kind: "retryable_system_failure",
+          retry_mode: "system_retry",
+          terminal: true,
+          evidence: {
+            failure_type: "retryable_system_failure",
+            retryable: true,
+            category: "worker",
+            code: "CONTENT_DETAIL_TERMINAL_EVIDENCE_MISSING",
+          },
+        },
+        errorMessage: text(job?.failedReason) ?? "terminal Content Detail evidence is missing",
+      };
+      let settled = await settleContentDetailRecoveryTerminalFailure(client, job, options);
+      if (settled.action !== "stale") return settled.action === "resolved";
+      const fence = contentDetailExecutionFence(job);
+      if (!(await claimContentDetailExecution(client, fence))) return false;
+      settled = await settleContentDetailRecoveryTerminalFailure(client, job, options);
+      return settled.action === "resolved";
     });
   }
 
@@ -1122,16 +1318,29 @@ export class MigrationSystemRetryRecoveryReconciler {
       }, row.recovery_agent_job_epoch);
   }
 
+  contentDetailJobFromData(dataValue, jobEpochValue) {
+    const data = { ...dataValue };
+    const runId = text(data.run_id);
+    const jobEpoch = contentDetailJobEpoch(jobEpochValue);
+    if (runId == null || jobEpoch == null) {
+      throw new TypeError("Migration recovery Content Detail Job epoch identity is incomplete");
+    }
+    data.content_detail_job_epoch = jobEpoch;
+    return {
+      id: this.jobIdFactory("content-detail", runId),
+      name: "content-detail-batch",
+      data,
+    };
+  }
+
   contentDetailJob(row) {
     const retryId = Number(row.system_retry_id);
     const generation = expectedGeneration(row);
     const runId = text(row.recovery_run_id);
     const batchId = text(row.failed_dispatch_batch_id);
     const contentMaxAgeDays = Number(row.run_content_max_age_days);
-    return {
-      id: this.jobIdFactory("content-detail", runId),
-      name: "content-detail-batch",
-      data: {
+    return this.contentDetailJobFromData(
+      {
         channel_id: text(row.candidate_channel_id),
         run_id: runId,
         migration_system_retry_id: retryId,
@@ -1145,7 +1354,8 @@ export class MigrationSystemRetryRecoveryReconciler {
           ? contentMaxAgeDays
           : null,
       },
-    };
+      row.run_content_detail_job_epoch,
+    );
   }
 
   finalizeJob(row) {
@@ -1270,10 +1480,24 @@ export class MigrationSystemRetryRecoveryReconciler {
             job,
             representedContentDetailJob,
             {
-              createJob: () => this.createContentDetailRecoveryJob(job),
+              createJob: ({ terminalRequeued }) => this.createContentDetailRecoveryJob(job, {
+                advanceEpoch: terminalRequeued,
+              }),
+              allowTerminalRequeue: async ({ job: terminalJob, represented, state }) => {
+                if (!represented) return true;
+                if (
+                  state === "failed"
+                  && contentDetailRecoveryEvidence(row, job) != null
+                ) return true;
+                const settled = await this.settleUnclassifiedContentDetailTerminalJob(
+                  terminalJob,
+                );
+                return { allow: false, settled };
+              },
             },
           );
           if (ensured.created) detailEnqueued += 1;
+          if (ensured.terminalSettled) resolved += 1;
           if (ensured.terminalRequeued) terminalJobsRequeued += 1;
           if (ensured.conflict) {
             queueConflicts += 1;
