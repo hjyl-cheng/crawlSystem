@@ -28,6 +28,7 @@ function job(id = "job-1") {
     id,
     queueName: "youtube-channel-crawl",
     attemptsMade: 0,
+    attemptsStarted: 1,
     data: { channel_id: "UCtest", run_id: "run-test", dispatch_generation: 3 },
   };
 }
@@ -103,6 +104,21 @@ test("channel runtime writes the persisted dispatch generation into execution au
   await runtime.run(context(currentProxy), async () => ({ ok: true }));
 
   assert.equal(calls.attempts[0].dispatchGeneration, 3);
+});
+
+test("channel runtime gives a stalled BullMQ restart a distinct zero-based audit attempt", async () => {
+  const currentProxy = { value: { ...proxy } };
+  const { runtime, calls } = runtimeFixture();
+  const stalledRestart = context(currentProxy);
+  stalledRestart.job = {
+    ...stalledRestart.job,
+    attemptsMade: 0,
+    attemptsStarted: 2,
+  };
+
+  await runtime.run(stalledRestart, async () => ({ ok: true }));
+
+  assert.equal(calls.attempts[0].jobAttempt, 1);
 });
 
 test("channel runtime rejects a missing dispatch generation before audit starts", async () => {

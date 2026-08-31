@@ -9,6 +9,7 @@ import {
 import { deferJobForSlotPause } from "./channelJobDeferral.js";
 import { DiscoverExecutionRuntimeAdapter } from "./discoverExecutionRuntimeAdapter.js";
 import { buildDemoChannelCrawlJob } from "./demoChannelDispatch.js";
+import { reconcileDispatchBatchCandidateState } from "./dispatchBatchCandidateState.js";
 import { evaluateDiscoveryChannelQualification } from "./channelQualification.js";
 import {
   classifyTerminalChannelError,
@@ -21,6 +22,7 @@ import {
   runChannelCandidateWorkerJobWithDurableSettlement,
 } from "./channelCandidateWorkerLifecycle.js";
 import { activeChannelCandidateAttemptFence } from "./channelCandidateAttemptFence.js";
+import { settleTerminalDataApiBatchJob } from "./dataApiBatchJobRecovery.js";
 import {
   persistChannelCandidateParserContractFailure,
   StaleChannelCandidateAttemptError,
@@ -228,6 +230,32 @@ function concurrencyFor(queueName) {
   return Number.isFinite(value) && value > 0 ? Math.floor(value) : 1;
 }
 
+function optionalPositiveWorkerOption(environmentName) {
+  const raw = String(process.env[environmentName] ?? "").trim();
+  if (!raw) return null;
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new Error(`${environmentName} must be a positive integer`);
+  }
+  return value;
+}
+
+function bullmqWorkerTimingOptions() {
+  const lockDuration = optionalPositiveWorkerOption("BULLMQ_LOCK_DURATION_MS");
+  const stalledInterval = optionalPositiveWorkerOption("BULLMQ_STALLED_INTERVAL_MS");
+  const skipLockRenewal = String(
+    process.env.BULLMQ_SKIP_LOCK_RENEWAL ?? "",
+  ).trim().toLowerCase();
+  if (skipLockRenewal && !["true", "false"].includes(skipLockRenewal)) {
+    throw new Error("BULLMQ_SKIP_LOCK_RENEWAL must be true or false");
+  }
+  return {
+    ...(lockDuration == null ? {} : { lockDuration }),
+    ...(stalledInterval == null ? {} : { stalledInterval }),
+    ...(skipLockRenewal === "true" ? { skipLockRenewal: true } : {}),
+  };
+}
+
 function errorMessage(error) {
   return String(error?.message ?? error ?? "unknown error");
 }
@@ -365,23 +393,7 @@ async function ensureDiscoveryDispatchBatch(dispatchBatchId, pipelineCycleId) {
 }
 
 async function refreshDispatchCandidateCounts(dispatchBatchId) {
-  await query(
-    `UPDATE crawler.query_dispatch_batches batch
-     SET discovered_candidate_count=stats.total,
-         accepted_channel_count=stats.accepted,
-         rejected_channel_count=stats.rejected,
-         updated_at=now()
-     FROM (
-       SELECT count(*)::int AS total,
-              count(*) FILTER (WHERE status='accepted')::int AS accepted,
-              count(*) FILTER (WHERE status='rejected')::int AS rejected
-       FROM crawler.channel_candidates
-       WHERE dispatch_batch_id=$1
-     ) stats
-     WHERE batch.dispatch_batch_id=$1
-       AND batch.status<>'completed'`,
-    [dispatchBatchId],
-  );
+  return reconcileDispatchBatchCandidateState(query, dispatchBatchId);
 }
 
 async function processDiscoverPage(job, preparedPage) {
@@ -1431,7 +1443,7 @@ function prepareManagedBusinessRun(job) {
 
 async function persistManagedRetryCheckpoint({ job, prepared, error, failure }) {
   const message = errorMessage(error).slice(0, 2000);
-  if (job.queueName === queuesByRole.channelCrawl) {
+  if ([queuesByRole.channelCrawl, queuesByRole.contentDetail].includes(job.queueName)) {
     const runId = String(prepared?.businessRunId ?? job.data?.run_id ?? "").trim();
     if (runId) {
       await query(
@@ -1621,11 +1633,35 @@ async function startWorkerRuntime() {
     const worker = new Worker(queueName, processJob, {
       connection: redisOptions,
       concurrency: concurrencyFor(queueName),
+      ...bullmqWorkerTimingOptions(),
       ...(bullmqPrefix ? { prefix: bullmqPrefix } : {}),
     });
 
     worker.on("completed", async (job) => {
       console.log(JSON.stringify({ event: "completed", queue: queueName, job_id: job.id, name: job.name }));
+      if (queueName === queuesByRole.dataApiBatch && job?.name === "youtube-data-api-batch") {
+        try {
+          const recovery = await settleTerminalDataApiBatchJob({
+            job,
+            withTransaction,
+            observationKind: "completed",
+          });
+          if (recovery.action === "settled") {
+            console.log(JSON.stringify({
+              event: "data_api_batch_execution_orphan_recovered",
+              job_id: job.id,
+              job_attempt: Number(job.attemptsStarted),
+              observation_kind: "completed",
+            }));
+          }
+        } catch (eventError) {
+          console.error(JSON.stringify({
+            event: "data_api_batch_execution_orphan_recovery_failed",
+            job_id: job.id,
+            error: eventError?.message || String(eventError),
+          }));
+        }
+      }
       if (queueName === queuesByRole.channelCrawl && job?.data?.candidate_id) {
         try {
           await completeChannelCandidateWorkerJob(query, job);
@@ -1694,6 +1730,25 @@ async function startWorkerRuntime() {
         });
         const maxAttempts = Math.max(1, Number(job?.opts?.attempts ?? 1));
         const attemptsMade = Number(job?.attemptsMade ?? 0);
+        if (queueName === queuesByRole.dataApiBatch && job?.name === "youtube-data-api-batch") {
+          const state = await job.getState();
+          if (state === "failed") {
+            const recovery = await settleTerminalDataApiBatchJob({
+              job,
+              withTransaction,
+              observationKind: "failed",
+              error,
+            });
+            if (recovery.action === "settled") {
+              console.log(JSON.stringify({
+                event: "data_api_batch_execution_orphan_recovered",
+                job_id: job.id,
+                job_attempt: Number(job.attemptsStarted),
+                observation_kind: "failed",
+              }));
+            }
+          }
+        }
         if (queueName === queuesByRole.channelIncremental && job?.data?.plan_id) {
           const terminalFailure = await recordIncrementalTerminalFailure({
             job,

@@ -38,6 +38,21 @@ test("Rota Worker V2 deployment extracts the complete additive integration schem
     block,
     /ALTER TABLE crawler\.migration_system_retry_items\s+ADD COLUMN IF NOT EXISTS failed_dispatch_batch_id TEXT/,
   );
+  assert.match(block, /recovery_run_id TEXT/);
+  assert.match(
+    block,
+    /ALTER TABLE crawler\.migration_system_retry_items\s+ADD COLUMN IF NOT EXISTS recovery_run_id TEXT/,
+  );
+  assert.match(
+    block,
+    /ADD CONSTRAINT migration_system_retry_items_recovery_run_id_fkey\s+FOREIGN KEY \(recovery_run_id\)\s+REFERENCES crawler\.channel_runs\(run_id\) ON DELETE RESTRICT/,
+  );
+  assert.match(block, /ADD COLUMN IF NOT EXISTS recovery_agent_active_job_id TEXT/);
+  assert.match(block, /ADD COLUMN IF NOT EXISTS recovery_agent_active_job_attempt BIGINT/);
+  assert.match(block, /ADD COLUMN IF NOT EXISTS recovery_agent_job_epoch BIGINT NOT NULL DEFAULT 0/);
+  assert.match(block, /migration_system_retry_items_recovery_agent_active_job_check/);
+  assert.match(block, /recovery_agent_active_job_attempt > 0/);
+  assert.match(block, /recovery_agent_job_epoch >= 0/);
   assert.doesNotMatch(
     block,
     /UPDATE crawler\.migration_system_retry_items[\s\S]*channel_candidates/,
@@ -49,6 +64,17 @@ test("Rota Worker V2 deployment extracts the complete additive integration schem
   assert.match(block, /ADD COLUMN IF NOT EXISTS outcome TEXT/);
   assert.match(block, /query_dispatch_batches_completion_count_check/);
   assert.match(block, /query_dispatch_batches_outcome_check/);
+  assert.match(
+    block,
+    /ALTER TABLE IF EXISTS crawler\.youtube_api_batches\s+ADD COLUMN IF NOT EXISTS active_job_id TEXT/,
+  );
+  assert.match(block, /ADD COLUMN IF NOT EXISTS active_job_attempt BIGINT/);
+  assert.match(block, /youtube_api_batches_active_job_check/);
+  assert.match(block, /ADD COLUMN IF NOT EXISTS detail_active_job_id TEXT/);
+  assert.match(block, /ADD COLUMN IF NOT EXISTS detail_active_job_attempt BIGINT/);
+  assert.match(block, /ADD COLUMN IF NOT EXISTS detail_active_scope_key TEXT/);
+  assert.match(block, /channel_runs_detail_active_job_check/);
+  assert.match(block, /detail_active_job_attempt > 0/);
   assert.match(block, /channel_execution_attempts[\s\S]*dispatch_generation BIGINT/);
   assert.match(block, /UNIQUE \(candidate_id,dispatch_generation\)/);
   assert.match(block, /ux_crawler_migration_retry_intents_active_candidate/);
@@ -70,11 +96,29 @@ test("Crawler bootstrap includes the Candidate attempt Fence shape", async () =>
   assert.match(bootstrap, /channel_execution_attempts[\s\S]*dispatch_generation bigint/);
   assert.match(bootstrap, /CREATE TABLE crawler\.migration_system_retry_items/);
   assert.match(bootstrap, /failed_dispatch_batch_id text NOT NULL/);
+  assert.match(bootstrap, /recovery_run_id text/);
+  assert.match(
+    bootstrap,
+    /CONSTRAINT migration_system_retry_items_recovery_run_id_fkey FOREIGN KEY \(recovery_run_id\) REFERENCES crawler\.channel_runs\(run_id\) ON DELETE RESTRICT/,
+  );
+  assert.match(bootstrap, /recovery_agent_active_job_id text/);
+  assert.match(bootstrap, /recovery_agent_active_job_attempt bigint/);
+  assert.match(bootstrap, /recovery_agent_job_epoch bigint DEFAULT 0 NOT NULL/);
+  assert.match(bootstrap, /migration_system_retry_items_recovery_agent_active_job_check/);
+  assert.match(bootstrap, /recovery_agent_active_job_attempt > 0/);
+  assert.match(bootstrap, /recovery_agent_job_epoch >= 0/);
   assert.match(bootstrap, /ux_crawler_migration_system_retry_active_candidate/);
   assert.match(bootstrap, /idx_crawler_migration_system_retry_status/);
   assert.match(bootstrap, /failed_channel_count integer DEFAULT 0 NOT NULL/);
   assert.match(bootstrap, /total_channel_count integer DEFAULT 0 NOT NULL/);
   assert.match(bootstrap, /query_dispatch_batches_completion_count_check/);
+  assert.match(bootstrap, /active_job_id text/);
+  assert.match(bootstrap, /active_job_attempt bigint/);
+  assert.match(bootstrap, /youtube_api_batches_active_job_check/);
+  assert.match(bootstrap, /detail_active_job_id text/);
+  assert.match(bootstrap, /detail_active_job_attempt bigint/);
+  assert.match(bootstrap, /detail_active_scope_key text/);
+  assert.match(bootstrap, /channel_runs_detail_active_job_check/);
 });
 
 test("Rota Worker V2 deployment requires explicit database and row-count confirmation", () => {

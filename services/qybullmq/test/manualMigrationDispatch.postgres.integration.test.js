@@ -189,3 +189,85 @@ test("Target SQL materializes one immutable idempotent intent without a Source w
     await pool.end();
   }
 });
+
+test("a new Migration Batch can refresh counts after its first Candidate settles", {
+  skip: !integrationUrl,
+}, async () => {
+  const pool = new Pool({ connectionString: integrationUrl, max: 1 });
+  const client = await pool.connect();
+  const suffix = randomUUID().replaceAll("-", "");
+  const batchId = `manual-counts:${suffix}`;
+  const sourceSnapshot = (sourceCandidateId) => {
+    const channelId = `UCmanualcounts${sourceCandidateId}${suffix}`;
+    const raw = {
+      source_id: "integration-source-counts-v1",
+      source_database: "migration_source_test",
+      source_database_oid: "16384",
+      source_candidate_id: String(sourceCandidateId),
+      source_candidate_status: "discovered",
+      source_dispatch_batch_id: "legacy-source-batch",
+      channel_id: channelId,
+      channel_url: `https://www.youtube.com/channel/${channelId}`,
+      handle: null,
+      title: `Integration Source ${sourceCandidateId}`,
+      description: null,
+      avatar_url: null,
+      search_subscriber_count: "1200",
+      search_subscriber_count_text: "1.2K",
+      is_verified: false,
+      priority: 100,
+      snapshot_json: {},
+      source_json: { source: "legacy_results_db" },
+      source_created_at: "2026-08-01T00:00:00.000Z",
+      source_updated_at: "2026-08-02T00:00:00.000Z",
+    };
+    return { ...raw, snapshot_sha256: sourceSnapshotHash(raw) };
+  };
+
+  try {
+    await client.query("BEGIN");
+    await client.query(
+      `INSERT INTO crawler.settings (setting_key,value_json,updated_at)
+       VALUES ('query_scheduler',jsonb_build_object('status','stopped'),now())
+       ON CONFLICT (setting_key) DO UPDATE
+       SET value_json=jsonb_build_object('status','stopped'),updated_at=now()`,
+    );
+
+    const first = await prepareManualMigration(client, {
+      sourceSnapshot: sourceSnapshot(1),
+      batchId,
+      minSubscriberCount: 1000,
+    });
+    await client.query(
+      `UPDATE crawler.channel_candidates
+       SET status='accepted',accepted_at=now(),validation_finished_at=now()
+       WHERE candidate_id=$1`,
+      [first.candidate.candidate_id],
+    );
+
+    await prepareManualMigration(client, {
+      sourceSnapshot: sourceSnapshot(2),
+      batchId,
+      minSubscriberCount: 1000,
+    });
+
+    const refreshed = (await client.query(
+      `SELECT total_channel_count,discovered_candidate_count,
+              accepted_channel_count,rejected_channel_count,failed_channel_count
+       FROM crawler.query_dispatch_batches
+       WHERE dispatch_batch_id=$1`,
+      [batchId],
+    )).rows[0];
+    assert.deepEqual(refreshed, {
+      total_channel_count: 2,
+      discovered_candidate_count: 2,
+      accepted_channel_count: 1,
+      rejected_channel_count: 0,
+      failed_channel_count: 0,
+    });
+  } finally {
+    await client.query("ROLLBACK").catch(() => {});
+    client.release();
+    await pool.end();
+  }
+});

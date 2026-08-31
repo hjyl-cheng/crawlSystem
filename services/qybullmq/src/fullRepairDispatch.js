@@ -6,6 +6,7 @@ import {
   channelDispatchCapacity,
   channelQueuePressure,
 } from "./migrationDispatchPolicy.js";
+import { sharedCrawlerSchedulerActivationAdmission } from "./migrationSystemRetryAdmission.js";
 import { safeJobId } from "./queues.js";
 
 export const FULL_REPAIR_MANIFEST_VERSION = "publication-full-repair-manifest-v2";
@@ -332,10 +333,6 @@ export async function prepareFullRepairBatch(client, {
 } = {}) {
   if (!client || typeof client.query !== "function") throw new TypeError("database client is required");
   const normalizedPreparedAt = isoTimestamp(preparedAt, "preparedAt");
-  await client.query(
-    "SELECT pg_advisory_xact_lock(hashtext($1))",
-    [`publication-full-repair:${manifest.batch_id}`],
-  );
   const schedulerRows = await client.query(
     `SELECT value_json
      FROM crawler.settings
@@ -350,6 +347,21 @@ export async function prepareFullRepairBatch(client, {
     error.code = conflict.code;
     throw error;
   }
+  if (String(schedulerRows.rows[0].value_json?.status ?? "stopped") === "stopped") {
+    const admission = await sharedCrawlerSchedulerActivationAdmission(client);
+    if (!admission.allowed) {
+      const error = new Error(
+        "Migration system recovery must finish before starting Full Repair",
+      );
+      error.code = admission.code;
+      error.details = admission.active_system_retry;
+      throw error;
+    }
+  }
+  await client.query(
+    "SELECT pg_advisory_xact_lock(hashtext($1))",
+    [`publication-full-repair:${manifest.batch_id}`],
+  );
   const batchRows = await client.query(
     `SELECT status,result_json,started_at,finished_at
      FROM crawler.query_dispatch_batches

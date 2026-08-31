@@ -4,7 +4,9 @@ import {
   channelSnapshotQueueJobIdentityMatches,
   stageChannelSnapshotOutbox,
 } from "./channelSnapshotDispatch.js";
+import { reconcileDispatchBatchCandidateState } from "./dispatchBatchCandidateState.js";
 import { channelSnapshotPayload } from "./migrationDispatchPolicy.js";
+import { sharedCrawlerSchedulerActivationAdmission } from "./migrationSystemRetryAdmission.js";
 import {
   loadMigrationSourceBatch,
   loadMigrationSourceChannel,
@@ -214,7 +216,7 @@ async function lockMigrationChannel(client, channelId) {
   );
 }
 
-async function loadSchedulerForUpdate(client, batchId) {
+async function lockSchedulerForUpdate(client) {
   const result = await client.query(
     `SELECT value_json
      FROM crawler.settings
@@ -228,13 +230,29 @@ async function loadSchedulerForUpdate(client, batchId) {
       code: "scheduler_missing",
     });
   }
-  const conflict = schedulerConflict(result.rows[0].value_json, batchId);
+  return result.rows[0].value_json;
+}
+
+async function assertSchedulerActivationAdmission(client, scheduler, batchId) {
+  const conflict = schedulerConflict(scheduler, batchId);
   if (conflict) {
     throw new ManualMigrationDispatchError(conflict.message, {
       statusCode: 409,
       code: conflict.code,
-      details: result.rows[0].value_json,
+      details: scheduler,
     });
+  }
+  if (String(scheduler?.status ?? "stopped") !== "stopped") return;
+  const admission = await sharedCrawlerSchedulerActivationAdmission(client);
+  if (!admission.allowed) {
+    throw new ManualMigrationDispatchError(
+      "Migration system recovery must finish before starting another crawler Batch",
+      {
+        statusCode: 409,
+        code: admission.code,
+        details: admission.active_system_retry,
+      },
+    );
   }
 }
 
@@ -440,22 +458,9 @@ async function attachIntentAndSource(client, {
 }
 
 async function refreshBatchCounts(client, batchId) {
-  await client.query(
-    `UPDATE crawler.query_dispatch_batches batch
-     SET discovered_candidate_count=stats.total,
-         accepted_channel_count=stats.accepted,
-         rejected_channel_count=stats.rejected,
-         updated_at=now()
-     FROM (
-       SELECT count(*)::int AS total,
-              count(*) FILTER (WHERE status='accepted')::int AS accepted,
-              count(*) FILTER (WHERE status='rejected')::int AS rejected
-       FROM crawler.channel_candidates
-       WHERE dispatch_batch_id=$1
-     ) stats
-     WHERE batch.dispatch_batch_id=$1
-       AND batch.status<>'completed'`,
-    [batchId],
+  await reconcileDispatchBatchCandidateState(
+    client.query.bind(client),
+    batchId,
   );
   await client.query(
     `UPDATE crawler.query_pages page
@@ -512,6 +517,7 @@ export async function prepareManualMigration(client, {
 } = {}) {
   const snapshot = validateMigrationSourceSnapshot(sourceSnapshot);
   const normalizedBatchId = requiredText(batchId, "batch_id");
+  const scheduler = await lockSchedulerForUpdate(client);
   await lockMigrationChannel(client, snapshot.channel_id);
 
   let intent = await loadIntentForUpdate(client, snapshot);
@@ -550,7 +556,7 @@ export async function prepareManualMigration(client, {
         { statusCode: 409, code: "target_candidate_not_retryable" },
       );
     }
-    await loadSchedulerForUpdate(client, normalizedBatchId);
+    await assertSchedulerActivationAdmission(client, scheduler, normalizedBatchId);
     await ensureBatchScaffold(client, {
       batchId: normalizedBatchId,
       selection: "single",
@@ -609,7 +615,7 @@ export async function prepareManualMigration(client, {
     });
   }
 
-  await loadSchedulerForUpdate(client, normalizedBatchId);
+  await assertSchedulerActivationAdmission(client, scheduler, normalizedBatchId);
   await ensureBatchScaffold(client, {
     batchId: normalizedBatchId,
     selection: "single",
@@ -698,6 +704,7 @@ export async function prepareManualMigrationBatch(client, {
     };
   }
 
+  const scheduler = await lockSchedulerForUpdate(client);
   await client.query(
     "SELECT pg_advisory_xact_lock(hashtext($1))",
     ["manual-migration-batch-dispatch-v2"],
@@ -720,7 +727,7 @@ export async function prepareManualMigrationBatch(client, {
     };
   }
 
-  await loadSchedulerForUpdate(client, normalizedBatchId);
+  await assertSchedulerActivationAdmission(client, scheduler, normalizedBatchId);
   await ensureBatchScaffold(client, {
     batchId: normalizedBatchId,
     selection: normalizedSelection.selection,

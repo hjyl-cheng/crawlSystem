@@ -72,6 +72,56 @@ export async function verifyRotaWorkerV2Schema(client) {
          WHERE table_schema='crawler' AND table_name='migration_system_retry_items'
            AND column_name='failed_dispatch_batch_id' AND data_type='text'
        ) AS migration_system_retry_failed_dispatch_batch_id,
+       EXISTS (
+         SELECT 1 FROM information_schema.columns
+         WHERE table_schema='crawler' AND table_name='migration_system_retry_items'
+           AND column_name='recovery_run_id' AND data_type='text'
+           AND is_nullable='YES' AND column_default IS NULL
+       ) AS migration_system_retry_recovery_run_id,
+       EXISTS (
+         SELECT 1
+         FROM pg_constraint fk
+         JOIN pg_attribute source_column
+           ON source_column.attrelid=fk.conrelid
+          AND source_column.attname='recovery_run_id'
+          AND NOT source_column.attisdropped
+         JOIN pg_attribute target_column
+           ON target_column.attrelid=fk.confrelid
+          AND target_column.attname='run_id'
+          AND NOT target_column.attisdropped
+         WHERE fk.conrelid=to_regclass('crawler.migration_system_retry_items')
+           AND fk.conname='migration_system_retry_items_recovery_run_id_fkey'
+           AND fk.contype='f' AND fk.convalidated AND fk.confdeltype='r'
+           AND fk.confrelid=to_regclass('crawler.channel_runs')
+           AND fk.conkey=ARRAY[source_column.attnum]
+           AND fk.confkey=ARRAY[target_column.attnum]
+       ) AS migration_system_retry_recovery_run_reference,
+       EXISTS (
+         SELECT 1 FROM information_schema.columns
+         WHERE table_schema='crawler' AND table_name='migration_system_retry_items'
+           AND column_name='recovery_agent_active_job_id' AND data_type='text'
+           AND is_nullable='YES' AND column_default IS NULL
+       ) AS migration_system_retry_recovery_agent_active_job_id,
+       EXISTS (
+         SELECT 1 FROM information_schema.columns
+         WHERE table_schema='crawler' AND table_name='migration_system_retry_items'
+           AND column_name='recovery_agent_active_job_attempt' AND data_type='bigint'
+           AND is_nullable='YES' AND column_default IS NULL
+       ) AS migration_system_retry_recovery_agent_active_job_attempt,
+       EXISTS (
+         SELECT 1 FROM information_schema.columns
+         WHERE table_schema='crawler' AND table_name='migration_system_retry_items'
+           AND column_name='recovery_agent_job_epoch' AND data_type='bigint'
+           AND is_nullable='NO' AND column_default='0'
+       ) AS migration_system_retry_recovery_agent_job_epoch,
+       EXISTS (
+         SELECT 1 FROM pg_constraint
+         WHERE conrelid=to_regclass('crawler.migration_system_retry_items')
+           AND conname='migration_system_retry_items_recovery_agent_active_job_check'
+           AND contype='c' AND convalidated
+           AND pg_get_constraintdef(oid) LIKE '%recovery_agent_active_job_attempt > 0%'
+           AND pg_get_constraintdef(oid) LIKE '%recovery_agent_job_epoch >= 0%'
+       ) AS migration_system_retry_recovery_agent_active_job_check,
        to_regclass('crawler.ux_crawler_migration_system_retry_active_candidate') IS NOT NULL
          AS migration_system_retry_active_candidate_index,
        to_regclass('crawler.idx_crawler_migration_system_retry_status') IS NOT NULL
@@ -105,6 +155,51 @@ export async function verifyRotaWorkerV2Schema(client) {
            AND contype='c' AND convalidated
            AND pg_get_constraintdef(oid) LIKE '%completed_with_system_failures%'
        ) AS query_dispatch_batch_outcome_check,
+       EXISTS (
+         SELECT 1 FROM information_schema.columns
+         WHERE table_schema='crawler' AND table_name='youtube_api_batches'
+           AND column_name='active_job_id' AND data_type='text'
+           AND is_nullable='YES' AND column_default IS NULL
+       ) AS data_api_batch_active_job_id,
+       EXISTS (
+         SELECT 1 FROM information_schema.columns
+         WHERE table_schema='crawler' AND table_name='youtube_api_batches'
+           AND column_name='active_job_attempt' AND data_type='bigint'
+           AND is_nullable='YES' AND column_default IS NULL
+       ) AS data_api_batch_active_job_attempt,
+       EXISTS (
+         SELECT 1 FROM pg_constraint
+         WHERE conrelid=to_regclass('crawler.youtube_api_batches')
+           AND conname='youtube_api_batches_active_job_check'
+           AND contype='c' AND convalidated
+           AND pg_get_constraintdef(oid) LIKE '%active_job_attempt > 0%'
+       ) AS data_api_batch_active_job_check,
+       EXISTS (
+         SELECT 1 FROM information_schema.columns
+         WHERE table_schema='crawler' AND table_name='channel_runs'
+           AND column_name='detail_active_job_id' AND data_type='text'
+           AND is_nullable='YES' AND column_default IS NULL
+       ) AS content_detail_active_job_id,
+       EXISTS (
+         SELECT 1 FROM information_schema.columns
+         WHERE table_schema='crawler' AND table_name='channel_runs'
+           AND column_name='detail_active_job_attempt' AND data_type='bigint'
+           AND is_nullable='YES' AND column_default IS NULL
+       ) AS content_detail_active_job_attempt,
+       EXISTS (
+         SELECT 1 FROM information_schema.columns
+         WHERE table_schema='crawler' AND table_name='channel_runs'
+           AND column_name='detail_active_scope_key' AND data_type='text'
+           AND is_nullable='YES' AND column_default IS NULL
+       ) AS content_detail_active_scope_key,
+       EXISTS (
+         SELECT 1 FROM pg_constraint
+         WHERE conrelid=to_regclass('crawler.channel_runs')
+           AND conname='channel_runs_detail_active_job_check'
+           AND contype='c' AND convalidated
+           AND pg_get_constraintdef(oid) LIKE '%detail_active_job_attempt > 0%'
+           AND pg_get_constraintdef(oid) LIKE '%detail_active_scope_key%'
+       ) AS content_detail_active_job_check,
        EXISTS (
          SELECT 1 FROM information_schema.columns
          WHERE table_schema='crawler' AND table_name='channel_candidates'

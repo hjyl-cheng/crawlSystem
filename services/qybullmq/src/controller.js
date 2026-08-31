@@ -16,6 +16,8 @@ import {
 } from "./db.js";
 import { createControllerLifecycle } from "./controllerLifecycle.js";
 import { dataApiCircuitState as loadDataApiCircuitState } from "./dataApiCircuit.js";
+import { DataApiBatchJobRecovery } from "./dataApiBatchJobRecovery.js";
+import { reconcileDispatchBatchCandidateState } from "./dispatchBatchCandidateState.js";
 import {
   reconcileChannelCandidateQueue as reconcileChannelCandidateQueueWithDependencies,
 } from "./channelSnapshotReconciliation.js";
@@ -46,6 +48,7 @@ import {
   IncrementalAgentBatcher,
 } from "./incrementalAgentBacklog.js";
 import { loadFullRepairCompletionState } from "./fullRepairDispatch.js";
+import { resumeLegacyAutomaticFinalizationWithFence } from "./legacyAutomaticFinalization.js";
 import {
   finalRepairCandidateSql,
   preparedFinalDetailRepairSql,
@@ -66,6 +69,10 @@ import {
 } from "./migrationRetryIntent.js";
 import { ManagedPolicyUnavailableError } from "./managedJobIntents.js";
 import { settleCompletedMigrationBatch } from "./migrationBatchCompletion.js";
+import {
+  automaticCompletedMigrationRecoveryEnabled,
+  MigrationSystemRetryRecoveryReconciler,
+} from "./migrationSystemRetryRecovery.js";
 import { loadIdentityPolicyCatalog } from "./identityPolicyCatalog.js";
 import { closeProxyControlClient, proxyControlClient } from "./proxyControlClient.js";
 import { normalizeRotaCapacity } from "./rotaCapacity.js";
@@ -130,6 +137,11 @@ const managedJobOutboxDispatcher = new ManagedJobOutboxDispatcher({
 const migrationRetryIntentJobReconciler = new MigrationRetryIntentJobReconciler({
   repository: new PostgresMigrationRetryIntentRepository({ withTransaction }),
   queue: queues[queuesByRole.channelCrawl],
+});
+const migrationSystemRetryRecoveryReconciler = new MigrationSystemRetryRecoveryReconciler({
+  query,
+  withTransaction,
+  queues,
 });
 
 function intEnv(name, fallback, min = 0, max = Number.MAX_SAFE_INTEGER) {
@@ -203,6 +215,13 @@ const channelSnapshotReconcileLimit = intEnv("CHANNEL_SNAPSHOT_RECONCILE_LIMIT",
 const channelSnapshotMaxAttempts = intEnv("CHANNEL_SNAPSHOT_MAX_ATTEMPTS", 6, 3, 30);
 const channelSnapshotRetrySeconds = intEnv("CHANNEL_SNAPSHOT_RETRY_SECONDS", 60, 10, 3600);
 const channelSnapshotStaleSeconds = intEnv("CHANNEL_SNAPSHOT_STALE_SECONDS", 900, 60, 7200);
+const dataApiOrphanGraceMs = intEnv("DATA_API_ORPHAN_GRACE_MS", 60000, 0, 3600000);
+const dataApiOrphanMinObservations = intEnv(
+  "DATA_API_ORPHAN_MIN_OBSERVATIONS",
+  2,
+  2,
+  100,
+);
 const channelSnapshotMinSubscriberCount = intEnv("MIN_SUBSCRIBER_COUNT", 1000, 1, 100_000_000);
 const channelCandidateDispatchEnabled = booleanEnv("CHANNEL_CANDIDATE_DISPATCH_ENABLED", true);
 const agentMaxBatchesPerTick = intEnv("AGENT_MAX_BATCHES_PER_TICK", 5, 1, 100);
@@ -316,6 +335,13 @@ const contentEnrichMonitor = new ContentEnrichMonitor({
   backlogAlertThreshold: contentEnrichBacklogAlertThreshold,
   queuedAgeAlertSeconds: contentEnrichQueuedAgeAlertSeconds,
   alertRepeatMs: contentEnrichAlertRepeatMs,
+});
+const dataApiBatchJobRecovery = new DataApiBatchJobRecovery({
+  query,
+  withTransaction,
+  queue: queues[queuesByRole.dataApiBatch],
+  graceMs: dataApiOrphanGraceMs,
+  minimumObservations: dataApiOrphanMinObservations,
 });
 
 function tickSignature(stats, actions, queryScheduler) {
@@ -571,13 +597,19 @@ async function closeDispatchDiscovery(dispatchBatchId) {
 }
 
 async function resumeLegacyAutomaticFinalization(scheduler, actions) {
-  if (scheduler.status !== "stopped" || scheduler.stop_reason !== "no_schedulable_query") return scheduler;
-  await updateSchedulerRuntime("finishing", {
-    stopped_at: null,
-    stop_reason: "upstream_drained",
-  });
+  const result = await resumeLegacyAutomaticFinalizationWithFence({ scheduler, withTransaction });
+  if (!result.resumed) {
+    if (result.admission && !result.admission.allowed) {
+      actions.push({
+        action: "hold-legacy-automatic-finalization",
+        reason: result.admission.code,
+        system_retry_id: result.admission.active_system_retry?.system_retry_id ?? null,
+      });
+    }
+    return result.scheduler;
+  }
   actions.push({ action: "resume-automatic-finalization", reason: "legacy_upstream_drained_state" });
-  return { ...scheduler, status: "finishing", stopped_at: null, stop_reason: "upstream_drained" };
+  return result.scheduler;
 }
 
 async function cleanupTelemetry(now = Date.now()) {
@@ -698,37 +730,10 @@ async function reconcileTerminalFinalizedRunStates(actions, pipelineCycleId) {
 
 async function refreshDispatchValidationState(dispatchBatchId) {
   if (!dispatchBatchId) return false;
-  const rows = await query(
-    `WITH candidate_stats AS (
-       SELECT count(*)::int AS total,
-              count(*) FILTER (WHERE status='accepted')::int AS accepted,
-              count(*) FILTER (WHERE status='rejected')::int AS rejected,
-              count(*) FILTER (WHERE status IN ('discovered','queued','validating'))::int AS open
-       FROM crawler.channel_candidates
-       WHERE dispatch_batch_id=$1
-     ), updated AS (
-       UPDATE crawler.query_dispatch_batches batch
-       SET discovered_candidate_count=stats.total,
-           accepted_channel_count=stats.accepted,
-           rejected_channel_count=stats.rejected,
-           status=CASE
-             WHEN batch.discovery_closed_at IS NOT NULL AND stats.open=0 THEN 'validation_closed'
-             ELSE batch.status
-           END,
-           validation_closed_at=CASE
-             WHEN batch.discovery_closed_at IS NOT NULL AND stats.open=0
-               THEN COALESCE(batch.validation_closed_at,now())
-             ELSE batch.validation_closed_at
-           END,
-           updated_at=now()
-       FROM candidate_stats stats
-       WHERE batch.dispatch_batch_id=$1
-       RETURNING batch.validation_closed_at,(SELECT open FROM candidate_stats) AS open
-     )
-     SELECT validation_closed_at,open FROM updated`,
-    [dispatchBatchId],
-  );
-  return Boolean(rows.rows[0]?.validation_closed_at) && Number(rows.rows[0]?.open ?? 0) === 0;
+  const state = await reconcileDispatchBatchCandidateState(query, dispatchBatchId, {
+    closeValidation: true,
+  });
+  return Boolean(state?.validation_closed_at) && state.open === 0;
 }
 
 async function syncAgentGlobalConcurrency(actions, agentConfigs) {
@@ -798,6 +803,12 @@ async function maybeCreateAgentBatch(actions, agentConfigs, agentCapacity, query
            AND c.subscriber_count IS NOT NULL
            AND NULLIF(btrim(c.title),'') IS NOT NULL
            AND COALESCE(current_run.result_json->>'dispatch_batch_id',current_run.result_json->>'pipeline_cycle_id')=$3
+           AND NOT EXISTS (
+             SELECT 1
+             FROM crawler.migration_system_retry_items retry
+             WHERE retry.candidate_id=current_run.candidate_id
+               AND retry.status IN ('retrying','pending','dispatched')
+           )
          ORDER BY c.priority DESC,c.created_at ASC
          LIMIT $1
          FOR UPDATE SKIP LOCKED
@@ -874,7 +885,13 @@ async function maybeCreateAgentBatch(actions, agentConfigs, agentCapacity, query
          )
          AND channel.subscriber_count IS NOT NULL
          AND NULLIF(btrim(channel.title),'') IS NOT NULL
-         AND COALESCE(run.result_json->>'dispatch_batch_id',run.result_json->>'pipeline_cycle_id')=$1`,
+         AND COALESCE(run.result_json->>'dispatch_batch_id',run.result_json->>'pipeline_cycle_id')=$1
+         AND NOT EXISTS (
+           SELECT 1
+           FROM crawler.migration_system_retry_items retry
+           WHERE retry.candidate_id=run.candidate_id
+             AND retry.status IN ('retrying','pending','dispatched')
+         )`,
       [dispatchBatchId],
     );
     if (Number(remaining.rows[0]?.count ?? 0) === 0) {
@@ -1031,28 +1048,339 @@ async function reconcileFinalizeQueue(actions, pipelineCycleId) {
   return enqueued;
 }
 
-async function maybeCreateDataApiBatches(
+const REPRESENTED_DATA_API_JOB_STATES = new Set([
+  "active",
+  "delayed",
+  "paused",
+  "prioritized",
+  "waiting",
+  "waiting-children",
+]);
+
+function orderedPositiveIntegers(values) {
+  return [...new Set((values ?? []).map(Number))]
+    .filter((value) => Number.isSafeInteger(value) && value > 0)
+    .sort((left, right) => left - right);
+}
+
+function normalizedDataApiRecoveryScopes(scopes) {
+  const retryIdsByCycle = new Map();
+  for (const scope of scopes ?? []) {
+    const pipelineCycleId = String(scope?.pipelineCycleId ?? "").trim();
+    if (!pipelineCycleId) continue;
+    const retryIds = retryIdsByCycle.get(pipelineCycleId) ?? new Set();
+    for (const retryId of orderedPositiveIntegers(scope?.migrationSystemRetryIds)) {
+      retryIds.add(retryId);
+    }
+    if (retryIds.size > 0) retryIdsByCycle.set(pipelineCycleId, retryIds);
+  }
+  return [...retryIdsByCycle.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([pipelineCycleId, retryIds]) => ({
+      pipelineCycleId,
+      migrationSystemRetryIds: [...retryIds].sort((left, right) => left - right),
+    }));
+}
+
+function sameOrderedValues(left, right) {
+  const normalizedLeft = [...(left ?? [])].map(String);
+  const normalizedRight = [...(right ?? [])].map(String);
+  return normalizedLeft.length === normalizedRight.length
+    && normalizedLeft.every((value, index) => value === normalizedRight[index]);
+}
+
+function dataApiBatchJob(batch) {
+  const migrationSystemRetryIds = orderedPositiveIntegers(batch.migration_system_retry_ids);
+  const recoveryRunIds = [...new Set((batch.recovery_run_ids ?? []).map(String))]
+    .filter(Boolean)
+    .sort();
+  return {
+    id: safeJobId("youtube-data-api", batch.batch_id),
+    name: "youtube-data-api-batch",
+    data: {
+      batch_id: String(batch.batch_id),
+      task_ids: orderedPositiveIntegers(batch.task_ids),
+      video_ids: [...(batch.video_ids ?? [])].map(String),
+      pipeline_cycle_id: String(batch.pipeline_cycle_id),
+      ...(migrationSystemRetryIds.length > 0
+        ? {
+          migration_system_retry_ids: migrationSystemRetryIds,
+          recovery_run_ids: recoveryRunIds,
+        }
+        : {}),
+    },
+  };
+}
+
+function representsDataApiBatchJob(job, expected) {
+  return job?.name === expected.name
+    && String(job.data?.batch_id ?? "") === expected.data.batch_id
+    && String(job.data?.pipeline_cycle_id ?? "") === expected.data.pipeline_cycle_id
+    && sameOrderedValues(job.data?.task_ids, expected.data.task_ids)
+    && sameOrderedValues(job.data?.video_ids, expected.data.video_ids)
+    && sameOrderedValues(
+      orderedPositiveIntegers(job.data?.migration_system_retry_ids),
+      expected.data.migration_system_retry_ids ?? [],
+    )
+    && sameOrderedValues(
+      [...(job.data?.recovery_run_ids ?? [])].map(String).sort(),
+      expected.data.recovery_run_ids ?? [],
+    );
+}
+
+async function ensureDataApiBatchJob(batch) {
+  const expected = dataApiBatchJob(batch);
+  const queue = queues[queuesByRole.dataApiBatch];
+  let existing = await queue.getJob(expected.id);
+  for (let inspection = 0; existing && inspection < 3; inspection += 1) {
+    if (!representsDataApiBatchJob(existing, expected)) {
+      throw new Error(`Data API Batch Job identity conflict: ${expected.id}`);
+    }
+    const state = await existing.getState();
+    if (REPRESENTED_DATA_API_JOB_STATES.has(state)) {
+      return { created: false, represented: true, job: existing };
+    }
+    if (["completed", "failed"].includes(state)) {
+      try {
+        await existing.remove();
+        existing = null;
+      } catch {
+        existing = await queue.getJob(expected.id);
+      }
+      continue;
+    }
+    existing = await queue.getJob(expected.id);
+  }
+  if (existing) throw new Error(`Data API Batch Job cannot be reconciled: ${expected.id}`);
+  const job = await queue.add(expected.name, expected.data, { jobId: expected.id });
+  if (!representsDataApiBatchJob(job, expected)) {
+    throw new Error(`Data API Batch Job changed during enqueue: ${expected.id}`);
+  }
+  return { created: true, represented: true, job };
+}
+
+async function loadQueuedDataApiBatchIntents({
+  pipelineCycleId,
+  migrationSystemRetryIds,
+  limit = 100,
+}) {
+  const recoveryRetryIds = orderedPositiveIntegers(migrationSystemRetryIds);
+  const rows = await query(
+    `SELECT batch.batch_id,batch.task_ids,batch.video_ids,
+            $1::text AS pipeline_cycle_id,
+            scope.migration_system_retry_ids,scope.recovery_run_ids
+     FROM crawler.youtube_api_batches batch
+     CROSS JOIN LATERAL (
+       SELECT count(DISTINCT task.task_id)::int AS cycle_task_count,
+              count(DISTINCT task.task_id)
+                FILTER (WHERE retry.system_retry_id IS NOT NULL)::int AS recovery_task_count,
+              COALESCE(
+                array_agg(DISTINCT retry.system_retry_id ORDER BY retry.system_retry_id)
+                  FILTER (WHERE retry.system_retry_id IS NOT NULL),
+                '{}'::bigint[]
+              ) AS migration_system_retry_ids,
+              COALESCE(
+                array_agg(DISTINCT retry.recovery_run_id ORDER BY retry.recovery_run_id)
+                  FILTER (WHERE retry.recovery_run_id IS NOT NULL),
+                '{}'::text[]
+              ) AS recovery_run_ids
+       FROM unnest(batch.task_ids) selected(task_id)
+       JOIN crawler.youtube_api_tasks task ON task.task_id=selected.task_id
+       JOIN crawler.content_candidates candidate
+         ON candidate.candidate_id=ANY(task.candidate_ids)
+       JOIN crawler.channel_runs run ON run.run_id=candidate.run_id
+       LEFT JOIN crawler.migration_system_retry_items retry
+         ON retry.system_retry_id=ANY($2::bigint[])
+        AND retry.status IN ('retrying','dispatched')
+        AND retry.candidate_id=run.candidate_id
+        AND retry.recovery_run_id=run.run_id
+        AND retry.failed_dispatch_batch_id=$1::text
+       WHERE COALESCE(
+               run.result_json->>'dispatch_batch_id',
+               run.result_json->>'pipeline_cycle_id'
+             )=$1::text
+         AND candidate.detail_status='api_pending'
+         AND candidate.api_status='queued'
+     ) scope
+     WHERE batch.status='queued'
+       AND batch.result_json#>>'{dispatch_intent,pipeline_cycle_id}'=$1::text
+       AND scope.cycle_task_count=cardinality(batch.task_ids)
+       AND NOT EXISTS (
+         SELECT 1
+         FROM unnest(batch.task_ids) selected(task_id)
+         LEFT JOIN crawler.youtube_api_tasks task ON task.task_id=selected.task_id
+         WHERE task.task_id IS NULL OR task.status<>'queued'
+       )
+       AND (
+         (
+           cardinality($2::bigint[])=0
+           AND scope.migration_system_retry_ids='{}'::bigint[]
+           AND COALESCE(batch.result_json#>'{dispatch_intent,migration_system_retry_ids}',
+                        '[]'::jsonb)='[]'::jsonb
+           AND COALESCE(batch.result_json#>'{dispatch_intent,recovery_run_ids}',
+                        '[]'::jsonb)='[]'::jsonb
+         )
+         OR (
+           cardinality($2::bigint[])>0
+           AND scope.recovery_task_count=cardinality(batch.task_ids)
+           AND scope.migration_system_retry_ids<@$2::bigint[]
+           AND COALESCE(batch.result_json#>'{dispatch_intent,migration_system_retry_ids}',
+                        '[]'::jsonb)=to_jsonb(scope.migration_system_retry_ids)
+           AND COALESCE(batch.result_json#>'{dispatch_intent,recovery_run_ids}',
+                        '[]'::jsonb)=to_jsonb(scope.recovery_run_ids)
+         )
+       )
+     ORDER BY batch.created_at,batch.batch_id
+     LIMIT $3`,
+    [String(pipelineCycleId), recoveryRetryIds, limit],
+  );
+  return rows.rows;
+}
+
+async function reconcileQueuedDataApiBatchJobs(actions, options) {
+  const batches = await loadQueuedDataApiBatchIntents(options);
+  let created = 0;
+  for (const batch of batches) {
+    const ensured = await ensureDataApiBatchJob(batch);
+    if (ensured.created) created += 1;
+  }
+  if (created > 0) {
+    actions.push({
+      action: "reconcile-youtube-api-batch-jobs",
+      count: created,
+      pipeline_cycle_id: options.pipelineCycleId,
+    });
+  }
+  return { represented: batches.length, created };
+}
+
+async function resetOrphanedQueuedDataApiTasks({
+  pipelineCycleId,
+  migrationSystemRetryIds,
+}) {
+  const recoveryRetryIds = orderedPositiveIntegers(migrationSystemRetryIds);
+  return withTransaction(async (client) => {
+    const reset = await client.query(
+      `WITH orphan AS MATERIALIZED (
+         SELECT task.task_id,task.candidate_ids
+         FROM crawler.youtube_api_tasks task
+         WHERE task.status='queued'
+           AND NOT EXISTS (
+             SELECT 1
+             FROM crawler.youtube_api_batches batch
+             WHERE batch.status IN ('queued','running')
+               AND task.task_id=ANY(batch.task_ids)
+           )
+           AND EXISTS (
+             SELECT 1
+             FROM crawler.content_candidates candidate
+             JOIN crawler.channel_runs run ON run.run_id=candidate.run_id
+             LEFT JOIN crawler.migration_system_retry_items retry
+               ON retry.system_retry_id=ANY($2::bigint[])
+              AND retry.status IN ('retrying','dispatched')
+              AND retry.candidate_id=run.candidate_id
+              AND retry.recovery_run_id=run.run_id
+              AND retry.failed_dispatch_batch_id=$1::text
+             WHERE candidate.candidate_id=ANY(task.candidate_ids)
+               AND candidate.detail_status='api_pending'
+               AND candidate.api_status='queued'
+               AND COALESCE(
+                     run.result_json->>'dispatch_batch_id',
+                     run.result_json->>'pipeline_cycle_id'
+                   )=$1::text
+               AND (
+                 cardinality($2::bigint[])=0
+                 OR retry.system_retry_id IS NOT NULL
+               )
+           )
+         ORDER BY task.created_at,task.task_id
+         FOR UPDATE OF task SKIP LOCKED
+       ), reset_task AS (
+         UPDATE crawler.youtube_api_tasks task
+         SET status='pending',updated_at=now()
+         FROM orphan
+         WHERE task.task_id=orphan.task_id AND task.status='queued'
+         RETURNING task.task_id,task.candidate_ids
+       ), reset_candidate AS (
+         UPDATE crawler.content_candidates candidate
+         SET api_status='pending',updated_at=now()
+         WHERE candidate.candidate_id IN (
+           SELECT unnest(reset_task.candidate_ids) FROM reset_task
+         )
+           AND candidate.detail_status='api_pending'
+           AND candidate.api_status='queued'
+           AND (
+             cardinality($2::bigint[])=0
+             OR EXISTS (
+               SELECT 1
+               FROM crawler.channel_runs run
+               JOIN crawler.migration_system_retry_items retry
+                 ON retry.recovery_run_id=run.run_id
+                AND retry.system_retry_id=ANY($2::bigint[])
+                AND retry.status IN ('retrying','dispatched')
+                AND retry.candidate_id=run.candidate_id
+                AND retry.failed_dispatch_batch_id=$1::text
+               WHERE run.run_id=candidate.run_id
+             )
+           )
+         RETURNING candidate.candidate_id
+       )
+       SELECT count(*)::int AS task_count,
+              (SELECT count(*)::int FROM reset_candidate) AS candidate_count
+       FROM reset_task`,
+      [String(pipelineCycleId), recoveryRetryIds],
+    );
+    return reset.rows[0] ?? { task_count: 0, candidate_count: 0 };
+  });
+}
+
+async function createDataApiBatchesForScope(
   actions,
   batchSize,
   stats,
   queryScheduler,
-  dailyRequestLimit,
-  dailyRequestCount,
+  {
+    pipelineCycleId,
+    migrationSystemRetryIds = [],
+    maxBatches = 0,
+  } = {},
 ) {
-  if (!queryScheduler.pipeline_cycle_id) return;
-  let upstreamDrained = automaticFinalizationActive(queryScheduler)
+  const recoveryRetryIds = orderedPositiveIntegers(migrationSystemRetryIds);
+  const normalizedPipelineCycleId = String(pipelineCycleId ?? "").trim();
+  if (!normalizedPipelineCycleId) return { created: 0, reserved: 0 };
+  const reset = await resetOrphanedQueuedDataApiTasks({
+    pipelineCycleId: normalizedPipelineCycleId,
+    migrationSystemRetryIds: recoveryRetryIds,
+  });
+  if (Number(reset.task_count ?? 0) > 0) {
+    actions.push({
+      action: "recover-orphaned-youtube-api-tasks",
+      tasks: Number(reset.task_count),
+      candidates: Number(reset.candidate_count),
+      pipeline_cycle_id: normalizedPipelineCycleId,
+    });
+  }
+  const reconciled = await reconcileQueuedDataApiBatchJobs(actions, {
+    pipelineCycleId: normalizedPipelineCycleId,
+    migrationSystemRetryIds: recoveryRetryIds,
+  });
+  let upstreamDrained = recoveryRetryIds.length > 0 || (automaticFinalizationActive(queryScheduler)
     && !hasQueueBacklog(stats, queuesByRole.discoverPage)
     && !hasQueueBacklog(stats, queuesByRole.channelCrawl)
-    && !hasQueueBacklog(stats, queuesByRole.contentDetail);
-  if (upstreamDrained) {
-    upstreamDrained = !(await hasRepairableFinalRuns(queryScheduler.pipeline_cycle_id));
+    && !hasQueueBacklog(stats, queuesByRole.contentDetail));
+  if (upstreamDrained && recoveryRetryIds.length === 0) {
+    upstreamDrained = !(await hasRepairableFinalRuns(normalizedPipelineCycleId));
   }
-  const queuedOrActiveBatches = backlog(stats, queuesByRole.dataApiBatch);
-  const availableRequests = Math.max(0, dailyRequestLimit - dailyRequestCount - queuedOrActiveBatches);
-  const maxBatches = Math.min(10, availableRequests);
-  for (let index = 0; index < maxBatches; index += 1) {
-    const rows = await query(
-      `WITH candidates AS MATERIALIZED (
+  const availableForNewBatches = Math.max(
+    0,
+    Number(maxBatches) - Number(reconciled.created ?? 0),
+  );
+  let created = 0;
+  for (let index = 0; index < availableForNewBatches; index += 1) {
+    const batchId = `youtube-api:${Date.now()}:${nanoid(8)}`;
+    const prepared = await withTransaction(async (client) => {
+      const rows = await client.query(
+        `WITH candidates AS MATERIALIZED (
          SELECT task_id, source_content_id, created_at
          FROM crawler.youtube_api_tasks task
          WHERE task.status IN ('pending','failed')
@@ -1063,7 +1391,10 @@ async function maybeCreateDataApiBatches(
              FROM crawler.content_candidates cc
              JOIN crawler.channel_runs run ON run.run_id=cc.run_id
              WHERE cc.candidate_id=ANY(task.candidate_ids)
-               AND run.result_json->>'pipeline_cycle_id'=$3::text
+               AND COALESCE(
+                     run.result_json->>'dispatch_batch_id',
+                     run.result_json->>'pipeline_cycle_id'
+                   )=$3::text
                AND NOT (run.result_json ? 'parser_contract_error')
                AND NOT (cc.result_json ? 'parser_contract_error')
            )
@@ -1072,6 +1403,28 @@ async function maybeCreateDataApiBatches(
              FROM crawler.content_candidates blocked
              WHERE blocked.candidate_id=ANY(task.candidate_ids)
                AND blocked.result_json ? 'parser_contract_error'
+           )
+           AND (
+             cardinality($4::bigint[])=0
+             OR EXISTS (
+               SELECT 1
+               FROM crawler.content_candidates recovery_candidate
+               JOIN crawler.channel_runs recovery_run
+                 ON recovery_run.run_id=recovery_candidate.run_id
+               JOIN crawler.migration_system_retry_items retry
+                 ON retry.recovery_run_id=recovery_run.run_id
+               WHERE recovery_candidate.candidate_id=ANY(task.candidate_ids)
+                 AND retry.system_retry_id=ANY($4::bigint[])
+                 AND retry.status IN ('retrying','dispatched')
+                 AND retry.candidate_id=recovery_run.candidate_id
+                 AND retry.failed_dispatch_batch_id=$3::text
+                 AND recovery_candidate.detail_status='api_pending'
+                 AND recovery_candidate.api_status IN ('pending','failed')
+                 AND COALESCE(
+                       recovery_run.result_json->>'dispatch_batch_id',
+                       recovery_run.result_json->>'pipeline_cycle_id'
+                     )=$3::text
+             )
            )
          ORDER BY task.created_at ASC, task.task_id ASC
          LIMIT $1
@@ -1093,37 +1446,148 @@ async function maybeCreateDataApiBatches(
          RETURNING t.task_id,t.source_content_id
        )
        SELECT * FROM updated`,
-      [batchSize, upstreamDrained, queryScheduler.pipeline_cycle_id],
-    );
-    if (rows.rows.length === 0) break;
-    const batchId = `youtube-api:${Date.now()}:${nanoid(8)}`;
-    const taskIds = rows.rows.map((row) => Number(row.task_id));
-    const videoIds = rows.rows.map((row) => row.source_content_id);
-    await query(
-      `INSERT INTO crawler.youtube_api_batches (batch_id,status,task_ids,video_ids,updated_at)
-       VALUES ($1,'queued',$2::bigint[],$3::text[],now())`,
-      [batchId, taskIds, videoIds],
-    );
-    await query(
-      `UPDATE crawler.content_candidates SET api_status='queued',updated_at=now()
-       WHERE candidate_id IN (
-         SELECT unnest(candidate_ids) FROM crawler.youtube_api_tasks WHERE task_id=ANY($1::bigint[])
-       )
-         AND NOT (result_json ? 'parser_contract_error')`,
-      [taskIds],
-    );
-    await queues[queuesByRole.dataApiBatch].add(
-      "youtube-data-api-batch",
-      {
+        [batchSize, upstreamDrained, normalizedPipelineCycleId, recoveryRetryIds],
+      );
+      if (rows.rows.length === 0) return null;
+      const taskIds = rows.rows.map((row) => Number(row.task_id));
+      const videoIds = rows.rows.map((row) => String(row.source_content_id));
+      const recoveryFence = recoveryRetryIds.length === 0
+        ? { migration_system_retry_ids: [], recovery_run_ids: [] }
+        : (await client.query(
+          `SELECT COALESCE(
+                    array_agg(DISTINCT retry.system_retry_id ORDER BY retry.system_retry_id),
+                    '{}'::bigint[]
+                  ) AS migration_system_retry_ids,
+                  COALESCE(
+                    array_agg(DISTINCT retry.recovery_run_id ORDER BY retry.recovery_run_id),
+                    '{}'::text[]
+                  ) AS recovery_run_ids
+           FROM crawler.youtube_api_tasks task
+           JOIN crawler.content_candidates candidate
+             ON candidate.candidate_id=ANY(task.candidate_ids)
+           JOIN crawler.channel_runs run ON run.run_id=candidate.run_id
+           JOIN crawler.migration_system_retry_items retry
+             ON retry.system_retry_id=ANY($2::bigint[])
+            AND retry.status IN ('retrying','dispatched')
+            AND retry.candidate_id=run.candidate_id
+            AND retry.recovery_run_id=run.run_id
+            AND retry.failed_dispatch_batch_id=$3::text
+           WHERE task.task_id=ANY($1::bigint[])
+             AND candidate.detail_status='api_pending'
+             AND candidate.api_status IN ('pending','failed')
+             AND COALESCE(
+                   run.result_json->>'dispatch_batch_id',
+                   run.result_json->>'pipeline_cycle_id'
+                 )=$3::text`,
+          [taskIds, recoveryRetryIds, normalizedPipelineCycleId],
+        )).rows[0];
+      const actualRetryIds = orderedPositiveIntegers(
+        recoveryFence?.migration_system_retry_ids,
+      );
+      const recoveryRunIds = [...new Set(
+        (recoveryFence?.recovery_run_ids ?? []).map(String),
+      )].sort();
+      if (recoveryRetryIds.length > 0 && actualRetryIds.length === 0) {
+        throw new Error(`Data API Batch ${batchId} lost its Migration recovery Fence`);
+      }
+      const dispatchIntent = {
+        pipeline_cycle_id: normalizedPipelineCycleId,
+        migration_system_retry_ids: actualRetryIds,
+        recovery_run_ids: recoveryRunIds,
+      };
+      await client.query(
+        `INSERT INTO crawler.youtube_api_batches (
+           batch_id,status,task_ids,video_ids,result_json,updated_at
+         ) VALUES ($1,'queued',$2::bigint[],$3::text[],$4::jsonb,now())`,
+        [batchId, taskIds, videoIds, JSON.stringify({ dispatch_intent: dispatchIntent })],
+      );
+      await client.query(
+        `UPDATE crawler.content_candidates candidate
+         SET api_status='queued',updated_at=now()
+         WHERE candidate.candidate_id IN (
+           SELECT unnest(task.candidate_ids)
+           FROM crawler.youtube_api_tasks task
+           WHERE task.task_id=ANY($1::bigint[])
+         )
+           AND candidate.detail_status='api_pending'
+           AND NOT (candidate.result_json ? 'parser_contract_error')
+           AND (
+             cardinality($2::bigint[])=0
+             OR EXISTS (
+               SELECT 1
+               FROM crawler.channel_runs run
+               JOIN crawler.migration_system_retry_items retry
+                 ON retry.recovery_run_id=run.run_id
+                AND retry.system_retry_id=ANY($2::bigint[])
+                AND retry.status IN ('retrying','dispatched')
+                AND retry.candidate_id=run.candidate_id
+                AND retry.failed_dispatch_batch_id=$3::text
+               WHERE run.run_id=candidate.run_id
+             )
+           )`,
+        [taskIds, actualRetryIds, normalizedPipelineCycleId],
+      );
+      return {
         batch_id: batchId,
         task_ids: taskIds,
         video_ids: videoIds,
-        pipeline_cycle_id: queryScheduler.pipeline_cycle_id,
-      },
-      { jobId: safeJobId("youtube-data-api", batchId) },
+        pipeline_cycle_id: normalizedPipelineCycleId,
+        migration_system_retry_ids: actualRetryIds,
+        recovery_run_ids: recoveryRunIds,
+      };
+    });
+    if (!prepared) break;
+    const ensured = await ensureDataApiBatchJob(prepared);
+    if (!ensured.represented) {
+      throw new Error(`Data API Batch ${batchId} has no represented Job`);
+    }
+    actions.push({
+      action: "enqueue-youtube-api-batch",
+      batch_id: batchId,
+      count: prepared.task_ids.length,
+      batch_size: batchSize,
+    });
+    created += 1;
+    if (prepared.task_ids.length < batchSize) break;
+  }
+  return {
+    created,
+    reserved: created + Number(reconciled.created ?? 0),
+  };
+}
+
+async function maybeCreateDataApiBatches(
+  actions,
+  batchSize,
+  stats,
+  queryScheduler,
+  dailyRequestLimit,
+  dailyRequestCount,
+  { migrationSystemRetryScopes = [] } = {},
+) {
+  const recoveryScopes = normalizedDataApiRecoveryScopes(migrationSystemRetryScopes);
+  const scopes = recoveryScopes.length > 0
+    ? recoveryScopes
+    : String(queryScheduler.pipeline_cycle_id ?? "").trim()
+      ? [{
+        pipelineCycleId: String(queryScheduler.pipeline_cycle_id),
+        migrationSystemRetryIds: [],
+      }]
+      : [];
+  const queuedOrActiveBatches = backlog(stats, queuesByRole.dataApiBatch);
+  let remainingBatchBudget = Math.min(
+    10,
+    Math.max(0, dailyRequestLimit - dailyRequestCount - queuedOrActiveBatches),
+  );
+  for (const scope of scopes) {
+    const result = await createDataApiBatchesForScope(
+      actions,
+      batchSize,
+      stats,
+      queryScheduler,
+      { ...scope, maxBatches: remainingBatchBudget },
     );
-    actions.push({ action: "enqueue-youtube-api-batch", batch_id: batchId, count: taskIds.length, batch_size: batchSize });
-    if (rows.rows.length < batchSize) break;
+    remainingBatchBudget = Math.max(0, remainingBatchBudget - result.reserved);
   }
 }
 
@@ -2448,6 +2912,18 @@ async function maybeReconcileAutomaticPublicationOnboarding(actions, now = Date.
 async function tick() {
   const stats = await getQueueStats(queues);
   const actions = [];
+  const dataApiOrphanRecovery = await dataApiBatchJobRecovery.reconcileAvailable({ limit: 100 });
+  if (
+    dataApiOrphanRecovery.suspected > 0
+    || dataApiOrphanRecovery.settled > 0
+    || dataApiOrphanRecovery.identityConflicts > 0
+    || dataApiOrphanRecovery.replayRequeuesCreated > 0
+  ) {
+    actions.push({
+      action: "reconcile-data-api-batch-execution-orphans",
+      ...dataApiOrphanRecovery,
+    });
+  }
   const contentEnrichController = await dispatchContentEnrichForController({
     dispatcher: contentEnrichDispatcher,
     monitor: contentEnrichMonitor,
@@ -2508,6 +2984,25 @@ async function tick() {
 
   const agentConfigs = automaticLocalAgentConfigs(await listEnabledAgentConfigs());
   const agentCapacity = await syncAgentGlobalConcurrency(actions, agentConfigs);
+  const migrationSystemRecovery = await migrationSystemRetryRecoveryReconciler
+    .reconcileAvailable({ limit: 100 });
+  const migrationSystemRecoveryQueueDemand = new Set(
+    migrationSystemRecovery.requiredQueues,
+  );
+  const automaticCompletedRecovery = automaticCompletedMigrationRecoveryEnabled(queryScheduler);
+  const migrationDataApiRecoveryActive = automaticCompletedRecovery
+    && migrationSystemRecoveryQueueDemand.has(queuesByRole.dataApiBatch)
+    && migrationSystemRecovery.dataApiRecoveryScopes.length > 0;
+  if (
+    migrationSystemRecovery.scanned > 0
+    || migrationSystemRecovery.resolved > 0
+    || migrationSystemRecovery.legacyReopened > 0
+  ) {
+    actions.push({
+      action: "reconcile-migration-system-retries",
+      ...migrationSystemRecovery,
+    });
+  }
   await reconcileIncrementalAgentQueue(actions);
   await maybeCreateIncrementalAgentBatch(actions);
   await maybeReconcileAutomaticPublicationOnboarding(actions);
@@ -2519,7 +3014,7 @@ async function tick() {
   }
   await resolvePendingDiscoveryPageQualifications(queryScheduler.pipeline_cycle_id, actions);
   if (
-    pipelineProducerActive(queryScheduler)
+    (pipelineProducerActive(queryScheduler) || migrationDataApiRecoveryActive)
     && crawlSettings.youtubeApiFallbackMode === "emergency"
     && !dataApiCircuit.open
   ) {
@@ -2530,8 +3025,16 @@ async function tick() {
       queryScheduler,
       crawlSettings.youtubeApiDailyRequestLimit,
       apiDailyRequestCount,
+      {
+        migrationSystemRetryScopes: migrationDataApiRecoveryActive
+          ? migrationSystemRecovery.dataApiRecoveryScopes
+          : [],
+      },
     );
-  } else if (pipelineProducerActive(queryScheduler) && apiPendingCount > 0) {
+  } else if (
+    (pipelineProducerActive(queryScheduler) || migrationDataApiRecoveryActive)
+    && apiPendingCount > 0
+  ) {
     actions.push({
       action: "hold-youtube-api-fallback",
       reason: crawlSettings.youtubeApiFallbackMode === "disabled" ? "fallback_disabled" : dataApiCircuit.reason,
@@ -2544,7 +3047,10 @@ async function tick() {
   const discoverProxyReady = roleReady(proxyCapacity, "discover");
   const channelProxyReady = roleReady(proxyCapacity, "channel");
   const queryQualityProxyReady = roleReady(proxyCapacity, "query_quality");
-  const detailProxyReady = roleReady(proxyCapacity, "detail");
+  const detailProxyReady = roleReady(
+    proxyCapacity,
+    channelInlineDetails ? "channel" : "detail",
+  );
   const effectiveDetailBacklog = channelInlineDetails ? 0 : detailBacklog;
   const pressureMetrics = {
     channelBacklog,
@@ -2606,10 +3112,13 @@ async function tick() {
   }
 
   const pipelineHalted = ["paused", "stopped"].includes(queryScheduler.status);
+  const recoveryConsumerRequired = (queueName) => (
+    automaticCompletedRecovery && migrationSystemRecoveryQueueDemand.has(queueName)
+  );
   const noChannelProxy = Number.isFinite(channelProxyReady)
     ? channelProxyReady === 0
     : Number.isFinite(proxyCapacity.active) && proxyCapacity.active < 2;
-  if (pipelineHalted) {
+  if (pipelineHalted && !recoveryConsumerRequired(queuesByRole.channelCrawl)) {
     await setPaused(queuesByRole.channelCrawl, true, `query_scheduler_${queryScheduler.status}`, actions);
   } else if (noChannelProxy || effectiveDetailBacklog >= channelPauseDetailBacklog) {
     await setPaused(queuesByRole.channelCrawl, true, effectiveDetailBacklog >= channelPauseDetailBacklog ? "content_detail_backlog_high" : "proxy_capacity_low", actions);
@@ -2627,9 +3136,9 @@ async function tick() {
   const noDetailProxy = Number.isFinite(detailProxyReady)
     ? detailProxyReady === 0
     : Number.isFinite(proxyCapacity.active) && proxyCapacity.active === 0;
-  if (pipelineHalted) {
+  if (pipelineHalted && !recoveryConsumerRequired(queuesByRole.contentDetail)) {
     await setPaused(queuesByRole.contentDetail, true, `query_scheduler_${queryScheduler.status}`, actions);
-  } else if (channelInlineDetails) {
+  } else if (channelInlineDetails && !recoveryConsumerRequired(queuesByRole.contentDetail)) {
     await setPaused(queuesByRole.contentDetail, true, "details_run_inside_channel_queue", actions);
   } else if (noDetailProxy) {
     await setPaused(queuesByRole.contentDetail, true, "no_active_proxy", actions);
@@ -2637,7 +3146,7 @@ async function tick() {
     await setPaused(queuesByRole.contentDetail, false, "proxy_available", actions);
   }
   for (const queueName of [queuesByRole.dataApiBatch, queuesByRole.agentBatch]) {
-    if (pipelineHalted) {
+    if (pipelineHalted && !recoveryConsumerRequired(queueName)) {
       await setPaused(queueName, true, `query_scheduler_${queryScheduler.status}`, actions);
     } else {
       await setPaused(queueName, false, "query_scheduler_active", actions);

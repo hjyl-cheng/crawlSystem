@@ -23,6 +23,7 @@ const { runWithChannelExecution } = await import("../../src/channelExecutionCont
 const job = {
   id: "final-repair__run_promotion__1",
   attemptsMade: 0,
+  attemptsStarted: 1,
   data: {
     channel_id: "UCaboutOnlyRegression",
     channel_url: "https://www.youtube.com/channel/UCaboutOnlyRegression",

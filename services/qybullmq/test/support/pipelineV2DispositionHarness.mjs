@@ -20,7 +20,7 @@ if (transportCancellation) {
 }
 const existingContent = scenario === "existing_private";
 const dataApiReplay = scenario === "data_api_replay";
-const dataApiLive = scenario === "data_api_live";
+const dataApiLive = ["data_api_live", "data_api_stale_before_request"].includes(scenario);
 const dataApiScenario = dataApiReplay || dataApiLive;
 const dispositionWriteRetry = scenario === "disposition_write_retry";
 const flatLiveInProgress = scenario === "live_in_progress_flat";
@@ -230,6 +230,7 @@ globalThis.__pipelineV2DispositionState = {
   youtubeJsDetailAttempts: 0,
   ytDlpDetailAttempts: 0,
   dispositionWriteAttempts: 0,
+  dataApiFenceLocks: 0,
 };
 
 const cancellationController = ["detail_cancelled", "detail_transport_cancelled"].includes(scenario)
@@ -262,6 +263,9 @@ let cancellationElapsedMs = null;
 let deadlineExceeded = false;
 if (dispositionWriteRetry) {
   const job = {
+    id: "content-detail:run:shared-video-disposition",
+    name: "content-detail-batch",
+    attemptsStarted: 1,
     data: {
       run_id: "run:shared-video-disposition",
       channel_id: "UCsharedDisposition",
@@ -285,9 +289,12 @@ if (dispositionWriteRetry) {
     const operation = () => (dataApiScenario
       ? processDataApiBatchV2({
         id: dataApiReplay ? "batch:stored-evidence" : "batch:live-api",
+        name: "youtube-data-api-batch",
+        attemptsStarted: 1,
         data: {
           batch_id: dataApiReplay ? "batch:stored-evidence" : "batch:live-api",
           task_ids: [91],
+          video_ids: ["public-without-type"],
           ...(dataApiReplay
             ? {
                 stored_evidence_replay: {
@@ -301,6 +308,9 @@ if (dispositionWriteRetry) {
         },
         })
       : processContentDetailBatchV2({
+        id: "content-detail:run:shared-video-disposition",
+        name: "content-detail-batch",
+        attemptsStarted: 1,
         data: {
           run_id: "run:shared-video-disposition",
           channel_id: "UCsharedDisposition",

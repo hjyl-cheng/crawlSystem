@@ -44,6 +44,14 @@ import {
   requestMigrationSystemRetry,
 } from "./migrationSystemRetries.js";
 import {
+  querySchedulerPauseTransition,
+  querySchedulerResumeTransition,
+  querySchedulerStartTransition,
+  querySchedulerStopTransition,
+  stopQuerySchedulerBatch,
+  updateQuerySchedulerWithMigrationFence,
+} from "./querySchedulerControl.js";
+import {
   loadMigrationRunDiagnostics,
   loadRotaBusinessRunBudget,
   renderMigrationRunDiagnostics,
@@ -1080,21 +1088,6 @@ async function ensureQueryScheduler() {
     ON CONFLICT (setting_key) DO NOTHING
   `, [JSON.stringify(settings)]);
   return settings;
-}
-
-async function saveQueryScheduler(settings) {
-  const normalized = normalizeQueryScheduler({
-    ...settings,
-    updated_at: new Date().toISOString(),
-    updated_by: "dashboard",
-  });
-  await db(`
-    INSERT INTO crawler.settings (setting_key, value_json, updated_at)
-    VALUES ('query_scheduler', $1::jsonb, now())
-    ON CONFLICT (setting_key)
-    DO UPDATE SET value_json = EXCLUDED.value_json, updated_at = now()
-  `, [JSON.stringify(normalized)]);
-  return normalized;
 }
 
 function queryDuePredicate(queryAlias, querySetParam, qualityScoreParam) {
@@ -5625,13 +5618,25 @@ app.get("/queries/scheduler/work-counts", async (req, res) => {
 app.post("/queries/scheduler/draft", async (req, res) => {
   const current = await ensureQueryScheduler();
   const querySetId = intValue(req.body.query_set_id, 0, 0, 1_000_000_000);
-  const next = await saveQueryScheduler({
-    ...current,
-    query_set_id: querySetId > 0 ? querySetId : null,
-    query_quality_min_score: intValue(req.body.query_quality_min_score, current.query_quality_min_score || 0, 0, 100),
-    chunk_size: intValue(req.body.chunk_size, current.chunk_size || 3, 1, 100),
-    max_discover_backlog: intValue(req.body.max_discover_backlog, current.max_discover_backlog || defaultDiscoverBacklogLimit, 1, 20),
+  const querySetIdPatch = querySetId > 0 ? querySetId : null;
+  const queryQualityMinScore = intValue(req.body.query_quality_min_score, current.query_quality_min_score || 0, 0, 100);
+  const chunkSize = intValue(req.body.chunk_size, current.chunk_size || 3, 1, 100);
+  const maxDiscoverBacklog = intValue(req.body.max_discover_backlog, current.max_discover_backlog || defaultDiscoverBacklogLimit, 1, 20);
+  const update = await updateQuerySchedulerWithMigrationFence({
+    pool,
+    normalize: normalizeQueryScheduler,
+    mutate: (lockedCurrent) => ({
+      startsNewCycle: false,
+      settings: {
+        ...lockedCurrent,
+        query_set_id: querySetIdPatch,
+        query_quality_min_score: queryQualityMinScore,
+        chunk_size: chunkSize,
+        max_discover_backlog: maxDiscoverBacklog,
+      },
+    }),
   });
+  const next = update.scheduler;
   const counts = await querySchedulerWorkCounts(next.query_set_id, next.query_quality_min_score);
   res.json({
     ok: true,
@@ -5658,13 +5663,6 @@ app.post("/queries/scheduler/:action", async (req, res) => {
     const queryQualityMinScore = intValue(req.body.query_quality_min_score, current.query_quality_min_score || 0, 0, 100);
     const chunkSize = intValue(req.body.chunk_size, current.chunk_size || 3, 1, 100);
     const maxDiscoverBacklog = intValue(req.body.max_discover_backlog, current.max_discover_backlog || defaultDiscoverBacklogLimit, 1, 20);
-    const draft = await saveQueryScheduler({
-      ...current,
-      query_set_id: normalizedQuerySetId,
-      query_quality_min_score: queryQualityMinScore,
-      chunk_size: chunkSize,
-      max_discover_backlog: maxDiscoverBacklog,
-    });
     const continuingCycle = Boolean(
       current.pipeline_cycle_id
       && !current.completed_at
@@ -5682,21 +5680,51 @@ app.post("/queries/scheduler/:action", async (req, res) => {
         error: `当前范围没有满足质量分 >= ${fmtInt(queryQualityMinScore)} 的 due query、可恢复页面，Discover 队列也为空，未启动调度。可以先降低 Query 质量分、点击某个 Query 的“设为 due”，或等待 next_crawl_at 到期。`,
       });
     }
-    next = await saveQueryScheduler({
-      ...draft,
-      status: discoverWork > 0 || workCounts.scoring > 0 ? "running" : "finishing",
-      query_set_id: normalizedQuerySetId,
-      query_quality_min_score: queryQualityMinScore,
-      chunk_size: chunkSize,
-      max_discover_backlog: maxDiscoverBacklog,
-      started_at: continuingCycle ? (current.started_at || now) : now,
-      paused_at: null,
-      stopped_at: null,
-      completed_at: null,
-      stop_reason: null,
-      paused_from_status: null,
-      pipeline_cycle_id: pipelineCycleId,
+    const activation = await updateQuerySchedulerWithMigrationFence({
+      pool,
+      normalize: normalizeQueryScheduler,
+      now,
+      mutate: (lockedCurrent) => {
+        const transition = querySchedulerStartTransition(lockedCurrent, {
+          expected: current,
+        });
+        if (!transition.allowed) return { rejection: transition };
+        return {
+          startsNewCycle: transition.startsNewCycle,
+          settings: {
+            ...lockedCurrent,
+            status: discoverWork > 0 || workCounts.scoring > 0 ? "running" : "finishing",
+            query_set_id: normalizedQuerySetId,
+            query_quality_min_score: queryQualityMinScore,
+            chunk_size: chunkSize,
+            max_discover_backlog: maxDiscoverBacklog,
+            started_at: transition.continuesCurrentCycle
+              ? (lockedCurrent.started_at || now)
+              : now,
+            paused_at: null,
+            stopped_at: null,
+            completed_at: null,
+            stop_reason: null,
+            paused_from_status: null,
+            pipeline_cycle_id: transition.continuesCurrentCycle
+              ? lockedCurrent.pipeline_cycle_id
+              : pipelineCycleId,
+          },
+        };
+      },
     });
+    if (!activation.updated) {
+      if (activation.rejection) {
+        return redirectWith(req, res, {
+          error: "Query 调度状态已变化，请刷新页面后重试。",
+        });
+      }
+      const activeRetry = activation.admission.active_system_retry;
+      return redirectWith(req, res, {
+        error: `系统重试 #${fmtInt(activeRetry.system_retry_id)} 正在恢复 Batch ${activeRetry.failed_dispatch_batch_id || "-"}，完成后才能开始新流水线。`,
+      });
+    }
+    next = activation.scheduler;
     await Promise.all(Object.values(queues).map((queue) => queue.resume()));
     notice = discoverWork > 0
       ? `Query 调度已开始：质量分 >= ${fmtInt(next.query_quality_min_score)}，每次切片 ${fmtInt(next.chunk_size)} 个`
@@ -5716,45 +5744,94 @@ app.post("/queries/scheduler/:action", async (req, res) => {
         });
       }
     }
-    next = await saveQueryScheduler({
-      ...current,
-      status: resumeStatus,
-      paused_at: null,
-      stopped_at: null,
-      paused_from_status: null,
+    const activation = await updateQuerySchedulerWithMigrationFence({
+      pool,
+      normalize: normalizeQueryScheduler,
+      now,
+      mutate: (lockedCurrent) => {
+        const transition = querySchedulerResumeTransition(lockedCurrent, {
+          expected: current,
+        });
+        if (!transition.allowed) return { rejection: transition };
+        return {
+          startsNewCycle: false,
+          settings: {
+            ...lockedCurrent,
+            status: transition.resumeStatus,
+            paused_at: null,
+            stopped_at: null,
+            paused_from_status: null,
+          },
+        };
+      },
     });
+    if (!activation.updated) {
+      return redirectWith(req, res, {
+        error: "Query 调度状态已变化，请刷新页面后重试。",
+      });
+    }
+    next = activation.scheduler;
     await Promise.all(Object.values(queues).map((queue) => queue.resume()));
-    notice = resumeStatus === "running"
+    notice = next.status === "running"
       ? `Query 调度已继续：质量分 >= ${fmtInt(next.query_quality_min_score)}，每次切片 ${fmtInt(next.chunk_size)} 个`
       : "自动收尾已继续：从暂停现场恢复";
   } else if (action === "pause") {
-    next = await saveQueryScheduler({
-      ...current,
-      status: "paused",
-      paused_at: now,
-      paused_from_status: ["running", "finishing", "repairing"].includes(current.status) ? current.status : "running",
+    const update = await updateQuerySchedulerWithMigrationFence({
+      pool,
+      normalize: normalizeQueryScheduler,
+      now,
+      mutate: (lockedCurrent) => {
+        const transition = querySchedulerPauseTransition(lockedCurrent, { expected: current });
+        return transition.allowed
+          ? {
+            startsNewCycle: false,
+            settings: {
+              ...lockedCurrent,
+              status: "paused",
+              paused_at: now,
+              paused_from_status: transition.pausedFromStatus,
+            },
+          }
+          : { rejection: transition };
+      },
     });
+    if (!update.updated) {
+      return redirectWith(req, res, {
+        error: "Query 调度状态已变化，请刷新页面后重试。",
+      });
+    }
+    next = update.scheduler;
     await Promise.all(pipelineExecutionQueues.map((queue) => queue.pause()));
     notice = "流水线已暂停：活动 Job 完成后停止领取，队列和数据库现场已保留";
   } else if (action === "stop") {
-    next = await saveQueryScheduler({
-      ...current,
-      status: "stopped",
-      stopped_at: now,
-      completed_at: null,
-      stop_reason: "user_requested",
-      paused_from_status: null,
+    const update = await updateQuerySchedulerWithMigrationFence({
+      pool,
+      normalize: normalizeQueryScheduler,
+      now,
+      mutate: (lockedCurrent) => {
+        const transition = querySchedulerStopTransition(lockedCurrent, { expected: current });
+        return transition.allowed
+          ? {
+            startsNewCycle: false,
+            settings: {
+              ...lockedCurrent,
+              status: "stopped",
+              stopped_at: now,
+              completed_at: null,
+              stop_reason: "user_requested",
+              paused_from_status: null,
+            },
+          }
+          : { rejection: transition };
+      },
+      afterUpdate: ({ client, scheduler }) => stopQuerySchedulerBatch(client, scheduler),
     });
-    if (current.pipeline_cycle_id) {
-      await db(
-        `UPDATE crawler.query_dispatch_batches
-         SET status=CASE WHEN status='completed' THEN status ELSE 'stopped' END,
-             finished_at=CASE WHEN status='completed' THEN finished_at ELSE now() END,
-             updated_at=now()
-         WHERE dispatch_batch_id=$1`,
-        [current.pipeline_cycle_id],
-      );
+    if (!update.updated) {
+      return redirectWith(req, res, {
+        error: "Query 调度状态已变化，请刷新页面后重试。",
+      });
     }
+    next = update.scheduler;
     await Promise.all(pipelineExecutionQueues.map((queue) => queue.pause()));
     notice = "流水线已结束：现场保留，后续开始会按当前 query/page 状态继续";
   } else {

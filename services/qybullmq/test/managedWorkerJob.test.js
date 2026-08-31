@@ -214,10 +214,11 @@ test("proxy identity drift is a structured retryable system failure", () => {
   }), "retryable_system_failure");
 });
 
-test("Candidate attempt Fences use the active and failed BullMQ attempt clocks", () => {
+test("Candidate attempt Fences use one BullMQ execution-start clock", () => {
   const job = {
     id: "channel-job-01",
     attemptsMade: 2,
+    attemptsStarted: 3,
     data: { candidate_id: 42, dispatch_generation: 7 },
   };
 
@@ -231,7 +232,7 @@ test("Candidate attempt Fences use the active and failed BullMQ attempt clocks",
     candidateId: 42,
     dispatchGeneration: 7,
     jobId: "channel-job-01",
-    bullmqAttempt: 2,
+    bullmqAttempt: 3,
   });
 });
 
@@ -243,6 +244,7 @@ test("a Candidate attempt claim is monotonic within one dispatch generation", as
   }, {
     id: "channel-job-01",
     attemptsMade: 1,
+    attemptsStarted: 2,
     data: { candidate_id: 42, dispatch_generation: 7 },
   });
 
@@ -261,6 +263,7 @@ test("a completed Job only clears its own active Candidate attempt", async () =>
   }, {
     id: "channel-job-01",
     attemptsMade: 2,
+    attemptsStarted: 2,
     data: { candidate_id: 42, dispatch_generation: 7 },
   });
 
@@ -279,6 +282,7 @@ test("a completed Job resolves only its active Migration system retry item", asy
   }, {
     id: "channel-job-01",
     attemptsMade: 2,
+    attemptsStarted: 2,
     data: { candidate_id: 42, dispatch_generation: 7 },
   });
 
@@ -297,6 +301,7 @@ test("a preserved terminal failure still releases its own Candidate attempt Fenc
   }, {
     id: "channel-job-01",
     attemptsMade: 2,
+    attemptsStarted: 2,
     data: { candidate_id: 42, dispatch_generation: 7 },
   }, {
     disposition: "preserve",
@@ -318,6 +323,7 @@ test("a Candidate failed event is fenced by terminal state, generation and newer
     id: "channel-job-01",
     queueName: queuesByRole.channelCrawl,
     attemptsMade: 2,
+    attemptsStarted: 2,
     data: { candidate_id: 42, dispatch_generation: 7 },
   }, {
     disposition: "queued",
@@ -364,6 +370,7 @@ test("a legal terminal failure preserves the Candidate attempt Fence for atomic 
     id: "channel-snapshot__legacy-results-canary__UC0Noar__g1",
     queueName: queuesByRole.channelCrawl,
     attemptsMade: 1,
+    attemptsStarted: 1,
     data: {
       candidate_id: 482,
       dispatch_generation: 1,
@@ -411,6 +418,7 @@ test("retryable_system_failure restores Candidate business budget under the exac
     id: "channel-snapshot__legacy-results-canary__UC0Noar__g1",
     queueName: queuesByRole.channelCrawl,
     attemptsMade: 1,
+    attemptsStarted: 1,
     data: {
       candidate_id: 482,
       dispatch_generation: 1,
@@ -475,6 +483,7 @@ test("a system failure after Candidate acceptance preserves the business termina
     id: "channel-snapshot__legacy-results-canary__UC0Noar__g1",
     queueName: queuesByRole.channelCrawl,
     attemptsMade: 3,
+    attemptsStarted: 3,
     data: {
       candidate_id: 482,
       dispatch_generation: 1,
@@ -535,6 +544,7 @@ test("an accepted non-Migration Candidate releases its Fence after terminal syst
     id: "channel-snapshot__query-batch__UCordinary__g1",
     queueName: queuesByRole.channelCrawl,
     attemptsMade: 3,
+    attemptsStarted: 3,
     data: {
       candidate_id: 900,
       dispatch_generation: 1,

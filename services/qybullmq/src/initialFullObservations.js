@@ -289,10 +289,14 @@ export async function recordInitialFullObservations({
   crawlerVersion = String(process.env.CRAWLER_VERSION || "qy-v16"),
   revisionType = "incremental",
   repairId = null,
+  transactionGuard = null,
   recordAbout = recordAboutObservation,
   recordObservation = recordCrawlerObservation,
 }) {
   if (typeof withTransaction !== "function") throw new TypeError("withTransaction is required");
+  if (transactionGuard != null && typeof transactionGuard !== "function") {
+    throw new TypeError("transactionGuard must be a function");
+  }
   if (!channelId || !runId) throw new TypeError("channelId and runId are required");
   if (!new Set(["incremental", "repair"]).has(revisionType)) {
     throw new TypeError("revisionType must be incremental or repair");
@@ -304,6 +308,14 @@ export async function recordInitialFullObservations({
     throw new TypeError("repairId is required for Repair observations");
   }
   return withTransaction(async (client) => {
+    if (transactionGuard && !(await transactionGuard(client))) {
+      return {
+        recorded: false,
+        reason: "transaction_guard_rejected",
+        observations: {},
+        fenceRejected: true,
+      };
+    }
     const sourceRows = await client.query(
       `SELECT row_to_json(channel) AS channel,row_to_json(run) AS run
        FROM crawler.channels channel

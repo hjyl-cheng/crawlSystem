@@ -108,7 +108,7 @@ function jobExecutionId(job) {
     job?.data?.dispatch_generation,
     "job.data.dispatch_generation",
   );
-  const attempt = nonNegativeInteger(job?.attemptsMade ?? 0, "job.attemptsMade") + 1;
+  const attempt = positiveInteger(job?.attemptsStarted, "job.attemptsStarted");
   const digest = createHash("sha256")
     .update(JSON.stringify([queue, id, generation, attempt]))
     .digest("hex");
@@ -288,7 +288,9 @@ export class RotaSlotAdapter {
           if (!isLeaseConflict(error)) throw error;
           if (beginTaskLeaseConflictRecovered) {
             this.#fenceSlot("LEASE_CONFLICT_UNRESOLVED", error, { preserveLeaseSafety: true });
-            throw new RotaSlotDeferredError("lease_conflict_recovery");
+            const reclaimed = await this.#reclaimAssignment(frozen);
+            if (reclaimed && this.slotReady) continue;
+            throw new RotaSlotDeferredError("lease_reclaiming");
           }
           beginTaskLeaseConflictRecovered = true;
           await this.#recoverBeginTaskLeaseConflict(frozen, error);
@@ -560,7 +562,9 @@ export class RotaSlotAdapter {
         throw new RotaSlotDeferredError("lease_reclaiming");
       }
       if (isLeaseConflict(error)) {
-        throw new RotaSlotDeferredError("lease_conflict_recovery");
+        const reclaimed = await this.#reclaimAssignment(frozen);
+        if (reclaimed && this.slotReady) return;
+        throw new RotaSlotDeferredError("lease_reclaiming");
       }
       if (error?.retryable === true) {
         throw new RotaSlotDeferredError("lease_conflict_recovery");
@@ -972,16 +976,16 @@ export class RotaSlotAdapter {
       const frozen = this.assignment;
       let retryable = true;
       void this.#renewAssignment(frozen).catch(async (error) => {
-        if (isLeaseGone(error)) {
+        if (isLeaseGone(error) || isLeaseConflict(error)) {
           retryable = false;
           if (this.assignment?.slot_name === frozen.slot_name
               && this.assignment?.lease_id === frozen.lease_id) {
-            this.#fenceSlot("LEASE_GONE", error);
+            this.#fenceSlot(isLeaseGone(error) ? "LEASE_GONE" : "LEASE_CONFLICT", error);
             await this.#reclaimAssignment(frozen);
           }
           return;
         }
-        retryable = error?.retryable === true || isLeaseConflict(error);
+        retryable = error?.retryable === true;
         if (this.assignment?.slot_name === frozen.slot_name
             && this.assignment?.lease_id === frozen.lease_id) {
           this.#fenceSlot("RENEW_FAILED", error);

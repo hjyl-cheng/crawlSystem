@@ -13,8 +13,12 @@ function hasSystemFailureEvidence(candidate) {
     );
 }
 
-function hasActiveSystemRetry(candidate) {
-  return candidate?.has_active_system_retry === true;
+function hasPendingSystemRetry(candidate) {
+  return candidate?.has_pending_system_retry === true;
+}
+
+function hasInFlightSystemRetry(candidate) {
+  return candidate?.has_in_flight_system_retry === true;
 }
 
 function completionFromCandidates(candidates) {
@@ -76,8 +80,18 @@ export async function settleCompletedMigrationBatch({
                 FROM crawler.migration_system_retry_items retry
                 WHERE retry.candidate_id=candidate.candidate_id
                   AND retry.failed_dispatch_batch_id=candidate.dispatch_batch_id
-                  AND retry.status IN ('retrying','pending','dispatched')
-              ) AS has_active_system_retry
+                  AND retry.status='pending'
+                  AND retry.failed_dispatch_generation=candidate.snapshot_dispatch_generation
+                  AND retry.failed_job_id=candidate.snapshot_active_job_id
+                  AND retry.failed_job_attempt=candidate.snapshot_active_job_attempt
+              ) AS has_pending_system_retry,
+              EXISTS (
+                SELECT 1
+                FROM crawler.migration_system_retry_items retry
+                WHERE retry.candidate_id=candidate.candidate_id
+                  AND retry.failed_dispatch_batch_id=candidate.dispatch_batch_id
+                  AND retry.status IN ('retrying','dispatched')
+              ) AS has_in_flight_system_retry
        FROM crawler.channel_candidates candidate
        WHERE candidate.dispatch_batch_id=$1
        ORDER BY candidate.candidate_id
@@ -87,15 +101,16 @@ export async function settleCompletedMigrationBatch({
     if (candidateRows.rows.some(({ status }) => !TERMINAL_CANDIDATE_STATUSES.has(status))) {
       return null;
     }
+    if (candidateRows.rows.some(hasInFlightSystemRetry)) return null;
     if (candidateRows.rows.some((candidate) => (
       candidate.status === "failed"
-      && !hasActiveSystemRetry(candidate)
+      && !hasPendingSystemRetry(candidate)
       && Number(candidate.snapshot_attempts) < normalizedMaxSnapshotAttempts
     ))) return null;
     if (candidateRows.rows.some((candidate) => (
       candidate.status === "accepted"
       && candidate.snapshot_active_job_id != null
-      && !hasActiveSystemRetry(candidate)
+      && !hasPendingSystemRetry(candidate)
     ))) return null;
     const completion = completionFromCandidates(candidateRows.rows);
     const statistics = {

@@ -305,11 +305,9 @@ export async function completeChannelCandidateJobAttempt(query, job, {
            updated_at=now()
        FROM cleared_candidate candidate
        WHERE retry.candidate_id=candidate.candidate_id
-         AND retry.status IN ('retrying','pending','dispatched')
-         AND (
-           (retry.failed_dispatch_generation=$2 AND retry.failed_job_id=$3)
-           OR retry.retry_dispatch_generation=$2
-         )
+         AND retry.status='retrying'
+         AND retry.failed_dispatch_generation=$2
+         AND retry.failed_job_id=$3
        RETURNING retry.system_retry_id
      )
      SELECT candidate.candidate_id,

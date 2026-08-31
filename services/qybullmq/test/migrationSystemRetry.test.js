@@ -4,6 +4,19 @@ import test from "node:test";
 
 import { retryMigrationSystemFailure } from "../src/migrationSystemRetry.js";
 
+function completedScheduler() {
+  return {
+    rowCount: 1,
+    rows: [{
+      value_json: {
+        status: "stopped",
+        stop_reason: "pipeline_complete",
+        pipeline_cycle_id: "legacy-results-canary",
+      },
+    }],
+  };
+}
+
 test("controlled Migration mode exposes only the existing controlled write surfaces", async () => {
   const server = await readFile(new URL("../src/server.js", import.meta.url), "utf8");
 
@@ -18,6 +31,7 @@ test("controlled system retry allocates exactly one G+1 Outbox", async () => {
       system_retry_id: "801",
       migration_intent_id: "25",
       candidate_id: "482",
+      failed_dispatch_batch_id: "legacy-results-canary",
       failed_dispatch_generation: "1",
       failed_job_id: "channel-snapshot__legacy-results-canary__UC0Noar__g1",
       failed_job_attempt: 3,
@@ -40,8 +54,17 @@ test("controlled system retry allocates exactly one G+1 Outbox", async () => {
     },
     createdOutboxes: 0,
   };
+  const lockOrder = [];
   const client = {
     async query(sql, params) {
+      for (const resource of ["candidate", "retry", "intent"]) {
+        if (sql.includes(`migration-system-retry-dispatch-lock:${resource}`)) {
+          lockOrder.push(resource);
+        }
+      }
+      if (sql.includes("FROM crawler.settings") && sql.includes("FOR UPDATE")) {
+        return completedScheduler();
+      }
       if (sql.includes("FROM crawler.migration_system_retry_items") && sql.includes("FOR UPDATE")) {
         return { rowCount: 1, rows: [{ ...state.retry }] };
       }
@@ -100,6 +123,90 @@ test("controlled system retry allocates exactly one G+1 Outbox", async () => {
   assert.equal(repeated.dispatch_generation, 2);
   assert.equal(state.createdOutboxes, 1);
   assert.equal(state.retry.status, "dispatched");
+  assert.deepEqual(lockOrder, [
+    "candidate", "retry", "intent",
+    "candidate", "retry", "intent",
+  ]);
+});
+
+test("controlled system retry pins a historical unknown Batch before allocating G+1", async () => {
+  const failedJobId = "channel-snapshot__legacy-results-canary__UC0Noar__g1";
+  const state = {
+    retry: {
+      system_retry_id: "801",
+      migration_intent_id: "25",
+      candidate_id: "482",
+      failed_dispatch_batch_id: null,
+      failed_dispatch_generation: "1",
+      failed_job_id: failedJobId,
+      failed_job_attempt: 3,
+      failure_code: "LEASE_CONFLICT",
+      failure_category: "lease",
+      failure_evidence: { failure_type: "retryable_system_failure" },
+      status: "pending",
+      retry_dispatch_generation: null,
+      dispatch_batch_id: "legacy-results-canary",
+      pipeline_cycle_id: "legacy-results-canary",
+      channel_id: "UC0NoarYHkSxek05QDqhtoYw",
+      channel_url: "https://www.youtube.com/channel/UC0NoarYHkSxek05QDqhtoYw",
+      priority: 100,
+      candidate_status: "failed",
+      snapshot_dispatch_generation: "1",
+      snapshot_active_job_id: failedJobId,
+      snapshot_active_job_attempt: 3,
+      snapshot_json: { failure_type: "retryable_system_failure" },
+      intent_dispatch_attempts: 1,
+    },
+  };
+  const client = {
+    async query(sql, params) {
+      if (sql.includes("FROM crawler.settings") && sql.includes("FOR UPDATE")) {
+        return completedScheduler();
+      }
+      if (sql.includes("FROM crawler.migration_system_retry_items") && sql.includes("FOR UPDATE")) {
+        return { rowCount: 1, rows: [{ ...state.retry }] };
+      }
+      if (sql.includes("SET failed_dispatch_batch_id=$2")) {
+        assert.deepEqual(params, [801, "legacy-results-canary", 1, failedJobId, 3]);
+        state.retry.failed_dispatch_batch_id = params[1];
+        return { rowCount: 1, rows: [{ failed_dispatch_batch_id: params[1] }] };
+      }
+      if (sql.includes("UPDATE crawler.channel_candidates") && sql.includes("snapshot_json")) {
+        return { rowCount: 1, rows: [{ candidate_id: 482 }] };
+      }
+      if (sql.includes("UPDATE crawler.migration_system_retry_items")) {
+        state.retry.status = "dispatched";
+        state.retry.retry_dispatch_generation = params[1];
+        return { rowCount: 1, rows: [{ system_retry_id: 801 }] };
+      }
+      throw new Error(`unexpected SQL: ${sql}`);
+    },
+  };
+  let allocated = false;
+
+  const result = await retryMigrationSystemFailure({
+    systemRetryId: 801,
+    withTransaction: (action) => action(client),
+    allocateOutbox: async (_client, options) => {
+      allocated = true;
+      assert.equal(state.retry.failed_dispatch_batch_id, "legacy-results-canary");
+      assert.equal(options.candidate.dispatch_batch_id, "legacy-results-canary");
+      return {
+        created: true,
+        candidate: options.candidate,
+        outbox: {
+          dispatch_id: "channel-snapshot-dispatch:482:g2:test",
+          deterministic_job_id: options.jobId,
+          payload_json: options.payload,
+          status: "pending",
+        },
+      };
+    },
+  });
+
+  assert.equal(allocated, true);
+  assert.equal(state.retry.failed_dispatch_batch_id, "legacy-results-canary");
+  assert.equal(result.dispatch_generation, 2);
 });
 
 test("controlled retry accepts an Intent-fenced system failure after Candidate acceptance", async () => {
@@ -108,6 +215,7 @@ test("controlled retry accepts an Intent-fenced system failure after Candidate a
     system_retry_id: "801",
     migration_intent_id: "25",
     candidate_id: "482",
+    failed_dispatch_batch_id: "legacy-results-canary",
     failed_dispatch_generation: "1",
     failed_job_id: failedJobId,
     failed_job_attempt: 3,
@@ -131,6 +239,9 @@ test("controlled retry accepts an Intent-fenced system failure after Candidate a
   let allocatedCandidate = null;
   const client = {
     async query(sql) {
+      if (sql.includes("FROM crawler.settings") && sql.includes("FOR UPDATE")) {
+        return completedScheduler();
+      }
       if (sql.includes("FROM crawler.migration_system_retry_items") && sql.includes("FOR UPDATE")) {
         return { rowCount: 1, rows: [row] };
       }
@@ -173,6 +284,7 @@ test("a dispatched retry rearms its exact sent G+1 Outbox without allocating G+2
     system_retry_id: "801",
     migration_intent_id: "25",
     candidate_id: "482",
+    failed_dispatch_batch_id: "legacy-results-canary",
     failed_dispatch_generation: "1",
     failed_job_id: "channel-snapshot__legacy-results-canary__UC0NoarYHkSxek05QDqhtoYw__g1",
     failed_job_attempt: 3,
@@ -207,6 +319,9 @@ test("a dispatched retry rearms its exact sent G+1 Outbox without allocating G+2
   let rearmed = false;
   const client = {
     async query(sql, params) {
+      if (sql.includes("FROM crawler.settings") && sql.includes("FOR UPDATE")) {
+        return completedScheduler();
+      }
       if (sql.includes("FROM crawler.migration_system_retry_items") && sql.includes("FOR UPDATE")) {
         return { rowCount: 1, rows: [row] };
       }
@@ -253,6 +368,7 @@ test("controlled retry rearms a dead G+1 Outbox without allocating G+2 or demoti
       system_retry_id: "801",
       migration_intent_id: "25",
       candidate_id: "482",
+      failed_dispatch_batch_id: "legacy-results-canary",
       failed_dispatch_generation: "1",
       failed_job_id: "channel-snapshot__legacy-results-canary__UC0Noar__g1",
       failed_job_attempt: 3,
@@ -287,6 +403,9 @@ test("controlled retry rearms a dead G+1 Outbox without allocating G+2 or demoti
   };
   const client = {
     async query(sql, params) {
+      if (sql.includes("FROM crawler.settings") && sql.includes("FOR UPDATE")) {
+        return completedScheduler();
+      }
       if (sql.includes("FROM crawler.migration_system_retry_items") && sql.includes("FOR UPDATE")) {
         return { rowCount: 1, rows: [{ ...state.retry }] };
       }

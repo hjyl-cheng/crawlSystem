@@ -31,12 +31,15 @@ async function fixture(pool, {
   materializedRun = false,
   runStatus = "running",
   dispatchGeneration = 1,
+  candidateStatus = "queued",
+  activeJobAttempt = 1,
 } = {}) {
   const suffix = randomUUID();
   const batchId = `budget-recovery:${suffix}`;
   const channelId = `UC${suffix.replaceAll("-", "").slice(0, 22)}`;
   const runId = `run:budget:${suffix}`;
   const businessRunKey = `full-candidate:budget:${suffix}`;
+  const jobId = `budget-job:${suffix}`;
   const candidateId = await transaction(pool, async (client) => {
     await client.query(
       `INSERT INTO crawler.query_dispatch_batches (
@@ -52,10 +55,18 @@ async function fixture(pool, {
     const candidate = await client.query(
       `INSERT INTO crawler.channel_candidates (
          dispatch_batch_id,pipeline_cycle_id,channel_id,channel_url,status,
-         snapshot_dispatch_generation
-       ) VALUES ($1,$1,$2,$3,'queued',$4)
+         snapshot_dispatch_generation,snapshot_active_job_id,snapshot_active_job_attempt
+       ) VALUES ($1,$1,$2,$3,$4,$5,$6,$7)
        RETURNING candidate_id`,
-      [batchId, channelId, `https://www.youtube.com/channel/${channelId}`, dispatchGeneration],
+      [
+        batchId,
+        channelId,
+        `https://www.youtube.com/channel/${channelId}`,
+        candidateStatus,
+        dispatchGeneration,
+        jobId,
+        activeJobAttempt,
+      ],
     );
     const id = Number(candidate.rows[0].candidate_id);
     await client.query(
@@ -84,11 +95,28 @@ async function fixture(pool, {
     }
     return id;
   });
-  return { batchId, businessRunKey, candidateId, channelId, dispatchGeneration, runId };
+  return {
+    activeJobAttempt,
+    batchId,
+    businessRunKey,
+    candidateId,
+    channelId,
+    dispatchGeneration,
+    jobId,
+    runId,
+  };
 }
 
 async function cleanup(pool, value) {
   await transaction(pool, async (client) => {
+    await client.query(
+      "DELETE FROM crawler.migration_system_retry_items WHERE candidate_id=$1",
+      [value.candidateId],
+    );
+    await client.query(
+      "DELETE FROM crawler.migration_channel_intents WHERE target_candidate_id=$1",
+      [value.candidateId],
+    );
     await client.query(
       "DELETE FROM crawler.business_run_bindings WHERE business_run_key=$1",
       [value.businessRunKey],
@@ -104,9 +132,10 @@ async function cleanup(pool, value) {
 
 function budgetJob(value) {
   return {
-    id: `budget-job:${value.candidateId}`,
+    id: value.jobId,
     queueName: "youtube-channel-crawl",
     name: "channel-crawl",
+    attemptsStarted: value.activeJobAttempt,
     data: {
       business_run_key: value.businessRunKey,
       candidate_id: value.candidateId,
@@ -114,6 +143,48 @@ function budgetJob(value) {
       dispatch_generation: value.dispatchGeneration,
     },
   };
+}
+
+async function addDispatchedSystemRetry(pool, value) {
+  return transaction(pool, async (client) => {
+    const intent = await client.query(
+      `INSERT INTO crawler.migration_channel_intents (
+         source_id,source_database,source_database_oid,source_candidate_id,
+         channel_id,source_snapshot,snapshot_sha256,target_candidate_id,
+         first_dispatch_batch_id,dispatch_attempts,last_dispatch_at
+       ) VALUES (
+         $1,current_database(),
+         (SELECT oid FROM pg_database WHERE datname=current_database()),$2,
+         $3,'{}'::jsonb,repeat('a',64),$2,$4,$5,now()
+       ) RETURNING migration_intent_id`,
+      [
+        `budget-recovery:${value.candidateId}`,
+        value.candidateId,
+        value.channelId,
+        value.batchId,
+        value.dispatchGeneration,
+      ],
+    );
+    const retry = await client.query(
+      `INSERT INTO crawler.migration_system_retry_items (
+         migration_intent_id,candidate_id,failed_dispatch_batch_id,
+         failed_dispatch_generation,failed_job_id,failed_job_attempt,
+         failure_code,failure_category,failure_evidence,status,
+         retry_dispatch_generation,dispatched_at
+       ) VALUES ($1,$2,$3,$4,$5,1,'LEASE_CONFLICT','lease','{}'::jsonb,
+                 'dispatched',$6,now())
+       RETURNING system_retry_id`,
+      [
+        Number(intent.rows[0].migration_intent_id),
+        value.candidateId,
+        value.batchId,
+        value.dispatchGeneration - 1,
+        `${value.jobId}:g${value.dispatchGeneration - 1}`,
+        value.dispatchGeneration,
+      ],
+    );
+    return Number(retry.rows[0].system_retry_id);
+  });
 }
 
 test("a reserved Binding without a Channel Run commits one terminal budget state", {
@@ -203,6 +274,119 @@ test("a materialized running Channel Run commits the same atomic terminal budget
       candidate_evidence_status: "business_run_budget_exhausted",
       binding_status: "terminal",
       terminal_reason: "proxy_control_business_run_budget_exhausted",
+    });
+  } finally {
+    if (value) await cleanup(pool, value).catch(() => {});
+    await pool.end();
+  }
+});
+
+test("G+1 budget exhaustion preserves an accepted Candidate and resolves its dispatched retry", {
+  skip: !integrationUrl,
+}, async () => {
+  const pool = new Pool({ connectionString: integrationUrl, max: 2 });
+  let value = null;
+  try {
+    value = await fixture(pool, {
+      materializedRun: true,
+      runStatus: "running",
+      dispatchGeneration: 2,
+      candidateStatus: "accepted",
+    });
+    const systemRetryId = await addDispatchedSystemRetry(pool, value);
+
+    let terminal = null;
+    try {
+      await terminateExhaustedBusinessRun(
+        (action) => transaction(pool, action),
+        { ...budgetJob(value), data: { ...budgetJob(value).data, run_id: value.runId } },
+        { code: "BUSINESS_RUN_BUDGET_EXHAUSTED" },
+      );
+    } catch (error) {
+      terminal = error;
+    }
+    assert.ok(terminal instanceof UnrecoverableError);
+    assert.equal(terminal.recovery.retry_resolved, 1);
+
+    const state = await pool.query(
+      `SELECT candidate.status AS candidate_status,
+              candidate.snapshot_active_job_id,candidate.snapshot_active_job_attempt,
+              run.status AS run_status,binding.status AS binding_status,
+              retry.status AS retry_status,retry.resolution
+       FROM crawler.channel_candidates candidate
+       JOIN crawler.business_run_bindings binding
+         ON binding.candidate_id=candidate.candidate_id
+       JOIN crawler.channel_runs run ON run.run_id=binding.business_run_id
+       JOIN crawler.migration_system_retry_items retry
+         ON retry.candidate_id=candidate.candidate_id
+       WHERE candidate.candidate_id=$1 AND retry.system_retry_id=$2`,
+      [value.candidateId, systemRetryId],
+    );
+    assert.deepEqual(state.rows[0], {
+      candidate_status: "accepted",
+      snapshot_active_job_id: null,
+      snapshot_active_job_attempt: null,
+      run_status: "failed",
+      binding_status: "terminal",
+      retry_status: "resolved",
+      resolution: "retry_job_terminal_business_run_budget_exhausted",
+    });
+  } finally {
+    if (value) await cleanup(pool, value).catch(() => {});
+    await pool.end();
+  }
+});
+
+test("a stalled budget failure cannot terminate or resolve the newer Candidate activation", {
+  skip: !integrationUrl,
+}, async () => {
+  const pool = new Pool({ connectionString: integrationUrl, max: 2 });
+  let value = null;
+  try {
+    value = await fixture(pool, {
+      materializedRun: true,
+      runStatus: "running",
+      dispatchGeneration: 2,
+      activeJobAttempt: 2,
+    });
+    const systemRetryId = await addDispatchedSystemRetry(pool, value);
+
+    await assert.rejects(
+      terminateExhaustedBusinessRun(
+        (action) => transaction(pool, action),
+        {
+          ...budgetJob(value),
+          attemptsStarted: 1,
+          data: { ...budgetJob(value).data, run_id: value.runId },
+        },
+        { code: "BUSINESS_RUN_BUDGET_EXHAUSTED" },
+      ),
+      (error) => error instanceof BusinessRunBudgetRecoveryError
+        && /Candidate activation changed/.test(error.message),
+    );
+
+    const state = await pool.query(
+      `SELECT candidate.status AS candidate_status,
+              candidate.snapshot_active_job_id,candidate.snapshot_active_job_attempt,
+              run.status AS run_status,binding.status AS binding_status,
+              retry.status AS retry_status,retry.resolution
+       FROM crawler.channel_candidates candidate
+       JOIN crawler.business_run_bindings binding
+         ON binding.candidate_id=candidate.candidate_id
+       JOIN crawler.channel_runs run ON run.run_id=binding.business_run_id
+       JOIN crawler.migration_system_retry_items retry
+         ON retry.candidate_id=candidate.candidate_id
+       WHERE candidate.candidate_id=$1 AND retry.system_retry_id=$2`,
+      [value.candidateId, systemRetryId],
+    );
+    assert.deepEqual(state.rows[0], {
+      candidate_status: "queued",
+      snapshot_active_job_id: value.jobId,
+      snapshot_active_job_attempt: 2,
+      run_status: "running",
+      binding_status: "materialized",
+      retry_status: "dispatched",
+      resolution: null,
     });
   } finally {
     if (value) await cleanup(pool, value).catch(() => {});

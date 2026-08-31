@@ -60,6 +60,7 @@ function currentAttemptJob(job) {
     data: job?.data,
     opts: job?.opts,
     attemptsMade: Number(job?.attemptsMade ?? 0) + 1,
+    attemptsStarted: job?.attemptsStarted,
   };
 }
 
@@ -156,7 +157,8 @@ export async function failChannelCandidateWorkerJob({
         ? { parser_contract_error: failure.parserDetails }
         : {},
     });
-    const resolvedCount = !failure.systemFailure && isTerminal
+    const ownsSettledCandidate = settled.recorded || settled.fenceCleared;
+    const resolvedCount = !failure.systemFailure && isTerminal && ownsSettledCandidate
       ? await resolveMigrationSystemRetryItems(transactionQuery, job, {
         resolution: "retry_job_terminal_business_failure",
       })

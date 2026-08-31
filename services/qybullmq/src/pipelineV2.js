@@ -60,6 +60,7 @@ import {
   currentChannelExecution,
   currentChannelExecutionAbortSignal,
 } from "./channelExecutionContext.js";
+import { reconcileDispatchBatchCandidateState } from "./dispatchBatchCandidateState.js";
 import { throwIfAborted } from "./abortSignal.js";
 import {
   classifyContentWindow,
@@ -68,11 +69,22 @@ import {
 } from "./contentWindow.js";
 import { contentDetailBatchStopReason } from "./contentDetailBatchPolicy.js";
 import {
+  assertInlineContentDetailExecutionCurrent,
+  claimContentDetailExecution,
+  contentDetailExecutionFence,
+  lockContentDetailExecution,
+} from "./contentDetailExecutionFence.js";
+import {
   publicationEvidenceFromFields,
   publicationEvidenceConflictRecord,
   selectPublicationEvidence,
 } from "./publicationTimeEvidence.js";
 import { query, withTransaction } from "./db.js";
+import {
+  claimDataApiBatchExecution,
+  dataApiBatchExecutionFence,
+  lockDataApiBatchExecution,
+} from "./dataApiBatchExecutionFence.js";
 import {
   IncrementalAgentResultStore,
   isIncrementalAgentJob,
@@ -125,6 +137,12 @@ import {
   resolveFinalizeStatus,
 } from "./finalizePolicy.js";
 import { reconcileFullCrawlAgentState } from "./fullCrawlAgentState.js";
+import { classifyFullAgentBatchSettlement } from "./agentBatchSettlement.js";
+import {
+  fullAgentMigrationRunScope,
+  lockGenericFullAgentAgainstMigrationSystemRetry,
+  lockGenericFullAgentBatchAgainstMigrationSystemRetry,
+} from "./fullAgentMigrationRetryGuard.js";
 import { fullRepairRunMetadata } from "./fullRepairDispatch.js";
 import {
   commitFinalizedProfile,
@@ -139,11 +157,20 @@ import {
   migrationActivityCanFinalize,
 } from "./migrationActivityPolicy.js";
 import {
+  claimMigrationSystemRetryAgentJobFence,
+  lockGenericFinalizeAgainstMigrationSystemRetry,
+  lockMigrationSystemRetryAgentJobFence,
+  lockMigrationSystemRetryFinalizeJobFence,
+  migrationSystemRetryAgentJobFence,
+  migrationSystemRetryFinalizeJobFence,
+} from "./migrationSystemRetryRecovery.js";
+import {
   fullVideoStorageAction,
   updateExistingFullVideoAccess,
   upsertFullVideoContent,
 } from "./fullVideoContentStore.js";
 import { createQueues, queuesByRole, safeJobId } from "./queues.js";
+import { reconcileRunDetailStatus } from "./runDetailStatus.js";
 import { putRawObject } from "./storage.js";
 import {
   fetchChannelInitial,
@@ -482,22 +509,6 @@ export async function getCrawlSettingsV2() {
       detailConcurrency: normalizeDetailConcurrency(value.detail_concurrency, fallback.detailConcurrency),
       publishedAtRequiredPrecision: "date_only",
     };
-    await query(
-      `INSERT INTO crawler.settings (setting_key, value_json, updated_at)
-       VALUES ('crawl', $1::jsonb, now())
-       ON CONFLICT (setting_key) DO UPDATE
-       SET value_json = crawler.settings.value_json || EXCLUDED.value_json,
-           updated_at = now()`,
-      [JSON.stringify({
-        min_subscriber_count: settings.minSubscriberCount,
-        discover_stop_min_qualified_ratio: settings.discoverStopMinQualifiedRatio,
-        channel_content_limit: settings.channelContentLimit,
-        content_max_age_days: settings.contentMaxAgeDays,
-        detail_max_attempts: settings.detailMaxAttempts,
-        detail_concurrency: settings.detailConcurrency,
-        published_at_required_precision: settings.publishedAtRequiredPrecision,
-      })],
-    );
     crawlSettingsCache = { expiresAt: now + 30000, value: settings };
     return settings;
   } catch {
@@ -727,8 +738,9 @@ function accessIsTerminalWithoutApi(access) {
   return ["members_only", "private", "unlisted", "unavailable"].includes(access?.access_status);
 }
 
-async function enqueueYoutubeApiFallback(row, missingFields) {
-  await query(
+async function enqueueYoutubeApiFallback(row, missingFields, client = null) {
+  const execute = client?.query.bind(client) ?? query;
+  await execute(
     `INSERT INTO crawler.youtube_api_tasks (
        source_content_id,status,missing_fields,candidate_ids,updated_at
      ) VALUES ($1,'pending',$2::text[],ARRAY[$3]::bigint[],now())
@@ -755,8 +767,9 @@ async function enqueueYoutubeApiFallback(row, missingFields) {
   );
 }
 
-async function cancelResolvedYoutubeApiTasks(runId) {
-  const rows = await query(
+async function cancelResolvedYoutubeApiTasks(runId, client = null) {
+  const execute = client?.query.bind(client) ?? query;
+  const rows = await execute(
     `UPDATE crawler.youtube_api_tasks t
      SET status='done',
          result_json=COALESCE(t.result_json,'{}'::jsonb)
@@ -782,24 +795,26 @@ async function cancelResolvedYoutubeApiTasks(runId) {
   return rows.rowCount;
 }
 
-async function upsertContentFromCandidate(candidate, state) {
+async function upsertContentFromCandidate(candidate, state, client = null) {
   if (!candidate.content_type || candidate.type_authoritative !== true) return null;
   const detail = state.detail ?? {};
   const access = state.access ?? accessFromDetail(detail);
-  return withTransaction((client) => upsertFullVideoContent(client, {
+  const persist = (transactionClient) => upsertFullVideoContent(transactionClient, {
     candidate,
     state,
     access,
     locale: language,
-  }));
+  });
+  return client ? persist(client) : withTransaction(persist);
 }
 
-async function updateExistingContentAccessFromCandidate(candidate, state) {
-  return withTransaction((client) => updateExistingFullVideoAccess(client, {
+async function updateExistingContentAccessFromCandidate(candidate, state, client = null) {
+  const persist = (transactionClient) => updateExistingFullVideoAccess(transactionClient, {
     candidate,
     state,
     access: state?.access,
-  }));
+  });
+  return client ? persist(client) : withTransaction(persist);
 }
 
 async function persistFullVideoDisposition(row, {
@@ -809,6 +824,7 @@ async function persistFullVideoDisposition(row, {
   detail,
   error = null,
   terminalReason = null,
+  client = null,
 } = {}) {
   const disposition = resolveVideoDisposition({
     storageAction,
@@ -833,7 +849,8 @@ async function persistFullVideoDisposition(row, {
       resolved_at: disposition.observed_at,
     };
   }
-  await query(
+  const execute = client?.query.bind(client) ?? query;
+  await execute(
     `UPDATE crawler.content_candidates
      SET disposition=$2,next_attempt_at=$3,
          result_json=result_json
@@ -855,98 +872,21 @@ async function persistFullVideoDisposition(row, {
   return disposition;
 }
 
-async function updateRunDetailStatus(runId) {
-  const rows = await query(
-    `SELECT
-       count(*)::int AS total,
-       count(*) FILTER (WHERE detail_status IN ('done','unavailable'))::int AS terminal,
-       count(*) FILTER (WHERE api_status IN ('pending','queued','running','failed'))::int AS api_open,
-       count(*) FILTER (WHERE detail_status = 'failed')::int AS failed,
-       count(*) FILTER (
-         WHERE detail_status IN ('done','unavailable')
-           AND disposition IS NULL
-       )::int AS undisposed,
-       count(*) FILTER (
-         WHERE detail_status IN ('done','unavailable')
-           AND cardinality(missing_fields)>0
-       )::int AS partial,
-       count(*) FILTER (WHERE result_json->'scope'->>'status' = 'excluded')::int AS excluded,
-       count(*) FILTER (WHERE result_json->'scope'->>'reason' IN ('older_than_max_age','after_chronological_age_cutoff'))::int AS age_excluded,
-       count(*) FILTER (WHERE result_json->'scope'->>'reason' = 'upcoming_live')::int AS upcoming_excluded,
-       count(*) FILTER (WHERE result_json->'scope'->>'reason' = 'live_in_progress')::int AS live_in_progress_excluded,
-       count(*) FILTER (
-         WHERE result_json#>>'{detail_request,reason_code}'='initial_publication_unresolved'
-       )::int AS details_requested_due_to_unresolved_count
-     FROM crawler.content_candidates
-     WHERE run_id=$1`,
-    [runId],
-  );
-  const summary = rows.rows[0] ?? {};
-  const undisposed = Number(summary.undisposed ?? 0);
-  const dispositionError = undisposed > 0
-    ? new Error(
-        `${undisposed} terminal content candidate${undisposed === 1 ? "" : "s"} has no disposition`,
-      )
-    : null;
-  const status = Number(summary.failed) > 0 || dispositionError
-    ? "failed"
-    : Number(summary.api_open) > 0
-      ? "api_pending"
-      : Number(summary.terminal) >= Number(summary.total)
-        ? "done"
-        : "running";
-  await query(
-    `UPDATE crawler.channel_runs
-     SET detail_status=$2,
-         status=CASE WHEN $2='done' THEN 'waiting_agent' WHEN $2='failed' THEN 'waiting_detail' ELSE 'waiting_detail' END,
-         expected_content_count=GREATEST($3::int-$4::int,0),
-         result_json=result_json || jsonb_build_object(
-           'excluded_count',$4::int,
-           'age_excluded_count',$5::int,
-           'upcoming_live_excluded_count',$6::int,
-           'live_in_progress_excluded_count',$7::int,
-           'undisposed_content_count',$8::int,
-           'retained_content_count',GREATEST($3::int-$4::int,0)
-         ) || jsonb_build_object(
-           'migration_activity_metrics',
-           COALESCE(result_json->'migration_activity_metrics','{}'::jsonb)
-             || jsonb_build_object(
-               'details_requested_due_to_unresolved_count',$10::int
-             )
-         ),
-         error_message=CASE
-           WHEN $8::int>0 THEN $9
-           WHEN $2='failed' THEN error_message
-           ELSE NULL
-         END,
-         updated_at=now()
-     WHERE run_id=$1`,
-    [
-      runId,
-      status,
-      Number(summary.total ?? 0),
-      Number(summary.excluded ?? 0),
-      Number(summary.age_excluded ?? 0),
-      Number(summary.upcoming_excluded ?? 0),
-      Number(summary.live_in_progress_excluded ?? 0),
-      undisposed,
-      dispositionError?.message ?? null,
-      Number(summary.details_requested_due_to_unresolved_count ?? 0),
-    ],
-  );
-  const migrationActivity = await applyMigrationActivityGate(runId, status);
-  if (migrationActivity.reject) {
-    await refreshDispatchCandidateCounts(migrationActivity.dispatchBatchId);
-    await signalReadyDiscoveryPageQualifications({
-      candidateId: migrationActivity.candidateId,
-    });
-  }
-  if (dispositionError) throw dispositionError;
-  return {
-    ...summary,
-    status: migrationActivity.reject ? "skipped" : status,
-    migration_activity_gate: migrationActivity,
-  };
+async function signalRunDetailStatusWakeup(migrationActivity) {
+  if (!migrationActivity?.reject) return;
+  await signalReadyDiscoveryPageQualifications({
+    candidateId: migrationActivity.candidateId,
+  });
+}
+
+async function updateRunDetailStatus(runId, { client = null } = {}) {
+  const summary = client
+    ? await reconcileRunDetailStatus(client, runId)
+    : await withTransaction((transactionClient) => (
+      reconcileRunDetailStatus(transactionClient, runId)
+    ));
+  if (!client) await signalRunDetailStatusWakeup(summary.migration_activity_gate);
+  return summary;
 }
 
 async function applyMigrationActivityGate(runId, detailStatus, options = {}) {
@@ -993,23 +933,7 @@ async function queueFinalize(channelId, runId, reason) {
 
 async function refreshDispatchCandidateCounts(dispatchBatchId) {
   if (!dispatchBatchId) return;
-  await query(
-    `UPDATE crawler.query_dispatch_batches batch
-     SET discovered_candidate_count=stats.total,
-         accepted_channel_count=stats.accepted,
-         rejected_channel_count=stats.rejected,
-         updated_at=now()
-     FROM (
-       SELECT count(*)::int AS total,
-              count(*) FILTER (WHERE status='accepted')::int AS accepted,
-              count(*) FILTER (WHERE status='rejected')::int AS rejected
-       FROM crawler.channel_candidates
-       WHERE dispatch_batch_id=$1
-     ) stats
-     WHERE batch.dispatch_batch_id=$1
-       AND batch.status<>'completed'`,
-    [dispatchBatchId],
-  );
+  return reconcileDispatchBatchCandidateState(query, dispatchBatchId);
 }
 
 export async function signalReadyDiscoveryPageQualifications({ candidateId = null, pageId = null } = {}) {
@@ -1237,7 +1161,12 @@ export async function processChannelCrawlV2(job, { resumeMode = "initial" } = {}
         executionMode: "channel_inline_resume",
         finalize: false,
         contentMaxAgeDays,
+        executionFence: contentDetailExecutionFence(job, {
+          executionMode: "channel_inline_resume",
+          candidateAttemptFence,
+        }),
       });
+      assertInlineContentDetailExecutionCurrent(detailResult, candidateAttemptFence);
       phaseTimingsMs.content_detail_resume = Date.now() - phaseStartedAt;
       phaseStartedAt = Date.now();
       if (migrationActivityCanFinalize(detailResult.migration_activity_gate)) {
@@ -2010,7 +1939,12 @@ export async function processChannelCrawlV2(job, { resumeMode = "initial" } = {}
       executionMode: "channel_inline",
       finalize: false,
       contentMaxAgeDays,
+      executionFence: contentDetailExecutionFence(job, {
+        executionMode: "channel_inline",
+        candidateAttemptFence,
+      }),
     });
+    assertInlineContentDetailExecutionCurrent(detailResult, candidateAttemptFence);
   } else if (uploads.entries.length > 0) {
     await queues[queuesByRole.contentDetail].add(
       "content-detail-batch",
@@ -2066,7 +2000,16 @@ export async function processChannelCrawlV2(job, { resumeMode = "initial" } = {}
   };
 }
 
-async function excludeCandidateByAge(row, detail, ageDays, maxAgeDays, source, window) {
+async function excludeCandidateByAge(
+  row,
+  detail,
+  ageDays,
+  maxAgeDays,
+  source,
+  window,
+  client = null,
+) {
+  const execute = client?.query.bind(client) ?? query;
   const resultJson = {
     ...(row.result_json ?? {}),
     detail,
@@ -2086,7 +2029,7 @@ async function excludeCandidateByAge(row, detail, ageDays, maxAgeDays, source, w
     },
     extractor_version: detail?.extractor_version ?? "v5_full_config_first_success",
   };
-  await query(
+  await execute(
     `UPDATE crawler.content_candidates
      SET content_key=NULL,detail_status='done',api_status='not_needed',missing_fields='{}'::text[],
          result_json=$2::jsonb,error_message=NULL,finished_at=now(),updated_at=now()
@@ -2099,9 +2042,13 @@ async function excludeCandidateByAge(row, detail, ageDays, maxAgeDays, source, w
     access: accessFromDetail(detail),
     detail,
     terminalReason: "outside_content_window",
+    client,
   });
   if (row.content_key) {
-    await query("DELETE FROM crawler.contents WHERE content_key=$1 AND run_id=$2", [row.content_key, row.run_id]);
+    await execute(
+      "DELETE FROM crawler.contents WHERE content_key=$1 AND run_id=$2",
+      [row.content_key, row.run_id],
+    );
   }
   return {
     candidate_id: row.candidate_id,
@@ -2118,7 +2065,14 @@ async function excludeCandidateByAge(row, detail, ageDays, maxAgeDays, source, w
   };
 }
 
-async function excludeUnfinishedLiveCandidate(row, detail, source, reason = unfinishedLiveReason(detail)) {
+async function excludeUnfinishedLiveCandidate(
+  row,
+  detail,
+  source,
+  reason = unfinishedLiveReason(detail),
+  client = null,
+) {
+  const execute = client?.query.bind(client) ?? query;
   if (!["upcoming_live", "live_in_progress"].includes(reason)) {
     throw new Error(`unfinished Live exclusion requires a supported reason for ${row.source_content_id}`);
   }
@@ -2149,7 +2103,7 @@ async function excludeUnfinishedLiveCandidate(row, detail, source, reason = unfi
     },
     extractor_version: detail?.extractor_version ?? "v6_persistent_session",
   };
-  await query(
+  await execute(
     `UPDATE crawler.content_candidates
      SET content_type='live',type_status='resolved',type_source=$2,content_key=NULL,
          detail_status='done',api_status='not_needed',missing_fields='{}'::text[],
@@ -2163,9 +2117,10 @@ async function excludeUnfinishedLiveCandidate(row, detail, source, reason = unfi
     access: accessFromDetail(detail),
     detail,
     terminalReason: reason,
+    client,
   });
   if (row.content_key) {
-    await query("DELETE FROM crawler.contents WHERE content_key=$1", [row.content_key]);
+    await execute("DELETE FROM crawler.contents WHERE content_key=$1", [row.content_key]);
   }
   return {
     candidate_id: row.candidate_id,
@@ -2221,7 +2176,7 @@ function terminalDispositionEvidence(row) {
   };
 }
 
-async function recoverTerminalCandidateDisposition(row) {
+async function recoverTerminalCandidateDisposition(row, { client = null } = {}) {
   const evidence = terminalDispositionEvidence(row);
   if (!evidence) {
     throw new Error(
@@ -2240,6 +2195,7 @@ async function recoverTerminalCandidateDisposition(row) {
     detail: evidence.detail,
     error: evidence.error,
     terminalReason: evidence.terminalReason,
+    client,
   });
   return {
     candidate_id: row.candidate_id,
@@ -2275,22 +2231,51 @@ async function captureYoutubeJsDetail(videoId, { signal = null } = {}) {
   }
 }
 
+class ContentDetailExecutionFenceStaleError extends Error {
+  constructor(fence) {
+    super(`Content Detail execution Fence is stale: ${fence?.jobId ?? "unknown"}`);
+    this.name = "ContentDetailExecutionFenceStaleError";
+    this.code = "CONTENT_DETAIL_EXECUTION_FENCE_STALE";
+  }
+}
+
+function contentDetailFenceStaleResult(fence) {
+  return {
+    ok: true,
+    skipped: true,
+    reason: "content_detail_execution_fence_stale",
+    channel_id: fence?.channelId ?? null,
+    run_id: fence?.runId ?? null,
+  };
+}
+
+async function commitContentDetailExecution(fence, action) {
+  return withTransaction(async (client) => {
+    if (fence && !(await lockContentDetailExecution(client, fence))) {
+      throw new ContentDetailExecutionFenceStaleError(fence);
+    }
+    return action(client);
+  });
+}
+
 async function processOneCandidate(row, settings, {
   youtubeJsDetail = null,
   signal = null,
+  commit,
 } = {}) {
+  if (typeof commit !== "function") throw new TypeError("Content Detail commit is required");
   throwIfAborted(signal);
   if (isUndisposedTerminalCandidate(row)) {
-    return recoverTerminalCandidateDisposition(row);
+    return commit((client) => recoverTerminalCandidateDisposition(row, { client }));
   }
   const attemptNumber = Number(row.attempts ?? 0) + 1;
   const maxAttempts = settings.detailMaxAttempts;
-  await query(
+  await commit((client) => client.query(
     `UPDATE crawler.content_candidates
      SET detail_status='running',attempts=attempts+1,error_message=NULL,updated_at=now()
      WHERE candidate_id=$1`,
     [row.candidate_id],
-  );
+  ));
   let detail = detailFromCandidate(row);
   let detailError = null;
   let youtubeJsDetailError = null;
@@ -2304,20 +2289,27 @@ async function processOneCandidate(row, settings, {
 
   const channelTabLiveReason = unfinishedLiveReason(detail);
   if (channelTabLiveReason) {
-    return excludeUnfinishedLiveCandidate(row, detail, "channel_tab", channelTabLiveReason);
+    return commit((client) => excludeUnfinishedLiveCandidate(
+      row,
+      detail,
+      "channel_tab",
+      channelTabLiveReason,
+      client,
+    ));
   }
 
   const crawlReferenceAt = row.crawl_started_at ?? Date.now();
   const flatWindow = classifyContentWindow(detail, settings.contentMaxAgeDays, crawlReferenceAt);
   if (settings.contentMaxAgeDays > 0 && flatWindow.relation === "outside") {
-    return excludeCandidateByAge(
+    return commit((client) => excludeCandidateByAge(
       row,
       detail,
       detailAgeDays(detail, crawlReferenceAt),
       settings.contentMaxAgeDays,
       "uploads_playlist",
       flatWindow,
-    );
+      client,
+    ));
   }
   if (settings.contentMaxAgeDays > 0 && flatWindow.relation === "unresolved") {
     const detailRequest = {
@@ -2335,13 +2327,13 @@ async function processOneCandidate(row, settings, {
       ...(row.result_json ?? {}),
       detail_request: detailRequest,
     };
-    await query(
+    await commit((client) => client.query(
       `UPDATE crawler.content_candidates
        SET result_json=result_json || jsonb_build_object('detail_request',$2::jsonb),
            updated_at=now()
        WHERE candidate_id=$1`,
       [row.candidate_id, JSON.stringify(detailRequest)],
-    );
+    ));
   }
 
   if (youtubeJsDetailEnabled()) {
@@ -2381,7 +2373,13 @@ async function processOneCandidate(row, settings, {
 
   const youtubeJsLiveReason = unfinishedLiveReason(detail);
   if (youtubeJsLiveReason) {
-    return excludeUnfinishedLiveCandidate(row, detail, "youtubejs_detail", youtubeJsLiveReason);
+    return commit((client) => excludeUnfinishedLiveCandidate(
+      row,
+      detail,
+      "youtubejs_detail",
+      youtubeJsLiveReason,
+      client,
+    ));
   }
 
   if (youtubeJsFallback.length > 0) {
@@ -2410,7 +2408,13 @@ async function processOneCandidate(row, settings, {
 
   const youtubeDetailLiveReason = unfinishedLiveReason(detail);
   if (youtubeDetailLiveReason) {
-    return excludeUnfinishedLiveCandidate(row, detail, "youtube_detail", youtubeDetailLiveReason);
+    return commit((client) => excludeUnfinishedLiveCandidate(
+      row,
+      detail,
+      "youtube_detail",
+      youtubeDetailLiveReason,
+      client,
+    ));
   }
 
   if (commentFirstPageNeedsResolution(detail) && !youtubeJsDetailEnabled()) {
@@ -2431,14 +2435,15 @@ async function processOneCandidate(row, settings, {
 
   const resolvedWindow = classifyContentWindow(detail, settings.contentMaxAgeDays, crawlReferenceAt);
   if (settings.contentMaxAgeDays > 0 && resolvedWindow.relation === "outside") {
-    return excludeCandidateByAge(
+    return commit((client) => excludeCandidateByAge(
       row,
       detail,
       detailAgeDays(detail, crawlReferenceAt),
       settings.contentMaxAgeDays,
       "youtube_detail",
       resolvedWindow,
-    );
+      client,
+    ));
   }
 
   try {
@@ -2480,42 +2485,45 @@ async function processOneCandidate(row, settings, {
       scrape_attempt: attemptNumber,
       scrape_max_attempts: maxAttempts,
     };
-    await query(
-      `UPDATE crawler.content_candidates
-       SET content_type=COALESCE($2,content_type),
-           type_status=CASE WHEN $2::text IS NULL THEN type_status ELSE 'resolved' END,
-           type_source=COALESCE($3,type_source),detail_status='failed',api_status='not_needed',
-           missing_fields=$4::text[],result_json=$5::jsonb,error_message=$6,updated_at=now()
-       WHERE candidate_id=$1`,
-      [
-        row.candidate_id,
-        confirmedRetryClassification?.content_type ?? null,
-        confirmedRetryClassification?.source ?? null,
-        retryMissing,
-        JSON.stringify(resultJson),
-        String(detailError?.message ?? detailError),
-      ],
-    );
     const retryAccess = accessFromDetail(detail);
-    await persistFullVideoDisposition(row, {
-      storageAction: fullVideoStorageAction({
-        candidate: row,
+    return commit(async (client) => {
+      await client.query(
+        `UPDATE crawler.content_candidates
+         SET content_type=COALESCE($2,content_type),
+             type_status=CASE WHEN $2::text IS NULL THEN type_status ELSE 'resolved' END,
+             type_source=COALESCE($3,type_source),detail_status='failed',api_status='not_needed',
+             missing_fields=$4::text[],result_json=$5::jsonb,error_message=$6,updated_at=now()
+         WHERE candidate_id=$1`,
+        [
+          row.candidate_id,
+          confirmedRetryClassification?.content_type ?? null,
+          confirmedRetryClassification?.source ?? null,
+          retryMissing,
+          JSON.stringify(resultJson),
+          String(detailError?.message ?? detailError),
+        ],
+      );
+      await persistFullVideoDisposition(row, {
+        storageAction: fullVideoStorageAction({
+          candidate: row,
+          classification,
+          access: retryAccess,
+        }),
         classification,
         access: retryAccess,
-      }),
-      classification,
-      access: retryAccess,
-      detail,
-      error: detailError,
+        detail,
+        error: detailError,
+        client,
+      });
+      return {
+        candidate_id: row.candidate_id,
+        video_id: row.source_content_id,
+        content_type: confirmedRetryClassification?.content_type ?? row.content_type ?? null,
+        api_missing: [],
+        error: detailError,
+        retryable: attemptNumber < maxAttempts,
+      };
     });
-    return {
-      candidate_id: row.candidate_id,
-      video_id: row.source_content_id,
-      content_type: confirmedRetryClassification?.content_type ?? row.content_type ?? null,
-      api_missing: [],
-      error: detailError,
-      retryable: attemptNumber < maxAttempts,
-    };
   }
   const access = accessFromDetail(detail, "unknown");
   const normalized = normalizeResolvedDetail(detail, { access });
@@ -2557,27 +2565,30 @@ async function processOneCandidate(row, settings, {
       ...resultJson,
       parser_contract_error: parserDetails,
     };
-    await query(
-      `UPDATE crawler.content_candidates
-       SET content_type=$2,type_status=CASE WHEN $2::text IS NULL THEN 'unresolved' ELSE 'resolved' END,
-           type_source=$3,detail_status='failed',api_status='not_needed',
-           missing_fields=$4::text[],result_json=$5::jsonb,error_message=$6,updated_at=now()
-       WHERE candidate_id=$1`,
-      [
-        row.candidate_id,
-        contentType,
-        typeSource,
-        candidateMissing,
-        JSON.stringify(parserResultJson),
-        String(parserError?.message ?? parserError),
-      ],
-    );
-    await persistFullVideoDisposition(row, {
-      storageAction,
-      classification,
-      access: normalized.access,
-      detail: normalized.detail,
-      error: parserError,
+    await commit(async (client) => {
+      await client.query(
+        `UPDATE crawler.content_candidates
+         SET content_type=$2,type_status=CASE WHEN $2::text IS NULL THEN 'unresolved' ELSE 'resolved' END,
+             type_source=$3,detail_status='failed',api_status='not_needed',
+             missing_fields=$4::text[],result_json=$5::jsonb,error_message=$6,updated_at=now()
+         WHERE candidate_id=$1`,
+        [
+          row.candidate_id,
+          contentType,
+          typeSource,
+          candidateMissing,
+          JSON.stringify(parserResultJson),
+          String(parserError?.message ?? parserError),
+        ],
+      );
+      await persistFullVideoDisposition(row, {
+        storageAction,
+        classification,
+        access: normalized.access,
+        detail: normalized.detail,
+        error: parserError,
+        client,
+      });
     });
     throw parserError;
   }
@@ -2585,37 +2596,40 @@ async function processOneCandidate(row, settings, {
   if (!contentType) {
     const unresolvedError = typeError ?? new Error(`content type unresolved for ${row.source_content_id}`);
     const terminal = attemptNumber >= maxAttempts;
-    await query(
-      `UPDATE crawler.content_candidates
-       SET content_type=NULL,type_status=$2,type_source=NULL,detail_status=$3,
-           api_status=$4,missing_fields=$5::text[],result_json=$6::jsonb,error_message=$7,
-           finished_at=CASE WHEN $3='unavailable' THEN now() ELSE finished_at END,updated_at=now()
-       WHERE candidate_id=$1`,
-      [
-        row.candidate_id,
-        terminal ? "unavailable" : "unresolved",
-        terminal ? "unavailable" : "failed",
-        terminal ? "unavailable" : "not_needed",
-        candidateMissing,
-        JSON.stringify(resultJson),
-        String(unresolvedError?.message ?? unresolvedError),
-      ],
-    );
-    await persistFullVideoDisposition(row, {
-      storageAction,
-      classification,
-      access: normalized.access,
-      detail: normalized.detail,
-      error: typeError,
+    return commit(async (client) => {
+      await client.query(
+        `UPDATE crawler.content_candidates
+         SET content_type=NULL,type_status=$2,type_source=NULL,detail_status=$3,
+             api_status=$4,missing_fields=$5::text[],result_json=$6::jsonb,error_message=$7,
+             finished_at=CASE WHEN $3='unavailable' THEN now() ELSE finished_at END,updated_at=now()
+         WHERE candidate_id=$1`,
+        [
+          row.candidate_id,
+          terminal ? "unavailable" : "unresolved",
+          terminal ? "unavailable" : "failed",
+          terminal ? "unavailable" : "not_needed",
+          candidateMissing,
+          JSON.stringify(resultJson),
+          String(unresolvedError?.message ?? unresolvedError),
+        ],
+      );
+      await persistFullVideoDisposition(row, {
+        storageAction,
+        classification,
+        access: normalized.access,
+        detail: normalized.detail,
+        error: typeError,
+        client,
+      });
+      return {
+        candidate_id: row.candidate_id,
+        video_id: row.source_content_id,
+        content_type: null,
+        api_missing: candidateMissing,
+        error: unresolvedError,
+        retryable: !terminal,
+      };
     });
-    return {
-      candidate_id: row.candidate_id,
-      video_id: row.source_content_id,
-      content_type: null,
-      api_missing: candidateMissing,
-      error: unresolvedError,
-      retryable: !terminal,
-    };
   }
 
   if (storageAction.kind === "classified_only") {
@@ -2642,18 +2656,61 @@ async function processOneCandidate(row, settings, {
           missing_fields: classifiedResolution.missingFields,
         },
       };
-      await query(
+      return commit(async (client) => {
+        await client.query(
+          `UPDATE crawler.content_candidates
+           SET content_type=$2,type_status='resolved',type_source=$3,content_key=NULL,
+               detail_status='api_pending',api_status='pending',missing_fields=$4::text[],
+               result_json=$5::jsonb,error_message=NULL,updated_at=now()
+           WHERE candidate_id=$1`,
+          [
+            row.candidate_id,
+            contentType,
+            typeSource,
+            classifiedResolution.missingFields,
+            JSON.stringify(apiResultJson),
+          ],
+        );
+        await persistFullVideoDisposition(row, {
+          storageAction,
+          classification,
+          access: normalized.access,
+          detail: normalized.detail,
+          client,
+        });
+        await enqueueYoutubeApiFallback(row, classifiedResolution.missingFields, client);
+        return {
+          candidate_id: row.candidate_id,
+          video_id: row.source_content_id,
+          content_type: contentType,
+          api_missing: classifiedResolution.missingFields,
+          error: null,
+          classified_only: true,
+        };
+      });
+    }
+    const terminal = classifiedResolution.action === "terminal";
+    return commit(async (client) => {
+      await client.query(
         `UPDATE crawler.content_candidates
          SET content_type=$2,type_status='resolved',type_source=$3,content_key=NULL,
-             detail_status='api_pending',api_status='pending',missing_fields=$4::text[],
-             result_json=$5::jsonb,error_message=NULL,updated_at=now()
+             detail_status=$4,api_status=$5,missing_fields=$6::text[],result_json=$7::jsonb,
+             error_message=$8,finished_at=CASE WHEN $4='unavailable' THEN now() ELSE finished_at END,
+             updated_at=now()
          WHERE candidate_id=$1`,
         [
           row.candidate_id,
           contentType,
           typeSource,
+          terminal ? "unavailable" : "failed",
+          terminal ? "unavailable" : "not_needed",
           classifiedResolution.missingFields,
-          JSON.stringify(apiResultJson),
+          JSON.stringify({
+            ...resultJson,
+            classified_only: true,
+            terminal_reason: terminal ? accessStatus : null,
+          }),
+          accessError.message,
         ],
       );
       await persistFullVideoDisposition(row, {
@@ -2661,56 +2718,19 @@ async function processOneCandidate(row, settings, {
         classification,
         access: normalized.access,
         detail: normalized.detail,
+        client,
       });
-      await enqueueYoutubeApiFallback(row, classifiedResolution.missingFields);
       return {
         candidate_id: row.candidate_id,
         video_id: row.source_content_id,
         content_type: contentType,
-        api_missing: classifiedResolution.missingFields,
-        error: null,
+        api_missing: [],
+        missing_fields: classifiedResolution.missingFields,
+        error: accessError,
+        retryable: !terminal,
         classified_only: true,
       };
-    }
-    const terminal = classifiedResolution.action === "terminal";
-    await query(
-      `UPDATE crawler.content_candidates
-       SET content_type=$2,type_status='resolved',type_source=$3,content_key=NULL,
-           detail_status=$4,api_status=$5,missing_fields=$6::text[],result_json=$7::jsonb,
-           error_message=$8,finished_at=CASE WHEN $4='unavailable' THEN now() ELSE finished_at END,
-           updated_at=now()
-       WHERE candidate_id=$1`,
-      [
-        row.candidate_id,
-        contentType,
-        typeSource,
-        terminal ? "unavailable" : "failed",
-        terminal ? "unavailable" : "not_needed",
-        classifiedResolution.missingFields,
-        JSON.stringify({
-          ...resultJson,
-          classified_only: true,
-          terminal_reason: terminal ? accessStatus : null,
-        }),
-        accessError.message,
-      ],
-    );
-    await persistFullVideoDisposition(row, {
-      storageAction,
-      classification,
-      access: normalized.access,
-      detail: normalized.detail,
     });
-    return {
-      candidate_id: row.candidate_id,
-      video_id: row.source_content_id,
-      content_type: contentType,
-      api_missing: [],
-      missing_fields: classifiedResolution.missingFields,
-      error: accessError,
-      retryable: !terminal,
-      classified_only: true,
-    };
   }
 
   if (storageAction.kind === "update_access") {
@@ -2718,70 +2738,74 @@ async function processOneCandidate(row, settings, {
       afterApi: true,
       access: normalized.access,
     });
-    const stored = await updateExistingContentAccessFromCandidate(row, terminal);
-    if (!stored?.content_key) {
-      const missingExisting = new Error(`known content identity disappeared for ${row.source_content_id}`);
-      await query(
+    return commit(async (client) => {
+      const stored = await updateExistingContentAccessFromCandidate(row, terminal, client);
+      if (!stored?.content_key) {
+        const missingExisting = new Error(`known content identity disappeared for ${row.source_content_id}`);
+        await client.query(
+          `UPDATE crawler.content_candidates
+           SET content_type=NULL,type_status='unresolved',type_source=NULL,detail_status='failed',
+               api_status='not_needed',missing_fields=$2::text[],result_json=$3::jsonb,
+               error_message=$4,updated_at=now()
+           WHERE candidate_id=$1`,
+          [row.candidate_id, candidateMissing, JSON.stringify(resultJson), missingExisting.message],
+        );
+        await persistFullVideoDisposition(row, {
+          storageAction: { kind: "unresolved" },
+          classification,
+          access: normalized.access,
+          detail: normalized.detail,
+          error: missingExisting,
+          client,
+        });
+        return {
+          candidate_id: row.candidate_id,
+          video_id: row.source_content_id,
+          content_type: null,
+          api_missing: candidateMissing,
+          error: missingExisting,
+          retryable: false,
+        };
+      }
+      const terminalJson = {
+        ...resultJson,
+        detail: terminal.detail,
+        terminal_reason: normalized.access.access_status,
+        preserved_content_type: true,
+      };
+      await client.query(
         `UPDATE crawler.content_candidates
-         SET content_type=NULL,type_status='unresolved',type_source=NULL,detail_status='failed',
-             api_status='not_needed',missing_fields=$2::text[],result_json=$3::jsonb,
-             error_message=$4,updated_at=now()
+         SET content_type=$2,type_status='resolved',type_source=$3,content_key=$4,
+             detail_status='done',api_status='not_needed',missing_fields=$5::text[],
+             result_json=$6::jsonb,error_message=NULL,finished_at=now(),updated_at=now()
          WHERE candidate_id=$1`,
-        [row.candidate_id, candidateMissing, JSON.stringify(resultJson), missingExisting.message],
+        [
+          row.candidate_id,
+          stored.content_type,
+          stored.content_type_source,
+          stored.content_key,
+          apiMissing,
+          JSON.stringify(terminalJson),
+        ],
       );
       await persistFullVideoDisposition(row, {
-        storageAction: { kind: "unresolved" },
+        storageAction,
         classification,
         access: normalized.access,
-        detail: normalized.detail,
-        error: missingExisting,
+        detail: terminal.detail,
+        client,
       });
       return {
         candidate_id: row.candidate_id,
         video_id: row.source_content_id,
-        content_type: null,
-        api_missing: candidateMissing,
-        error: missingExisting,
-        retryable: false,
+        content_type: stored.content_type,
+        api_missing: [],
+        missing_fields: apiMissing,
+        error: null,
+        partial: apiMissing.length > 0,
+        access_only: true,
       };
-    }
-    const terminalJson = {
-      ...resultJson,
-      detail: terminal.detail,
-      terminal_reason: normalized.access.access_status,
-      preserved_content_type: true,
-    };
-    await query(
-      `UPDATE crawler.content_candidates
-       SET content_type=$2,type_status='resolved',type_source=$3,content_key=$4,
-           detail_status='done',api_status='not_needed',missing_fields=$5::text[],
-           result_json=$6::jsonb,error_message=NULL,finished_at=now(),updated_at=now()
-       WHERE candidate_id=$1`,
-      [
-        row.candidate_id,
-        stored.content_type,
-        stored.content_type_source,
-        stored.content_key,
-        apiMissing,
-        JSON.stringify(terminalJson),
-      ],
-    );
-    await persistFullVideoDisposition(row, {
-      storageAction,
-      classification,
-      access: normalized.access,
-      detail: terminal.detail,
     });
-    return {
-      candidate_id: row.candidate_id,
-      video_id: row.source_content_id,
-      content_type: stored.content_type,
-      api_missing: [],
-      missing_fields: apiMissing,
-      error: null,
-      partial: apiMissing.length > 0,
-      access_only: true,
-    };
   }
 
   const candidate = {
@@ -2790,7 +2814,6 @@ async function processOneCandidate(row, settings, {
     type_source: typeSource,
     type_authoritative: classification?.authoritative === true,
   };
-  let contentKey = await upsertContentFromCandidate(candidate, normalized);
   const resolutionAction = detailResolutionAction({
     error: apiMissing.length > 0 ? detailError : null,
     attemptNumber,
@@ -2800,85 +2823,91 @@ async function processOneCandidate(row, settings, {
     accessStatus: normalized.access.access_status,
     apiAlreadyAttempted: Object.prototype.hasOwnProperty.call(row.result_json ?? {}, "api_detail"),
   });
-  if (resolutionAction === "done") {
-    await query(
-      `UPDATE crawler.content_candidates
-       SET content_type=$2,type_status='resolved',type_source=$3,content_key=$4,
-           detail_status='done',api_status='not_needed',missing_fields='{}'::text[],
-           result_json=$5::jsonb,error_message=NULL,finished_at=now(),updated_at=now()
-       WHERE candidate_id=$1`,
-      [row.candidate_id, contentType, typeSource, contentKey, JSON.stringify(resultJson)],
-    );
-    await persistFullVideoDisposition(row, {
-      storageAction,
-      classification,
-      access: normalized.access,
-      detail: normalized.detail,
-    });
-    return { candidate_id: row.candidate_id, video_id: row.source_content_id, content_type: contentType, api_missing: [], error: null };
-  }
+  return commit(async (client) => {
+    let contentKey = await upsertContentFromCandidate(candidate, normalized, client);
+    if (resolutionAction === "done") {
+      await client.query(
+        `UPDATE crawler.content_candidates
+         SET content_type=$2,type_status='resolved',type_source=$3,content_key=$4,
+             detail_status='done',api_status='not_needed',missing_fields='{}'::text[],
+             result_json=$5::jsonb,error_message=NULL,finished_at=now(),updated_at=now()
+         WHERE candidate_id=$1`,
+        [row.candidate_id, contentType, typeSource, contentKey, JSON.stringify(resultJson)],
+      );
+      await persistFullVideoDisposition(row, {
+        storageAction,
+        classification,
+        access: normalized.access,
+        detail: normalized.detail,
+        client,
+      });
+      return { candidate_id: row.candidate_id, video_id: row.source_content_id, content_type: contentType, api_missing: [], error: null };
+    }
 
-  if (resolutionAction === "api") {
-    const apiResultJson = {
+    if (resolutionAction === "api") {
+      const apiResultJson = {
+        ...resultJson,
+        api_trigger: {
+          mode: "emergency",
+          reason: detailError ? "scrape_error" : "scrape_incomplete",
+          attempt: attemptNumber,
+          missing_fields: apiMissing,
+        },
+      };
+      await client.query(
+        `UPDATE crawler.content_candidates
+         SET content_type=$2,type_status='resolved',type_source=$3,content_key=$4,
+             detail_status='api_pending',api_status='pending',missing_fields=$5::text[],
+             result_json=$6::jsonb,error_message=NULL,updated_at=now()
+         WHERE candidate_id=$1`,
+        [row.candidate_id, contentType, typeSource, contentKey, apiMissing, JSON.stringify(apiResultJson)],
+      );
+      await persistFullVideoDisposition(row, {
+        storageAction,
+        classification,
+        access: normalized.access,
+        detail: normalized.detail,
+        client,
+      });
+      await enqueueYoutubeApiFallback(row, apiMissing, client);
+      return { candidate_id: row.candidate_id, video_id: row.source_content_id, content_type: contentType, api_missing: apiMissing, error: null };
+    }
+
+    const terminal = normalizeResolvedDetail(normalized.detail, { afterApi: true, access: normalized.access });
+    contentKey = await upsertContentFromCandidate(candidate, terminal, client);
+    const terminalJson = {
       ...resultJson,
-      api_trigger: {
-        mode: "emergency",
-        reason: detailError ? "scrape_error" : "scrape_incomplete",
-        attempt: attemptNumber,
-        missing_fields: apiMissing,
-      },
+      detail: terminal.detail,
+      terminal_reason: accessIsTerminalWithoutApi(normalized.access) ? normalized.access.access_status : "partial_fields",
     };
-    await query(
+    const partialError = detailError
+      ? String(detailError?.message ?? detailError)
+      : `partial fields: ${apiMissing.join(", ")}`;
+    await client.query(
       `UPDATE crawler.content_candidates
        SET content_type=$2,type_status='resolved',type_source=$3,content_key=$4,
-           detail_status='api_pending',api_status='pending',missing_fields=$5::text[],
-           result_json=$6::jsonb,error_message=NULL,updated_at=now()
+           detail_status='done',api_status='not_needed',missing_fields=$5::text[],
+           result_json=$6::jsonb,error_message=$7,finished_at=now(),updated_at=now()
        WHERE candidate_id=$1`,
-      [row.candidate_id, contentType, typeSource, contentKey, apiMissing, JSON.stringify(apiResultJson)],
+      [row.candidate_id, contentType, typeSource, contentKey, apiMissing, JSON.stringify(terminalJson), partialError],
     );
     await persistFullVideoDisposition(row, {
       storageAction,
       classification,
       access: normalized.access,
-      detail: normalized.detail,
+      detail: terminal.detail,
+      client,
     });
-    await enqueueYoutubeApiFallback(row, apiMissing);
-    return { candidate_id: row.candidate_id, video_id: row.source_content_id, content_type: contentType, api_missing: apiMissing, error: null };
-  }
-
-  const terminal = normalizeResolvedDetail(normalized.detail, { afterApi: true, access: normalized.access });
-  contentKey = await upsertContentFromCandidate(candidate, terminal);
-  const terminalJson = {
-    ...resultJson,
-    detail: terminal.detail,
-    terminal_reason: accessIsTerminalWithoutApi(normalized.access) ? normalized.access.access_status : "partial_fields",
-  };
-  const partialError = detailError
-    ? String(detailError?.message ?? detailError)
-    : `partial fields: ${apiMissing.join(", ")}`;
-  await query(
-    `UPDATE crawler.content_candidates
-     SET content_type=$2,type_status='resolved',type_source=$3,content_key=$4,
-         detail_status='done',api_status='not_needed',missing_fields=$5::text[],
-         result_json=$6::jsonb,error_message=$7,finished_at=now(),updated_at=now()
-     WHERE candidate_id=$1`,
-    [row.candidate_id, contentType, typeSource, contentKey, apiMissing, JSON.stringify(terminalJson), partialError],
-  );
-  await persistFullVideoDisposition(row, {
-    storageAction,
-    classification,
-    access: normalized.access,
-    detail: terminal.detail,
+    return {
+      candidate_id: row.candidate_id,
+      video_id: row.source_content_id,
+      content_type: contentType,
+      api_missing: [],
+      missing_fields: apiMissing,
+      error: null,
+      partial: true,
+    };
   });
-  return {
-    candidate_id: row.candidate_id,
-    video_id: row.source_content_id,
-    content_type: contentType,
-    api_missing: [],
-    missing_fields: apiMissing,
-    error: null,
-    partial: true,
-  };
 }
 
 async function processContentDetailRun({
@@ -2890,122 +2919,162 @@ async function processContentDetailRun({
   publishedAtRequiredPrecision = null,
   apiFallbackMode = null,
   contentMaxAgeDays = null,
+  executionFence = null,
 }) {
   if (!runId || !channelId) throw new Error("run_id and channel_id are required");
-  await query("UPDATE crawler.channel_runs SET detail_status='running',status='waiting_detail',updated_at=now() WHERE run_id=$1", [runId]);
-  const rows = await query(
-    `SELECT candidate.*,run.started_at AS crawl_started_at,
-            known.content_key AS known_content_key,
-            known.content_type AS known_content_type,
-            known.content_type_source AS known_content_type_source,
-            run.result_json#>>'{publication_repair,content_max_age_days}'
-              AS repair_content_max_age_days
-     FROM crawler.content_candidates candidate
-     JOIN crawler.channel_runs run ON run.run_id=candidate.run_id
-     LEFT JOIN crawler.contents known
-       ON known.channel_id=candidate.channel_id
-      AND known.source_content_id=candidate.source_content_id
-     WHERE candidate.run_id=$1
-       AND (
-         candidate.detail_status NOT IN ('done','unavailable','api_pending')
-         OR (
-           candidate.detail_status IN ('done','unavailable')
-           AND candidate.disposition IS NULL
+  const commit = executionFence
+    ? (action) => commitContentDetailExecution(executionFence, action)
+    : (action) => withTransaction(action);
+  try {
+    if (executionFence) {
+      const claimed = await withTransaction(async (client) => {
+        const scope = await claimContentDetailExecution(client, executionFence);
+        if (!scope) return null;
+        await client.query(
+          `UPDATE crawler.channel_runs
+           SET detail_status='running',status='waiting_detail',updated_at=now()
+           WHERE run_id=$1`,
+          [runId],
+        );
+        return scope;
+      });
+      if (!claimed) return contentDetailFenceStaleResult(executionFence);
+    } else {
+      await query(
+        `UPDATE crawler.channel_runs
+         SET detail_status='running',status='waiting_detail',updated_at=now()
+         WHERE run_id=$1`,
+        [runId],
+      );
+    }
+    const rows = await query(
+      `SELECT candidate.*,run.started_at AS crawl_started_at,
+              known.content_key AS known_content_key,
+              known.content_type AS known_content_type,
+              known.content_type_source AS known_content_type_source,
+              run.result_json#>>'{publication_repair,content_max_age_days}'
+                AS repair_content_max_age_days
+       FROM crawler.content_candidates candidate
+       JOIN crawler.channel_runs run ON run.run_id=candidate.run_id
+       LEFT JOIN crawler.contents known
+         ON known.channel_id=candidate.channel_id
+        AND known.source_content_id=candidate.source_content_id
+       WHERE candidate.run_id=$1
+         AND (
+           candidate.detail_status NOT IN ('done','unavailable','api_pending')
+           OR (
+             candidate.detail_status IN ('done','unavailable')
+             AND candidate.disposition IS NULL
+           )
          )
-       )
-     ORDER BY candidate.position ASC`,
-    [runId],
-  );
-  const crawlSettings = await getCrawlSettingsV2();
-  const apiSettings = await getYoutubeApiSettingsV2();
-  const settings = {
-    detailMaxAttempts: crawlSettings.detailMaxAttempts,
-    detailConcurrency: crawlSettings.detailConcurrency,
-    contentMaxAgeDays: intValue(
-      contentMaxAgeDays ?? rows.rows[0]?.repair_content_max_age_days,
-      crawlSettings.contentMaxAgeDays,
-      0,
-      3650,
-    ),
-    publishedAtRequiredPrecision: ["date_only", "second"].includes(publishedAtRequiredPrecision)
-      ? publishedAtRequiredPrecision
-      : crawlSettings.publishedAtRequiredPrecision,
-    apiFallbackMode: ["disabled", "emergency"].includes(apiFallbackMode)
-      ? apiFallbackMode
-      : apiSettings.fallbackMode,
-  };
-  const execution = await processWithOrderedPrefetch({
-    items: rows.rows,
-    concurrency: settings.detailConcurrency,
-    signal,
-    shouldPrefetch: (row) => shouldPrefetchYoutubeJsDetail(row, settings),
-    prefetch: (row) => captureYoutubeJsDetail(row.source_content_id, { signal }),
-    process: (row, youtubeJsDetail) => processOneCandidate(row, settings, {
-      youtubeJsDetail,
+       ORDER BY candidate.position ASC`,
+      [runId],
+    );
+    const crawlSettings = await getCrawlSettingsV2();
+    const apiSettings = await getYoutubeApiSettingsV2();
+    const settings = {
+      detailMaxAttempts: crawlSettings.detailMaxAttempts,
+      detailConcurrency: crawlSettings.detailConcurrency,
+      contentMaxAgeDays: intValue(
+        contentMaxAgeDays ?? rows.rows[0]?.repair_content_max_age_days,
+        crawlSettings.contentMaxAgeDays,
+        0,
+        3650,
+      ),
+      publishedAtRequiredPrecision: ["date_only", "second"].includes(publishedAtRequiredPrecision)
+        ? publishedAtRequiredPrecision
+        : crawlSettings.publishedAtRequiredPrecision,
+      apiFallbackMode: ["disabled", "emergency"].includes(apiFallbackMode)
+        ? apiFallbackMode
+        : apiSettings.fallbackMode,
+    };
+    const execution = await processWithOrderedPrefetch({
+      items: rows.rows,
+      concurrency: settings.detailConcurrency,
       signal,
-    }),
-    stopAfter: contentDetailBatchStopReason,
-  });
-  const results = [...execution.results];
-  const processed = execution.processed;
-  const cancelledApiTasks = await cancelResolvedYoutubeApiTasks(runId);
-  await saveJsonRaw({
-    objectType: "youtube_content_detail_batch_json",
-    entityType: "channel_run",
-    entityId: runId,
-    source: executionMode === "channel_inline" ? "channel_inline_detail_v2" : "content_detail_v2",
-    payload: { channel_id: channelId, run_id: runId, execution_mode: executionMode, results },
-    metadata: {
+      shouldPrefetch: (row) => shouldPrefetchYoutubeJsDetail(row, settings),
+      prefetch: (row) => captureYoutubeJsDetail(row.source_content_id, { signal }),
+      process: (row, youtubeJsDetail) => processOneCandidate(row, settings, {
+        youtubeJsDetail,
+        signal,
+        commit,
+      }),
+      stopAfter: contentDetailBatchStopReason,
+    });
+    const results = [...execution.results];
+    const processed = execution.processed;
+    await commit(async () => null);
+    await saveJsonRaw({
+      objectType: "youtube_content_detail_batch_json",
+      entityType: "channel_run",
+      entityId: runId,
+      source: executionMode === "channel_inline" ? "channel_inline_detail_v2" : "content_detail_v2",
+      payload: { channel_id: channelId, run_id: runId, execution_mode: executionMode, results },
+      metadata: {
+        channel_id: channelId,
+        run_id: runId,
+        count: results.length,
+        execution_mode: executionMode,
+        extractor_version: "v4_first_success",
+        detail_concurrency: settings.detailConcurrency,
+      },
+    });
+    const retryableFailureError = contentDetailFailureError("content detail failure", results).cause ?? null;
+    const finalized = await commit(async (client) => {
+      const cancelledApiTasks = await cancelResolvedYoutubeApiTasks(runId, client);
+      const summary = await updateRunDetailStatus(runId, { client });
+      const youtubeRequestRows = await client.query(
+        `SELECT COALESCE(sum(COALESCE((result_json#>>'{detail,youtubejs_request_count}')::int,0)),0)::int AS request_count
+         FROM crawler.content_candidates
+         WHERE run_id=$1`,
+        [runId],
+      );
+      const youtubeJsDetailRequestCount = Number(
+        youtubeRequestRows.rows[0]?.request_count ?? 0,
+      );
+      await client.query(
+        `UPDATE crawler.channel_runs
+         SET result_json=jsonb_set(
+               result_json,
+               '{youtube_request_counts}',
+               COALESCE(result_json->'youtube_request_counts','{}'::jsonb)
+                 || jsonb_build_object('content_detail',$2::int),
+               true
+             ) || jsonb_build_object('detail_concurrency',$3::int),
+             updated_at=now()
+         WHERE run_id=$1`,
+        [runId, youtubeJsDetailRequestCount, settings.detailConcurrency],
+      );
+      return { cancelledApiTasks, summary, youtubeJsDetailRequestCount };
+    });
+    await signalRunDetailStatusWakeup(finalized.summary.migration_activity_gate);
+    if (finalize && migrationActivityCanFinalize(finalized.summary.migration_activity_gate)) {
+      await queueFinalize(channelId, runId, "content-detail-updated");
+    }
+    return {
+      ok: true,
       channel_id: channelId,
       run_id: runId,
-      count: results.length,
       execution_mode: executionMode,
-      extractor_version: "v4_first_success",
       detail_concurrency: settings.detailConcurrency,
-    },
-  });
-  const summary = await updateRunDetailStatus(runId);
-  const youtubeRequestRows = await query(
-    `SELECT COALESCE(sum(COALESCE((result_json#>>'{detail,youtubejs_request_count}')::int,0)),0)::int AS request_count
-     FROM crawler.content_candidates
-     WHERE run_id=$1`,
-    [runId],
-  );
-  const youtubeJsDetailRequestCount = Number(youtubeRequestRows.rows[0]?.request_count ?? 0);
-  const retryableFailureError = contentDetailFailureError("content detail failure", results).cause ?? null;
-  await query(
-    `UPDATE crawler.channel_runs
-     SET result_json=jsonb_set(
-           result_json,
-           '{youtube_request_counts}',
-           COALESCE(result_json->'youtube_request_counts','{}'::jsonb)
-             || jsonb_build_object('content_detail',$2::int),
-           true
-         ) || jsonb_build_object('detail_concurrency',$3::int),
-         updated_at=now()
-     WHERE run_id=$1`,
-    [runId, youtubeJsDetailRequestCount, settings.detailConcurrency],
-  );
-  if (finalize && migrationActivityCanFinalize(summary.migration_activity_gate)) {
-    await queueFinalize(channelId, runId, "content-detail-updated");
+      processed,
+      youtubejs_request_count: finalized.youtubeJsDetailRequestCount,
+      cancelled_api_tasks: finalized.cancelledApiTasks,
+      ...(retryableFailureError ? { retryable_failure_error: retryableFailureError } : {}),
+      ...finalized.summary,
+    };
+  } catch (error) {
+    if (error instanceof ContentDetailExecutionFenceStaleError) {
+      return contentDetailFenceStaleResult(executionFence);
+    }
+    throw error;
   }
-  return {
-    ok: true,
-    channel_id: channelId,
-    run_id: runId,
-    execution_mode: executionMode,
-    detail_concurrency: settings.detailConcurrency,
-    processed,
-    youtubejs_request_count: youtubeJsDetailRequestCount,
-    cancelled_api_tasks: cancelledApiTasks,
-    ...(retryableFailureError ? { retryable_failure_error: retryableFailureError } : {}),
-    ...summary,
-  };
 }
 
 export async function processContentDetailBatchV2(job) {
   const runId = text(job.data?.run_id);
   const channelId = text(job.data?.channel_id);
+  const executionFence = contentDetailExecutionFence(job);
   const result = await processContentDetailRun({
     runId,
     channelId,
@@ -3013,6 +3082,7 @@ export async function processContentDetailBatchV2(job) {
     publishedAtRequiredPrecision: text(job.data?.published_at_required_precision),
     apiFallbackMode: text(job.data?.api_fallback_mode),
     contentMaxAgeDays: job.data?.content_max_age_days,
+    executionFence,
   });
   const summary = result;
   if (Number(summary.failed) > 0) {
@@ -3087,9 +3157,13 @@ function mergeApiDetail(existing, apiDetail) {
   return mergeDetail(existing, apiDetail);
 }
 
-async function reserveYoutubeApiRequest(dailyRequestLimit, requestedVideoCount) {
+async function reserveYoutubeApiRequestWith(
+  execute,
+  dailyRequestLimit,
+  requestedVideoCount,
+) {
   if (dailyRequestLimit <= 0) return null;
-  const rows = await query(
+  const rows = await execute(
     `INSERT INTO crawler.youtube_api_daily_usage (
        usage_date,request_count,requested_video_count,created_at,updated_at
      ) VALUES (CURRENT_DATE,1,$2,now(),now())
@@ -3104,9 +3178,28 @@ async function reserveYoutubeApiRequest(dailyRequestLimit, requestedVideoCount) 
   return rows.rows[0] ?? null;
 }
 
-async function deferYoutubeApiBatchForDailyLimit({ batchId, taskIds, candidateIds, dailyRequestLimit }) {
+async function reserveYoutubeApiRequest(dailyRequestLimit, requestedVideoCount) {
+  return reserveYoutubeApiRequestWith(query, dailyRequestLimit, requestedVideoCount);
+}
+
+async function reserveYoutubeApiRequestTransaction(
+  client,
+  dailyRequestLimit,
+  requestedVideoCount,
+) {
+  return reserveYoutubeApiRequestWith(
+    client.query.bind(client),
+    dailyRequestLimit,
+    requestedVideoCount,
+  );
+}
+
+async function deferYoutubeApiBatchForDailyLimit(
+  client,
+  { batchId, taskIds, candidateIds, dailyRequestLimit },
+) {
   const nextRetrySql = "date_trunc('day', now()) + interval '1 day 5 minutes'";
-  await query(
+  await client.query(
     `UPDATE crawler.youtube_api_batches
      SET status='done',
          result_json=result_json || $2::jsonb,
@@ -3114,13 +3207,13 @@ async function deferYoutubeApiBatchForDailyLimit({ batchId, taskIds, candidateId
      WHERE batch_id=$1`,
     [batchId, JSON.stringify({ deferred: true, reason: "daily_request_limit_reached", daily_request_limit: dailyRequestLimit })],
   );
-  await query(
+  await client.query(
     `UPDATE crawler.youtube_api_tasks
      SET status='pending',error_message=NULL,next_retry_at=${nextRetrySql},updated_at=now()
      WHERE task_id=ANY($1::bigint[])`,
     [taskIds],
   );
-  await query(
+  await client.query(
     `UPDATE crawler.content_candidates
      SET api_status='pending',error_message=NULL,updated_at=now()
      WHERE candidate_id=ANY($1::bigint[])`,
@@ -3136,7 +3229,11 @@ function youtubeApiTaskNeedsCommentThreads(task) {
 async function fetchCommentThreadsForApiTask(task, settings, {
   preferredKeyIndex = null,
   totalCount = null,
+  reserveRequest,
 } = {}) {
+  if (typeof reserveRequest !== "function") {
+    throw new TypeError("a fenced Data API request reservation is required");
+  }
   const keyIndices = [
     ...(Number.isInteger(preferredKeyIndex) ? [preferredKeyIndex] : []),
     ...settings.apiKeys.map((_, index) => index),
@@ -3144,9 +3241,20 @@ async function fetchCommentThreadsForApiTask(task, settings, {
   let requestAttempts = 0;
   let lastError = null;
   for (const index of keyIndices) {
-    const usage = await reserveYoutubeApiRequest(settings.dailyRequestLimit, 1);
+    const reservation = await reserveRequest(1);
+    if (reservation.stale) {
+      return {
+        result: null,
+        keyIndex: null,
+        requestAttempts,
+        deferred: false,
+        stale: true,
+        lastError,
+      };
+    }
+    const usage = reservation.value;
     if (!usage) {
-      return { deferred: true, requestAttempts, lastError };
+      return { deferred: true, requestAttempts, stale: false, lastError };
     }
     requestAttempts += 1;
     try {
@@ -3155,19 +3263,38 @@ async function fetchCommentThreadsForApiTask(task, settings, {
         settings.apiKeys[index],
         { timeoutMs: settings.timeoutMs, totalCount },
       );
-      return { result, keyIndex: index, requestAttempts, deferred: false, lastError: null };
+      return {
+        result,
+        keyIndex: index,
+        requestAttempts,
+        deferred: false,
+        stale: false,
+        lastError: null,
+      };
     } catch (error) {
       lastError = error;
     }
   }
-  return { result: null, keyIndex: null, requestAttempts, deferred: false, lastError };
+  return {
+    result: null,
+    keyIndex: null,
+    requestAttempts,
+    deferred: false,
+    stale: false,
+    lastError,
+  };
 }
 
-async function deferYoutubeApiTaskForDailyLimit(task, dailyRequestLimit) {
+async function deferYoutubeApiTaskForDailyLimit(
+  client,
+  task,
+  candidateIds,
+  dailyRequestLimit,
+) {
   const nextRetrySql = "date_trunc('day', now()) + interval '1 day 5 minutes'";
-  await query(
+  const updated = await client.query(
     `UPDATE crawler.youtube_api_tasks
-     SET status='pending',error_message=NULL,next_retry_at=${nextRetrySql},
+     SET error_message=NULL,next_retry_at=${nextRetrySql},
          result_json=COALESCE(result_json,'{}'::jsonb)
            || jsonb_build_object(
                 'deferred',true,
@@ -3184,22 +3311,23 @@ async function deferYoutubeApiTaskForDailyLimit(task, dailyRequestLimit) {
                      )
               ),
          updated_at=now()
-     WHERE task_id=$1`,
+     WHERE task_id=$1 AND status='running'`,
     [task.task_id, dailyRequestLimit],
   );
-  await query(
+  if (updated.rowCount !== 1) throw new Error(`Data API task ${task.task_id} changed`);
+  await client.query(
     `UPDATE crawler.content_candidates
      SET api_status='pending',error_message=NULL,updated_at=now()
      WHERE candidate_id=ANY($1::bigint[])`,
-    [task.candidate_ids ?? []],
+    [candidateIds],
   );
 }
 
-async function failYoutubeApiCommentTask(task, error) {
+async function failYoutubeApiCommentTask(client, task, candidateIds, error) {
   const message = String(error?.message ?? error ?? "commentThreads.list failed");
-  await query(
+  const updated = await client.query(
     `UPDATE crawler.youtube_api_tasks
-     SET status='failed',error_message=$2,next_retry_at=now()+interval '5 minutes',
+     SET error_message=$2,next_retry_at=now()+interval '5 minutes',
          result_json=COALESCE(result_json,'{}'::jsonb)
            || jsonb_build_object(
                 'api_verification',
@@ -3211,80 +3339,297 @@ async function failYoutubeApiCommentTask(task, error) {
                      )
               ),
          updated_at=now()
-     WHERE task_id=$1`,
+     WHERE task_id=$1 AND status='running'`,
     [task.task_id, message],
   );
-  await query(
+  if (updated.rowCount !== 1) throw new Error(`Data API task ${task.task_id} changed`);
+  await client.query(
     `UPDATE crawler.content_candidates
      SET api_status='failed',error_message=$2,updated_at=now()
      WHERE candidate_id=ANY($1::bigint[])`,
-    [task.candidate_ids ?? [], message],
+    [candidateIds, message],
   );
 }
 
-export async function processDataApiBatchV2(job) {
-  const batchId = text(job.data?.batch_id) ?? String(job.id);
-  const taskIds = [...new Set((job.data?.task_ids ?? []).map(Number).filter(Number.isFinite))].slice(0, 50);
-  if (taskIds.length === 0) return { ok: true, skipped: true, reason: "no tasks" };
-  const taskRows = await query("SELECT * FROM crawler.youtube_api_tasks WHERE task_id=ANY($1::bigint[]) ORDER BY task_id", [taskIds]);
-  const videoIds = taskRows.rows.map((row) => row.source_content_id);
-  const storedReplay = job.data?.stored_evidence_replay
-    ? storedDataApiReplayResult({ jobData: job.data, tasks: taskRows.rows })
-    : null;
-  const settings = await getYoutubeApiSettingsV2();
-  const crawlSettings = await getCrawlSettingsV2();
-  const candidateIds = taskRows.rows.flatMap((row) => row.candidate_ids ?? []);
-  const markBatchFailed = async (error) => {
-    const message = String(error?.message ?? error);
-    await query(
-      `UPDATE crawler.youtube_api_batches SET status='failed',error_message=$2,finished_at=now(),updated_at=now() WHERE batch_id=$1`,
-      [batchId, message],
-    );
-    await query(
-      `UPDATE crawler.youtube_api_tasks
-       SET status='failed',error_message=$2,next_retry_at=now()+interval '5 minutes',updated_at=now()
-       WHERE task_id=ANY($1::bigint[])`,
-      [taskIds, message],
-    );
-    await query(
-      `UPDATE crawler.content_candidates
-       SET api_status='failed',error_message=$2,updated_at=now()
-       WHERE candidate_id=ANY($1::bigint[])`,
-      [candidateIds, message],
-    );
+function dataApiExecutionFenceStaleResult() {
+  return {
+    ok: true,
+    skipped: true,
+    reason: "data_api_batch_execution_fence_stale",
   };
-  if (!storedReplay && settings.apiKeys.length === 0) {
-    const error = new Error("youtube data api key missing");
-    await markBatchFailed(error);
-    throw error;
-  }
-  await query(
-    `UPDATE crawler.youtube_api_batches SET status='running',started_at=now(),updated_at=now() WHERE batch_id=$1`,
-    [batchId],
+}
+
+async function withLockedDataApiBatchExecution(fence, action) {
+  return withTransaction(async (client) => {
+    const scope = await lockDataApiBatchExecution(client, fence);
+    if (!scope) return { stale: true, value: null };
+    return { stale: false, value: await action(client, scope) };
+  });
+}
+
+function normalizedCandidateIds(values) {
+  return [...new Set((values ?? []).map(Number))]
+    .filter((value) => Number.isSafeInteger(value) && value > 0)
+    .sort((left, right) => left - right);
+}
+
+function dataApiTaskCandidateIds(scope, task) {
+  if (!scope.recovery) return normalizedCandidateIds(task.candidate_ids);
+  return normalizedCandidateIds(
+    scope.authorized_candidate_ids_by_task?.[Number(task.task_id)] ?? [],
   );
-  await query(
-    `UPDATE crawler.youtube_api_tasks SET status='running',attempts=attempts+1,updated_at=now() WHERE task_id=ANY($1::bigint[])`,
+}
+
+function dataApiCandidateIds(scope, tasks) {
+  return normalizedCandidateIds(
+    tasks.flatMap((task) => dataApiTaskCandidateIds(scope, task)),
+  );
+}
+
+function projectDataApiTasksToScope(tasks, scope) {
+  return tasks.map((task) => ({
+    ...task,
+    candidate_ids: dataApiTaskCandidateIds(scope, task),
+  }));
+}
+
+function sameDataApiIdentity(left, right) {
+  return left.length === right.length
+    && left.every((value, index) => String(value) === String(right[index]));
+}
+
+function assertDataApiTaskIdentity(tasks, fence) {
+  const taskIds = tasks.map((task) => Number(task.task_id)).sort((left, right) => left - right);
+  if (!sameDataApiIdentity(taskIds, fence.taskIds)) {
+    throw new Error("Data API Batch task identity changed");
+  }
+  const videoIds = tasks.map((task) => String(task.source_content_id)).sort();
+  if (!sameDataApiIdentity(videoIds, fence.videoIds)) {
+    throw new Error("Data API Batch video identity changed");
+  }
+}
+
+async function finishScopedDataApiTask(client, {
+  task,
+  scope,
+  taskStatus,
+  missingFields,
+  resultJson,
+}) {
+  const lockedTask = (await client.query(
+    `SELECT task_id,status,candidate_ids
+     FROM crawler.youtube_api_tasks
+     WHERE task_id=$1
+     FOR UPDATE`,
+    [task.task_id],
+  )).rows[0];
+  if (!lockedTask || lockedTask.status !== "running") {
+    throw new Error(`Data API task ${task.task_id} is not owned by the running Batch`);
+  }
+  if (!scope.recovery) {
+    const updated = await client.query(
+      `UPDATE crawler.youtube_api_tasks
+       SET status=$2,missing_fields=$3::text[],result_json=$4::jsonb,
+           error_message=NULL,next_retry_at=NULL,finished_at=now(),updated_at=now()
+       WHERE task_id=$1 AND status='running'`,
+      [task.task_id, taskStatus, missingFields, JSON.stringify(resultJson)],
+    );
+    if (updated.rowCount !== 1) throw new Error(`Data API task ${task.task_id} changed`);
+    return { taskStatus, releaseStatus: null };
+  }
+  const remainingRows = await client.query(
+    `SELECT COALESCE(
+              array_agg(DISTINCT candidate.candidate_id ORDER BY candidate.candidate_id),
+              '{}'::bigint[]
+            ) AS candidate_ids,
+            COALESCE(
+              array_agg(DISTINCT fields.field ORDER BY fields.field)
+                FILTER (WHERE fields.field IS NOT NULL),
+              '{}'::text[]
+            ) AS missing_fields
+     FROM crawler.content_candidates candidate
+     LEFT JOIN LATERAL unnest(candidate.missing_fields) fields(field) ON true
+     WHERE candidate.candidate_id=ANY($1::bigint[])
+       AND candidate.detail_status='api_pending'
+       AND candidate.api_status IN ('pending','queued','running','failed')`,
+    [lockedTask.candidate_ids ?? []],
+  );
+  const remainingCandidateIds = normalizedCandidateIds(
+    remainingRows.rows[0]?.candidate_ids ?? [],
+  );
+  if (remainingCandidateIds.length > 0) {
+    const updated = await client.query(
+      `UPDATE crawler.youtube_api_tasks
+       SET candidate_ids=$2::bigint[],missing_fields=$3::text[],
+           error_message=NULL,next_retry_at=NULL,finished_at=NULL,updated_at=now()
+       WHERE task_id=$1 AND status='running'`,
+      [
+        task.task_id,
+        remainingCandidateIds,
+        remainingRows.rows[0]?.missing_fields ?? [],
+      ],
+    );
+    if (updated.rowCount !== 1) throw new Error(`Data API task ${task.task_id} changed`);
+    return { taskStatus, releaseStatus: "pending" };
+  }
+  const updated = await client.query(
+    `UPDATE crawler.youtube_api_tasks
+     SET status=$2,missing_fields=$3::text[],result_json=$4::jsonb,
+         error_message=NULL,next_retry_at=NULL,finished_at=now(),updated_at=now()
+     WHERE task_id=$1 AND status='running'`,
+    [task.task_id, taskStatus, missingFields, JSON.stringify(resultJson)],
+  );
+  if (updated.rowCount !== 1) throw new Error(`Data API task ${task.task_id} changed`);
+  return { taskStatus, releaseStatus: null };
+}
+
+async function releaseDataApiTasks(client, releases) {
+  if (releases.size === 0) return;
+  const taskIds = [...releases.keys()].sort((left, right) => left - right);
+  const locked = await client.query(
+    `SELECT task_id,status
+     FROM crawler.youtube_api_tasks
+     WHERE task_id=ANY($1::bigint[])
+     ORDER BY task_id
+     FOR UPDATE`,
     [taskIds],
   );
-  await query(
-    `UPDATE crawler.content_candidates SET api_status='running',updated_at=now()
-     WHERE candidate_id=ANY($1::bigint[])`,
-    [candidateIds],
+  if (locked.rows.length !== taskIds.length
+      || locked.rows.some((row, index) => (
+        Number(row.task_id) !== taskIds[index] || row.status !== "running"
+      ))) {
+    throw new Error("Data API task release identity changed before Batch terminal");
+  }
+  const releaseStatuses = taskIds.map((taskId) => releases.get(taskId));
+  const updated = await client.query(
+    `UPDATE crawler.youtube_api_tasks task
+     SET status=release.status,
+         finished_at=CASE WHEN release.status='pending' THEN NULL ELSE task.finished_at END,
+         updated_at=now()
+     FROM unnest($1::bigint[],$2::text[]) release(task_id,status)
+     WHERE task.task_id=release.task_id AND task.status='running'
+     RETURNING task.task_id`,
+    [taskIds, releaseStatuses],
   );
+  if (updated.rowCount !== taskIds.length) {
+    throw new Error("Data API task release changed before Batch terminal");
+  }
+}
+
+export async function processDataApiBatchV2(job) {
+  const requestedTaskIds = normalizedCandidateIds(job.data?.task_ids ?? []);
+  if (requestedTaskIds.length === 0) {
+    return { ok: true, skipped: true, reason: "no tasks" };
+  }
+  const executionFence = dataApiBatchExecutionFence(job);
+  const batchId = executionFence.batchId;
+  const claimedScope = await withTransaction((client) => (
+    claimDataApiBatchExecution(client, executionFence)
+  ));
+  if (!claimedScope) return dataApiExecutionFenceStaleResult();
+
+  const loadedTasks = await query(
+    `SELECT * FROM crawler.youtube_api_tasks
+     WHERE task_id=ANY($1::bigint[])
+     ORDER BY task_id`,
+    [executionFence.taskIds],
+  );
+  const tasks = projectDataApiTasksToScope(loadedTasks.rows, claimedScope);
+  const markBatchFailed = async (error) => {
+    const message = String(error?.message ?? error);
+    const committed = await withLockedDataApiBatchExecution(
+      executionFence,
+      async (client, scope) => {
+        const candidateIds = dataApiCandidateIds(scope, tasks);
+        await client.query(
+          `UPDATE crawler.youtube_api_batches
+           SET status='failed',error_message=$2,finished_at=now(),updated_at=now()
+           WHERE batch_id=$1`,
+          [batchId, message],
+        );
+        await client.query(
+          `UPDATE crawler.youtube_api_tasks
+           SET status='failed',error_message=$2,
+               next_retry_at=now()+interval '5 minutes',updated_at=now()
+           WHERE task_id=ANY($1::bigint[])`,
+          [executionFence.taskIds, message],
+        );
+        await client.query(
+          `UPDATE crawler.content_candidates
+           SET api_status='failed',error_message=$2,updated_at=now()
+           WHERE candidate_id=ANY($1::bigint[])`,
+          [candidateIds, message],
+        );
+      },
+    );
+    return !committed.stale;
+  };
+
+  let storedReplay = null;
+  try {
+    assertDataApiTaskIdentity(tasks, executionFence);
+    storedReplay = job.data?.stored_evidence_replay
+      ? storedDataApiReplayResult({ jobData: job.data, tasks })
+      : null;
+  } catch (error) {
+    if (!(await markBatchFailed(error))) return dataApiExecutionFenceStaleResult();
+    throw error;
+  }
+  const videoIds = tasks.map((row) => row.source_content_id);
+  const settings = await getYoutubeApiSettingsV2();
+  const crawlSettings = await getCrawlSettingsV2();
+  if (!storedReplay && settings.apiKeys.length === 0) {
+    const error = new Error("youtube data api key missing");
+    if (!(await markBatchFailed(error))) return dataApiExecutionFenceStaleResult();
+    throw error;
+  }
+  const started = await withLockedDataApiBatchExecution(
+    executionFence,
+    async (client, scope) => {
+      const candidateIds = dataApiCandidateIds(scope, tasks);
+      await client.query(
+        `UPDATE crawler.youtube_api_tasks
+         SET status='running',attempts=attempts+1,updated_at=now()
+         WHERE task_id=ANY($1::bigint[])`,
+        [executionFence.taskIds],
+      );
+      await client.query(
+        `UPDATE crawler.content_candidates
+         SET api_status='running',updated_at=now()
+         WHERE candidate_id=ANY($1::bigint[])`,
+        [candidateIds],
+      );
+    },
+  );
+  if (started.stale) return dataApiExecutionFenceStaleResult();
+
   let apiResult = storedReplay;
   let keyIndex = null;
   let lastError = null;
   let requestAttempts = storedReplay?.requestAttempts ?? 0;
   if (!storedReplay) {
     for (let index = 0; index < settings.apiKeys.length; index += 1) {
-      const usage = await reserveYoutubeApiRequest(settings.dailyRequestLimit, videoIds.length);
+      const reservation = await withLockedDataApiBatchExecution(
+        executionFence,
+        (client) => reserveYoutubeApiRequestTransaction(
+          client,
+          settings.dailyRequestLimit,
+          videoIds.length,
+        ),
+      );
+      if (reservation.stale) return dataApiExecutionFenceStaleResult();
+      const usage = reservation.value;
       if (!usage) {
-        await deferYoutubeApiBatchForDailyLimit({
-          batchId,
-          taskIds,
-          candidateIds,
-          dailyRequestLimit: settings.dailyRequestLimit,
-        });
+        const deferred = await withLockedDataApiBatchExecution(
+          executionFence,
+          (client, scope) => deferYoutubeApiBatchForDailyLimit(client, {
+            batchId,
+            taskIds: executionFence.taskIds,
+            candidateIds: dataApiCandidateIds(scope, tasks),
+            dailyRequestLimit: settings.dailyRequestLimit,
+          }),
+        );
+        if (deferred.stale) return dataApiExecutionFenceStaleResult();
         return {
           ok: true,
           deferred: true,
@@ -3303,7 +3648,7 @@ export async function processDataApiBatchV2(job) {
     }
   }
   if (!apiResult) {
-    await markBatchFailed(lastError);
+    if (!(await markBatchFailed(lastError))) return dataApiExecutionFenceStaleResult();
     throw lastError;
   }
   if (!storedReplay) {
@@ -3318,23 +3663,53 @@ export async function processDataApiBatchV2(job) {
   }
 
   const affectedRuns = new Map();
+  const taskReleases = new Map();
   const taskOutcomes = { done: 0, unavailable: 0, failed: 0, deferred: 0 };
-  for (const task of taskRows.rows) {
+  for (const task of tasks) {
     const apiDetail = apiResult.detailsById.get(task.source_content_id) ?? {};
     let commentApiResult = null;
     if (youtubeApiTaskNeedsCommentThreads(task) && !unfinishedLiveReason(apiDetail)) {
       const commentFetch = await fetchCommentThreadsForApiTask(task, settings, {
         preferredKeyIndex: keyIndex,
         totalCount: integer(apiDetail.comment_count),
+        reserveRequest: (requestedVideoCount) => withLockedDataApiBatchExecution(
+          executionFence,
+          (client) => reserveYoutubeApiRequestTransaction(
+            client,
+            settings.dailyRequestLimit,
+            requestedVideoCount,
+          ),
+        ),
       });
+      if (commentFetch.stale) return dataApiExecutionFenceStaleResult();
       requestAttempts += commentFetch.requestAttempts;
       if (commentFetch.deferred) {
-        await deferYoutubeApiTaskForDailyLimit(task, settings.dailyRequestLimit);
+        const deferred = await withLockedDataApiBatchExecution(
+          executionFence,
+          (client, scope) => deferYoutubeApiTaskForDailyLimit(
+            client,
+            task,
+            dataApiTaskCandidateIds(scope, task),
+            settings.dailyRequestLimit,
+          ),
+        );
+        if (deferred.stale) return dataApiExecutionFenceStaleResult();
+        taskReleases.set(Number(task.task_id), "pending");
         taskOutcomes.deferred += 1;
         continue;
       }
       if (!commentFetch.result) {
-        await failYoutubeApiCommentTask(task, commentFetch.lastError);
+        const failed = await withLockedDataApiBatchExecution(
+          executionFence,
+          (client, scope) => failYoutubeApiCommentTask(
+            client,
+            task,
+            dataApiTaskCandidateIds(scope, task),
+            commentFetch.lastError,
+          ),
+        );
+        if (failed.stale) return dataApiExecutionFenceStaleResult();
+        taskReleases.set(Number(task.task_id), "failed");
         taskOutcomes.failed += 1;
         continue;
       }
@@ -3352,232 +3727,250 @@ export async function processDataApiBatchV2(job) {
         },
       });
     }
-    const candidates = await query(
-      `SELECT candidate.*,run.started_at AS crawl_started_at,
-              known.content_key AS known_content_key,
-              known.content_type AS known_content_type,
-              known.content_type_source AS known_content_type_source,
-              run.result_json#>>'{publication_repair,content_max_age_days}'
-                AS repair_content_max_age_days
-       FROM crawler.content_candidates candidate
-       JOIN crawler.channel_runs run ON run.run_id=candidate.run_id
-       LEFT JOIN crawler.contents known
-         ON known.channel_id=candidate.channel_id
-        AND known.source_content_id=candidate.source_content_id
-       WHERE candidate.candidate_id=ANY($1::bigint[])`,
-      [task.candidate_ids],
-    );
-    const taskMissing = new Set();
-    for (const candidate of candidates.rows) {
-      const resultJson = candidate.result_json ?? {};
-      const existingDetail = resultJson.detail ?? {};
-      const mergedDetail = mergeApiDetail(
-        mergeApiDetail(existingDetail, apiDetail),
-        commentApiResult?.detail ?? {},
-      );
-      const classification = resolveYoutubeContentType({
-        videoId: candidate.source_content_id,
-        upload: resultJson.flat ?? {
-          video_id: candidate.source_content_id,
-          content_type: candidate.content_type,
-          type_source: candidate.type_source,
-        },
-        detail: mergedDetail,
-      });
-      const confirmedClassification = classification?.authoritative === true ? classification : null;
-      const contentType = confirmedClassification?.content_type ?? null;
-      const typeSource = confirmedClassification?.source ?? null;
-      const apiAccess = accessFromDetail(mergedDetail, "unknown");
-      const previousAccess = resultJson.access;
-      const resolvedAccess = apiAccess.access_status !== "unknown"
-        ? apiAccess
-        : previousAccess?.access_status && previousAccess.access_status !== "unknown"
-          ? previousAccess
-          : apiAccess;
-      const normalized = normalizeResolvedDetail(mergedDetail, { afterApi: true, access: resolvedAccess });
-      const storageAction = fullVideoStorageAction({
-        candidate,
-        classification,
-        access: normalized.access,
-      });
-      const state = {
-        ...resultJson,
-        detail: normalized.detail,
-        classification,
-        access: normalized.access,
-        api_detail: apiDetail,
-        api_comments: commentApiResult
-          ? {
-              status: commentApiResult.status,
-              source: "youtube_data_api_comment_threads",
-            }
-          : null,
-      };
-      const apiLiveReason = unfinishedLiveReason(normalized.detail);
-      if (apiLiveReason) {
-        await excludeUnfinishedLiveCandidate(
-          candidate,
-          normalized.detail,
-          "youtube_data_api",
-          apiLiveReason,
+    const taskCommit = await withLockedDataApiBatchExecution(
+      executionFence,
+      async (client, scope) => {
+        const candidateIds = dataApiTaskCandidateIds(scope, task);
+        const candidates = await client.query(
+          `SELECT candidate.*,run.started_at AS crawl_started_at,
+                  known.content_key AS known_content_key,
+                  known.content_type AS known_content_type,
+                  known.content_type_source AS known_content_type_source,
+                  run.result_json#>>'{publication_repair,content_max_age_days}'
+                    AS repair_content_max_age_days
+           FROM crawler.content_candidates candidate
+           JOIN crawler.channel_runs run ON run.run_id=candidate.run_id
+           LEFT JOIN crawler.contents known
+             ON known.channel_id=candidate.channel_id
+            AND known.source_content_id=candidate.source_content_id
+           WHERE candidate.candidate_id=ANY($1::bigint[])
+             AND (NOT $2::boolean OR run.run_id=ANY($3::text[]))
+           ORDER BY candidate.candidate_id
+           FOR UPDATE OF candidate`,
+          [candidateIds, scope.recovery, scope.recovery_run_ids],
         );
-        affectedRuns.set(candidate.run_id, candidate.channel_id);
-        continue;
-      }
-      if (storageAction.kind === "update_access") {
-        const stored = await updateExistingContentAccessFromCandidate(candidate, normalized);
-        const terminalMissing = terminalApiMissingFields(
-          missingApiFields(normalized.detail),
-          normalized.access,
-        );
-        terminalMissing.forEach((field) => taskMissing.add(field));
-        await query(
-          `UPDATE crawler.content_candidates
-           SET content_type=$2,type_status='resolved',type_source=$3,content_key=$4,
-               detail_status='done',api_status='not_needed',missing_fields=$5::text[],
-               result_json=$6::jsonb,error_message=NULL,finished_at=now(),updated_at=now()
-           WHERE candidate_id=$1`,
-          [
-            candidate.candidate_id,
-            stored?.content_type ?? candidate.known_content_type,
-            stored?.content_type_source ?? candidate.known_content_type_source,
-            stored?.content_key ?? candidate.known_content_key,
-            terminalMissing,
-            JSON.stringify({ ...state, preserved_content_type: true }),
-          ],
-        );
-        await persistFullVideoDisposition(candidate, {
-          storageAction,
-          classification,
-          access: normalized.access,
-          detail: normalized.detail,
-        });
-      } else if (storageAction.kind === "classified_only") {
-        const terminalMissing = terminalApiMissingFields(
-          missingApiFields(normalized.detail),
-          normalized.access,
-        );
-        terminalMissing.forEach((field) => taskMissing.add(field));
-        await query(
-          `UPDATE crawler.content_candidates
-           SET content_type=$2,type_status='resolved',type_source=$3,content_key=NULL,
-               detail_status='unavailable',api_status='unavailable',missing_fields=$4::text[],
-               result_json=$5::jsonb,error_message=$6,finished_at=now(),updated_at=now()
-           WHERE candidate_id=$1`,
-          [
-            candidate.candidate_id,
-            contentType,
-            typeSource,
-            terminalMissing,
-            JSON.stringify({ ...state, classified_only: true }),
-            `content access ${normalized.access.access_status || "unknown"} after detail and api`,
-          ],
-        );
-        await persistFullVideoDisposition(candidate, {
-          storageAction,
-          classification,
-          access: normalized.access,
-          detail: normalized.detail,
-        });
-      } else if (!contentType) {
-        const terminalMissing = [...new Set([
-          "content_type",
-          ...terminalApiMissingFields(missingApiFields(normalized.detail), normalized.access),
-        ])];
-        terminalMissing.forEach((field) => taskMissing.add(field));
-        await query(
-          `UPDATE crawler.content_candidates
-           SET type_status='unavailable',detail_status='unavailable',api_status='unavailable',
-               missing_fields=$2::text[],result_json=$3::jsonb,error_message='type unresolved after detail and api',
-               finished_at=now(),updated_at=now()
-           WHERE candidate_id=$1`,
-          [candidate.candidate_id, terminalMissing, JSON.stringify(state)],
-        );
-        await persistFullVideoDisposition(candidate, {
-          storageAction,
-          classification,
-          access: normalized.access,
-          detail: normalized.detail,
-        });
-      } else {
-        const terminalMissing = terminalApiMissingFields(
-          missingApiFields(normalized.detail),
-          normalized.access,
-        );
-        terminalMissing.forEach((field) => taskMissing.add(field));
-        const apiReferenceAt = candidate.crawl_started_at ?? Date.now();
-        const contentMaxAgeDays = intValue(
-          candidate.repair_content_max_age_days,
-          crawlSettings.contentMaxAgeDays,
-          0,
-          3650,
-        );
-        const apiWindow = classifyContentWindow(
-          normalized.detail,
-          contentMaxAgeDays,
-          apiReferenceAt,
-        );
-        if (contentMaxAgeDays > 0 && apiWindow.relation === "outside") {
-          await excludeCandidateByAge(
-            candidate,
-            normalized.detail,
-            detailAgeDays(normalized.detail, apiReferenceAt),
-            contentMaxAgeDays,
-            "youtube_data_api",
-            apiWindow,
+        const taskMissing = new Set();
+        const taskRuns = new Map();
+        for (const candidate of candidates.rows) {
+          const resultJson = candidate.result_json ?? {};
+          const existingDetail = resultJson.detail ?? {};
+          const mergedDetail = mergeApiDetail(
+            mergeApiDetail(existingDetail, apiDetail),
+            commentApiResult?.detail ?? {},
           );
-          affectedRuns.set(candidate.run_id, candidate.channel_id);
-          continue;
+          const classification = resolveYoutubeContentType({
+            videoId: candidate.source_content_id,
+            upload: resultJson.flat ?? {
+              video_id: candidate.source_content_id,
+              content_type: candidate.content_type,
+              type_source: candidate.type_source,
+            },
+            detail: mergedDetail,
+          });
+          const confirmedClassification = classification?.authoritative === true
+            ? classification
+            : null;
+          const contentType = confirmedClassification?.content_type ?? null;
+          const typeSource = confirmedClassification?.source ?? null;
+          const apiAccess = accessFromDetail(mergedDetail, "unknown");
+          const previousAccess = resultJson.access;
+          const resolvedAccess = apiAccess.access_status !== "unknown"
+            ? apiAccess
+            : previousAccess?.access_status && previousAccess.access_status !== "unknown"
+              ? previousAccess
+              : apiAccess;
+          const normalized = normalizeResolvedDetail(
+            mergedDetail,
+            { afterApi: true, access: resolvedAccess },
+          );
+          const storageAction = fullVideoStorageAction({
+            candidate,
+            classification,
+            access: normalized.access,
+          });
+          const state = {
+            ...resultJson,
+            detail: normalized.detail,
+            classification,
+            access: normalized.access,
+            api_detail: apiDetail,
+            api_comments: commentApiResult
+              ? {
+                  status: commentApiResult.status,
+                  source: "youtube_data_api_comment_threads",
+                }
+              : null,
+          };
+          const apiLiveReason = unfinishedLiveReason(normalized.detail);
+          if (apiLiveReason) {
+            await excludeUnfinishedLiveCandidate(
+              candidate,
+              normalized.detail,
+              "youtube_data_api",
+              apiLiveReason,
+              client,
+            );
+            taskRuns.set(candidate.run_id, candidate.channel_id);
+            continue;
+          }
+          if (storageAction.kind === "update_access") {
+            const stored = await updateExistingContentAccessFromCandidate(
+              candidate,
+              normalized,
+              client,
+            );
+            const terminalMissing = terminalApiMissingFields(
+              missingApiFields(normalized.detail),
+              normalized.access,
+            );
+            terminalMissing.forEach((field) => taskMissing.add(field));
+            await client.query(
+              `UPDATE crawler.content_candidates
+               SET content_type=$2,type_status='resolved',type_source=$3,content_key=$4,
+                   detail_status='done',api_status='not_needed',missing_fields=$5::text[],
+                   result_json=$6::jsonb,error_message=NULL,finished_at=now(),updated_at=now()
+               WHERE candidate_id=$1`,
+              [
+                candidate.candidate_id,
+                stored?.content_type ?? candidate.known_content_type,
+                stored?.content_type_source ?? candidate.known_content_type_source,
+                stored?.content_key ?? candidate.known_content_key,
+                terminalMissing,
+                JSON.stringify({ ...state, preserved_content_type: true }),
+              ],
+            );
+            await persistFullVideoDisposition(candidate, {
+              storageAction,
+              classification,
+              access: normalized.access,
+              detail: normalized.detail,
+              client,
+            });
+          } else if (storageAction.kind === "classified_only") {
+            const terminalMissing = terminalApiMissingFields(
+              missingApiFields(normalized.detail),
+              normalized.access,
+            );
+            terminalMissing.forEach((field) => taskMissing.add(field));
+            await client.query(
+              `UPDATE crawler.content_candidates
+               SET content_type=$2,type_status='resolved',type_source=$3,content_key=NULL,
+                   detail_status='unavailable',api_status='unavailable',missing_fields=$4::text[],
+                   result_json=$5::jsonb,error_message=$6,finished_at=now(),updated_at=now()
+               WHERE candidate_id=$1`,
+              [
+                candidate.candidate_id,
+                contentType,
+                typeSource,
+                terminalMissing,
+                JSON.stringify({ ...state, classified_only: true }),
+                `content access ${normalized.access.access_status || "unknown"} after detail and api`,
+              ],
+            );
+            await persistFullVideoDisposition(candidate, {
+              storageAction,
+              classification,
+              access: normalized.access,
+              detail: normalized.detail,
+              client,
+            });
+          } else if (!contentType) {
+            const terminalMissing = [...new Set([
+              "content_type",
+              ...terminalApiMissingFields(
+                missingApiFields(normalized.detail),
+                normalized.access,
+              ),
+            ])];
+            terminalMissing.forEach((field) => taskMissing.add(field));
+            await client.query(
+              `UPDATE crawler.content_candidates
+               SET type_status='unavailable',detail_status='unavailable',api_status='unavailable',
+                   missing_fields=$2::text[],result_json=$3::jsonb,
+                   error_message='type unresolved after detail and api',
+                   finished_at=now(),updated_at=now()
+               WHERE candidate_id=$1`,
+              [candidate.candidate_id, terminalMissing, JSON.stringify(state)],
+            );
+            await persistFullVideoDisposition(candidate, {
+              storageAction,
+              classification,
+              access: normalized.access,
+              detail: normalized.detail,
+              client,
+            });
+          } else {
+            const terminalMissing = terminalApiMissingFields(
+              missingApiFields(normalized.detail),
+              normalized.access,
+            );
+            terminalMissing.forEach((field) => taskMissing.add(field));
+            const apiReferenceAt = candidate.crawl_started_at ?? Date.now();
+            const contentMaxAgeDays = intValue(
+              candidate.repair_content_max_age_days,
+              crawlSettings.contentMaxAgeDays,
+              0,
+              3650,
+            );
+            const apiWindow = classifyContentWindow(
+              normalized.detail,
+              contentMaxAgeDays,
+              apiReferenceAt,
+            );
+            if (contentMaxAgeDays > 0 && apiWindow.relation === "outside") {
+              await excludeCandidateByAge(
+                candidate,
+                normalized.detail,
+                detailAgeDays(normalized.detail, apiReferenceAt),
+                contentMaxAgeDays,
+                "youtube_data_api",
+                apiWindow,
+                client,
+              );
+              taskRuns.set(candidate.run_id, candidate.channel_id);
+              continue;
+            }
+            const contentKey = await upsertContentFromCandidate({
+              ...candidate,
+              content_type: contentType,
+              type_source: typeSource,
+              type_authoritative: classification?.authoritative === true,
+            }, normalized, client);
+            await client.query(
+              `UPDATE crawler.content_candidates
+               SET content_type=$2,type_status='resolved',type_source=$3,content_key=$4,
+                   detail_status='done',api_status=$5,missing_fields=$6::text[],
+                   result_json=$7::jsonb,error_message=NULL,finished_at=now(),updated_at=now()
+               WHERE candidate_id=$1`,
+              [
+                candidate.candidate_id,
+                contentType,
+                typeSource,
+                contentKey,
+                terminalMissing.length > 0 ? "unavailable" : "done",
+                terminalMissing,
+                JSON.stringify(state),
+              ],
+            );
+            await persistFullVideoDisposition(candidate, {
+              storageAction,
+              classification,
+              access: normalized.access,
+              detail: normalized.detail,
+              client,
+            });
+          }
+          taskRuns.set(candidate.run_id, candidate.channel_id);
         }
-        const contentKey = await upsertContentFromCandidate({
-          ...candidate,
-          content_type: contentType,
-          type_source: typeSource,
-          type_authoritative: classification?.authoritative === true,
-        }, normalized);
-        await query(
-          `UPDATE crawler.content_candidates
-           SET content_type=$2,type_status='resolved',type_source=$3,content_key=$4,
-               detail_status='done',api_status=$5,missing_fields=$6::text[],
-               result_json=$7::jsonb,error_message=NULL,finished_at=now(),updated_at=now()
-           WHERE candidate_id=$1`,
-          [
-            candidate.candidate_id,
-            contentType,
-            typeSource,
-            contentKey,
-            terminalMissing.length > 0 ? "unavailable" : "done",
-            terminalMissing,
-            JSON.stringify(state),
-          ],
-        );
-        await persistFullVideoDisposition(candidate, {
-          storageAction,
-          classification,
-          access: normalized.access,
-          detail: normalized.detail,
-        });
-      }
-      affectedRuns.set(candidate.run_id, candidate.channel_id);
-    }
-    const taskStatus = apiResult.detailsById.has(task.source_content_id) && taskMissing.size === 0
-      ? "done"
-      : "unavailable";
-    taskOutcomes[taskStatus] += 1;
-    await query(
-      `UPDATE crawler.youtube_api_tasks
-       SET status=$2,missing_fields=$3::text[],result_json=$4::jsonb,
-           error_message=NULL,next_retry_at=NULL,finished_at=now(),updated_at=now()
-       WHERE task_id=$1`,
-      [
-        task.task_id,
-        taskStatus,
-        [...taskMissing],
-        JSON.stringify({
+        const taskStatus = apiResult.detailsById.has(task.source_content_id)
+            && taskMissing.size === 0
+          ? "done"
+          : "unavailable";
+        const taskResultJson = {
           ...youtubeApiTaskResultEvidence({
-          apiDetail,
-          detailReturned: apiResult.detailsById.has(task.source_content_id),
-          commentApiResult,
+            apiDetail,
+            detailReturned: apiResult.detailsById.has(task.source_content_id),
+            commentApiResult,
           }),
           ...(storedReplay
             ? {
@@ -3588,37 +3981,69 @@ export async function processDataApiBatchV2(job) {
                 },
               }
             : {}),
-        }),
-      ],
+        };
+        const finished = await finishScopedDataApiTask(client, {
+          task,
+          scope,
+          taskStatus,
+          missingFields: [...taskMissing],
+          resultJson: taskResultJson,
+        });
+        return {
+          ...finished,
+          runs: [...taskRuns.entries()],
+        };
+      },
     );
+    if (taskCommit.stale) return dataApiExecutionFenceStaleResult();
+    if (taskCommit.value.releaseStatus) {
+      taskReleases.set(Number(task.task_id), taskCommit.value.releaseStatus);
+    }
+    taskOutcomes[taskCommit.value.taskStatus] += 1;
+    for (const [runId, channelId] of taskCommit.value.runs) {
+      affectedRuns.set(runId, channelId);
+    }
   }
   const batchStatus = taskOutcomes.failed > 0 ? "failed" : "done";
   const batchError = taskOutcomes.failed > 0
     ? `${taskOutcomes.failed} YouTube API task(s) require retry`
     : null;
-  await query(
-    `UPDATE crawler.youtube_api_batches
-     SET status=$2,key_index=$3,result_json=$4::jsonb,error_message=$5,finished_at=now(),updated_at=now()
-     WHERE batch_id=$1`,
-    [
-      batchId,
-      batchStatus,
-      keyIndex,
-      JSON.stringify({
-        requested_count: videoIds.length,
-        returned_count: apiResult.returnedCount,
-        request_attempts: requestAttempts,
-        task_outcomes: taskOutcomes,
-        ...(storedReplay ? { stored_evidence_replay: storedReplay.replay } : {}),
-      }),
-      batchError,
-    ],
+  const finalized = await withLockedDataApiBatchExecution(
+    executionFence,
+    async (client, scope) => {
+      const runSummaries = [];
+      for (const [runId, channelId] of affectedRuns) {
+        if (scope.recovery && !scope.recovery_run_ids.includes(String(runId))) continue;
+        const summary = await updateRunDetailStatus(runId, { client });
+        runSummaries.push({ runId, channelId, summary });
+      }
+      await releaseDataApiTasks(client, taskReleases);
+      await client.query(
+        `UPDATE crawler.youtube_api_batches
+         SET status=$2,key_index=$3,
+             result_json=COALESCE(result_json,'{}'::jsonb) || $4::jsonb,
+             error_message=$5,finished_at=now(),updated_at=now()
+         WHERE batch_id=$1`,
+        [
+          batchId,
+          batchStatus,
+          keyIndex,
+          JSON.stringify({
+            requested_count: videoIds.length,
+            returned_count: apiResult.returnedCount,
+            request_attempts: requestAttempts,
+            task_outcomes: taskOutcomes,
+            ...(storedReplay ? { stored_evidence_replay: storedReplay.replay } : {}),
+          }),
+          batchError,
+        ],
+      );
+      return runSummaries;
+    },
   );
-  for (const [runId, channelId] of affectedRuns) {
-    const summary = await updateRunDetailStatus(runId);
-    if (migrationActivityCanFinalize(summary.migration_activity_gate)) {
-      await queueFinalize(channelId, runId, "youtube-data-api-complete");
-    }
+  if (finalized.stale) return dataApiExecutionFenceStaleResult();
+  for (const { summary } of finalized.value) {
+    await signalRunDetailStatusWakeup(summary.migration_activity_gate);
   }
   return {
     ok: true,
@@ -3677,6 +4102,7 @@ async function loadFirstPartyIdentityByChannel(channelIds) {
 export async function processAgentBatchV2(job) {
   let channelIds = [...new Set((job.data?.channel_ids ?? []).map(String).filter(Boolean))];
   if (channelIds.length === 0) return { ok: true, skipped: true, reason: "no channels" };
+  const recoveryFence = migrationSystemRetryAgentJobFence(job);
   const incrementalAgent = isIncrementalAgentJob(job);
   const requestedConfigId = Number(job.data?.agent_config_id);
   const requestedConfig = Number.isFinite(requestedConfigId) && requestedConfigId > 0
@@ -3703,19 +4129,78 @@ export async function processAgentBatchV2(job) {
     channelIds = incrementalClaim.requests.map((request) => request.channel_id);
   }
   const requestedRows = await query(
-    `SELECT channel_id,channel_url,handle,title,summary,about_description,
-            country,country_source,country_code,country_canonical_name,
-            agent_status,latest_run_id
-     FROM crawler.channels
-     WHERE channel_id=ANY($1::text[]) AND status='active'
-     ORDER BY array_position($1::text[],channel_id)`,
+    `SELECT channel.channel_id,channel.channel_url,channel.handle,channel.title,
+            channel.summary,channel.about_description,channel.country,
+            channel.country_source,channel.country_code,channel.country_canonical_name,
+            channel.agent_status,channel.latest_run_id,run.candidate_id,
+            candidate.dispatch_batch_id AS candidate_dispatch_batch_id,
+            candidate.snapshot_dispatch_generation AS candidate_dispatch_generation
+     FROM crawler.channels channel
+     LEFT JOIN crawler.channel_runs run
+       ON run.run_id=channel.latest_run_id
+      AND run.channel_id=channel.channel_id
+     LEFT JOIN crawler.channel_candidates candidate
+       ON candidate.candidate_id=run.candidate_id
+     WHERE channel.channel_id=ANY($1::text[]) AND channel.status='active'
+     ORDER BY array_position($1::text[],channel.channel_id)`,
     [channelIds],
   );
+  if (
+    !recoveryFence
+    && !incrementalAgent
+    && requestedRows.rows.some((row) => !text(row.latest_run_id))
+  ) {
+    return {
+      ok: true,
+      skipped: true,
+      reason: "full_agent_run_fence_required",
+    };
+  }
+  const genericRunScopeByChannel = recoveryFence || incrementalAgent
+    ? new Map()
+    : new Map(requestedRows.rows
+      .map((row) => [row.channel_id, fullAgentMigrationRunScope(row)]));
+  const batchTransactionGuard = recoveryFence
+    ? (client) => lockMigrationSystemRetryAgentJobFence(client, recoveryFence)
+    : genericRunScopeByChannel.size > 0
+      ? (client) => lockGenericFullAgentBatchAgainstMigrationSystemRetry(
+          client,
+          [...genericRunScopeByChannel.values()],
+        )
+      : null;
+  const initialTransactionGuard = recoveryFence
+    ? (client) => claimMigrationSystemRetryAgentJobFence(client, recoveryFence)
+    : batchTransactionGuard;
+  const resultTransactionGuard = (row) => {
+    if (recoveryFence) {
+      return (client) => lockMigrationSystemRetryAgentJobFence(client, recoveryFence);
+    }
+    const scope = genericRunScopeByChannel.get(row.channel_id);
+    return scope
+      ? (client) => lockGenericFullAgentAgainstMigrationSystemRetry(client, scope)
+      : null;
+  };
+  const fenceRejectedReason = recoveryFence
+    ? "migration_system_retry_agent_fence_stale"
+    : "migration_system_retry_agent_fence_required";
+  if (initialTransactionGuard && !(await withTransaction(initialTransactionGuard))) {
+    return {
+      ok: true,
+      skipped: true,
+      reason: fenceRejectedReason,
+    };
+  }
   const completedRows = incrementalAgent
     ? []
     : requestedRows.rows.filter((row) => row.agent_status === "done");
   for (const row of completedRows) {
-    await queueFinalize(row.channel_id, row.latest_run_id, "agent-already-complete");
+    if (!recoveryFence) {
+      await queueFinalize(
+        row.channel_id,
+        row.latest_run_id,
+        "agent-already-complete",
+      );
+    }
   }
   const rows = {
     rows: incrementalAgent
@@ -3723,11 +4208,19 @@ export async function processAgentBatchV2(job) {
       : requestedRows.rows.filter((row) => row.agent_status !== "done"),
   };
   if (rows.rows.length === 0) return { ok: true, skipped: true, reason: "already complete" };
-  await markAgentChannelsRunning({
+  const markedRunning = await markAgentChannelsRunning({
     withTransaction,
     channelIds: rows.rows.map((row) => row.channel_id),
     forceRefresh: incrementalAgent,
+    transactionGuard: batchTransactionGuard,
   });
+  if (markedRunning.fenceRejected === true) {
+    return {
+      ok: true,
+      skipped: true,
+      reason: fenceRejectedReason,
+    };
+  }
   let channels = [];
   if (!localExecution) {
     const identityByChannel = await loadFirstPartyIdentityByChannel(
@@ -3784,6 +4277,7 @@ export async function processAgentBatchV2(job) {
   const requestByChannel = new Map(
     (incrementalClaim?.requests ?? []).map((request) => [request.channel_id, request]),
   );
+  const rowOutcomes = [];
   for (const row of rows.rows) {
     const resolved = result.results.get(row.channel_id);
     if (resolved) {
@@ -3810,18 +4304,26 @@ export async function processAgentBatchV2(job) {
           inputContentIds: resolved.input_content_ids ?? [],
           taxonomyVersion: process.env.AGENT_TAXONOMY_VERSION || AGENT_TAXONOMY_VERSION,
         });
-        await persistAgentChannelSuccess({
+        const persisted = await persistAgentChannelSuccess({
           withTransaction,
           channelId: row.channel_id,
           inputUrl: normalChannelUrl(row),
           metrics: resolved.metrics,
           publicationRun,
+          transactionGuard: resultTransactionGuard(row),
         });
-        await queueFinalize(
-          row.channel_id,
-          resolved.source_latest_run_id ?? row.latest_run_id,
-          "agent-complete",
-        );
+        if (persisted.fenceRejected === true) {
+          rowOutcomes.push("fence_rejected");
+          continue;
+        }
+        rowOutcomes.push("success_applied");
+        if (!recoveryFence) {
+          await queueFinalize(
+            row.channel_id,
+            resolved.source_latest_run_id ?? row.latest_run_id,
+            "agent-complete",
+          );
+        }
       }
     } else {
       const error = errorByChannel.get(row.channel_id) ?? "agent returned no result";
@@ -3834,7 +4336,7 @@ export async function processAgentBatchV2(job) {
           error,
         });
       } else {
-        await persistAgentChannelFailure({
+        const persisted = await persistAgentChannelFailure({
           withTransaction,
           channelId: row.channel_id,
           inputUrl: normalChannelUrl(row),
@@ -3846,15 +4348,29 @@ export async function processAgentBatchV2(job) {
             ? "local_offline"
             : hasResolvedCrawlerCountry(row) ? "country_resolved" : "country_required",
           errorMessage: error,
+          transactionGuard: resultTransactionGuard(row),
         });
+        rowOutcomes.push(
+          persisted.fenceRejected === true ? "fence_rejected" : "failure_applied",
+        );
       }
     }
   }
-  if (result.errors.length > 0 && !incrementalAgent) {
-    throw new Error(`agent failed for ${result.errors.length}/${rows.rows.length} channels`);
+  const settlement = incrementalAgent
+    ? null
+    : classifyFullAgentBatchSettlement(rowOutcomes);
+  if (settlement?.action === "skip") {
+    return {
+      ok: true,
+      skipped: true,
+      reason: fenceRejectedReason,
+    };
+  }
+  if (settlement?.action === "throw") {
+    throw new Error(`agent failed for ${settlement.failedCount}/${rows.rows.length} channels`);
   }
   return {
-    ok: result.errors.length === 0,
+    ok: incrementalAgent ? result.errors.length === 0 : true,
     partial: incrementalAgent && result.errors.length > 0,
     incremental: incrementalAgent,
     channel_count: rows.rows.length,
@@ -3864,7 +4380,7 @@ export async function processAgentBatchV2(job) {
     country_resolved_count: localExecution
       ? rows.rows.length
       : channels.filter((item) => !item.country_required).length,
-    applied_count: result.results.size,
+    applied_count: settlement?.appliedCount ?? result.results.size,
     agent_config_id: agentConfig.config_id,
     agent_config_name: agentConfig.name,
   };
@@ -3948,6 +4464,7 @@ function crawlerCountryMetric(channel) {
 export async function processFinalizeV2(job) {
   const channelId = text(job.data?.channel_id);
   if (!channelId) throw new Error("channel_id is required");
+  const recoveryFence = migrationSystemRetryFinalizeJobFence(job);
   const channelRows = await query("SELECT * FROM crawler.channels WHERE channel_id=$1 LIMIT 1", [channelId]);
   let channel = channelRows.rows[0];
   if (!channel) throw new Error(`channel not found: ${channelId}`);
@@ -3971,6 +4488,21 @@ export async function processFinalizeV2(job) {
       latest_run_id: channel.latest_run_id ?? null,
     };
   }
+  const transactionGuard = recoveryFence
+    ? (client) => lockMigrationSystemRetryFinalizeJobFence(client, recoveryFence)
+    : (client) => lockGenericFinalizeAgainstMigrationSystemRetry(client, {
+      channelId,
+      runId,
+    });
+  const rejectedFinalizeGuardResult = () => ({
+    ok: true,
+    skipped: true,
+    skip_reason: recoveryFence
+      ? "migration_system_retry_finalize_fence_stale"
+      : "migration_system_retry_finalize_fence_required",
+    channel_id: channelId,
+    requested_run_id: runId,
+  });
   const runRows = runId ? await query("SELECT * FROM crawler.channel_runs WHERE run_id=$1 LIMIT 1", [runId]) : { rows: [] };
   const run = runRows.rows[0] ?? null;
   const candidates = runId
@@ -4007,7 +4539,9 @@ export async function processFinalizeV2(job) {
     observedAt: publicationAsOf,
     revisionType: publicationRevisionType,
     repairId: publicationContext.repairId,
+    transactionGuard,
   });
+  if (initialObservations.fenceRejected === true) return rejectedFinalizeGuardResult();
   [channel, agent] = await Promise.all([
     query("SELECT * FROM crawler.channels WHERE channel_id=$1 LIMIT 1", [channelId])
       .then((result) => result.rows[0]),
@@ -4036,14 +4570,20 @@ export async function processFinalizeV2(job) {
     sourceRevision,
     initialObservations.outcomes,
   )) {
-    const committed = await withTransaction((client) => commitFinalizedProfile(client, {
-      channelId,
-      runId,
-      status: existingFinalized.rows[0].status,
-      deduplicated: true,
-      publicationAsOf,
-      publicationRevisionType,
-    }));
+    const committed = await withTransaction(async (client) => {
+      if (transactionGuard && !(await transactionGuard(client))) {
+        return { fenceRejected: true };
+      }
+      return commitFinalizedProfile(client, {
+        channelId,
+        runId,
+        status: existingFinalized.rows[0].status,
+        deduplicated: true,
+        publicationAsOf,
+        publicationRevisionType,
+      });
+    });
+    if (committed.fenceRejected === true) return rejectedFinalizeGuardResult();
     return {
       ok: true,
       deduplicated: true,
@@ -4092,10 +4632,17 @@ export async function processFinalizeV2(job) {
     status,
     String(existingFinalizedRow?.run_id ?? "") === String(runId ?? ""),
   )) {
-    await withTransaction((client) => synchronizeFinalizedRun(client, {
-      runId,
-      finalizedStatus: existingFinalizedRow.status,
-    }));
+    const synchronized = await withTransaction(async (client) => {
+      if (transactionGuard && !(await transactionGuard(client))) {
+        return { fenceRejected: true };
+      }
+      await synchronizeFinalizedRun(client, {
+        runId,
+        finalizedStatus: existingFinalizedRow.status,
+      });
+      return { fenceRejected: false };
+    });
+    if (synchronized.fenceRejected === true) return rejectedFinalizeGuardResult();
     return {
       ok: true,
       skipped: true,
@@ -4159,6 +4706,9 @@ export async function processFinalizeV2(job) {
   };
   let rawObject = null;
   if (isSuccessfulPublicationFinalize(status)) {
+    if (transactionGuard && !(await withTransaction(transactionGuard))) {
+      return rejectedFinalizeGuardResult();
+    }
     rawObject = await saveJsonRaw({
       objectType: "youtube_final_profile_json",
       entityType: "channel",
@@ -4168,15 +4718,21 @@ export async function processFinalizeV2(job) {
       metadata: { channel_id: channelId, run_id: runId, status },
     });
   }
-  const committed = await withTransaction((client) => commitFinalizedProfile(client, {
-    channelId,
-    runId,
-    status,
-    profile,
-    quality: { ...quality, raw_object_path: rawObject?.object_path ?? null },
-    publicationAsOf,
-    publicationRevisionType,
-  }));
+  const committed = await withTransaction(async (client) => {
+    if (transactionGuard && !(await transactionGuard(client))) {
+      return { fenceRejected: true };
+    }
+    return commitFinalizedProfile(client, {
+      channelId,
+      runId,
+      status,
+      profile,
+      quality: { ...quality, raw_object_path: rawObject?.object_path ?? null },
+      publicationAsOf,
+      publicationRevisionType,
+    });
+  });
+  if (committed.fenceRejected === true) return rejectedFinalizeGuardResult();
   if (!committed.applied) {
     return {
       ok: true,

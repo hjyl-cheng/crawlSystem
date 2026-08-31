@@ -3,6 +3,7 @@ import {
   normalizeQueryScheduler,
   QUERY_SCHEDULER_KEY,
 } from "./queryScheduler.js";
+import { sharedCrawlerSchedulerActivationAdmission } from "./migrationSystemRetryAdmission.js";
 
 const ENABLED_VALUES = new Set(["1", "true", "yes", "on"]);
 
@@ -58,6 +59,10 @@ export async function maybeStartMetadataDiscoveryCycle(
           : `scheduler_${scheduler.status}`,
         scheduler,
       );
+    }
+    const admission = await sharedCrawlerSchedulerActivationAdmission(client);
+    if (!admission.allowed) {
+      return inactive(admission.code, scheduler);
     }
 
     const workRows = await client.query(

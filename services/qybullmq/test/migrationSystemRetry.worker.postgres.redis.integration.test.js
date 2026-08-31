@@ -9,11 +9,14 @@ import {
   describeChannelCandidateWorkerFailure,
   failChannelCandidateWorkerJob,
 } from "../src/channelCandidateWorkerLifecycle.js";
+import { activeChannelCandidateAttemptFence } from "../src/channelCandidateAttemptFence.js";
+import { beginChannelCandidateValidation } from "../src/channelCandidateAttemptMutations.js";
 import { dataApiCircuitState } from "../src/dataApiCircuit.js";
 import {
   ManagedJobOutboxDispatcher,
   PostgresManagedJobDispatchRepository,
 } from "../src/managedJobDispatchOutbox.js";
+import { hasOpenPipelineCrawlerWork } from "../src/finalizeRecoveryPolicy.js";
 import { markChannelCandidateJobAttemptActive } from "../src/managedWorkerJob.js";
 import { settleCompletedMigrationBatch } from "../src/migrationBatchCompletion.js";
 import { retryMigrationSystemFailure } from "../src/migrationSystemRetry.js";
@@ -130,6 +133,128 @@ async function initializeScenario(client) {
   };
 }
 
+test("a completed Batch retains its dispatched G+1 recovery while the Redis Job is absent", {
+  skip: databaseUrl && redisUrl
+    ? false
+    : "MANAGED_JOB_TEST_DATABASE_URL and MANAGED_JOB_TEST_REDIS_URL are not configured",
+  timeout: 60_000,
+}, async (t) => {
+  assertDedicatedLocalTestDatabase(databaseUrl);
+  assertDedicatedLocalRedis(redisUrl);
+  const setup = new Client({ connectionString: databaseUrl });
+  const pool = new Pool({ connectionString: databaseUrl, max: 4 });
+  const connection = redisConnection(redisUrl);
+  const prefix = "migration-completion-gap-e2e";
+  const queue = new Queue(queuesByRole.channelCrawl, { connection, prefix });
+  const query = pool.query.bind(pool);
+  const withTransaction = async (action) => {
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      const result = await action(client);
+      await client.query("COMMIT");
+      return result;
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => {});
+      throw error;
+    } finally {
+      client.release();
+    }
+  };
+
+  await setup.connect();
+  t.after(async () => {
+    await queue.obliterate({ force: true }).catch(() => {});
+    await queue.close();
+    await setup.query("DROP SCHEMA IF EXISTS publication CASCADE").catch(() => {});
+    await setup.query("DROP SCHEMA IF EXISTS crawler CASCADE").catch(() => {});
+    await setup.end();
+    await pool.end();
+  });
+
+  const scenario = await initializeScenario(setup);
+  const runId = `run:migration-system-retry:${candidateId}`;
+  await setup.query(
+    `UPDATE crawler.channel_candidates
+     SET status='accepted',validation_finished_at=now(),accepted_at=now(),
+         snapshot_json=$2::jsonb,updated_at=now()
+     WHERE candidate_id=$1`,
+    [
+      candidateId,
+      JSON.stringify({
+        failure_type: "retryable_system_failure",
+        failed_dispatch_batch_id: batchId,
+        system_failure: { code: "LEASE_CONFLICT", category: "lease" },
+      }),
+    ],
+  );
+  await setup.query(
+    `INSERT INTO crawler.channels (
+       channel_id,channel_url,title,status,agent_status,latest_run_id
+     ) VALUES ($1,$2,'Migration retry gap','active','pending',$3)`,
+    [channelId, `https://www.youtube.com/channel/${channelId}`, runId],
+  );
+  await setup.query(
+    `INSERT INTO crawler.channel_runs (
+       run_id,channel_id,candidate_id,status,crawl_mode,detail_status,
+       started_at,result_json
+     ) VALUES ($1,$2,$3,'waiting_detail','full','pending',now(),$4::jsonb)`,
+    [
+      runId,
+      channelId,
+      candidateId,
+      JSON.stringify({ dispatch_batch_id: batchId, pipeline_cycle_id: batchId }),
+    ],
+  );
+  const retryItem = await setup.query(
+    `INSERT INTO crawler.migration_system_retry_items (
+       migration_intent_id,candidate_id,failed_dispatch_batch_id,
+       failed_dispatch_generation,failed_job_id,failed_job_attempt,
+       failure_code,failure_category,failure_evidence,status
+     ) VALUES ($1,$2,$3,1,$4,0,'LEASE_CONFLICT','lease','{}'::jsonb,'pending')
+     RETURNING system_retry_id`,
+    [scenario.migrationIntentId, candidateId, batchId, scenario.g1JobId],
+  );
+  await Promise.all([queue.waitUntilReady()]);
+
+  const settled = await settleCompletedMigrationBatch({ withTransaction, batchId });
+  assert.equal(settled.status, "completed");
+  assert.equal(settled.outcome, "completed_with_system_failures");
+
+  const retry = await retryMigrationSystemFailure({
+    systemRetryId: Number(retryItem.rows[0].system_retry_id),
+    withTransaction,
+  });
+  const redisJob = await queue.getJob(retry.outbox.deterministic_job_id);
+  const open = await hasOpenPipelineCrawlerWork(query, batchId);
+  const completion = await settleCompletedMigrationBatch({ withTransaction, batchId });
+  const persisted = (await query(
+    `SELECT retry.status AS retry_status,outbox.status AS outbox_status,
+            scheduler.value_json->>'status' AS scheduler_status
+     FROM crawler.migration_system_retry_items retry
+     JOIN crawler.proxy_job_dispatch_outbox outbox
+       ON outbox.dispatch_id=$2
+     JOIN crawler.settings scheduler
+       ON scheduler.setting_key='query_scheduler'
+     WHERE retry.system_retry_id=$1`,
+    [Number(retryItem.rows[0].system_retry_id), retry.outbox.dispatch_id],
+  )).rows[0];
+
+  assert.deepEqual({
+    ...persisted,
+    redis_job: redisJob == null ? "missing" : "present",
+    open,
+    completion: completion == null ? null : completion.status,
+  }, {
+    retry_status: "dispatched",
+    outbox_status: "pending",
+    scheduler_status: "stopped",
+    redis_job: "missing",
+    open: true,
+    completion: null,
+  });
+});
+
 test("real Worker recovers the field Candidate through one controlled G+1 dispatch", {
   skip: databaseUrl && redisUrl
     ? false
@@ -181,17 +306,9 @@ test("real Worker recovers the field Candidate through one controlled G+1 dispat
   await Promise.all([queue.waitUntilReady(), queueEvents.waitUntilReady()]);
   worker = new Worker(queueName, async (job) => {
     assert.equal(await markChannelCandidateJobAttemptActive(query, job), true);
-    const claimed = await query(
-      `UPDATE crawler.channel_candidates
-       SET status='validating',snapshot_attempts=snapshot_attempts+1,
-           validation_started_at=COALESCE(validation_started_at,now()),updated_at=now()
-       WHERE candidate_id=$1 AND snapshot_dispatch_generation=$2
-         AND snapshot_active_job_id=$3 AND snapshot_active_job_attempt=$4
-         AND status='queued'
-       RETURNING candidate_id`,
-      [candidateId, Number(job.data.dispatch_generation), String(job.id), job.attemptsMade + 1],
-    );
-    assert.equal(claimed.rowCount, 1);
+    const fence = activeChannelCandidateAttemptFence(job);
+    const claimed = await beginChannelCandidateValidation(query, fence);
+    assert.equal(Number(claimed.candidate_id), candidateId);
     if (Number(job.data.dispatch_generation) === 1) {
       const error = new Error("lease changed in the Renew-to-BeginTask gap");
       error.code = "LEASE_CONFLICT";
@@ -206,7 +323,7 @@ test("real Worker recovers the field Candidate through one controlled G+1 dispat
          AND snapshot_active_job_id=$3 AND snapshot_active_job_attempt=$4
          AND status='validating'
        RETURNING candidate_id`,
-      [candidateId, Number(job.data.dispatch_generation), String(job.id), job.attemptsMade + 1],
+      [fence.candidateId, fence.dispatchGeneration, fence.jobId, fence.bullmqAttempt],
     );
     assert.equal(accepted.rowCount, 1);
     return { accepted: true };
@@ -376,8 +493,8 @@ test("real Worker recovers the field Candidate through one controlled G+1 dispat
     snapshot_active_job_id: null,
     snapshot_active_job_attempt: null,
     dispatch_attempts: 2,
-    retry_status: "resolved",
-    resolution: "job_completed",
+    retry_status: "dispatched",
+    resolution: null,
     batch_status: "completed",
     outcome: "completed_with_system_failures",
     total_channel_count: 100,
@@ -387,30 +504,5 @@ test("real Worker recovers the field Candidate through one controlled G+1 dispat
     g2_outbox_count: 1,
   });
 
-  const laterBatchId = `${batchId}-later`;
-  await query(
-    `INSERT INTO crawler.query_dispatch_batches (
-       dispatch_batch_id,pipeline_cycle_id,status,result_json
-     ) VALUES ($1,$1,'finishing','{}'::jsonb)`,
-    [laterBatchId],
-  );
-  await query(
-    `UPDATE crawler.channel_candidates
-     SET dispatch_batch_id=$2,pipeline_cycle_id=$2,updated_at=now()
-     WHERE candidate_id=$1`,
-    [candidateId, laterBatchId],
-  );
-  await query(
-    `UPDATE crawler.settings
-     SET value_json=$1::jsonb,updated_at=now()
-     WHERE setting_key='query_scheduler'`,
-    [JSON.stringify({ status: "finishing", pipeline_cycle_id: laterBatchId })],
-  );
-  const laterCompletion = await settleCompletedMigrationBatch({
-    withTransaction,
-    batchId: laterBatchId,
-  });
-  assert.equal(laterCompletion.status, "completed");
-  assert.equal(laterCompletion.outcome, "completed");
   assert.deepEqual(workerErrors, []);
 });

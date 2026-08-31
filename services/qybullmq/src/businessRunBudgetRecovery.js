@@ -72,6 +72,8 @@ export async function recordBusinessRunBudgetExhaustion(client, job, {
     job?.data?.dispatch_generation,
     "job.data.dispatch_generation",
   );
+  const jobId = text(job?.id);
+  const jobAttempt = optionalPositiveInteger(job?.attemptsStarted, "job.attemptsStarted");
   const bindingCandidateId = optionalPositiveInteger(binding.candidate_id, "binding.candidate_id");
   if (jobCandidateId && bindingCandidateId && jobCandidateId !== bindingCandidateId) {
     throw new BusinessRunBudgetRecoveryError("BullMQ Job conflicts with the Binding Candidate");
@@ -84,7 +86,8 @@ export async function recordBusinessRunBudgetExhaustion(client, job, {
   let lockedCandidate = null;
   if (candidateId) {
     const candidate = await client.query(
-      `SELECT candidate_id,status,channel_id,snapshot_dispatch_generation
+      `SELECT candidate_id,status,channel_id,snapshot_dispatch_generation,
+              snapshot_active_job_id,snapshot_active_job_attempt
        FROM crawler.channel_candidates
        WHERE candidate_id=$1
        FOR UPDATE`,
@@ -106,7 +109,18 @@ export async function recordBusinessRunBudgetExhaustion(client, job, {
         `Candidate dispatch generation changed: expected ${jobDispatchGeneration}, got ${candidateDispatchGeneration}`,
       );
     }
-    if (["accepted", "rejected", "existing"].includes(lockedCandidate.status)) {
+    if (!jobId || jobAttempt === null) {
+      throw new BusinessRunBudgetRecoveryError(
+        "BullMQ Job activation identity is required for Candidate budget recovery",
+      );
+    }
+    if (text(lockedCandidate.snapshot_active_job_id) !== jobId
+        || Number(lockedCandidate.snapshot_active_job_attempt) !== jobAttempt) {
+      throw new BusinessRunBudgetRecoveryError(
+        "Candidate activation changed before Business Run budget recovery",
+      );
+    }
+    if (["rejected", "existing"].includes(lockedCandidate.status)) {
       throw new BusinessRunBudgetRecoveryError(
         `Business Run Candidate is already terminal: ${lockedCandidate.status}`,
       );
@@ -150,6 +164,7 @@ export async function recordBusinessRunBudgetExhaustion(client, job, {
     source: text(source) ?? "rota_begin_task",
     queue_name: text(job?.queueName),
     job_id: text(job?.id),
+    job_attempt: jobAttempt,
     job_name: text(job?.name),
     repair_round: Number(job?.data?.repair_round ?? 0) || null,
     business_run_key: binding.business_run_key,
@@ -264,14 +279,35 @@ export async function recordBusinessRunBudgetExhaustion(client, job, {
            updated_at=now()
        WHERE candidate_id=$1
          AND snapshot_dispatch_generation=$3
-         AND status NOT IN ('accepted','rejected','existing')
+         AND snapshot_active_job_id=$4
+         AND snapshot_active_job_attempt=$5
+         AND status NOT IN ('rejected','existing')
        RETURNING candidate_id,status`,
-      [candidateId, JSON.stringify(evidence), jobDispatchGeneration],
+      [candidateId, JSON.stringify(evidence), jobDispatchGeneration, jobId, jobAttempt],
     );
     if (candidate.rowCount !== 1) {
       throw new BusinessRunBudgetRecoveryError("Business Run Candidate could not be terminated");
     }
     candidateRecorded = true;
+  }
+  let retryResolved = 0;
+  if (candidateRecorded) {
+    const resolvedRetry = await client.query(
+      `UPDATE crawler.migration_system_retry_items retry
+       SET status='resolved',
+           resolution='retry_job_terminal_business_run_budget_exhausted',
+           resolved_at=COALESCE(resolved_at,now()),updated_at=now()
+       FROM crawler.migration_channel_intents intent
+       WHERE retry.candidate_id=$1
+         AND retry.status='dispatched'
+         AND retry.retry_dispatch_generation=$2
+         AND retry.migration_intent_id=intent.migration_intent_id
+         AND intent.target_candidate_id=$1
+         AND intent.dispatch_attempts=$2
+       RETURNING retry.system_retry_id`,
+      [candidateId, jobDispatchGeneration],
+    );
+    retryResolved = Number(resolvedRetry.rowCount ?? 0);
   }
   return {
     recorded: true,
@@ -281,6 +317,7 @@ export async function recordBusinessRunBudgetExhaustion(client, job, {
     run_materialized: execution.rowCount === 1,
     binding_recorded: true,
     candidate_recorded: candidateRecorded,
+    retry_resolved: retryResolved,
   };
 }
 

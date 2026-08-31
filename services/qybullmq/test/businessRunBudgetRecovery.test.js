@@ -14,6 +14,8 @@ function budgetFixture({
   runMaterialized = true,
   candidateId = null,
   candidateGeneration = 0,
+  candidateJobId = null,
+  candidateJobAttempt = null,
 } = {}) {
   const fixture = { calls: [], committed: false };
   fixture.client = {
@@ -40,6 +42,8 @@ function budgetFixture({
             status: "queued",
             channel_id: "UCtest",
             snapshot_dispatch_generation: candidateGeneration,
+            snapshot_active_job_id: candidateJobId,
+            snapshot_active_job_attempt: candidateJobAttempt,
           }],
         };
       }
@@ -59,6 +63,9 @@ function budgetFixture({
       }
       if (/UPDATE crawler\.channel_candidates/.test(sql)) {
         return { rowCount: 1, rows: [{ candidate_id: candidateId, status: "failed" }] };
+      }
+      if (/UPDATE crawler\.migration_system_retry_items/.test(sql)) {
+        return { rowCount: 0, rows: [] };
       }
       throw new Error(`unexpected SQL: ${sql}`);
     },
@@ -159,6 +166,8 @@ test("a reserved Binding without a materialized Run still terminates atomically"
               status: "queued",
               channel_id: "UCtest",
               snapshot_dispatch_generation: 1,
+              snapshot_active_job_id: "channel-job",
+              snapshot_active_job_attempt: 1,
             }],
           };
         }
@@ -171,6 +180,9 @@ test("a reserved Binding without a materialized Run still terminates atomically"
         }
         if (/UPDATE crawler\.channel_candidates/.test(sql)) {
           return { rowCount: 1, rows: [{ candidate_id: 1, status: "failed" }] };
+        }
+        if (/UPDATE crawler\.migration_system_retry_items/.test(sql)) {
+          return { rowCount: 0, rows: [] };
         }
         throw new Error(`unexpected SQL: ${sql}`);
       },
@@ -185,6 +197,7 @@ test("a reserved Binding without a materialized Run still terminates atomically"
       id: "channel-job",
       queueName: "youtube-channel-crawl",
       name: "channel-crawl",
+      attemptsStarted: 1,
       data: {
         business_run_key: "full-candidate:1",
         candidate_id: 1,
@@ -269,12 +282,15 @@ test("Candidate budget termination carries its dispatch generation into the writ
     businessRunKey: "full-candidate:44:recovery:generation-7",
     candidateId: 44,
     candidateGeneration: 7,
+    candidateJobId: "channel-job:generation-7",
+    candidateJobAttempt: 1,
   });
 
   await recordBusinessRunBudgetExhaustion(fixture.client, {
     id: "channel-job:generation-7",
     queueName: "youtube-channel-crawl",
     name: "channel-crawl",
+    attemptsStarted: 1,
     data: {
       run_id: "run:generation-7",
       business_run_key: "full-candidate:44:recovery:generation-7",
@@ -288,5 +304,9 @@ test("Candidate budget termination carries its dispatch generation into the writ
     (call) => /^\s*UPDATE crawler\.channel_candidates/.test(call.sql),
   );
   assert.match(candidateUpdate.sql, /snapshot_dispatch_generation=\$3/);
+  assert.match(candidateUpdate.sql, /snapshot_active_job_id=\$4/);
+  assert.match(candidateUpdate.sql, /snapshot_active_job_attempt=\$5/);
   assert.equal(candidateUpdate.params[2], 7);
+  assert.equal(candidateUpdate.params[3], "channel-job:generation-7");
+  assert.equal(candidateUpdate.params[4], 1);
 });

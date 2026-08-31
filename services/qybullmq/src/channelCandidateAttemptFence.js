@@ -43,9 +43,9 @@ function channelCandidateAttemptFence(job, bullmqAttempt) {
 }
 
 export function activeChannelCandidateAttemptFence(job) {
-  return channelCandidateAttemptFence(job, Number(job?.attemptsMade ?? 0) + 1);
+  return channelCandidateAttemptFence(job, job?.attemptsStarted);
 }
 
 export function failedChannelCandidateAttemptFence(job) {
-  return channelCandidateAttemptFence(job, job?.attemptsMade);
+  return channelCandidateAttemptFence(job, job?.attemptsStarted);
 }

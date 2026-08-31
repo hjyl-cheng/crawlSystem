@@ -2,8 +2,11 @@ const pipelineUrlSuffix = "/src/pipelineV2.js";
 const runtimeMockUrl = new URL("./pipelineV2DispositionRuntimeMock.mjs", import.meta.url).href;
 const mockedSpecifiers = new Set([
   "./db.js",
+  "./contentDetailExecutionFence.js",
+  "./dataApiBatchExecutionFence.js",
   "./migrationActivityGate.js",
   "./queues.js",
+  "./runDetailStatus.js",
   "./storage.js",
   "./youtube.js",
   "./youtubeJs.js",

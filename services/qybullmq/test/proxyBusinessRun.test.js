@@ -32,6 +32,48 @@ function bindingStore(result = {}) {
   };
 }
 
+test("a standalone Detail recovery reuses its existing Channel Business Run", async () => {
+  const store = bindingStore();
+  const job = {
+    id: "content-detail:run:existing",
+    name: "content-detail-batch",
+    queueName: queuesByRole.contentDetail,
+    attemptsMade: 1,
+    data: { channel_id: "UC1", run_id: "run:existing" },
+    async updateData(data) { this.data = data; },
+  };
+  const preparer = new ProxyBusinessRunPreparer({
+    queryFn: async (sql) => {
+      if (sql.includes("FROM (SELECT")) return { rows: [{ channel_status: "active" }] };
+      if (sql.includes("FROM crawler.channel_runs")) {
+        return {
+          rows: [{
+            run_id: "run:existing",
+            business_run_key: "full-candidate:42",
+            business_run_id: "run:existing",
+            binding_status: "materialized",
+            identity_policy_id: resolvedPolicy.policy.id,
+            identity_policy_version: resolvedPolicy.policy.version,
+            identity_policy_hash: resolvedPolicy.policy.hash,
+          }],
+        };
+      }
+      return { rows: [] };
+    },
+    withTransaction: async () => {},
+    resolvedPolicy,
+    bindingStore: store,
+  });
+
+  const prepared = await preparer.prepareChannel(job);
+
+  assert.equal(prepared.businessRunId, "run:existing");
+  assert.equal(prepared.businessRunKey, "full-candidate:42");
+  assert.equal(prepared.workloadKind, "channel_full");
+  assert.equal(prepared.initialResumeMode, "bullmq_redelivery_resume");
+  assert.equal(store.calls.length, 0);
+});
+
 test("a candidate Full job resolves and caches one reserved Business Run", async () => {
   const store = bindingStore();
   const job = {

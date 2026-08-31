@@ -10,9 +10,19 @@ test("managed Worker queue configuration is Role-exclusive", () => {
   assert.deepEqual(
     validateWorkerQueueConfiguration({
       role: "channel",
-      enabledQueues: ["youtube-channel-crawl", "youtube-channel-incremental", "youtube-content-enrich"],
+      enabledQueues: [
+        "youtube-channel-crawl",
+        "youtube-channel-incremental",
+        "youtube-content-enrich",
+        "youtube-content-detail",
+      ],
     }).queues,
-    ["youtube-channel-crawl", "youtube-channel-incremental", "youtube-content-enrich"],
+    [
+      "youtube-channel-crawl",
+      "youtube-channel-incremental",
+      "youtube-content-enrich",
+      "youtube-content-detail",
+    ],
   );
   assert.throws(
     () => validateWorkerQueueConfiguration({
@@ -32,6 +42,13 @@ test("managed Worker queue configuration is Role-exclusive", () => {
       enabledQueues: ["youtube-content-detail"],
     }),
     /standalone youtube-content-detail/,
+  );
+  assert.deepEqual(
+    validateWorkerQueueConfiguration({
+      enabledQueues: ["youtube-content-detail"],
+      fixedProxy: true,
+    }).queues,
+    ["youtube-content-detail"],
   );
   assert.throws(
     () => validateWorkerQueueConfiguration({

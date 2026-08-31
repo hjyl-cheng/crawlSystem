@@ -13,7 +13,7 @@ import { PUBLICATION_WRITER_VERSION } from "../src/publicationWriterVersion.js";
 const { Pool } = pg;
 const integrationUrl = process.env.PUBLICATION_POSTGRES_TEST_URL;
 
-test("Batch-scoped system retry evidence releases only its materialized open Channel Run", {
+test("only a pending Batch-scoped system retry releases its materialized open Channel Run", {
   skip: !integrationUrl,
 }, async () => {
   const pool = new Pool({ connectionString: integrationUrl, max: 1 });
@@ -115,6 +115,21 @@ test("Batch-scoped system retry evidence releases only its materialized open Cha
       finalOpen: 0,
       publicationOpen: 0,
     });
+
+    for (const status of ["retrying", "dispatched", "resolved", "cancelled"]) {
+      await client.query(
+        `UPDATE crawler.migration_system_retry_items
+         SET status=$2,updated_at=now()
+         WHERE candidate_id=$1 AND failed_dispatch_batch_id=$3`,
+        [candidateId, status, batchId],
+      );
+      assert.equal(await hasOpenWork(), true, `${status} retry must leave the Run open`);
+      assert.deepEqual(
+        await loadBlockers(),
+        expectedBlockers,
+        `${status} retry must leave finalize blockers open`,
+      );
+    }
   } finally {
     await client.query("ROLLBACK").catch(() => {});
     client.release();

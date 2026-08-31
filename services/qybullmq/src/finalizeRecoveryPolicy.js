@@ -375,6 +375,7 @@ export async function hasOpenPipelineCrawlerWork(
              FROM crawler.migration_system_retry_items retry
              WHERE retry.candidate_id=run.candidate_id
                AND retry.failed_dispatch_batch_id=$1
+               AND retry.status='pending'
            )
          LIMIT 1
        ) AS open_channel_runs,
@@ -475,6 +476,7 @@ export async function loadPipelineFinalizeBlockers(queryValue, pipelineCycleId =
            OR retry.candidate_id=channel.registry_promotion_candidate_id
          )
            AND retry.failed_dispatch_batch_id=$1
+           AND retry.status='pending'
        )`,
     [optionalText(pipelineCycleId), SUCCESSFUL_PUBLICATION_FINALIZE_STATUSES],
   );

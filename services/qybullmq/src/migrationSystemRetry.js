@@ -2,6 +2,7 @@ import {
   allocateChannelSnapshotDispatchOutbox,
   channelSnapshotJobPayload,
 } from "./channelSnapshotDispatch.js";
+import { migrationSystemRetryDispatchAdmission } from "./migrationSystemRetryAdmission.js";
 import { safeJobId } from "./queues.js";
 
 export class MigrationSystemRetryError extends Error {
@@ -82,6 +83,49 @@ function assertDispatchedRetryFence(row, nextGeneration) {
       details: { system_retry_id: Number(row.system_retry_id) },
     });
   }
+}
+
+async function pinFailedDispatchBatch(client, row, failedGeneration) {
+  const candidateBatchId = requiredText(row.dispatch_batch_id, "dispatch_batch_id");
+  const failedBatchId = String(row.failed_dispatch_batch_id ?? "").trim() || null;
+  if (failedBatchId != null) {
+    if (failedBatchId !== candidateBatchId) {
+      throw new MigrationSystemRetryError("Migration system retry changed Dispatch Batch", {
+        code: "migration_system_retry_fence_stale",
+        details: {
+          system_retry_id: Number(row.system_retry_id),
+          candidate_id: Number(row.candidate_id),
+          failed_dispatch_batch_id: failedBatchId,
+          candidate_dispatch_batch_id: candidateBatchId,
+        },
+      });
+    }
+    return failedBatchId;
+  }
+
+  const pinned = await client.query(
+    `UPDATE crawler.migration_system_retry_items
+     SET failed_dispatch_batch_id=$2,updated_at=now()
+     WHERE system_retry_id=$1 AND failed_dispatch_batch_id IS NULL
+       AND failed_dispatch_generation=$3 AND failed_job_id=$4 AND failed_job_attempt=$5
+       AND status IN ('pending','dispatched')
+     RETURNING failed_dispatch_batch_id`,
+    [
+      Number(row.system_retry_id),
+      candidateBatchId,
+      failedGeneration,
+      requiredText(row.failed_job_id, "failed_job_id"),
+      Number(row.failed_job_attempt),
+    ],
+  );
+  if (pinned.rowCount !== 1) {
+    throw new MigrationSystemRetryError("Migration system retry could not pin its Dispatch Batch", {
+      code: "migration_system_retry_item_stale",
+      details: { system_retry_id: Number(row.system_retry_id) },
+    });
+  }
+  row.failed_dispatch_batch_id = pinned.rows[0].failed_dispatch_batch_id;
+  return row.failed_dispatch_batch_id;
 }
 
 async function rearmDeadRetryOutbox(client, {
@@ -237,34 +281,104 @@ export async function retryMigrationSystemFailure({
   if (typeof allocateOutbox !== "function") throw new TypeError("allocateOutbox is required");
 
   return withTransaction(async (client) => {
-    const locked = await client.query(
-      `SELECT retry.system_retry_id,retry.migration_intent_id,retry.candidate_id,
-              retry.failed_dispatch_batch_id,retry.failed_dispatch_generation,
-              retry.failed_job_id,retry.failed_job_attempt,
-              retry.failure_code,retry.failure_category,retry.failure_evidence,retry.status,
-              retry.retry_dispatch_generation,intent.dispatch_attempts AS intent_dispatch_attempts,
-              candidate.dispatch_batch_id,candidate.pipeline_cycle_id,candidate.channel_id,
-              candidate.channel_url,candidate.priority,candidate.status AS candidate_status,
-              candidate.snapshot_json,candidate.snapshot_dispatch_generation,
-              candidate.snapshot_active_job_id,candidate.snapshot_active_job_attempt
+    const schedulerRows = await client.query(
+      `SELECT value_json
+       FROM crawler.settings
+       WHERE setting_key='query_scheduler'
+       LIMIT 1
+       FOR UPDATE`,
+    );
+    if (schedulerRows.rows.length !== 1) {
+      throw new MigrationSystemRetryError("query_scheduler setting is missing", {
+        statusCode: 503,
+        code: "migration_system_retry_scheduler_missing",
+      });
+    }
+    const schedulerAdmission = migrationSystemRetryDispatchAdmission(
+      schedulerRows.rows[0].value_json,
+    );
+    if (!schedulerAdmission.allowed) {
+      throw new MigrationSystemRetryError(
+        "Migration system retry requires a completed Scheduler",
+        {
+          code: schedulerAdmission.code,
+          details: schedulerAdmission,
+        },
+      );
+    }
+    const candidateLock = await client.query(
+      `/* migration-system-retry-dispatch-lock:candidate */
+       SELECT candidate.candidate_id
        FROM crawler.migration_system_retry_items retry
-       JOIN crawler.migration_channel_intents intent
-         ON intent.migration_intent_id=retry.migration_intent_id
-        AND intent.target_candidate_id=retry.candidate_id
        JOIN crawler.channel_candidates candidate
          ON candidate.candidate_id=retry.candidate_id
        WHERE retry.system_retry_id=$1
-       FOR UPDATE OF retry,intent,candidate`,
+       ORDER BY candidate.candidate_id
+       FOR UPDATE OF candidate`,
       [normalizedRetryId],
     );
-    const row = locked.rows[0];
-    if (!row) {
+    const lockedCandidateId = candidateLock.rows[0]?.candidate_id;
+    if (lockedCandidateId == null) {
       throw new MigrationSystemRetryError("Migration system retry item was not found", {
         statusCode: 404,
         code: "migration_system_retry_not_found",
         details: { system_retry_id: normalizedRetryId },
       });
     }
+    const lockedRetry = await client.query(
+      `/* migration-system-retry-dispatch-lock:retry */
+       SELECT retry.system_retry_id,retry.migration_intent_id,retry.candidate_id,
+              retry.failed_dispatch_batch_id,retry.failed_dispatch_generation,
+              retry.failed_job_id,retry.failed_job_attempt,
+              retry.failure_code,retry.failure_category,retry.failure_evidence,retry.status,
+              retry.retry_dispatch_generation,
+              candidate.dispatch_batch_id,candidate.pipeline_cycle_id,candidate.channel_id,
+              candidate.channel_url,candidate.priority,candidate.status AS candidate_status,
+              candidate.snapshot_json,candidate.snapshot_dispatch_generation,
+              candidate.snapshot_active_job_id,candidate.snapshot_active_job_attempt
+       FROM crawler.migration_system_retry_items retry
+       JOIN crawler.channel_candidates candidate
+         ON candidate.candidate_id=retry.candidate_id
+       WHERE retry.system_retry_id=$1 AND retry.candidate_id=$2
+       ORDER BY retry.system_retry_id
+       FOR UPDATE OF retry`,
+      [normalizedRetryId, lockedCandidateId],
+    );
+    const retryRow = lockedRetry.rows[0];
+    if (!retryRow) {
+      throw new MigrationSystemRetryError("Migration system retry item was not found", {
+        statusCode: 404,
+        code: "migration_system_retry_not_found",
+        details: { system_retry_id: normalizedRetryId },
+      });
+    }
+    const lockedIntent = await client.query(
+      `/* migration-system-retry-dispatch-lock:intent */
+       SELECT intent.migration_intent_id,intent.dispatch_attempts
+       FROM crawler.migration_system_retry_items retry
+       JOIN crawler.migration_channel_intents intent
+         ON intent.migration_intent_id=retry.migration_intent_id
+        AND intent.target_candidate_id=retry.candidate_id
+       WHERE retry.system_retry_id=$1
+         AND retry.candidate_id=$2
+         AND retry.migration_intent_id=$3
+       ORDER BY intent.migration_intent_id
+       FOR UPDATE OF intent`,
+      [normalizedRetryId, lockedCandidateId, retryRow.migration_intent_id],
+    );
+    const intentRow = lockedIntent.rows[0];
+    if (!intentRow) {
+      throw new MigrationSystemRetryError("Migration system retry item was not found", {
+        statusCode: 404,
+        code: "migration_system_retry_not_found",
+        details: { system_retry_id: normalizedRetryId },
+      });
+    }
+    const row = {
+      ...retryRow,
+      intent_dispatch_attempts: intentRow.dispatch_attempts
+        ?? intentRow.intent_dispatch_attempts,
+    };
     if (!["pending", "dispatched"].includes(row.status)) {
       throw new MigrationSystemRetryError(
         row.status === "retrying"
@@ -290,6 +404,11 @@ export async function retryMigrationSystemFailure({
     } else {
       assertDispatchedRetryFence(row, nextGeneration);
     }
+    const failedDispatchBatchId = await pinFailedDispatchBatch(
+      client,
+      row,
+      failedGeneration,
+    );
 
     const candidate = retryCandidate(row, nextGeneration);
     const jobId = jobIdFactory(
@@ -349,8 +468,9 @@ export async function retryMigrationSystemFailure({
              dispatched_at=COALESCE(dispatched_at,now()),updated_at=now()
          WHERE system_retry_id=$1 AND status='pending'
            AND failed_dispatch_generation=$3
+           AND failed_dispatch_batch_id=$4
          RETURNING system_retry_id,status,retry_dispatch_generation,dispatched_at`,
-        [normalizedRetryId, nextGeneration, failedGeneration],
+        [normalizedRetryId, nextGeneration, failedGeneration, failedDispatchBatchId],
       );
       if (dispatched.rowCount !== 1) {
         throw new MigrationSystemRetryError("Migration system retry item changed during dispatch", {

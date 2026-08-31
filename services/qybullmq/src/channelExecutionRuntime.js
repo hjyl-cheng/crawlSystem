@@ -22,6 +22,14 @@ import {
 } from "./youtubeJs.js";
 import { selectYoutubeFailure } from "./youtubeFailurePolicy.js";
 
+function zeroBasedBullmqAttempt(job) {
+  const attemptsStarted = Number(job?.attemptsStarted);
+  if (!Number.isSafeInteger(attemptsStarted) || attemptsStarted <= 0) {
+    throw new TypeError("job.attemptsStarted must be a positive integer");
+  }
+  return attemptsStarted - 1;
+}
+
 function cleanSessionRelease(value) {
   if (!value) return { summary: value, cookieState: undefined };
   const { cookie_state: cookieState, ...summary } = value;
@@ -195,7 +203,7 @@ export class ChannelExecutionRuntime {
         runId: prepared?.businessRunId ?? job.data?.run_id ?? null,
         queueName: job.queueName,
         jobId: job.id,
-        jobAttempt: job.attemptsMade,
+        jobAttempt: zeroBasedBullmqAttempt(job),
         dispatchGeneration,
         workerId,
         proxy,

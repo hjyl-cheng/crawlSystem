@@ -187,6 +187,63 @@ test("full Agent failure persists Profile and Channel in one writer transaction"
   assert.deepEqual(statements[1].params, ["UCfailure", "local runtime failed"]);
 });
 
+test("full Agent writes stop before mutation when an execution Fence is stale", async () => {
+  const writes = [];
+  const withTransaction = async (action) => action({
+    async query(sql, params) {
+      writes.push({ sql: String(sql), params });
+      return { rowCount: 1, rows: [] };
+    },
+  });
+  let guardCalls = 0;
+  const transactionGuard = async () => {
+    guardCalls += 1;
+    return false;
+  };
+
+  const running = await markAgentChannelsRunning({
+    withTransaction,
+    channelIds: ["UCstale"],
+    transactionGuard,
+  });
+  const success = await persistAgentChannelSuccess({
+    withTransaction,
+    channelId: "UCstale",
+    inputUrl: "https://www.youtube.com/channel/UCstale",
+    metrics,
+    publicationRun: {
+      agent_model: "local-model",
+      agent_config_id: 9,
+      prompt_template_id: null,
+      prompt_hash: null,
+      prompt_variant: "local_offline",
+      input_content_ids: [],
+      input_content_hash: `sha256:${"b".repeat(64)}`,
+      taxonomy_version: "taxonomy-v1",
+      agent_version_hash: `sha256:${"c".repeat(64)}`,
+    },
+    transactionGuard,
+  });
+  const failure = await persistAgentChannelFailure({
+    withTransaction,
+    channelId: "UCstale",
+    inputUrl: "https://www.youtube.com/channel/UCstale",
+    agentModel: "local-model",
+    agentConfigId: 9,
+    promptTemplateId: null,
+    promptHash: null,
+    promptVariant: "local_offline",
+    errorMessage: "stale execution",
+    transactionGuard,
+  });
+
+  assert.equal(guardCalls, 3);
+  assert.equal(running.fenceRejected, true);
+  assert.equal(success.fenceRejected, true);
+  assert.equal(failure.fenceRejected, true);
+  assert.deepEqual(writes, []);
+});
+
 test("retryable Agent failure does not emit a terminal Observation", async () => {
   const sql = [];
   const client = {

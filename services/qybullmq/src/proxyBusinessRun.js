@@ -279,7 +279,7 @@ export class ProxyBusinessRunPreparer {
       });
     }
 
-    if (job.queueName !== queuesByRole.channelCrawl) {
+    if (![queuesByRole.channelCrawl, queuesByRole.contentDetail].includes(job.queueName)) {
       throw new TypeError(`unsupported Channel queue: ${job.queueName}`);
     }
     const identity = bindingIdentity(job);

@@ -41,12 +41,14 @@ function assignment(generation, overrides = {}) {
   };
 }
 
-function job() {
+function job(overrides = {}) {
   return {
     id: "job-01",
     queueName: "youtube-channel-crawl",
     attemptsMade: 0,
+    attemptsStarted: 1,
     data: { channel_id: "UCtest", run_id: "run-01", dispatch_generation: 1 },
+    ...overrides,
   };
 }
 
@@ -231,6 +233,29 @@ test("a normal managed job uses one fenced Rota task", async () => {
   assert.deepEqual(runtimeCalls.map((call) => call.action), ["acquire", "quiesce", "checkpoint", "retire"]);
 });
 
+test("stalled BullMQ activations use distinct Rota Execution fences", async () => {
+  const { adapter, calls } = createFixture();
+  await adapter.start();
+  const execute = (currentJob) => adapter.executeJob(currentJob, {
+    prepare: async () => prepared(),
+    executeAttempt: async () => ({
+      kind: "managed_work_complete",
+      businessState: "terminal",
+      result: null,
+    }),
+  });
+
+  await execute(job({ attemptsMade: 0, attemptsStarted: 1 }));
+  await execute(job({ attemptsMade: 0, attemptsStarted: 2 }));
+  await adapter.close();
+
+  const executionIds = calls
+    .filter(({ command }) => command === "begin")
+    .map(({ request }) => request.job_execution_id);
+  assert.equal(executionIds.length, 2);
+  assert.notEqual(executionIds[0], executionIds[1]);
+});
+
 test("Rota's production Business Run budget code is not a capacity deferral", async () => {
   const { adapter } = createFixture({
     clientOverrides: {
@@ -380,50 +405,84 @@ test("a same-Lease ready Renew retries BeginTask without reclaiming", async () =
   assert.equal(runtimeCalls.filter((call) => call.action === "acquire").length, 1);
 });
 
-test("a repeated BeginTask Lease conflict defers after one authoritative Renew", async () => {
-  const { adapter, calls } = createFixture();
+test("a repeated BeginTask Lease conflict retires the renewed Assignment and Claims again", async () => {
+  let claimCount = 0;
+  const { adapter, calls } = createFixture({
+    clientOverrides: {
+      async claim(request) {
+        calls.push({ command: "claim", request });
+        claimCount += 1;
+        return claimCount === 1
+          ? assignment(1)
+          : assignment(2, { lease_id: "lease-02", route_changed: true });
+      },
+    },
+  });
+  const beginTask = adapter.client.beginTask.bind(adapter.client);
   let beginCount = 0;
   adapter.client.beginTask = async (request) => {
-    calls.push({ command: "begin", request });
     beginCount += 1;
     if (beginCount <= 2) {
+      calls.push({ command: "begin", request });
       const error = new Error("Lease fence still conflicts after Renew");
       error.code = "LEASE_CONFLICT";
       error.retryable = false;
       throw error;
     }
-    throw new Error("BeginTask Lease conflict recovery exceeded its bound");
+    return beginTask(request);
   };
 
   await adapter.start();
-  const rejection = await adapter.executeJob(job(), {
+  const result = await adapter.executeJob(job(), {
     prepare: async () => prepared(),
-    executeAttempt: async () => assert.fail("a conflicted Lease must not start business work"),
-  }).then(
-    () => null,
-    (error) => error,
-  );
+    executeAttempt: async (_prepared, attempt) => ({
+      kind: "managed_work_complete",
+      businessState: "terminal",
+      result: { routeGeneration: attempt.routeGeneration },
+    }),
+  });
   await adapter.close();
 
-  assert.ok(rejection instanceof RotaSlotDeferredError);
-  assert.equal(rejection.reason, "lease_conflict_recovery");
+  assert.deepEqual(result, { routeGeneration: 2 });
   assert.deepEqual(
     calls.map((call) => call.command),
-    ["claim", "begin", "renew", "begin", "release"],
+    ["claim", "begin", "renew", "begin", "claim", "begin", "complete", "release"],
   );
-  assert.equal(calls.filter((call) => call.command === "claim").length, 1);
+  assert.equal(calls.filter((call) => call.command === "claim").length, 2);
   assert.equal(calls.filter((call) => call.command === "renew").length, 1);
+  assert.equal(calls.at(-1).request.lease_id, "lease-02");
 });
 
-test("a Renew Lease conflict during BeginTask recovery never reclaims a live Lease", async () => {
+test("a Renew Lease conflict during BeginTask recovery retires the stale Assignment and Claims again", async () => {
+  let claimCount = 0;
   const { adapter, calls } = createFixture({
     clientOverrides: {
+      async claim(request) {
+        calls.push({ command: "claim", request });
+        claimCount += 1;
+        return claimCount === 1
+          ? assignment(1)
+          : assignment(2, { lease_id: "lease-02", route_changed: true });
+      },
       async beginTask(request) {
         calls.push({ command: "begin", request });
-        const error = new Error("BeginTask Lease fence conflicts");
-        error.code = "LEASE_CONFLICT";
-        error.retryable = false;
-        throw error;
+        if (request.lease_id === "lease-01") {
+          const error = new Error("BeginTask Lease fence conflicts");
+          error.code = "LEASE_CONFLICT";
+          error.retryable = false;
+          throw error;
+        }
+        return {
+          ok: true,
+          task_id: "task-reclaimed",
+          attempt_request_id: request.attempt_request_id,
+          business_run_id: request.business_run_id,
+          job_execution_id: request.job_execution_id,
+          attempt_number: 1,
+          slot_name: request.slot_name,
+          route_generation: request.route_generation,
+          started_at: "2026-08-13T00:00:00.000Z",
+        };
       },
       async renew(request) {
         calls.push({ command: "renew", request });
@@ -436,64 +495,47 @@ test("a Renew Lease conflict during BeginTask recovery never reclaims a live Lea
   });
 
   await adapter.start();
-  const rejection = await adapter.executeJob(job(), {
+  const result = await adapter.executeJob(job(), {
     prepare: async () => prepared(),
-    executeAttempt: async () => assert.fail("an unresolved Lease must not start business work"),
-  }).then(
-    () => null,
-    (error) => error,
-  );
+    executeAttempt: async (_prepared, attempt) => ({
+      kind: "managed_work_complete",
+      businessState: "terminal",
+      result: { routeGeneration: attempt.routeGeneration },
+    }),
+  });
   await adapter.close();
 
-  assert.ok(rejection instanceof RotaSlotDeferredError);
-  assert.equal(rejection.reason, "lease_conflict_recovery");
+  assert.deepEqual(result, { routeGeneration: 2 });
   assert.deepEqual(
     calls.map((call) => call.command),
-    ["claim", "begin", "renew", "release"],
+    ["claim", "begin", "renew", "claim", "begin", "complete", "release"],
   );
-  assert.equal(calls.filter((call) => call.command === "claim").length, 1);
+  assert.equal(calls.filter((call) => call.command === "claim").length, 2);
+  assert.equal(calls.at(-1).request.lease_id, "lease-02");
 });
 
-test("periodic Renew keeps reconciling a live Lease after repeated Lease conflicts", async () => {
+test("a periodic Renew Lease conflict retires the stale Assignment and Claims again", async () => {
   const timers = [];
-  let beginCount = 0;
-  let renewCount = 0;
-  let resolveRecovered;
-  const recovered = new Promise((resolve) => { resolveRecovered = resolve; });
+  let claimCount = 0;
   const { adapter, calls } = createFixture({
     clientOverrides: {
-      async beginTask(request) {
-        calls.push({ command: "begin", request });
-        beginCount += 1;
-        if (beginCount === 1) {
-          const error = new Error("BeginTask Lease fence conflicts");
-          error.code = "LEASE_CONFLICT";
-          error.retryable = false;
-          throw error;
-        }
-        return {
-          ok: true,
-          task_id: "task-recovered",
-          attempt_request_id: request.attempt_request_id,
-          business_run_id: request.business_run_id,
-          job_execution_id: request.job_execution_id,
-          attempt_number: 1,
-          slot_name: request.slot_name,
-          route_generation: request.route_generation,
-          started_at: "2026-08-13T00:00:00.000Z",
-        };
+      async claim(request) {
+        calls.push({ command: "claim", request });
+        claimCount += 1;
+        const claimed = claimCount === 1
+          ? assignment(1)
+          : assignment(2, { lease_id: "lease-02", route_changed: true });
+        return claimed;
       },
       async renew(request) {
         calls.push({ command: "renew", request });
-        renewCount += 1;
-        if (renewCount <= 2) {
-          const error = new Error("Renew still sees the live Lease conflict");
+        if (request.lease_id === "lease-01") {
+          const error = new Error("Renew sees a different authoritative Lease owner");
           error.code = "LEASE_CONFLICT";
           error.retryable = false;
           throw error;
         }
-        resolveRecovered();
-        return assignment(1);
+        return assignment(2, { lease_id: "lease-02" });
       },
     },
     adapterOverrides: {
@@ -507,38 +549,20 @@ test("periodic Renew keeps reconciling a live Lease after repeated Lease conflic
   });
 
   await adapter.start();
-  const first = await adapter.executeJob(job(), {
-    prepare: async () => prepared(),
-    executeAttempt: async () => assert.fail("an unresolved Lease must not start business work"),
-  }).then(
-    () => null,
-    (error) => error,
-  );
-  assert.ok(first instanceof RotaSlotDeferredError);
-  assert.equal(first.reason, "lease_conflict_recovery");
-
   timers.shift().callback();
   await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(timers.length, 1, "a Lease conflict must leave another Renew scheduled");
-
-  timers.shift().callback();
-  await recovered;
   await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(claimCount, 2, "the stale Assignment must be replaced through Claim");
   assert.equal(adapter.status().assignment.ready, true);
-
-  const result = await adapter.executeJob(job(), {
-    prepare: async () => prepared(),
-    executeAttempt: async () => ({
-      kind: "managed_work_complete",
-      businessState: "terminal",
-      result: { bullmqAttempt: 1 },
-    }),
-  });
+  assert.equal(adapter.status().assignment.lease_id, "lease-02");
+  assert.equal(timers.length, 1, "the replacement Lease must own the only Renew timer");
   await adapter.close();
 
-  assert.deepEqual(result, { bullmqAttempt: 1 });
-  assert.equal(calls.filter((call) => call.command === "claim").length, 1);
-  assert.equal(calls.filter((call) => call.command === "renew").length, 3);
+  assert.deepEqual(
+    calls.map((call) => call.command),
+    ["claim", "renew", "claim", "release"],
+  );
+  assert.equal(calls.at(-1).request.lease_id, "lease-02");
 });
 
 test("a BeginTask Lease conflict reclaims a conclusively gone Lease before retrying", async () => {
@@ -615,7 +639,7 @@ test("the local Route switch limit ends the current BullMQ attempt", async () =>
   assert.equal(adapter.status().assignment.route_generation, 2);
   assert.equal(adapter.status().assignment.ready, true);
 
-  const retriedJob = { ...job(), attemptsMade: 1 };
+  const retriedJob = { ...job(), attemptsMade: 1, attemptsStarted: 2 };
   const result = await adapter.executeJob(retriedJob, {
     prepare: async () => prepared(),
     executeAttempt: async () => ({
@@ -688,6 +712,7 @@ test("Execution IDs are bounded and distinct across dispatch generations", async
       ...job(),
       id: longJobID,
       attemptsMade: 2,
+      attemptsStarted: 3,
       data: { ...job().data, dispatch_generation: dispatchGeneration },
     }, {
       prepare: async () => prepared(),

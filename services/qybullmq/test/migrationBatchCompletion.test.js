@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
 import test from "node:test";
 
+import { reconcileDispatchBatchCandidateState } from "../src/dispatchBatchCandidateState.js";
 import { settleCompletedMigrationBatch } from "../src/migrationBatchCompletion.js";
 import { schedulerConflict } from "../src/manualMigrationDispatch.js";
 
@@ -23,7 +23,7 @@ test("99 accepted and one system failure settle atomically and release the next 
       dispatch_batch_id: batchId,
       status: "failed",
       has_system_failure: true,
-      has_active_system_retry: true,
+      has_pending_system_retry: true,
       snapshot_json: {
         failure_type: "retryable_system_failure",
         failed_dispatch_batch_id: batchId,
@@ -266,7 +266,7 @@ test("a resolved historical system failure cannot hide a retry-eligible failed C
             snapshot_active_job_id: "channel-snapshot__legacy-results-canary__UC0Noar__g1",
             snapshot_active_job_attempt: 1,
             has_system_failure: true,
-            has_active_system_retry: false,
+            has_pending_system_retry: false,
           }],
         };
       }
@@ -397,16 +397,83 @@ test("Migration Batch completion cannot overwrite a stopped or failed Batch", as
   assert.equal(completion, null);
 });
 
-test("completed Migration Batch statistics are fenced from later Candidate refreshes", async () => {
-  const sources = await Promise.all([
-    readFile(new URL("../src/worker.js", import.meta.url), "utf8"),
-    readFile(new URL("../src/pipelineV2.js", import.meta.url), "utf8"),
-    readFile(new URL("../src/manualMigrationDispatch.js", import.meta.url), "utf8"),
+test("Dispatch Batch Candidate state atomically refreshes counts behind its completion Fence", async () => {
+  const batchId = "legacy-results-canary-candidate-state";
+  const validationClosedAt = "2026-08-30T15:00:00.000Z";
+  const calls = [];
+  const responses = [
+    {
+      dispatch_batch_id: batchId,
+      status: "discovery_closed",
+      discovered_candidate_count: "4",
+      total_channel_count: "4",
+      accepted_channel_count: "1",
+      rejected_channel_count: "1",
+      failed_channel_count: "1",
+      validation_closed_at: null,
+      open: "1",
+    },
+    {
+      dispatch_batch_id: batchId,
+      status: "validation_closed",
+      discovered_candidate_count: "4",
+      total_channel_count: "4",
+      accepted_channel_count: "1",
+      rejected_channel_count: "1",
+      failed_channel_count: "1",
+      validation_closed_at: validationClosedAt,
+      open: "0",
+    },
+    null,
+  ];
+  const query = async (sql, params) => {
+    calls.push({ sql: String(sql), params });
+    const response = responses.shift();
+    return { rows: response == null ? [] : [response] };
+  };
+
+  const open = await reconcileDispatchBatchCandidateState(query, batchId);
+  assert.equal(calls.length, 1, "one statement must refresh every Candidate count");
+  assert.deepEqual(open, {
+    dispatch_batch_id: batchId,
+    status: "discovery_closed",
+    discovered_candidate_count: 4,
+    total_channel_count: 4,
+    accepted_channel_count: 1,
+    rejected_channel_count: 1,
+    failed_channel_count: 1,
+    validation_closed_at: null,
+    open: 1,
+  });
+
+  const closed = await reconcileDispatchBatchCandidateState(query, batchId, {
+    closeValidation: true,
+  });
+  assert.deepEqual(closed, {
+    ...open,
+    status: "validation_closed",
+    validation_closed_at: validationClosedAt,
+    open: 0,
+  });
+
+  const completed = await reconcileDispatchBatchCandidateState(query, batchId, {
+    closeValidation: true,
+  });
+  assert.equal(completed, null);
+  assert.deepEqual(calls.map(({ params }) => params), [
+    [batchId, false],
+    [batchId, true],
+    [batchId, true],
   ]);
-  for (const source of sources) {
-    assert.match(
-      source,
-      /UPDATE crawler\.query_dispatch_batches batch[\s\S]{0,700}WHERE batch\.dispatch_batch_id=\$1\s+AND batch\.status<>'completed'/,
-    );
-  }
+  assert.equal(new Set(calls.map(({ sql }) => sql)).size, 1);
+  assert.match(calls[0].sql, /WITH candidate_stats AS/);
+  assert.match(
+    calls[0].sql,
+    /total_channel_count=stats\.total,[\s\S]*accepted_channel_count=stats\.accepted,[\s\S]*rejected_channel_count=stats\.rejected,[\s\S]*failed_channel_count=stats\.failed/,
+  );
+  assert.match(
+    calls[0].sql,
+    /WHEN \$2::boolean[\s\S]*batch\.discovery_closed_at IS NOT NULL[\s\S]*stats\.open=0 THEN 'validation_closed'/,
+  );
+  assert.match(calls[0].sql, /AND batch\.status<>'completed'/);
 });

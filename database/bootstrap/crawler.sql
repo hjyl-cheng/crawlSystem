@@ -1346,7 +1346,11 @@ CREATE TABLE crawler.channel_runs (
     identity_policy_id text,
     identity_policy_version integer,
     identity_policy_hash text,
+    detail_active_job_id text,
+    detail_active_job_attempt bigint,
+    detail_active_scope_key text,
     CONSTRAINT channel_runs_crawl_mode_check CHECK ((crawl_mode = ANY (ARRAY['full'::text, 'incremental'::text]))),
+    CONSTRAINT channel_runs_detail_active_job_check CHECK ((((detail_active_job_id IS NULL) AND (detail_active_job_attempt IS NULL) AND (detail_active_scope_key IS NULL)) OR ((detail_active_job_id IS NOT NULL) AND (detail_active_job_attempt IS NOT NULL) AND (detail_active_job_attempt > 0) AND (detail_active_scope_key IS NOT NULL)))),
     CONSTRAINT channel_runs_detail_status_check CHECK ((detail_status = ANY (ARRAY['pending'::text, 'queued'::text, 'running'::text, 'api_pending'::text, 'done'::text, 'failed'::text]))),
     CONSTRAINT channel_runs_publication_finalize_check CHECK ((((publication_finalized_status IS NULL) AND (publication_finalized_at IS NULL)) OR ((publication_finalized_status = ANY (ARRAY['ready_auto'::text, 'ready_partial'::text])) AND (publication_finalized_at IS NOT NULL)))),
     CONSTRAINT channel_runs_status_check CHECK ((status = ANY (ARRAY['queued'::text, 'running'::text, 'waiting_pages'::text, 'waiting_detail'::text, 'waiting_agent'::text, 'finalizing'::text, 'done'::text, 'failed'::text, 'skipped'::text]))),
@@ -2199,12 +2203,15 @@ CREATE TABLE crawler.youtube_api_batches (
     task_ids bigint[] NOT NULL,
     video_ids text[] NOT NULL,
     key_index integer,
+    active_job_id text,
+    active_job_attempt bigint,
     result_json jsonb DEFAULT '{}'::jsonb NOT NULL,
     error_message text,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     started_at timestamp with time zone,
     finished_at timestamp with time zone,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT youtube_api_batches_active_job_check CHECK (((active_job_id IS NULL) AND (active_job_attempt IS NULL)) OR ((active_job_id IS NOT NULL) AND (active_job_attempt IS NOT NULL) AND (active_job_attempt > 0))),
     CONSTRAINT youtube_api_batches_status_check CHECK ((status = ANY (ARRAY['queued'::text, 'running'::text, 'done'::text, 'failed'::text])))
 );
 
@@ -5468,12 +5475,18 @@ CREATE TABLE crawler.migration_system_retry_items (
     status text DEFAULT 'pending'::text NOT NULL
       CHECK (status = ANY (ARRAY['retrying'::text,'pending'::text,'dispatched'::text,'resolved'::text,'cancelled'::text])),
     retry_dispatch_generation bigint,
+    recovery_run_id text,
+    recovery_agent_job_epoch bigint DEFAULT 0 NOT NULL,
+    recovery_agent_active_job_id text,
+    recovery_agent_active_job_attempt bigint,
     resolution text,
     requested_at timestamp with time zone DEFAULT now() NOT NULL,
     dispatched_at timestamp with time zone,
     resolved_at timestamp with time zone,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     UNIQUE (migration_intent_id,failed_dispatch_generation,failed_job_id,failed_job_attempt),
+    CONSTRAINT migration_system_retry_items_recovery_run_id_fkey FOREIGN KEY (recovery_run_id) REFERENCES crawler.channel_runs(run_id) ON DELETE RESTRICT,
+    CONSTRAINT migration_system_retry_items_recovery_agent_active_job_check CHECK (((recovery_agent_job_epoch >= 0) AND (((recovery_agent_active_job_id IS NULL) AND (recovery_agent_active_job_attempt IS NULL)) OR ((recovery_agent_active_job_id IS NOT NULL) AND (recovery_agent_active_job_attempt IS NOT NULL) AND (recovery_agent_active_job_attempt > 0))))),
     CHECK (retry_dispatch_generation IS NULL OR retry_dispatch_generation > failed_dispatch_generation)
 );
 

@@ -62,6 +62,14 @@ test("fresh Migration overlay gives Source access only to API and Dashboard", as
   assert.match(overlay, /migration_source:\n    external: true/);
 });
 
+test("the Channel Worker consumes fenced standalone Detail recovery jobs", async () => {
+  const compose = await readFile(new URL("../../../deploy/compose.yml", import.meta.url), "utf8");
+  const worker = serviceBlock(compose, "worker-channel");
+
+  assert.match(worker, /WORKER_QUEUES: youtube-channel-crawl,youtube-content-detail/);
+  assert.match(worker, /PROXY_SLOT_ROLE: channel/);
+});
+
 test("fresh Migration overlay isolates state, reuses only Rota, and disables automatic work", async () => {
   const [compose, overlay] = await Promise.all([
     readFile(new URL("../../../deploy/compose.yml", import.meta.url), "utf8"),

@@ -148,17 +148,26 @@ export async function markAgentChannelsRunning({
   withTransaction,
   channelIds,
   forceRefresh = false,
+  transactionGuard = null,
 }) {
   if (typeof withTransaction !== "function") throw new TypeError("withTransaction is required");
+  if (transactionGuard != null && typeof transactionGuard !== "function") {
+    throw new TypeError("transactionGuard must be a function");
+  }
   const ids = [...new Set((channelIds ?? []).map(text).filter(Boolean))];
   if (ids.length === 0) return { rows: [], rowCount: 0 };
-  return withTransaction((client) => client.query(
-    `UPDATE crawler.channels
-     SET agent_status='running',agent_error_message=NULL,updated_at=now()
-     WHERE channel_id=ANY($1::text[]) AND status='active'
-       AND ($2::boolean OR agent_status<>'done')`,
-    [ids, forceRefresh === true],
-  ));
+  return withTransaction(async (client) => {
+    if (transactionGuard && await transactionGuard(client) !== true) {
+      return { rows: [], rowCount: 0, fenceRejected: true };
+    }
+    return client.query(
+      `UPDATE crawler.channels
+       SET agent_status='running',agent_error_message=NULL,updated_at=now()
+       WHERE channel_id=ANY($1::text[]) AND status='active'
+         AND ($2::boolean OR agent_status<>'done')`,
+      [ids, forceRefresh === true],
+    );
+  });
 }
 
 export async function persistAgentChannelSuccess({
@@ -167,9 +176,16 @@ export async function persistAgentChannelSuccess({
   inputUrl,
   metrics,
   publicationRun,
+  transactionGuard = null,
 }) {
   if (typeof withTransaction !== "function") throw new TypeError("withTransaction is required");
+  if (transactionGuard != null && typeof transactionGuard !== "function") {
+    throw new TypeError("transactionGuard must be a function");
+  }
   return withTransaction(async (client) => {
+    if (transactionGuard && await transactionGuard(client) !== true) {
+      return { rows: [], rowCount: 0, fenceRejected: true };
+    }
     await client.query(
       `INSERT INTO crawler.agent_profiles (
          channel_id,agent_mode,input_url,status,metrics_json,agent_model,agent_config_id,
@@ -224,9 +240,16 @@ export async function persistAgentChannelFailure({
   promptHash,
   promptVariant,
   errorMessage,
+  transactionGuard = null,
 }) {
   if (typeof withTransaction !== "function") throw new TypeError("withTransaction is required");
+  if (transactionGuard != null && typeof transactionGuard !== "function") {
+    throw new TypeError("transactionGuard must be a function");
+  }
   return withTransaction(async (client) => {
+    if (transactionGuard && await transactionGuard(client) !== true) {
+      return { rows: [], rowCount: 0, fenceRejected: true };
+    }
     await client.query(
       `INSERT INTO crawler.agent_profiles (
          channel_id,agent_mode,input_url,status,metrics_json,agent_model,agent_config_id,

@@ -438,7 +438,7 @@ services:
     environment:
       <<: [*crawler-database, *crawler-storage, *crawl-policy, *rota-worker]
       NODE_ENV: production
-      WORKER_QUEUES: youtube-channel-crawl
+      WORKER_QUEUES: youtube-channel-crawl,youtube-content-detail
       YOUTUBE_CHANNEL_CRAWL_CONCURRENCY: 1
       YTDLP_PERSISTENT_POOL_ENABLED: "true"
       PROXY_SLOT_ROLE: channel

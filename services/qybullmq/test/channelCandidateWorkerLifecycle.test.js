@@ -11,6 +11,7 @@ function completedJob() {
   return {
     id: "channel-snapshot__legacy-results-canary__UC0Noar__g2",
     attemptsMade: 1,
+    attemptsStarted: 1,
     data: { candidate_id: 482, dispatch_generation: 2 },
   };
 }
@@ -102,6 +103,7 @@ test("a system failure is durable under the current attempt Fence before the pro
     id: "channel-snapshot__legacy-results-canary__UC0Noar__g1",
     queueName: "youtube-channel-crawl",
     attemptsMade: 2,
+    attemptsStarted: 3,
     opts: { attempts: 3 },
     data: {
       candidate_id: 482,
@@ -148,6 +150,7 @@ test("a successful Candidate processor clears the current attempt Fence before r
     id: "channel-snapshot__legacy-results-canary__UC0Noar__g2",
     queueName: "youtube-channel-crawl",
     attemptsMade: 1,
+    attemptsStarted: 2,
     opts: { attempts: 3 },
     data: {
       candidate_id: 482,

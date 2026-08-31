@@ -347,6 +347,26 @@ test("Data API videos.list excludes a running Live instead of repairing comment 
   assert.equal(observed.candidate.content_key, null);
 });
 
+test("a stale Data API execution cannot reserve quota or start another request", () => {
+  const observed = runScenario("data_api_stale_before_request");
+
+  assert.equal(observed.error, null);
+  assert.deepEqual(observed.value, {
+    ok: true,
+    skipped: true,
+    reason: "data_api_batch_execution_fence_stale",
+  });
+  assert.equal(observed.requests_after_retry, 0);
+  assert.equal(
+    observed.queries.some((sql) => sql.includes("INSERT INTO crawler.youtube_api_daily_usage")),
+    false,
+  );
+  assert.equal(
+    observed.queries.some((sql) => sql.includes("INSERT INTO crawler.settings")),
+    false,
+  );
+});
+
 test("the shared detail pipeline propagates channel cancellation without yt-dlp fallback", () => {
   const observed = runScenario("detail_cancelled", { expectedStatus: 1 });
 

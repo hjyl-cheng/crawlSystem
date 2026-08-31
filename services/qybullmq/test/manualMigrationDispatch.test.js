@@ -337,6 +337,12 @@ test("an active Migration system retry item cannot be moved into a new batch", a
   const client = {
     async query(sql) {
       statements.push(sql);
+      if (sql.includes("FROM crawler.settings") && sql.includes("FOR UPDATE")) {
+        return {
+          rowCount: 1,
+          rows: [{ value_json: { status: "stopped", stop_reason: "pipeline_complete" } }],
+        };
+      }
       if (sql.includes("pg_advisory_xact_lock")) return { rowCount: 1, rows: [] };
       if (sql.includes("FROM crawler.migration_channel_intents intent")) {
         return {
@@ -380,7 +386,7 @@ test("an active Migration system retry item cannot be moved into a new batch", a
       && error?.details?.candidate_id === 482
       && error?.details?.system_retry_id === 801,
   );
-  assert.equal(statements.length, 2);
+  assert.equal(statements.length, 3);
 });
 
 test("a Redis delivery failure records compensation only in the Target database", async () => {

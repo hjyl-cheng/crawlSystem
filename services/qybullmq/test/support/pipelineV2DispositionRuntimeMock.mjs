@@ -50,7 +50,9 @@ export async function query(sqlValue, params = []) {
   if (sql.includes("setting_key = 'youtube_api'")) {
     return result([{ value_json: {
       fallback_mode: "disabled",
-      api_keys: state().scenario === "data_api_live" ? ["test-key"] : [],
+      api_keys: ["data_api_live", "data_api_stale_before_request"].includes(state().scenario)
+        ? ["test-key"]
+        : [],
     } }]);
   }
   if (sql.includes("INSERT INTO crawler.youtube_api_daily_usage")) {
@@ -194,7 +196,15 @@ export async function query(sqlValue, params = []) {
   if (sql.includes("sum(COALESCE((result_json#>>'{detail,youtubejs_request_count}')")) {
     return result([{ request_count: 0 }]);
   }
-  if (sql.includes("UPDATE crawler.youtube_api_tasks")) return result([], 0);
+  if (sql.includes("SELECT task_id,status,candidate_ids")
+      && sql.includes("FROM crawler.youtube_api_tasks")) {
+    return result(state().tasks.map((task) => ({
+      task_id: task.task_id,
+      status: "running",
+      candidate_ids: [...task.candidate_ids],
+    })));
+  }
+  if (sql.includes("UPDATE crawler.youtube_api_tasks")) return result([], 1);
   if (sql.includes("INSERT INTO crawler.contents") && sql.includes("RETURNING content_key")) {
     return result([{ content_key: params[0] }]);
   }
@@ -212,8 +222,87 @@ export async function withTransaction(callback) {
   return callback({ query });
 }
 
+const contentDetailScope = Object.freeze({
+  recovery: false,
+  candidateId: null,
+  migrationSystemRetryId: null,
+  dispatchGeneration: null,
+});
+
+export function contentDetailExecutionFence(job, { executionMode = "detail_queue" } = {}) {
+  return Object.freeze({
+    runId: String(job.data.run_id),
+    channelId: String(job.data.channel_id),
+    jobId: String(job.id),
+    jobAttempt: Number(job.attemptsStarted),
+    executionMode,
+    recovery: false,
+  });
+}
+
+export async function claimContentDetailExecution() {
+  return contentDetailScope;
+}
+
+export async function lockContentDetailExecution() {
+  return contentDetailScope;
+}
+
+export function assertInlineContentDetailExecutionCurrent(result) {
+  return result;
+}
+
+const dataApiScope = Object.freeze({
+  recovery: false,
+  authorized_candidate_ids_by_task: null,
+  recovery_run_ids: [],
+  migration_system_retry_ids: [],
+});
+
+export function dataApiBatchExecutionFence(job) {
+  return Object.freeze({
+    batchId: String(job.data.batch_id),
+    jobId: String(job.id),
+    jobAttempt: Number(job.attemptsStarted),
+    taskIds: [...job.data.task_ids].map(Number).sort((left, right) => left - right),
+    videoIds: [...job.data.video_ids].map(String).sort(),
+    pipelineCycleId: null,
+    migrationSystemRetryIds: [],
+    recoveryRunIds: [],
+    recovery: false,
+    storedReplay: job.data.stored_evidence_replay ?? null,
+  });
+}
+
+export async function claimDataApiBatchExecution() {
+  return dataApiScope;
+}
+
+export async function lockDataApiBatchExecution() {
+  state().dataApiFenceLocks += 1;
+  if (state().scenario === "data_api_stale_before_request"
+      && state().dataApiFenceLocks >= 2) {
+    return null;
+  }
+  return dataApiScope;
+}
+
 export async function applyMigrationActivityGate() {
   return { decision: "not_required", reject: false };
+}
+
+export async function reconcileRunDetailStatus() {
+  const summary = candidateSummary();
+  const status = summary.failed > 0 || summary.undisposed > 0
+    ? "failed"
+    : summary.api_open > 0
+      ? "api_pending"
+      : summary.terminal >= summary.total ? "done" : "running";
+  return {
+    ...summary,
+    status,
+    migration_activity_gate: { decision: "not_required", reject: false },
+  };
 }
 
 export const queuesByRole = Object.freeze({

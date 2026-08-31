@@ -144,6 +144,51 @@ test("Full Repair cannot replace another crawler pipeline and only resumes its o
   );
 });
 
+test("Full Repair cannot start while controlled migration recovery owns shared consumers", async () => {
+  const manifest = buildFullRepairManifest({
+    batchId: "repair-20260727-v1",
+    channelIds: ["UC1234567890123456789012"],
+  });
+  const calls = [];
+  const client = {
+    async query(sql, params = []) {
+      calls.push({ sql, params });
+      if (sql.includes("FROM crawler.settings") && sql.includes("FOR UPDATE")) {
+        return {
+          rowCount: 1,
+          rows: [{
+            value_json: {
+              status: "stopped",
+              stop_reason: "pipeline_complete",
+              pipeline_cycle_id: "completed-migration-batch",
+            },
+          }],
+        };
+      }
+      if (sql.includes("FROM crawler.migration_system_retry_items")) {
+        return {
+          rowCount: 1,
+          rows: [{
+            system_retry_id: "801",
+            candidate_id: "482",
+            failed_dispatch_batch_id: "completed-migration-batch",
+            status: "dispatched",
+          }],
+        };
+      }
+      throw new Error(`unexpected SQL: ${sql}`);
+    },
+  };
+
+  await assert.rejects(
+    prepareFullRepairBatch(client, { manifest }),
+    (error) => error?.code === "migration_system_retry_recovery_active",
+  );
+  assert.equal(calls[0].sql.includes("FROM crawler.settings"), true);
+  assert.equal(calls.some(({ sql }) => sql.includes("pg_advisory_xact_lock")), false);
+  assert.equal(calls.some(({ sql }) => sql.includes("query_dispatch_batches")), false);
+});
+
 test("Full Repair resolves every manifest Channel to an active Channel and accepted Candidate using reads only", async () => {
   const manifest = buildFullRepairManifest({
     batchId: "repair-20260727-v1",

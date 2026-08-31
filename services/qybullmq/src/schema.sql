@@ -505,6 +505,54 @@ CHECK (
       <= total_channel_count
 );
 
+ALTER TABLE IF EXISTS crawler.youtube_api_batches
+ADD COLUMN IF NOT EXISTS active_job_id TEXT;
+
+ALTER TABLE IF EXISTS crawler.youtube_api_batches
+ADD COLUMN IF NOT EXISTS active_job_attempt BIGINT;
+
+ALTER TABLE IF EXISTS crawler.youtube_api_batches
+DROP CONSTRAINT IF EXISTS youtube_api_batches_active_job_check;
+
+ALTER TABLE IF EXISTS crawler.youtube_api_batches
+ADD CONSTRAINT youtube_api_batches_active_job_check
+CHECK (
+  (active_job_id IS NULL AND active_job_attempt IS NULL)
+  OR (
+    active_job_id IS NOT NULL
+    AND active_job_attempt IS NOT NULL
+    AND active_job_attempt > 0
+  )
+);
+
+ALTER TABLE crawler.channel_runs
+ADD COLUMN IF NOT EXISTS detail_active_job_id TEXT;
+
+ALTER TABLE crawler.channel_runs
+ADD COLUMN IF NOT EXISTS detail_active_job_attempt BIGINT;
+
+ALTER TABLE crawler.channel_runs
+ADD COLUMN IF NOT EXISTS detail_active_scope_key TEXT;
+
+ALTER TABLE crawler.channel_runs
+DROP CONSTRAINT IF EXISTS channel_runs_detail_active_job_check;
+
+ALTER TABLE crawler.channel_runs
+ADD CONSTRAINT channel_runs_detail_active_job_check
+CHECK (
+  (
+    detail_active_job_id IS NULL
+    AND detail_active_job_attempt IS NULL
+    AND detail_active_scope_key IS NULL
+  )
+  OR (
+    detail_active_job_id IS NOT NULL
+    AND detail_active_job_attempt IS NOT NULL
+    AND detail_active_job_attempt > 0
+    AND detail_active_scope_key IS NOT NULL
+  )
+);
+
 ALTER TABLE crawler.channel_candidates
 ADD COLUMN IF NOT EXISTS snapshot_dispatch_generation BIGINT NOT NULL DEFAULT 0;
 
@@ -635,6 +683,10 @@ CREATE TABLE IF NOT EXISTS crawler.migration_system_retry_items (
   status TEXT NOT NULL DEFAULT 'pending'
     CHECK (status IN ('retrying','pending','dispatched','resolved','cancelled')),
   retry_dispatch_generation BIGINT,
+  recovery_run_id TEXT,
+  recovery_agent_job_epoch BIGINT NOT NULL DEFAULT 0,
+  recovery_agent_active_job_id TEXT,
+  recovery_agent_active_job_attempt BIGINT,
   resolution TEXT,
   requested_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   dispatched_at TIMESTAMPTZ,
@@ -643,6 +695,24 @@ CREATE TABLE IF NOT EXISTS crawler.migration_system_retry_items (
   UNIQUE (
     migration_intent_id,failed_dispatch_generation,failed_job_id,failed_job_attempt
   ),
+  CONSTRAINT migration_system_retry_items_recovery_run_id_fkey
+    FOREIGN KEY (recovery_run_id)
+    REFERENCES crawler.channel_runs(run_id) ON DELETE RESTRICT,
+  CONSTRAINT migration_system_retry_items_recovery_agent_active_job_check
+    CHECK (
+      recovery_agent_job_epoch >= 0
+      AND (
+        (
+          recovery_agent_active_job_id IS NULL
+          AND recovery_agent_active_job_attempt IS NULL
+        )
+        OR (
+          recovery_agent_active_job_id IS NOT NULL
+          AND recovery_agent_active_job_attempt IS NOT NULL
+          AND recovery_agent_active_job_attempt > 0
+        )
+      )
+    ),
   CHECK (
     retry_dispatch_generation IS NULL
     OR retry_dispatch_generation > failed_dispatch_generation
@@ -652,6 +722,46 @@ CREATE TABLE IF NOT EXISTS crawler.migration_system_retry_items (
 -- Historical rows predate immutable Batch evidence and must remain unknown rather than guessed.
 ALTER TABLE crawler.migration_system_retry_items
 ADD COLUMN IF NOT EXISTS failed_dispatch_batch_id TEXT;
+
+ALTER TABLE crawler.migration_system_retry_items
+ADD COLUMN IF NOT EXISTS recovery_run_id TEXT;
+
+ALTER TABLE crawler.migration_system_retry_items
+ADD COLUMN IF NOT EXISTS recovery_agent_active_job_id TEXT;
+
+ALTER TABLE crawler.migration_system_retry_items
+ADD COLUMN IF NOT EXISTS recovery_agent_active_job_attempt BIGINT;
+
+ALTER TABLE crawler.migration_system_retry_items
+ADD COLUMN IF NOT EXISTS recovery_agent_job_epoch BIGINT NOT NULL DEFAULT 0;
+
+ALTER TABLE crawler.migration_system_retry_items
+DROP CONSTRAINT IF EXISTS migration_system_retry_items_recovery_run_id_fkey;
+
+ALTER TABLE crawler.migration_system_retry_items
+ADD CONSTRAINT migration_system_retry_items_recovery_run_id_fkey
+FOREIGN KEY (recovery_run_id)
+REFERENCES crawler.channel_runs(run_id) ON DELETE RESTRICT;
+
+ALTER TABLE crawler.migration_system_retry_items
+DROP CONSTRAINT IF EXISTS migration_system_retry_items_recovery_agent_active_job_check;
+
+ALTER TABLE crawler.migration_system_retry_items
+ADD CONSTRAINT migration_system_retry_items_recovery_agent_active_job_check
+CHECK (
+  recovery_agent_job_epoch >= 0
+  AND (
+    (
+      recovery_agent_active_job_id IS NULL
+      AND recovery_agent_active_job_attempt IS NULL
+    )
+    OR (
+      recovery_agent_active_job_id IS NOT NULL
+      AND recovery_agent_active_job_attempt IS NOT NULL
+      AND recovery_agent_active_job_attempt > 0
+    )
+  )
+);
 
 CREATE UNIQUE INDEX IF NOT EXISTS ux_crawler_migration_system_retry_active_candidate
 ON crawler.migration_system_retry_items (candidate_id)
@@ -1941,12 +2051,22 @@ CREATE TABLE IF NOT EXISTS crawler.youtube_api_batches (
   task_ids BIGINT[] NOT NULL,
   video_ids TEXT[] NOT NULL,
   key_index INTEGER,
+  active_job_id TEXT,
+  active_job_attempt BIGINT,
   result_json JSONB NOT NULL DEFAULT '{}'::jsonb,
   error_message TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   started_at TIMESTAMPTZ,
   finished_at TIMESTAMPTZ,
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CONSTRAINT youtube_api_batches_active_job_check CHECK (
+    (active_job_id IS NULL AND active_job_attempt IS NULL)
+    OR (
+      active_job_id IS NOT NULL
+      AND active_job_attempt IS NOT NULL
+      AND active_job_attempt > 0
+    )
+  )
 );
 
 CREATE TABLE IF NOT EXISTS crawler.youtube_api_daily_usage (
