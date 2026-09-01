@@ -1444,6 +1444,19 @@ var migrations = []Migration{
 			  );
 		`,
 	},
+	{
+		Version:     1011,
+		Description: "Generate network identity keys for new proxies",
+		Up: `
+			ALTER TABLE proxies
+			  ALTER COLUMN network_identity_key
+			  SET DEFAULT ('net_' || replace(gen_random_uuid()::text, '-', ''));
+		`,
+		Down: `
+			ALTER TABLE proxies
+			  ALTER COLUMN network_identity_key DROP DEFAULT;
+		`,
+	},
 }
 
 // Migrate runs all pending migrations
