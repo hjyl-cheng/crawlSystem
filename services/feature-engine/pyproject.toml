@@ -22,6 +22,10 @@ feature-bootstrap = "feature_engine.bootstrap_service:main"
 feature-repair-agent-clocks = "feature_engine.agent_clock_repair:main"
 feature-rebase-agent-clocks = "feature_engine.agent_clock_semantic_rebase:main"
 feature-repair-daily-plan-statuses = "feature_engine.daily_plan_status_repair:main"
+feature-seed-clock-policy = "feature_engine.clock_policy_seed:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+feature_engine = ["clock_policy_v16_rule_7.json"]

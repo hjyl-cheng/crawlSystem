@@ -64,3 +64,23 @@ transactional Schema migration folds every historical `run_profile=true` mask
 into About, recomputes the three-Clock minimum, and physically drops Profile
 Clock, Plan, policy, retry, and derived-state columns before online services
 restart.
+
+## Clock policy seed
+
+The deployable Clock policy is stored in
+`services/feature-engine/src/feature_engine/clock_policy_v16_rule_7.json`.
+`v16-rule-7` is the aggregate database snapshot; its latest domain rule origins
+are About `v16-rule-5`, Video `v16-rule-2`, and Agent `v16-rule-7`.
+
+`feature-seed-clock-policy` is read-only by default. It validates the database
+identity, Feature role, policy contract, local SHA-256, and existing rows, then
+prints the exact confirmation required for an activation:
+
+```sh
+feature-seed-clock-policy
+feature-seed-clock-policy --execute --confirm '<confirmation from the plan>'
+```
+
+The activation is transactionally fenced and idempotent. It only installs the
+rule policy. It does not synthesize reference distributions, Baseline Bundles,
+or Channel Clock rows; those remain separate audited bootstrap operations.

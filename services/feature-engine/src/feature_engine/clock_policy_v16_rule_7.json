@@ -1,0 +1,59 @@
+{
+  "schema_version": 1,
+  "domain_rule_versions": {
+    "about": "v16-rule-5",
+    "video": "v16-rule-2",
+    "agent": "v16-rule-7"
+  },
+  "source_sha256": "sha256:3e441c9e92a7a8e60052ea6155d89857a96a6d832b185fb09788f30fb8439dab",
+  "policy": {
+    "policy_version": "v16-rule-7",
+    "status": "active",
+    "effective_from": "2026-08-10T00:00:00Z",
+    "allowed_days": [1, 2, 3, 5, 7, 14, 30, 60, 90, 180, 365],
+    "about_config": {
+      "velocity_ewma_alpha": 0.3,
+      "baseline_interval_days": 7,
+      "neutral_growth_percentile": 0.5,
+      "stable_min_days_for_long_interval": 90,
+      "video_delta_full_scale": 3,
+      "cold_start_priority_floor": 0.75,
+      "cold_start_min_recent_video_count": 20,
+      "cold_start_max_publish_interval_days": 1.5,
+      "cold_start_max_publish_age_days": 7.0,
+      "cold_start_tier_one_max_publish_interval_days": 1.0,
+      "cold_start_min_reliable_intervals": 3,
+      "cold_start_min_subscriber_count": 5000,
+      "cold_start_min_subscriber_percentile": 0.5,
+      "cold_start_min_feature_confidence": 0.75,
+      "dynamic_baseline_enabled": true,
+      "cadence_baseline_enabled": true
+    },
+    "discovery_config": {
+      "fallback_interval_days": 7,
+      "interval_ewma_alpha": 0.35,
+      "regularity_threshold": 0.65,
+      "silence_decay": 0.6,
+      "automatic_min_interval_days": 3
+    },
+    "recent_sampling_config": {
+      "fallback_interval_days": 14,
+      "change_ewma_alpha": 0.4
+    },
+    "agent_config": {
+      "baseline_interval_days": 180,
+      "bootstrap_min_days": 60,
+      "bootstrap_max_days": 90,
+      "high_priority_cap_days": 90,
+      "version_change_interval_days": 14,
+      "dynamic_baseline_enabled": true
+    },
+    "partial_retry_config": {
+      "about_days": 3,
+      "discovery_days": 3,
+      "recent_sampling_days": 7,
+      "agent_days": 14
+    },
+    "checksum": "md5:c5ff35add09ad995b77d58258ff5f7f1"
+  }
+}
