@@ -52,14 +52,7 @@ import { resumeLegacyAutomaticFinalizationWithFence } from "./legacyAutomaticFin
 import {
   finalRepairCandidateSql,
   preparedFinalDetailRepairSql,
-  recoverablePreparedFinalDetailRepairSql,
 } from "./finalRepairCandidatePolicy.js";
-import {
-  FinalRepairExecutionBusyError,
-  FinalRepairExecutionConflictError,
-  FinalRepairExecutionRecovery,
-  PostgresFinalRepairExecutionRecoveryRepository,
-} from "./finalRepairExecutionRecovery.js";
 import { ensureFinalRepairJob } from "./finalRepairJobRecovery.js";
 import { maybeStartMetadataDiscoveryCycle } from "./metadataDiscoveryLoop.js";
 import {
@@ -149,16 +142,6 @@ const migrationSystemRetryRecoveryReconciler = new MigrationSystemRetryRecoveryR
   query,
   withTransaction,
   queues,
-});
-const finalRepairExecutionRecovery = new FinalRepairExecutionRecovery({
-  repository: new PostgresFinalRepairExecutionRecoveryRepository({ withTransaction }),
-  findJob: async (jobId) => {
-    for (const queueName of [queuesByRole.channelCrawl, queuesByRole.contentDetail]) {
-      const job = await queues[queueName].getJob(jobId);
-      if (job) return job;
-    }
-    return null;
-  },
 });
 
 function intEnv(name, fallback, min = 0, max = Number.MAX_SAFE_INTEGER) {
@@ -2589,9 +2572,6 @@ async function maybeRepairFailedChannelRuns(actions, stats, queryScheduler, prox
               WHERE ${preparedFinalDetailRepairSql("cc", "r")}
             )::int AS prepared_detail_candidates,
             count(cc.*) FILTER (
-              WHERE ${recoverablePreparedFinalDetailRepairSql("cc", "r")}
-            )::int AS recoverable_prepared_detail_candidates,
-            count(cc.*) FILTER (
               WHERE cc.result_json ? 'repair_once_version'
             )::int AS strict_repair_candidates,
             max(cc.result_json->>'repair_once_version') FILTER (
@@ -2607,18 +2587,10 @@ async function maybeRepairFailedChannelRuns(actions, stats, queryScheduler, prox
        AND r.result_json->>'pipeline_cycle_id'=$4::text
        AND NOT (r.result_json ? 'parser_contract_error')
        AND r.updated_at <= now()-interval '30 seconds'
-       AND (
-         ${finalRepairRoundEligibilitySql("r", {
-           finalRepairMaxRoundsParameter: "$1",
-           checkpointRepairMaxRoundsParameter: "$5",
-         })}
-         OR EXISTS (
-           SELECT 1
-           FROM eligible_candidates recoverable_candidate
-           WHERE recoverable_candidate.run_id=r.run_id
-             AND ${recoverablePreparedFinalDetailRepairSql("recoverable_candidate", "r")}
-         )
-       )
+       AND ${finalRepairRoundEligibilitySql("r", {
+         finalRepairMaxRoundsParameter: "$1",
+         checkpointRepairMaxRoundsParameter: "$5",
+       })}
        AND NOT (r.run_id = ANY($3::text[]))
      GROUP BY r.run_id,c.channel_url,c.subscriber_count,c.registry_promotion_run_id
      HAVING r.status='failed'
@@ -2629,9 +2601,6 @@ async function maybeRepairFailedChannelRuns(actions, stats, queryScheduler, prox
             ) > 0
          OR count(cc.*) FILTER (
               WHERE ${preparedFinalDetailRepairSql("cc", "r")}
-            ) > 0
-         OR count(cc.*) FILTER (
-              WHERE ${recoverablePreparedFinalDetailRepairSql("cc", "r")}
             ) > 0
      ORDER BY r.updated_at ASC
      LIMIT $2`,
@@ -2661,32 +2630,20 @@ async function maybeRepairFailedChannelRuns(actions, stats, queryScheduler, prox
     const repairableCandidates = Number(row.repairable_candidates ?? 0);
     const typeMissingCandidates = Number(row.type_missing_candidates ?? 0);
     const preparedDetailCandidates = Number(row.prepared_detail_candidates ?? 0);
-    const recoverablePreparedDetailCandidates = Number(
-      row.recoverable_prepared_detail_candidates ?? 0,
-    );
-    const recoveringRecordedDetailRound = recoverablePreparedDetailCandidates > 0;
     const strictRepair = Number(row.strict_repair_candidates ?? 0) > 0;
     const strictRepairVersion = strictRepair
       ? String(row.strict_repair_version || CONTENT_COMPLETENESS_REPAIR_VERSION)
       : null;
     const publicationGap = row.publication_gap === true;
-    const recordedRepairRound = Number(row.repair_rounds ?? 0);
-    const roundDecision = recoveringRecordedDetailRound
-      ? {
-          eligible: Number.isSafeInteger(recordedRepairRound) && recordedRepairRound > 0,
-          businessRunBudgetExhausted: false,
-          finalRepairRound: recordedRepairRound,
-          checkpointRepairRound: null,
-        }
-      : finalRepairRoundDecision({
-          finalRepairRounds: row.repair_rounds,
-          finalRepairMaxRounds,
-          proxyControlStatus: publicationGap
-            ? null
-            : row.result_json?.proxy_control?.status,
-          checkpointRepairRounds: row.checkpoint_repair_rounds,
-          checkpointRepairMaxRounds: finalCheckpointRepairMaxRounds,
-        });
+    const roundDecision = finalRepairRoundDecision({
+      finalRepairRounds: row.repair_rounds,
+      finalRepairMaxRounds,
+      proxyControlStatus: publicationGap
+        ? null
+        : row.result_json?.proxy_control?.status,
+      checkpointRepairRounds: row.checkpoint_repair_rounds,
+      checkpointRepairMaxRounds: finalCheckpointRepairMaxRounds,
+    });
     if (!roundDecision.eligible) continue;
     const {
       businessRunBudgetExhausted,
@@ -2697,7 +2654,7 @@ async function maybeRepairFailedChannelRuns(actions, stats, queryScheduler, prox
       publicationGap,
       businessRunBudgetExhausted,
       failedCandidates: row.failed_candidates,
-      preparedDetailCandidates: preparedDetailCandidates + recoverablePreparedDetailCandidates,
+      preparedDetailCandidates,
       repairableCandidates,
       typeMissingCandidates,
     });
@@ -2722,68 +2679,90 @@ async function maybeRepairFailedChannelRuns(actions, stats, queryScheduler, prox
     }
     const jobId = safeJobId("final-repair", row.run_id, strictRepairVersion, round);
     const prepareDetailRepair = detailOnly
-      ? () => finalRepairExecutionRecovery.prepareDetailDispatch({
-          runId: row.run_id,
-          channelId: row.channel_id,
-          repairRound: round,
-          jobId,
-        })
+      ? () => query(
+        `WITH crawl_settings AS (
+           SELECT GREATEST(
+                    0,
+                    LEAST(
+                      3650,
+                      COALESCE(
+                        (
+                          SELECT (value_json->>'content_max_age_days')::int
+                          FROM crawler.settings
+                          WHERE setting_key='crawl'
+                          LIMIT 1
+                        ),
+                        90
+                      )
+                    )
+                  )::int AS content_max_age_days
+         )
+         UPDATE crawler.content_candidates
+         SET detail_status='queued',api_status='not_needed',attempts=0,
+             missing_fields='{}'::text[],error_message=NULL,finished_at=NULL,
+             result_json=jsonb_set(
+               COALESCE(result_json,'{}'::jsonb),
+               '{final_repair_dispatch}',
+               jsonb_build_object(
+                 'status','prepared',
+                 'mode','detail',
+                 'repair_round',$2::int,
+                 'job_id',$3::text,
+                 'prepared_at',now()
+               ),
+               true
+             ),
+             updated_at=now()
+         FROM crawl_settings settings
+         WHERE run_id=$1
+           AND NOT (result_json ? 'parser_contract_error')
+           AND COALESCE(result_json->'scope'->>'status','')<>'excluded'
+           AND (
+             settings.content_max_age_days=0
+             OR NOT EXISTS (
+               SELECT 1
+               FROM crawler.contents repair_content
+               WHERE repair_content.content_key=crawler.content_candidates.content_key
+                 AND repair_content.run_id=crawler.content_candidates.run_id
+                 AND repair_content.published_at IS NOT NULL
+                 AND repair_content.published_at<now()-(settings.content_max_age_days * interval '1 day')
+             )
+           )
+           AND ${finalRepairCandidateSql()}`,
+        [row.run_id, round, jobId],
+      )
       : null;
-    let ensuredJob;
-    try {
-      ensuredJob = await ensureFinalRepairJob(
-        queues[queuesByRole.channelCrawl],
-        {
-          name,
-          data: {
-            dispatch_generation: round,
-            channel_id: row.channel_id,
-            channel_url: detailOnly ? row.channel_url : `https://www.youtube.com/channel/${row.channel_id}`,
-            ...repairReference,
-            crawl_mode: row.crawl_mode,
-            enforce_min_subscribers: false,
-            repair_reason: "automatic_final_reconciliation",
-            repair_round: round,
-            pipeline_cycle_id: queryScheduler.pipeline_cycle_id,
-            ...(businessRunBudgetExhausted ? {
-              checkpoint_target_run_id: row.run_id,
-              api_fallback_mode: "emergency",
-            } : {}),
-            ...(strictRepair && !businessRunBudgetExhausted ? {
-              published_at_required_precision: "date_only",
-              api_fallback_mode: "disabled",
-            } : {}),
-          },
-          options: {
-            jobId,
-            attempts: 3,
-            backoff: { type: "exponential", delay: 5000, jitter: 0.5 },
-          },
-          beforeDispatch: prepareDetailRepair,
-          isBusinessComplete: detailOnly
-            ? () => finalRepairExecutionRecovery.isBusinessComplete({
-                runId: row.run_id,
-                channelId: row.channel_id,
-              })
-            : null,
-        },
-      );
-    } catch (error) {
-      if (error instanceof FinalRepairExecutionBusyError
-          || error instanceof FinalRepairExecutionConflictError) {
-        actions.push({
-          action: "wait-final-repair-detail-ownership",
+    const ensuredJob = await ensureFinalRepairJob(
+      queues[queuesByRole.channelCrawl],
+      {
+        name,
+        data: {
+          dispatch_generation: round,
           channel_id: row.channel_id,
-          run_id: row.run_id,
+          channel_url: detailOnly ? row.channel_url : `https://www.youtube.com/channel/${row.channel_id}`,
+          ...repairReference,
+          crawl_mode: row.crawl_mode,
+          enforce_min_subscribers: false,
+          repair_reason: "automatic_final_reconciliation",
           repair_round: round,
-          reason: error.code,
-          owner_job_id: error.jobId ?? null,
-          owner_job_state: error.state ?? null,
-        });
-        continue;
-      }
-      throw error;
-    }
+          pipeline_cycle_id: queryScheduler.pipeline_cycle_id,
+          ...(businessRunBudgetExhausted ? {
+            checkpoint_target_run_id: row.run_id,
+            api_fallback_mode: "emergency",
+          } : {}),
+          ...(strictRepair && !businessRunBudgetExhausted ? {
+            published_at_required_precision: "date_only",
+            api_fallback_mode: "disabled",
+          } : {}),
+        },
+        options: {
+          jobId,
+          attempts: 3,
+          backoff: { type: "exponential", delay: 5000, jitter: 0.5 },
+        },
+        beforeDispatch: prepareDetailRepair,
+      },
+    );
     await query(
       `UPDATE crawler.channel_runs
        SET result_json=jsonb_set(

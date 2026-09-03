@@ -44,68 +44,6 @@ test("a failed Final Repair is retried in place without resetting its attempt hi
   assert.equal(result.attempts_made, 3);
 });
 
-test("a fence-stale completed Final Repair is retried when its business work is still open", async () => {
-  const retryStates = [];
-  const prepared = [];
-  const job = {
-    id: spec.options.jobId,
-    name: "channel-detail-repair",
-    data: { ...spec.data, run_id: "run:parent" },
-    returnvalue: { ok: true, reason: "content_detail_execution_fence_stale" },
-    attemptsMade: 1,
-    attemptsStarted: 1,
-    async getState() { return "completed"; },
-    async updateData(data) { this.data = data; },
-    async retry(state) { retryStates.push(state); },
-  };
-
-  const result = await ensureFinalRepairJob({
-    async getJob() { return job; },
-    async add() { assert.fail("the same logical Final Repair Job must be recovered"); },
-  }, {
-    name: job.name,
-    data: { ...spec.data, run_id: "run:parent" },
-    options: spec.options,
-    isBusinessComplete: async () => false,
-    beforeDispatch: async ({ action }) => {
-      prepared.push(action);
-      return { data: { content_detail_job_epoch: 1 } };
-    },
-  });
-
-  assert.equal(result.action, "retried_incomplete");
-  assert.deepEqual(prepared, ["retry_incomplete"]);
-  assert.deepEqual(retryStates, ["completed"]);
-  assert.equal(job.data.content_detail_job_epoch, 1);
-});
-
-test("a normally completed Final Repair is not replayed while Finalize is still propagating", async () => {
-  const job = {
-    id: spec.options.jobId,
-    name: "channel-detail-repair",
-    data: { ...spec.data, run_id: "run:parent" },
-    returnvalue: { ok: true, processed: 1, status: "done" },
-    attemptsMade: 1,
-    attemptsStarted: 1,
-    async getState() { return "completed"; },
-    async retry() { assert.fail("a completed execution must not be replayed"); },
-  };
-
-  const result = await ensureFinalRepairJob({
-    async getJob() { return job; },
-    async add() { assert.fail("the represented Job must not be recreated"); },
-  }, {
-    name: job.name,
-    data: { ...spec.data, run_id: "run:parent" },
-    options: spec.options,
-    isBusinessComplete: async () => false,
-    beforeDispatch: async () => assert.fail("normal completion must not reset Candidates"),
-  });
-
-  assert.equal(result.action, "already_represented");
-  assert.equal(result.state, "completed");
-});
-
 test("Controller recovery adds at most one execution to the same logical Final Repair Job", async () => {
   const retryStates = [];
   const prepared = [];
