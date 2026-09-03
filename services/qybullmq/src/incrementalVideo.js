@@ -48,7 +48,10 @@ import {
 } from "./youtubePlayability.js";
 import { shouldReportProxyFailure } from "./youtubeFailurePolicy.js";
 import { reconcilePublication } from "./publicationReconciler.js";
-import { applyVideoActivityLifecycle } from "./videoActivityLifecycle.js";
+import {
+  applyVideoActivityLifecycle,
+  buildVideoActivityEvidence,
+} from "./videoActivityLifecycle.js";
 import { refreshVideoPublicationItemHashes } from "./videoPublicationItemStore.js";
 
 const GAP_ABANDONMENT_STOP_REASON = "gap_abandoned_latest_30";
@@ -2861,20 +2864,19 @@ async function recordVideoCycle({
               ],
             ),
           });
-          const lifecycleEvidenceMetrics = {
-            evidence_complete: lifecycle.evidence_complete,
-            evidence_scan_complete: lifecycle.evidence_scan_complete,
-            evidence_scan_rows: lifecycle.evidence_scan_rows,
-            evidence_scan_page_count: lifecycle.evidence_scan_page_count,
-            evidence_scan_elapsed_ms: lifecycle.evidence_scan_elapsed_ms,
-            evidence_scan_truncated_count: lifecycle.evidence_scan_truncated_count,
-            evidence_scan_truncated_count_is_lower_bound:
-              lifecycle.evidence_scan_truncated_count_is_lower_bound,
-            evidence_scan_stop_reason: lifecycle.evidence_scan_stop_reason,
-            evidence_scan_row_limit: lifecycle.evidence_scan_row_limit,
-            evidence_scan_page_size: lifecycle.evidence_scan_page_size,
-            evidence_scan_time_budget_ms: lifecycle.evidence_scan_time_budget_ms,
-          };
+          let activityEvidence;
+          try {
+            activityEvidence = buildVideoActivityEvidence(lifecycle);
+          } catch (error) {
+            console.error(JSON.stringify({
+              event: "producer_activity_evidence_invalid",
+              channel_id: plan.channel_id,
+              plan_id: plan.plan_id ?? null,
+              policy_version: lifecycle?.policy_version ?? null,
+              violated_rules: [error?.message || String(error)],
+            }));
+            throw error;
+          }
           const outcome = discovery.outcome === "complete" && recentSampling.outcome === "complete"
             ? "complete"
             : "partial";
@@ -2890,13 +2892,7 @@ async function recordVideoCycle({
               recent_sampling: recentSampling.summary,
               activity: {
                 lifecycle_status: lifecycle.lifecycle_status,
-                recent_published_content_count: lifecycle.recent_published_content_count,
-                uncertain_content_count: lifecycle.uncertain_content_count,
-                classifier_version: lifecycle.classifier_version,
-                policy_version: lifecycle.policy_version,
-                relation_counts: lifecycle.relation_counts,
-                unresolved_by_status_counts: lifecycle.unresolved_by_status_counts,
-                ...lifecycleEvidenceMetrics,
+                ...activityEvidence,
                 conclusive: lifecycle.conclusive,
               },
             },
@@ -2906,15 +2902,7 @@ async function recordVideoCycle({
                 outcome: recentSampling.outcome,
                 payload: recentSampling.payload,
               },
-              activity_evidence: {
-                recent_published_content_count: lifecycle.recent_published_content_count,
-                uncertain_content_count: lifecycle.uncertain_content_count,
-                classifier_version: lifecycle.classifier_version,
-                policy_version: lifecycle.policy_version,
-                relation_counts: lifecycle.relation_counts,
-                unresolved_by_status_counts: lifecycle.unresolved_by_status_counts,
-                ...lifecycleEvidenceMetrics,
-              },
+              activity_evidence: activityEvidence,
               ...(lifecycle.activity ? { activity: lifecycle.activity } : {}),
             },
             anchorVideoIds: discovery.outcome === "complete"

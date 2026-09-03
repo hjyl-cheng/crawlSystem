@@ -38,6 +38,223 @@ export const INCREMENTAL_VIDEO_ACTIVITY_EVIDENCE_SCAN_DEFAULTS = Object.freeze({
   ),
 });
 
+const ACTIVITY_EVIDENCE_KEYS = Object.freeze([
+  "recent_published_content_count",
+  "uncertain_content_count",
+  "classifier_version",
+  "policy_version",
+  "relation_counts",
+  "unresolved_by_status_counts",
+  "evidence_complete",
+  "evidence_scan_complete",
+  "evidence_scan_rows",
+  "evidence_scan_page_count",
+  "evidence_scan_elapsed_ms",
+  "evidence_scan_truncated_count",
+  "evidence_scan_truncated_count_is_lower_bound",
+  "evidence_scan_stop_reason",
+  "evidence_scan_row_limit",
+  "evidence_scan_page_size",
+  "evidence_scan_time_budget_ms",
+]);
+const ACTIVITY_RELATION_COUNT_KEYS = Object.freeze([
+  "inside",
+  "outside",
+  "after_as_of",
+  "cutoff_overlap",
+  "unresolved",
+]);
+const ACTIVITY_UNRESOLVED_STATUS_COUNT_KEYS = Object.freeze([
+  "relative",
+  "estimated",
+  "unavailable",
+  "unresolved",
+]);
+const ACTIVITY_EVIDENCE_STOP_REASONS = new Set(["complete", "row_limit", "time_budget"]);
+
+function evidenceObject(value, label) {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError(`${label} must be an object`);
+  }
+  return value;
+}
+
+function exactEvidenceKeys(value, expected, label) {
+  const actual = Object.keys(evidenceObject(value, label)).sort();
+  const required = [...expected].sort();
+  if (actual.length !== required.length || actual.some((key, index) => key !== required[index])) {
+    const actualSet = new Set(actual);
+    const requiredSet = new Set(required);
+    const missing = required.filter((key) => !actualSet.has(key));
+    const unknown = actual.filter((key) => !requiredSet.has(key));
+    const details = [
+      ...(missing.length > 0 ? [`missing: ${missing.join(",")}`] : []),
+      ...(unknown.length > 0 ? [`unknown: ${unknown.join(",")}`] : []),
+    ].join("; ");
+    throw new TypeError(`${label} fields are incomplete or unknown (${details})`);
+  }
+}
+
+function evidenceInteger(value, label, { positive = false } = {}) {
+  if (!Number.isSafeInteger(value) || value < (positive ? 1 : 0)) {
+    throw new TypeError(`${label} must be a ${positive ? "positive" : "non-negative"} integer`);
+  }
+  return value;
+}
+
+function evidenceText(value, label) {
+  if (typeof value !== "string" || value.trim() === "") {
+    throw new TypeError(`${label} must be a non-empty string`);
+  }
+  return value;
+}
+
+function evidenceBoolean(value, label) {
+  if (typeof value !== "boolean") throw new TypeError(`${label} must be a boolean`);
+  return value;
+}
+
+export function validateVideoActivityEvidence(value) {
+  exactEvidenceKeys(value, ACTIVITY_EVIDENCE_KEYS, "activity_evidence");
+  const evidence = value;
+  evidenceInteger(
+    evidence.recent_published_content_count,
+    "activity_evidence.recent_published_content_count",
+  );
+  evidenceInteger(evidence.uncertain_content_count, "activity_evidence.uncertain_content_count");
+  evidenceText(evidence.classifier_version, "activity_evidence.classifier_version");
+  evidenceText(evidence.policy_version, "activity_evidence.policy_version");
+  exactEvidenceKeys(
+    evidence.relation_counts,
+    ACTIVITY_RELATION_COUNT_KEYS,
+    "activity_evidence.relation_counts",
+  );
+  for (const key of ACTIVITY_RELATION_COUNT_KEYS) {
+    evidenceInteger(evidence.relation_counts[key], `activity_evidence.relation_counts.${key}`);
+  }
+  exactEvidenceKeys(
+    evidence.unresolved_by_status_counts,
+    ACTIVITY_UNRESOLVED_STATUS_COUNT_KEYS,
+    "activity_evidence.unresolved_by_status_counts",
+  );
+  for (const key of ACTIVITY_UNRESOLVED_STATUS_COUNT_KEYS) {
+    evidenceInteger(
+      evidence.unresolved_by_status_counts[key],
+      `activity_evidence.unresolved_by_status_counts.${key}`,
+    );
+  }
+  evidenceBoolean(evidence.evidence_complete, "activity_evidence.evidence_complete");
+  evidenceBoolean(evidence.evidence_scan_complete, "activity_evidence.evidence_scan_complete");
+  evidenceInteger(evidence.evidence_scan_rows, "activity_evidence.evidence_scan_rows");
+  evidenceInteger(
+    evidence.evidence_scan_page_count,
+    "activity_evidence.evidence_scan_page_count",
+  );
+  if (!Number.isFinite(evidence.evidence_scan_elapsed_ms)
+      || evidence.evidence_scan_elapsed_ms < 0) {
+    throw new TypeError(
+      "activity_evidence.evidence_scan_elapsed_ms must be a finite non-negative number",
+    );
+  }
+  evidenceInteger(
+    evidence.evidence_scan_truncated_count,
+    "activity_evidence.evidence_scan_truncated_count",
+  );
+  evidenceBoolean(
+    evidence.evidence_scan_truncated_count_is_lower_bound,
+    "activity_evidence.evidence_scan_truncated_count_is_lower_bound",
+  );
+  const stopReason = evidenceText(
+    evidence.evidence_scan_stop_reason,
+    "activity_evidence.evidence_scan_stop_reason",
+  );
+  if (!ACTIVITY_EVIDENCE_STOP_REASONS.has(stopReason)) {
+    throw new TypeError("activity_evidence.evidence_scan_stop_reason is unsupported");
+  }
+  evidenceInteger(
+    evidence.evidence_scan_row_limit,
+    "activity_evidence.evidence_scan_row_limit",
+    { positive: true },
+  );
+  evidenceInteger(
+    evidence.evidence_scan_page_size,
+    "activity_evidence.evidence_scan_page_size",
+    { positive: true },
+  );
+  evidenceInteger(
+    evidence.evidence_scan_time_budget_ms,
+    "activity_evidence.evidence_scan_time_budget_ms",
+    { positive: true },
+  );
+
+  if (evidence.recent_published_content_count !== evidence.relation_counts.inside) {
+    throw new TypeError("activity_evidence recent published count disagrees with relation counts");
+  }
+  const uncertain = evidence.relation_counts.after_as_of
+    + evidence.relation_counts.cutoff_overlap
+    + evidence.relation_counts.unresolved;
+  if (evidence.uncertain_content_count !== uncertain) {
+    throw new TypeError("activity_evidence uncertain count disagrees with relation counts");
+  }
+  const unresolved = ACTIVITY_UNRESOLVED_STATUS_COUNT_KEYS
+    .reduce((total, key) => total + evidence.unresolved_by_status_counts[key], 0);
+  if (evidence.relation_counts.unresolved !== unresolved) {
+    throw new TypeError("activity_evidence unresolved counts disagree");
+  }
+  if (evidence.evidence_scan_rows > evidence.evidence_scan_row_limit) {
+    throw new TypeError("activity_evidence scan rows exceed the row limit");
+  }
+  if (evidence.evidence_scan_page_size > evidence.evidence_scan_row_limit) {
+    throw new TypeError("activity_evidence page size exceeds the row limit");
+  }
+  if (evidence.evidence_scan_complete
+      && (stopReason !== "complete" || evidence.evidence_scan_truncated_count !== 0)) {
+    throw new TypeError("complete activity_evidence scan fields disagree");
+  }
+  if (stopReason === "complete" && !evidence.evidence_scan_complete) {
+    throw new TypeError("activity_evidence complete stop reason requires a complete scan");
+  }
+  if (evidence.evidence_complete && !evidence.evidence_scan_complete) {
+    throw new TypeError("complete activity_evidence requires a complete scan");
+  }
+  return evidence;
+}
+
+export function buildVideoActivityEvidence(lifecycle) {
+  const source = evidenceObject(lifecycle, "Video lifecycle");
+  const evidence = {
+    recent_published_content_count: source.recent_published_content_count,
+    uncertain_content_count: source.uncertain_content_count,
+    classifier_version: source.classifier_version,
+    policy_version: source.policy_version,
+    relation_counts: {
+      ...evidenceObject(source.relation_counts, "Video lifecycle relation_counts"),
+    },
+    unresolved_by_status_counts: {
+      ...evidenceObject(
+        source.unresolved_by_status_counts,
+        "Video lifecycle unresolved_by_status_counts",
+      ),
+    },
+    evidence_complete: source.evidence_complete,
+    evidence_scan_complete: source.evidence_scan_complete,
+    evidence_scan_rows: source.evidence_scan_rows,
+    evidence_scan_page_count: source.evidence_scan_page_count,
+    evidence_scan_elapsed_ms: source.evidence_scan_elapsed_ms,
+    evidence_scan_truncated_count: source.evidence_scan_truncated_count,
+    evidence_scan_truncated_count_is_lower_bound:
+      source.evidence_scan_truncated_count_is_lower_bound,
+    evidence_scan_stop_reason: source.evidence_scan_stop_reason,
+    evidence_scan_row_limit: source.evidence_scan_row_limit,
+    evidence_scan_page_size: source.evidence_scan_page_size,
+    evidence_scan_time_budget_ms: source.evidence_scan_time_budget_ms,
+  };
+  validateVideoActivityEvidence(evidence);
+  Object.freeze(evidence.relation_counts);
+  Object.freeze(evidence.unresolved_by_status_counts);
+  return Object.freeze(evidence);
+}
+
 const EVIDENCE_PAGE_SAVEPOINT = "video_activity_evidence_page";
 const EVIDENCE_CURSOR = "video_activity_evidence_cursor";
 

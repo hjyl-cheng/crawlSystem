@@ -6,6 +6,7 @@ from hashlib import sha256
 import json
 import math
 import re
+from types import MappingProxyType
 from typing import Any, Mapping, TypeAlias
 from uuid import UUID
 
@@ -234,6 +235,34 @@ def canonical_payload_hash(value: Mapping[str, Any]) -> str:
     return f"sha256:{sha256(body.encode('utf-8')).hexdigest()}"
 
 
+def _freeze_json(value: Any, field: str) -> Any:
+    if value is None or isinstance(value, (bool, str)):
+        return value
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if not math.isfinite(float(value)):
+            raise EventValidationError(f"{field} numbers must be finite")
+        return value
+    if isinstance(value, list):
+        return tuple(_freeze_json(item, f"{field}[]") for item in value)
+    if isinstance(value, Mapping):
+        if not all(isinstance(key, str) for key in value):
+            raise EventValidationError(f"{field} object keys must be strings")
+        return MappingProxyType(
+            {key: _freeze_json(item, f"{field}.{key}") for key, item in value.items()}
+        )
+    raise EventValidationError(
+        f"{field} contains unsupported value type: {type(value).__name__}"
+    )
+
+
+def _thaw_json(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {key: _thaw_json(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_thaw_json(item) for item in value]
+    return value
+
+
 def _metric(value: Any, status: Any, field: str) -> tuple[int | None, str]:
     normalized_status = _required_text(status, f"{field}_status")
     if normalized_status not in METRIC_STATUSES:
@@ -349,16 +378,27 @@ class FirstSeenVideo:
     content_type: str
     published_at: str | None
     published_at_precision: str
+    published_at_status: str | None = None
+    published_at_source: str | None = None
+    publication_evidence_present: bool = False
 
     @classmethod
     def from_mapping(cls, source: Mapping[str, Any], index: int) -> FirstSeenVideo:
-        _exact_keys(
+        _required_optional_keys(
             source,
-            frozenset(
+            required=frozenset(
                 {"video_id", "position", "content_type", "published_at", "published_at_precision"}
             ),
-            f"first_seen[{index}]",
+            optional=frozenset({"published_at_status", "published_at_source"}),
+            label=f"first_seen[{index}]",
         )
+        evidence_fields = {"published_at_status", "published_at_source"}
+        supplied_evidence = evidence_fields & set(source)
+        if supplied_evidence and supplied_evidence != evidence_fields:
+            raise EventValidationError(
+                "first_seen published_at_status and published_at_source "
+                "must be supplied together"
+            )
         content_type = _required_text(source["content_type"], f"first_seen[{index}].content_type")
         if content_type not in {"video", "short", "live"}:
             raise EventValidationError(f"invalid first_seen[{index}].content_type")
@@ -372,22 +412,54 @@ class FirstSeenVideo:
             published_at = _timestamp_text(published_at, f"first_seen[{index}].published_at")
         elif precision != "unknown":
             raise EventValidationError("missing first_seen published_at requires unknown precision")
+        published_at_status = None
+        published_at_source = None
+        if supplied_evidence:
+            published_at_status = _required_text(
+                source["published_at_status"],
+                f"first_seen[{index}].published_at_status",
+            )
+            if published_at_status not in {
+                "exact",
+                "relative",
+                "estimated",
+                "unavailable",
+                "unresolved",
+            }:
+                raise EventValidationError(
+                    f"invalid first_seen[{index}].published_at_status"
+                )
+            published_at_source = _optional_text(
+                source["published_at_source"],
+                f"first_seen[{index}].published_at_source",
+            )
         return cls(
             video_id=_required_text(source["video_id"], f"first_seen[{index}].video_id"),
             position=_integer(source["position"], f"first_seen[{index}].position", minimum=1),
             content_type=content_type,
             published_at=published_at,
             published_at_precision=precision,
+            published_at_status=published_at_status,
+            published_at_source=published_at_source,
+            publication_evidence_present=bool(supplied_evidence),
         )
 
     def as_facts(self) -> dict[str, Any]:
-        return {
+        facts = {
             "video_id": self.video_id,
             "position": self.position,
             "content_type": self.content_type,
             "published_at": self.published_at,
             "published_at_precision": self.published_at_precision,
         }
+        if self.publication_evidence_present:
+            facts.update(
+                {
+                    "published_at_status": self.published_at_status,
+                    "published_at_source": self.published_at_source,
+                }
+            )
+        return facts
 
 
 def _video_disposition_entries(value: Any, field: str) -> tuple[dict[str, Any], ...]:
@@ -1289,11 +1361,30 @@ class VideoActivityPayload:
 
 
 @dataclass(frozen=True, slots=True)
+class VideoActivityEvidencePayload:
+    raw: Mapping[str, Any]
+
+    @classmethod
+    def from_mapping(
+        cls, source: Mapping[str, Any]
+    ) -> VideoActivityEvidencePayload:
+        if not isinstance(source, Mapping):
+            raise EventValidationError("Video activity_evidence must be an object")
+        frozen = _freeze_json(source, "activity_evidence")
+        assert isinstance(frozen, Mapping)
+        return cls(raw=frozen)
+
+    def as_facts(self) -> dict[str, Any]:
+        return _thaw_json(self.raw)
+
+
+@dataclass(frozen=True, slots=True)
 class VideoPayload:
     discovery_outcome: str
     discovery: VideoDiscoveryPayload
     recent_sampling_outcome: str
     recent_sampling: VideoRecentSamplingPayload | VideoRecentSamplingSkippedPayload
+    activity_evidence: VideoActivityEvidencePayload | None = None
     activity: VideoActivityPayload | None = None
 
     @classmethod
@@ -1301,7 +1392,7 @@ class VideoPayload:
         _required_optional_keys(
             source,
             required=frozenset({"discovery", "recent_sampling"}),
-            optional=frozenset({"activity"}),
+            optional=frozenset({"activity_evidence", "activity"}),
             label="Video payload",
         )
         raw_discovery = source["discovery"]
@@ -1341,6 +1432,19 @@ class VideoPayload:
                 sampling_payload, outcome=sampling_outcome
             )
         )
+        activity_evidence_present = "activity_evidence" in source
+        raw_activity_evidence = source.get("activity_evidence")
+        if activity_evidence_present and raw_activity_evidence is None:
+            raise EventValidationError(
+                "Video activity_evidence must be an object when supplied"
+            )
+        if activity_evidence_present and not isinstance(raw_activity_evidence, Mapping):
+            raise EventValidationError("Video activity_evidence must be an object")
+        activity_evidence = (
+            VideoActivityEvidencePayload.from_mapping(raw_activity_evidence)
+            if activity_evidence_present and isinstance(raw_activity_evidence, Mapping)
+            else None
+        )
         raw_activity = source.get("activity")
         if raw_activity is not None and not isinstance(raw_activity, Mapping):
             raise EventValidationError("Video activity must be an object")
@@ -1361,6 +1465,7 @@ class VideoPayload:
             discovery=discovery,
             recent_sampling_outcome=sampling_outcome,
             recent_sampling=recent_sampling,
+            activity_evidence=activity_evidence,
             activity=activity,
         )
 
@@ -1375,6 +1480,8 @@ class VideoPayload:
                 "payload": self.recent_sampling.as_facts(),
             },
         }
+        if self.activity_evidence is not None:
+            facts["activity_evidence"] = self.activity_evidence.as_facts()
         if self.activity is not None:
             facts["activity"] = self.activity.as_facts()
         return facts

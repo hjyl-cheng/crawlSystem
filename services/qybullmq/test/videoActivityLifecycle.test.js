@@ -1,6 +1,95 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { applyVideoActivityLifecycle } from "../src/videoActivityLifecycle.js";
+import {
+  applyVideoActivityLifecycle,
+  buildVideoActivityEvidence,
+  validateVideoActivityEvidence,
+} from "../src/videoActivityLifecycle.js";
+
+function activityEvidenceFixture() {
+  return {
+    recent_published_content_count: 1,
+    uncertain_content_count: 0,
+    classifier_version: "publication-time-evidence-v1",
+    policy_version: "incremental-video-activity-v5",
+    relation_counts: {
+      inside: 1,
+      outside: 2,
+      after_as_of: 0,
+      cutoff_overlap: 0,
+      unresolved: 0,
+    },
+    unresolved_by_status_counts: {
+      relative: 0,
+      estimated: 0,
+      unavailable: 0,
+      unresolved: 0,
+    },
+    evidence_complete: true,
+    evidence_scan_complete: true,
+    evidence_scan_rows: 3,
+    evidence_scan_page_count: 1,
+    evidence_scan_elapsed_ms: 2.1614830009639263,
+    evidence_scan_truncated_count: 0,
+    evidence_scan_truncated_count_is_lower_bound: false,
+    evidence_scan_stop_reason: "complete",
+    evidence_scan_row_limit: 1000,
+    evidence_scan_page_size: 200,
+    evidence_scan_time_budget_ms: 500,
+  };
+}
+
+test("Video activity evidence validator accepts the complete producer shape", () => {
+  const evidence = activityEvidenceFixture();
+
+  assert.equal(validateVideoActivityEvidence(evidence), evidence);
+});
+
+test("Video activity evidence validator rejects field and type drift", () => {
+  const missing = activityEvidenceFixture();
+  delete missing.policy_version;
+  assert.throws(() => validateVideoActivityEvidence(missing), /fields are incomplete or unknown/);
+
+  const unknown = { ...activityEvidenceFixture(), future_field: true };
+  assert.throws(() => validateVideoActivityEvidence(unknown), /fields are incomplete or unknown/);
+
+  const wrongType = { ...activityEvidenceFixture(), evidence_scan_rows: 3.5 };
+  assert.throws(() => validateVideoActivityEvidence(wrongType), /non-negative integer/);
+});
+
+test("Video activity evidence validator rejects inconsistent statistics", () => {
+  const recentMismatch = activityEvidenceFixture();
+  recentMismatch.relation_counts.inside = 0;
+  assert.throws(() => validateVideoActivityEvidence(recentMismatch), /recent published count/);
+
+  const unresolvedMismatch = activityEvidenceFixture();
+  unresolvedMismatch.relation_counts.unresolved = 1;
+  unresolvedMismatch.uncertain_content_count = 1;
+  assert.throws(() => validateVideoActivityEvidence(unresolvedMismatch), /unresolved counts/);
+
+  const scanMismatch = activityEvidenceFixture();
+  scanMismatch.evidence_scan_stop_reason = "row_limit";
+  assert.throws(
+    () => validateVideoActivityEvidence(scanMismatch),
+    /complete.*scan fields disagree/,
+  );
+});
+
+test("Video activity evidence builder returns a detached frozen value", () => {
+  const lifecycle = activityEvidenceFixture();
+
+  const evidence = buildVideoActivityEvidence(lifecycle);
+
+  assert.deepEqual(evidence, lifecycle);
+  assert.equal(Object.isFrozen(evidence), true);
+  assert.equal(Object.isFrozen(evidence.relation_counts), true);
+  assert.equal(Object.isFrozen(evidence.unresolved_by_status_counts), true);
+  lifecycle.relation_counts.inside = 0;
+  assert.equal(evidence.relation_counts.inside, 1);
+  assert.throws(() => {
+    evidence.evidence_scan_rows = 4;
+  }, TypeError);
+});
 
 function lifecycleFixture(contents, channel = { status: "active", dormant_cycle: 0 }) {
   const queries = [];

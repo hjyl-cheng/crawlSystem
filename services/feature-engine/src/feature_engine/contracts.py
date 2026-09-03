@@ -9,6 +9,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    JsonValue,
     StringConstraints,
     TypeAdapter,
     ValidationError,
@@ -136,6 +137,22 @@ class _FirstSeenVideoContract(_ContractModel):
     content_type: Literal["video", "short", "live"]
     published_at: TimestampText | None
     published_at_precision: Literal["second", "date_only", "unknown"]
+    published_at_status: Literal[
+        "exact", "relative", "estimated", "unavailable", "unresolved"
+    ] | None = None
+    published_at_source: NonEmptyText | None = None
+
+    @model_validator(mode="after")
+    def validate_publication_evidence_pair(self) -> Self:
+        evidence_fields = {"published_at_status", "published_at_source"}
+        supplied = evidence_fields & self.model_fields_set
+        if supplied and supplied != evidence_fields:
+            raise ValueError(
+                "published_at_status and published_at_source must be supplied together"
+            )
+        if "published_at_status" in supplied and self.published_at_status is None:
+            raise ValueError("published_at_status cannot be null when supplied")
+        return self
 
 
 class _VideoDispositionEvidenceContract(_ContractModel):
@@ -560,7 +577,19 @@ class _VideoActivityContract(_ContractModel):
 class _VideoPayloadContract(_ContractModel):
     discovery: _VideoDiscoveryPhaseContract
     recent_sampling: _VideoRecentSamplingPhaseContract
+    activity_evidence: dict[str, JsonValue] | None = None
     activity: _VideoActivityContract | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_null_activity_evidence(cls, value: Any) -> Any:
+        if (
+            isinstance(value, Mapping)
+            and "activity_evidence" in value
+            and value["activity_evidence"] is None
+        ):
+            raise ValueError("activity_evidence must be an object when supplied")
+        return value
 
     @model_validator(mode="after")
     def validate_skipped_sampling(self) -> Self:

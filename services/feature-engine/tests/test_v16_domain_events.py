@@ -9,6 +9,7 @@ from feature_engine.events import (
     CrawlerObservationRecorded,
     EventValidationError,
     FailedDomainPayload,
+    VideoActivityEvidencePayload,
     VideoPayload,
     VideoDiscoveryPayload,
     VideoRecentSamplingPayload,
@@ -101,6 +102,51 @@ def video_payload(
             "outcome": recent_sampling_outcome,
             "payload": recent_sampling or recent_payload(partial=False),
         },
+    }
+
+
+def activity_payload() -> dict:
+    return {
+        "window_days": 90,
+        "recent_published_content_count": 1,
+        "lifecycle_status": "active",
+        "dormant_reason": None,
+        "dormant_since": None,
+        "dormant_recheck_day": None,
+        "dormant_cycle": 0,
+    }
+
+
+def activity_evidence_payload() -> dict:
+    return {
+        "recent_published_content_count": 1,
+        "uncertain_content_count": 0,
+        "classifier_version": "publication-time-evidence-v1",
+        "policy_version": "incremental-video-activity-v5",
+        "relation_counts": {
+            "inside": 1,
+            "outside": 2,
+            "after_as_of": 0,
+            "cutoff_overlap": 0,
+            "unresolved": 0,
+        },
+        "unresolved_by_status_counts": {
+            "relative": 0,
+            "estimated": 0,
+            "unavailable": 0,
+            "unresolved": 0,
+        },
+        "evidence_complete": True,
+        "evidence_scan_complete": True,
+        "evidence_scan_rows": 3,
+        "evidence_scan_page_count": 1,
+        "evidence_scan_elapsed_ms": 2.1614830009639263,
+        "evidence_scan_truncated_count": 0,
+        "evidence_scan_truncated_count_is_lower_bound": False,
+        "evidence_scan_stop_reason": "complete",
+        "evidence_scan_row_limit": 1000,
+        "evidence_scan_page_size": 200,
+        "evidence_scan_time_budget_ms": 500,
     }
 
 
@@ -215,6 +261,121 @@ class V16DomainEventTests(unittest.TestCase):
         self.assertIsInstance(parsed.payload.discovery, VideoDiscoveryPayload)
         self.assertIsInstance(parsed.payload.recent_sampling, VideoRecentSamplingPayload)
         self.assertEqual(parsed.payload.discovery.first_seen[0].video_id, "new-video")
+
+    def test_transparently_round_trips_incremental_activity_evidence(self) -> None:
+        payload = video_payload()
+        evidence = activity_evidence_payload()
+        evidence["future_extension"] = {
+            "enabled": False,
+            "values": [None, 0, 1.25, "保留原值", {"nested": []}],
+        }
+        payload["activity_evidence"] = evidence
+        payload["activity"] = activity_payload()
+        source = event("video", payload)
+
+        parsed = CrawlerObservationRecorded.from_mapping(source)
+
+        self.assertIsInstance(
+            parsed.payload.activity_evidence, VideoActivityEvidencePayload
+        )
+        self.assertEqual(parsed.payload.activity_evidence.as_facts(), evidence)
+        self.assertEqual(parsed.as_pending_payload()["payload"], payload)
+        self.assertEqual(
+            canonical_payload_hash(parsed.as_pending_payload()["payload"]),
+            source["payload_hash"],
+        )
+
+    def test_round_trips_current_first_seen_publication_evidence(self) -> None:
+        payload = video_payload()
+        first_seen = payload["discovery"]["payload"]["first_seen"][0]
+        first_seen.update(
+            {
+                "published_at_status": "exact",
+                "published_at_source": "youtubejs_player_microformat",
+            }
+        )
+        source = event("video", payload)
+
+        parsed = CrawlerObservationRecorded.from_mapping(source)
+
+        self.assertEqual(parsed.as_pending_payload()["payload"], payload)
+        self.assertEqual(
+            canonical_payload_hash(parsed.as_pending_payload()["payload"]),
+            source["payload_hash"],
+        )
+
+    def test_rejects_incomplete_first_seen_publication_evidence_pair(self) -> None:
+        payload = video_payload()
+        payload["discovery"]["payload"]["first_seen"][0][
+            "published_at_status"
+        ] = "exact"
+
+        with self.assertRaisesRegex(EventValidationError, "must be supplied together"):
+            CrawlerObservationRecorded.from_mapping(event("video", payload))
+
+    def test_activity_evidence_is_detached_from_the_input_mapping(self) -> None:
+        payload = video_payload()
+        payload["activity_evidence"] = {"nested": {"values": [1, 2]}}
+        source = event("video", payload)
+        parsed = CrawlerObservationRecorded.from_mapping(source)
+
+        source["payload"]["activity_evidence"]["nested"]["values"].append(3)
+
+        self.assertEqual(
+            parsed.payload.activity_evidence.as_facts(),
+            {"nested": {"values": [1, 2]}},
+        )
+
+    def test_accepts_inconclusive_and_legacy_activity_combinations(self) -> None:
+        inconclusive = video_payload()
+        inconclusive["activity_evidence"] = {"schema_added_later": {"complete": False}}
+        parsed_inconclusive = CrawlerObservationRecorded.from_mapping(
+            event("video", inconclusive)
+        )
+        legacy = video_payload()
+        legacy["activity"] = activity_payload()
+        parsed_legacy = CrawlerObservationRecorded.from_mapping(event("video", legacy))
+
+        self.assertIsNotNone(parsed_inconclusive.payload.activity_evidence)
+        self.assertIsNone(parsed_inconclusive.payload.activity)
+        self.assertIsNone(parsed_legacy.payload.activity_evidence)
+        self.assertIsNotNone(parsed_legacy.payload.activity)
+
+    def test_accepts_empty_or_internally_incomplete_activity_evidence(self) -> None:
+        for evidence in ({}, {"policy_version": "future-policy"}):
+            with self.subTest(evidence=evidence):
+                payload = video_payload()
+                payload["activity_evidence"] = evidence
+
+                parsed = CrawlerObservationRecorded.from_mapping(
+                    event("video", payload)
+                )
+
+                self.assertEqual(parsed.payload.activity_evidence.as_facts(), evidence)
+
+    def test_rejects_null_or_non_object_activity_evidence(self) -> None:
+        for evidence in (None, [], "invalid", 1, True):
+            with self.subTest(evidence=evidence):
+                payload = video_payload()
+                payload["activity_evidence"] = evidence
+                with self.assertRaisesRegex(EventValidationError, "activity_evidence"):
+                    CrawlerObservationRecorded.from_mapping(event("video", payload))
+
+    def test_rejects_non_finite_activity_evidence_numbers(self) -> None:
+        for number in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(number=number):
+                payload = video_payload()
+                payload["activity_evidence"] = {"elapsed_ms": number}
+                with self.assertRaises(EventValidationError):
+                    CrawlerObservationRecorded.from_mapping(event("video", payload))
+
+    def test_still_rejects_unknown_video_payload_fields(self) -> None:
+        payload = video_payload()
+        payload["activity_evidence"] = {"future_extension": True}
+        payload["unexpected_top_level"] = True
+
+        with self.assertRaisesRegex(EventValidationError, "unexpected_top_level"):
+            CrawlerObservationRecorded.from_mapping(event("video", payload))
 
     def test_accepts_incremental_video_disposition_ledger(self) -> None:
         discovery = discovery_payload()

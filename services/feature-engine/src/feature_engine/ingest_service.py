@@ -16,6 +16,28 @@ from .events import EventValidationError
 from .runtime_environment import optional_environment, required_environment
 
 
+def _stdout_json_log(value: Mapping[str, Any]) -> None:
+    print(json.dumps(dict(value), separators=(",", ":")), flush=True)
+
+
+def _activity_evidence_warning_codes(event: Mapping[str, Any]) -> tuple[str, ...]:
+    if event.get("observation_kind") != "video" or event.get("outcome") == "failed":
+        return ()
+    payload = event.get("payload")
+    if not isinstance(payload, Mapping) or "activity_evidence" in payload:
+        return ()
+    codes: list[str] = []
+    if "activity" in payload:
+        codes.append("activity_without_evidence")
+    recent_sampling = payload.get("recent_sampling")
+    sampling_outcome = (
+        recent_sampling.get("outcome") if isinstance(recent_sampling, Mapping) else None
+    )
+    if event.get("plan_id") is not None and sampling_outcome != "skipped":
+        codes.append("incremental_activity_evidence_missing")
+    return tuple(codes)
+
+
 @dataclass(frozen=True, slots=True)
 class IngestResponse:
     status: int
@@ -29,12 +51,36 @@ class FeatureIngestApplication:
         *,
         token: str | None,
         readiness: Callable[[], Mapping[str, Any]] | None = None,
+        warning_sink: Callable[[Mapping[str, Any]], None] | None = None,
         max_body_bytes: int = 65536,
     ) -> None:
         self._applier = applier
         self._token = str(token or "").strip() or None
         self._readiness = readiness
+        self._warning_sink = warning_sink or _stdout_json_log
         self.max_body_bytes = max(1024, min(int(max_body_bytes), 1048576))
+
+    def _emit_activity_evidence_warnings(
+        self, event: Mapping[str, Any], *, duplicate: bool
+    ) -> None:
+        if duplicate:
+            return
+        for warning_code in _activity_evidence_warning_codes(event):
+            record = {
+                "event": "feature_ingest_warning",
+                "warning_code": warning_code,
+                "event_id": event.get("event_id"),
+                "observation_id": event.get("observation_id"),
+                "channel_id": event.get("channel_id"),
+                "plan_id": event.get("plan_id"),
+                "kind_sequence": event.get("kind_sequence"),
+                "observed_at": event.get("observed_at"),
+                "crawler_version": event.get("crawler_version"),
+            }
+            try:
+                self._warning_sink(record)
+            except Exception:
+                pass
 
     def _authorized(self, headers: Mapping[str, str]) -> bool:
         if self._token is None:
@@ -114,6 +160,7 @@ class FeatureIngestApplication:
                 HTTPStatus.SERVICE_UNAVAILABLE,
                 {"ok": False, "error": "feature ingest temporarily failed"},
             )
+        self._emit_activity_evidence_warnings(event, duplicate=result.duplicate)
         payload = asdict(result)
         payload["drained_event_ids"] = list(result.drained_event_ids)
         return IngestResponse(
