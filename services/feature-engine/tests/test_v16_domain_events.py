@@ -285,6 +285,34 @@ class V16DomainEventTests(unittest.TestCase):
             source["payload_hash"],
         )
 
+    def test_round_trips_current_first_seen_publication_evidence(self) -> None:
+        payload = video_payload()
+        first_seen = payload["discovery"]["payload"]["first_seen"][0]
+        first_seen.update(
+            {
+                "published_at_status": "exact",
+                "published_at_source": "youtubejs_player_microformat",
+            }
+        )
+        source = event("video", payload)
+
+        parsed = CrawlerObservationRecorded.from_mapping(source)
+
+        self.assertEqual(parsed.as_pending_payload()["payload"], payload)
+        self.assertEqual(
+            canonical_payload_hash(parsed.as_pending_payload()["payload"]),
+            source["payload_hash"],
+        )
+
+    def test_rejects_incomplete_first_seen_publication_evidence_pair(self) -> None:
+        payload = video_payload()
+        payload["discovery"]["payload"]["first_seen"][0][
+            "published_at_status"
+        ] = "exact"
+
+        with self.assertRaisesRegex(EventValidationError, "must be supplied together"):
+            CrawlerObservationRecorded.from_mapping(event("video", payload))
+
     def test_activity_evidence_is_detached_from_the_input_mapping(self) -> None:
         payload = video_payload()
         payload["activity_evidence"] = {"nested": {"values": [1, 2]}}

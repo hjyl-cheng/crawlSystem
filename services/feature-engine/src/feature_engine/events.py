@@ -378,16 +378,27 @@ class FirstSeenVideo:
     content_type: str
     published_at: str | None
     published_at_precision: str
+    published_at_status: str | None = None
+    published_at_source: str | None = None
+    publication_evidence_present: bool = False
 
     @classmethod
     def from_mapping(cls, source: Mapping[str, Any], index: int) -> FirstSeenVideo:
-        _exact_keys(
+        _required_optional_keys(
             source,
-            frozenset(
+            required=frozenset(
                 {"video_id", "position", "content_type", "published_at", "published_at_precision"}
             ),
-            f"first_seen[{index}]",
+            optional=frozenset({"published_at_status", "published_at_source"}),
+            label=f"first_seen[{index}]",
         )
+        evidence_fields = {"published_at_status", "published_at_source"}
+        supplied_evidence = evidence_fields & set(source)
+        if supplied_evidence and supplied_evidence != evidence_fields:
+            raise EventValidationError(
+                "first_seen published_at_status and published_at_source "
+                "must be supplied together"
+            )
         content_type = _required_text(source["content_type"], f"first_seen[{index}].content_type")
         if content_type not in {"video", "short", "live"}:
             raise EventValidationError(f"invalid first_seen[{index}].content_type")
@@ -401,22 +412,54 @@ class FirstSeenVideo:
             published_at = _timestamp_text(published_at, f"first_seen[{index}].published_at")
         elif precision != "unknown":
             raise EventValidationError("missing first_seen published_at requires unknown precision")
+        published_at_status = None
+        published_at_source = None
+        if supplied_evidence:
+            published_at_status = _required_text(
+                source["published_at_status"],
+                f"first_seen[{index}].published_at_status",
+            )
+            if published_at_status not in {
+                "exact",
+                "relative",
+                "estimated",
+                "unavailable",
+                "unresolved",
+            }:
+                raise EventValidationError(
+                    f"invalid first_seen[{index}].published_at_status"
+                )
+            published_at_source = _optional_text(
+                source["published_at_source"],
+                f"first_seen[{index}].published_at_source",
+            )
         return cls(
             video_id=_required_text(source["video_id"], f"first_seen[{index}].video_id"),
             position=_integer(source["position"], f"first_seen[{index}].position", minimum=1),
             content_type=content_type,
             published_at=published_at,
             published_at_precision=precision,
+            published_at_status=published_at_status,
+            published_at_source=published_at_source,
+            publication_evidence_present=bool(supplied_evidence),
         )
 
     def as_facts(self) -> dict[str, Any]:
-        return {
+        facts = {
             "video_id": self.video_id,
             "position": self.position,
             "content_type": self.content_type,
             "published_at": self.published_at,
             "published_at_precision": self.published_at_precision,
         }
+        if self.publication_evidence_present:
+            facts.update(
+                {
+                    "published_at_status": self.published_at_status,
+                    "published_at_source": self.published_at_source,
+                }
+            )
+        return facts
 
 
 def _video_disposition_entries(value: Any, field: str) -> tuple[dict[str, Any], ...]:
