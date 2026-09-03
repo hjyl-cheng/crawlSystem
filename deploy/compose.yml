@@ -481,6 +481,8 @@ services:
       NODE_ENV: production
       WORKER_QUEUES: youtube-channel-incremental
       YOUTUBE_CHANNEL_INCREMENTAL_CONCURRENCY: 1
+      INCREMENTAL_VIDEO_EXECUTOR: ${INCREMENTAL_VIDEO_EXECUTOR:-legacy}
+      YOUTUBEJS_EXTRACTOR_MODE: ${YOUTUBEJS_EXTRACTOR_MODE:-channel}
       YTDLP_PERSISTENT_POOL_ENABLED: "true"
       PROXY_SLOT_ROLE: channel
       ROTA_IDENTITY_POLICY_ID: qy-br-channel-anonymous-v1

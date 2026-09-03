@@ -27,6 +27,11 @@ const TRUSTED_FINGERPRINT_SOURCES = new Set([
   "fingerprint_gateway",
 ]);
 
+const YOUTUBEJS_REQUIRED_SURFACES = new Set([
+  "comments",
+  "player",
+]);
+
 function normalizedStatus(value, text) {
   const numeric = Number(value);
   if (Number.isInteger(numeric) && numeric >= 100 && numeric <= 599) return numeric;
@@ -338,6 +343,12 @@ function decideYoutubeFailureBranch({
     || /\b(?:408|425)\b|timeout|timed out|abort|fetch failed|failed to extract any player response|no player response|network|socket|econn|eai_again|connection refused|connection reset|temporary failure in name resolution|name or service not known|dns|remote end closed/i.test(lower)
   ) {
     return decision("upstream_transient", { retryMode: "same_identity", status: httpStatus });
+  }
+  if (
+    errorName === "YoutubeJsRequiredSurfaceError"
+    && YOUTUBEJS_REQUIRED_SURFACES.has(String(error?.required_surface || "").toLowerCase())
+  ) {
+    return decision("parser_runtime", { retryMode: "default", status: httpStatus });
   }
   if (/ytinitialdata not found|parse|invalid json|unexpected token/i.test(lower)) {
     return decision("parser_runtime", { retryMode: "default", status: httpStatus });

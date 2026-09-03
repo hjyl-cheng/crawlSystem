@@ -1425,7 +1425,9 @@ export function normalizeYoutubeJsVideoInfo(info, comments = null, {
     length_text: duration == null
       ? null
       : `${Math.floor(duration / 60)}:${String(duration % 60).padStart(2, "0")}`,
+    view_count: viewCount,
     view_count_text: viewCount == null ? null : String(viewCount),
+    view_count_status: viewCount == null ? "unresolved" : "exact",
     view_count_source: viewCount == null ? null : "youtubejs_player",
     like_count: likeCount,
     like_count_source: likeCount == null ? null : "youtubejs_next",
@@ -1572,7 +1574,10 @@ export async function fetchYoutubeJsPlayerTypeDetail(videoId) {
   });
 }
 
-export async function fetchYoutubeJsVideoDetail(videoId, { signal = null } = {}) {
+export async function fetchYoutubeJsVideoDetail(videoId, {
+  signal = null,
+  strictRequiredSurfaces = false,
+} = {}) {
   if (!youtubeJsDetailEnabled()) throw new Error("YouTube.js detail extraction is disabled");
   const cleanVideoId = String(videoId ?? "").trim();
   if (!cleanVideoId) throw new Error("video_id is required");
@@ -1599,6 +1604,7 @@ export async function fetchYoutubeJsVideoDetail(videoId, { signal = null } = {})
     }
     let comments = null;
     let commentsError = null;
+    let commentsFailure = null;
     const hint = parseObservedYoutubeJsCount(
       info?.comments_entry_point_header?.comment_count,
       {
@@ -1622,14 +1628,30 @@ export async function fetchYoutubeJsVideoDetail(videoId, { signal = null } = {})
     } catch (error) {
       throwIfYoutubeJsOperationAborted();
       commentsError = String(error?.message || error);
+      commentsFailure = error;
     }
     throwIfYoutubeJsOperationAborted();
-    return {
+    const detail = {
       ...normalizeYoutubeJsVideoInfo(info, comments, { commentsError, contentTypeSignals }),
       youtubejs_duration_ms: Date.now() - startedAt,
       youtubejs_request_count: current.stats.requests - requestStart,
       youtubejs_comments_error: commentsError,
     };
+    const commentsRequired = !["members_only", "private", "unavailable"]
+      .includes(detail.access_status)
+      && detail.is_upcoming !== true
+      && detail.comments_disabled !== true;
+    if (strictRequiredSurfaces === true && commentsRequired && commentsFailure != null) {
+      const error = new Error(
+        `YouTube.js required comments surface failed for ${cleanVideoId}: ${commentsError}`,
+        { cause: commentsFailure },
+      );
+      error.name = "YoutubeJsRequiredSurfaceError";
+      error.required_surface = "comments";
+      error.partial_detail = detail;
+      throw error;
+    }
+    return detail;
   });
 }
 

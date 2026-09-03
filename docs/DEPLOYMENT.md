@@ -141,7 +141,52 @@ old and new consumers together against the shared Redis queues. Never run old
 and new Scheduler or Dispatch processes together against the same Feature
 Clock tables.
 
-### 9.1 Content Enrich Drain Cutover
+### 9.1 Incremental YouTubeJS Video Cutover
+
+The Incremental Worker defaults to the legacy Video executor. Publish the two
+checkpoint tables before changing that default. Set the expected minimum to a
+recently verified count of `crawler.channel_runs` rows whose `crawl_mode` is
+`incremental`, then run the guarded publisher from the immutable QYBullMQ
+image:
+
+```bash
+./scripts/compose.sh production run --rm --no-deps \
+  -e CONFIRM_INCREMENTAL_YOUTUBEJS_CHECKPOINT_SCHEMA_APPLY='<crawler-database>' \
+  -e EXPECTED_INCREMENTAL_RUN_MIN_COUNT='<verified-minimum>' \
+  worker-incremental \
+  node scripts/applyIncrementalYoutubeJsVideoCheckpointSchema.mjs --apply
+```
+
+Keep `INCREMENTAL_VIDEO_EXECUTOR=legacy` and
+`YOUTUBEJS_EXTRACTOR_MODE=channel` while publishing the Schema. Before the
+cutover, pause new Incremental intake, wait for every active legacy Incremental
+Job to drain, and stop every `worker-incremental` replica. Never let legacy and
+checkpoint executors consume `youtube-channel-incremental` together.
+
+For the single-Worker canary, change the ignored runtime environment to:
+
+```text
+INCREMENTAL_VIDEO_EXECUTOR=youtubejs_checkpoint_v1
+YOUTUBEJS_EXTRACTOR_MODE=full
+QY_INCREMENTAL_WORKER_REPLICAS=1
+```
+
+Start only `worker-incremental`, release a small controlled set of Incremental
+Jobs, and observe a complete Clock cycle. Promotion requires successful
+Observation, Cursor, First-Seen, Lifecycle, Feature ingest, Publication, and
+route-switch checkpoint recovery. Before rollback to legacy, require no
+unfinished checkpoint Batch:
+
+```sql
+SELECT count(*)
+FROM crawler.incremental_youtubejs_video_batches
+WHERE status <> 'finalized';
+```
+
+An unfinished Batch must be drained or repaired by the checkpoint executor; it
+must never be handed to the legacy executor.
+
+### 9.2 Content Enrich Drain Cutover
 
 Content Enrich ships with both safety controls closed: the Controller gate is
 `false`, and the database owner mode is `clock`. Apply the Crawler schema and

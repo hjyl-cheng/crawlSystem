@@ -12,6 +12,14 @@ services:
 
   worker-incremental:
     profiles: [automatic-work-disabled-during-canary]
+    depends_on: !override
+      crawler-pgbouncer:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    networks: !override [internal, qy_rota]
 
   worker-content-enrich:
     profiles: [content-enrich-canary]

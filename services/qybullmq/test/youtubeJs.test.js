@@ -689,7 +689,9 @@ test("normalizeYoutubeJsVideoInfo preserves second timestamps and exact engageme
   assert.equal(detail.published_at_precision, "second");
   assert.equal(detail.duration_seconds, 2111);
   assert.equal(detail.duration_source, "youtubejs_player");
+  assert.equal(detail.view_count, 12383);
   assert.equal(detail.view_count_text, "12383");
+  assert.equal(detail.view_count_status, "exact");
   assert.equal(detail.like_count, 1487);
   assert.equal(detail.comment_count, 87);
   assert.equal(detail.comments_disabled, false);

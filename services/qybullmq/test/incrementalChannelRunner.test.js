@@ -199,6 +199,8 @@ test("a deferred Video reservation cleanup keeps the Run successful and records 
       kind_sequence: null,
       duplicate: false,
       reservation_cleanup_deferred: true,
+      lifecycle_status: null,
+      dormant_recheck_day: null,
     },
   });
 });
@@ -234,7 +236,11 @@ test("a Video transition to dormant skips an Agent due in the same Plan", async 
     agentBacklog: {},
     withTransaction: async (action) => action({}),
     openChannel: async () => ({}),
-    video: async () => ({ outcome: "complete", lifecycle_status: "dormant" }),
+    video: async () => ({
+      outcome: "complete",
+      lifecycle_status: "dormant",
+      dormant_recheck_day: "2026-08-19",
+    }),
     agent: async () => { agentCalls += 1; return { queued: true }; },
   });
 
@@ -244,5 +250,198 @@ test("a Video transition to dormant skips an Agent due in the same Plan", async 
   assert.deepEqual(runStore.calls.slice(-2), [
     ["domain", "agent", "skipped"],
     ["finish", false],
+  ]);
+  const videoResult = runStore.domainResults.find(
+    (entry) => entry.domain === "video" && entry.status === "complete",
+  )?.result;
+  assert.equal(
+    videoResult?.lifecycle_status,
+    "dormant",
+  );
+  assert.equal(
+    videoResult?.dormant_recheck_day,
+    "2026-08-19",
+  );
+});
+
+test("an incomplete Video Partial without lifecycle still queues an Agent due in the same Plan", async () => {
+  const data = plan({ video: true, agent: true });
+  const runStore = storeFixture(data);
+  let agentCalls = 0;
+  let queryCalls = 0;
+  const runner = new IncrementalChannelRunner({
+    runStore,
+    agentBacklog: {},
+    query: async () => {
+      queryCalls += 1;
+      return { rows: [{ lifecycle_status: null }] };
+    },
+    withTransaction: async (action) => action({}),
+    openChannel: async () => ({}),
+    video: async () => ({
+      outcome: "partial",
+      observation_id: "8f413b50-f73c-43b1-b92f-e4d6f20154fd",
+      lifecycle_status: null,
+    }),
+    agent: async () => { agentCalls += 1; return { queued: true }; },
+  });
+
+  const result = await runner.execute(job(data));
+
+  assert.equal(queryCalls, 1);
+  assert.equal(agentCalls, 1);
+  assert.equal(result.status, "waiting_agent");
+  assert.deepEqual(result.executed_domains, ["video", "agent"]);
+  assert.deepEqual(runStore.calls, [
+    ["domain", "video", "running"],
+    ["domain", "video", "partial"],
+    ["domain", "agent", "queued"],
+    ["finish", true],
+  ]);
+});
+
+test("a resumed Run restores dormant lifecycle from the completed Video Domain", async () => {
+  const data = plan({ video: true, agent: true });
+  const runStore = storeFixture(data);
+  runStore.claim = async () => ({
+    created: false,
+    resumed: true,
+    terminal: false,
+    run: {
+      run_id: `incremental:${data.plan_id}`,
+      status: "running",
+      result_json: {
+        domains: {
+          about: { status: "not_due" },
+          video: {
+            status: "complete",
+            observation_id: "8f413b50-f73c-43b1-b92f-e4d6f20154fd",
+            lifecycle_status: "dormant",
+            dormant_recheck_day: "2026-08-19",
+          },
+          agent: { status: "pending" },
+        },
+      },
+    },
+  });
+  let videoCalls = 0;
+  let agentCalls = 0;
+  let queryCalls = 0;
+  const runner = new IncrementalChannelRunner({
+    runStore,
+    agentBacklog: {},
+    query: async () => { queryCalls += 1; return { rows: [] }; },
+    withTransaction: async (action) => action({}),
+    video: async () => { videoCalls += 1; return { outcome: "complete" }; },
+    agent: async () => { agentCalls += 1; return { queued: true }; },
+  });
+
+  const result = await runner.execute(job(data));
+
+  assert.equal(videoCalls, 0);
+  assert.equal(agentCalls, 0);
+  assert.equal(queryCalls, 0);
+  assert.equal(result.status, "done");
+  assert.deepEqual(result.executed_domains, ["agent"]);
+  assert.deepEqual(runStore.calls, [
+    ["domain", "agent", "skipped"],
+    ["finish", false],
+  ]);
+});
+
+test("a historical resumed Run restores dormant lifecycle from its Video Observation", async () => {
+  const data = plan({ video: true, agent: true });
+  const observationId = "8f413b50-f73c-43b1-b92f-e4d6f20154fd";
+  const runStore = storeFixture(data);
+  runStore.claim = async () => ({
+    created: false,
+    resumed: true,
+    terminal: false,
+    run: {
+      run_id: `incremental:${data.plan_id}`,
+      status: "running",
+      result_json: {
+        domains: {
+          about: { status: "not_due" },
+          video: { status: "complete", observation_id: observationId },
+          agent: { status: "pending" },
+        },
+      },
+    },
+  });
+  let videoCalls = 0;
+  let agentCalls = 0;
+  const queries = [];
+  const runner = new IncrementalChannelRunner({
+    runStore,
+    agentBacklog: {},
+    query: async (sql, params) => {
+      queries.push({ sql, params });
+      return { rows: [{ lifecycle_status: "dormant" }] };
+    },
+    withTransaction: async (action) => action({}),
+    video: async () => { videoCalls += 1; return { outcome: "complete" }; },
+    agent: async () => { agentCalls += 1; return { queued: true }; },
+  });
+
+  const result = await runner.execute(job(data));
+
+  assert.equal(videoCalls, 0);
+  assert.equal(agentCalls, 0);
+  assert.equal(queries.length, 1);
+  assert.deepEqual(queries[0].params, [`incremental:${data.plan_id}`, observationId]);
+  assert.match(queries[0].sql, /result_summary_json/);
+  assert.equal(result.status, "done");
+  assert.deepEqual(runStore.calls, [
+    ["domain", "agent", "skipped"],
+    ["finish", false],
+  ]);
+});
+
+test("a resumed Video Partial without lifecycle continues its pending Agent", async () => {
+  const data = plan({ video: true, agent: true });
+  const observationId = "8f413b50-f73c-43b1-b92f-e4d6f20154fd";
+  const runStore = storeFixture(data);
+  runStore.claim = async () => ({
+    created: false,
+    resumed: true,
+    terminal: false,
+    run: {
+      run_id: `incremental:${data.plan_id}`,
+      status: "running",
+      result_json: {
+        domains: {
+          about: { status: "not_due" },
+          video: {
+            status: "partial",
+            outcome: "partial",
+            observation_id: observationId,
+            lifecycle_status: null,
+          },
+          agent: { status: "pending" },
+        },
+      },
+    },
+  });
+  let videoCalls = 0;
+  let agentCalls = 0;
+  const runner = new IncrementalChannelRunner({
+    runStore,
+    agentBacklog: {},
+    query: async () => ({ rows: [{ lifecycle_status: null }] }),
+    withTransaction: async (action) => action({}),
+    video: async () => { videoCalls += 1; return { outcome: "complete" }; },
+    agent: async () => { agentCalls += 1; return { queued: true }; },
+  });
+
+  const result = await runner.execute(job(data));
+
+  assert.equal(videoCalls, 0);
+  assert.equal(agentCalls, 1);
+  assert.equal(result.status, "waiting_agent");
+  assert.deepEqual(result.executed_domains, ["agent"]);
+  assert.deepEqual(runStore.calls, [
+    ["domain", "agent", "queued"],
+    ["finish", true],
   ]);
 });
