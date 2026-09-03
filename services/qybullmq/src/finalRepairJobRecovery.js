@@ -50,6 +50,10 @@ function sameIdentitySet(actual, expected) {
     && JSON.stringify(actualSet) === JSON.stringify(expectedSet);
 }
 
+function completedWithoutExecutingBusinessWork(job) {
+  return job?.returnvalue?.reason === "content_detail_execution_fence_stale";
+}
+
 function assertSameRepairIntent(job, { name, data, jobId }) {
   if (String(job?.id ?? "") !== jobId || String(job?.name ?? "") !== name) {
     throw new Error(`Final Repair Job identity conflicts with ${jobId}`);
@@ -86,6 +90,7 @@ export async function ensureFinalRepairJob(queue, {
   data,
   options,
   beforeDispatch = null,
+  isBusinessComplete = null,
 } = {}) {
   if (!queue || typeof queue.getJob !== "function" || typeof queue.add !== "function") {
     throw new TypeError("a BullMQ queue is required");
@@ -95,18 +100,28 @@ export async function ensureFinalRepairJob(queue, {
   if (beforeDispatch !== null && typeof beforeDispatch !== "function") {
     throw new TypeError("beforeDispatch must be a function when provided");
   }
+  if (isBusinessComplete !== null && typeof isBusinessComplete !== "function") {
+    throw new TypeError("isBusinessComplete must be a function when provided");
+  }
   const existing = await queue.getJob(jobId);
   if (!existing) {
-    if (beforeDispatch) await beforeDispatch({ action: "enqueue", job: null });
-    const job = await queue.add(normalizedName, data, options);
+    const prepared = beforeDispatch
+      ? await beforeDispatch({ action: "enqueue", job: null })
+      : null;
+    const jobData = { ...data, ...(prepared?.data ?? {}) };
+    const job = await queue.add(normalizedName, jobData, options);
     return { action: "enqueued", job, attempts_made: Number(job?.attemptsMade ?? 0) };
   }
 
   assertSameRepairIntent(existing, { name: normalizedName, data, jobId });
   const state = await existing.getState();
-  if (state === "failed") {
+  const incompleteCompletion = state === "completed"
+    && isBusinessComplete !== null
+    && completedWithoutExecutingBusinessWork(existing)
+    && !(await isBusinessComplete({ job: existing, state }));
+  if (state === "failed" || incompleteCompletion) {
     if (typeof existing.retry !== "function") {
-      throw new TypeError(`failed Final Repair Job ${jobId} cannot be retried`);
+      throw new TypeError(`${state} Final Repair Job ${jobId} cannot be retried`);
     }
     const attemptsMade = nonNegativeInteger(existing.attemptsMade ?? 0, "attemptsMade");
     const attemptsStarted = nonNegativeInteger(
@@ -129,20 +144,29 @@ export async function ensureFinalRepairJob(queue, {
           attempts_made: attemptsMade,
         };
       }
-    } else {
+    }
+    const action = incompleteCompletion ? "retry_incomplete" : "retry_failed";
+    const prepared = beforeDispatch
+      ? await beforeDispatch({ action, job: existing })
+      : null;
+    if (recoveryMarker == null || Object.keys(prepared?.data ?? {}).length > 0) {
       if (typeof existing.updateData !== "function") {
-        throw new TypeError(`failed Final Repair Job ${jobId} cannot persist recovery state`);
+        throw new TypeError(`${state} Final Repair Job ${jobId} cannot persist recovery state`);
       }
       const nextData = {
         ...(existing.data ?? {}),
+        ...(prepared?.data ?? {}),
         [CONTROLLER_RETRY_ATTEMPTS_STARTED_FIELD]: attemptsStarted,
       };
       await existing.updateData(nextData);
       existing.data = nextData;
     }
-    if (beforeDispatch) await beforeDispatch({ action: "retry_failed", job: existing });
-    await existing.retry("failed");
-    return { action: "retried_failed", job: existing, attempts_made: attemptsMade };
+    await existing.retry(state);
+    return {
+      action: incompleteCompletion ? "retried_incomplete" : "retried_failed",
+      job: existing,
+      attempts_made: attemptsMade,
+    };
   }
   if (REPRESENTED_STATES.has(state)) {
     return {

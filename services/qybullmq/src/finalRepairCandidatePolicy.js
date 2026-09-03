@@ -88,3 +88,22 @@ export function preparedFinalDetailRepairSql(candidateAlias = "", runAlias = "")
           )::text
   )`;
 }
+
+export function recoverablePreparedFinalDetailRepairSql(candidateAlias = "", runAlias = "") {
+  const candidate = normalizedAlias(candidateAlias);
+  const run = normalizedAlias(runAlias);
+  if (!candidate || !run) {
+    throw new TypeError("candidate and Run SQL aliases are required");
+  }
+  return `(
+    ${candidate}result_json#>>'{final_repair_dispatch,mode}'='detail'
+    AND ${candidate}result_json#>>'{final_repair_dispatch,status}'='prepared'
+    AND ${candidate}result_json#>>'{final_repair_dispatch,repair_round}'
+          =COALESCE((${run}result_json#>>'{final_repair,rounds}')::int,0)::text
+    AND (
+      ${run}detail_status<>'done'
+      OR ${candidate}detail_status IN ('queued','running','failed')
+      OR ${candidate}api_status='failed'
+    )
+  )`;
+}

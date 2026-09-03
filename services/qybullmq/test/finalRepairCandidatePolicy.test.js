@@ -4,6 +4,7 @@ import {
   finalRepairCandidateDecision,
   finalRepairCandidateSql,
   preparedFinalDetailRepairSql,
+  recoverablePreparedFinalDetailRepairSql,
 } from "../src/finalRepairCandidatePolicy.js";
 
 function candidate({
@@ -112,4 +113,15 @@ test("prepared Detail Repair SQL is scoped to the same pending repair round", ()
     () => preparedFinalDetailRepairSql("cc", "r; DELETE"),
     /SQL alias/,
   );
+});
+
+test("recoverable Detail Repair SQL reuses the already recorded repair round", () => {
+  const sql = recoverablePreparedFinalDetailRepairSql("cc", "r");
+  assert.match(sql, /final_repair_dispatch,mode.*='detail'/s);
+  assert.match(sql, /final_repair_dispatch,status.*='prepared'/s);
+  assert.match(sql, /final_repair_dispatch,repair_round/s);
+  assert.match(sql, /=COALESCE\(\(r\.result_json#>>'\{final_repair,rounds\}'\)::int,0\)::text/);
+  assert.match(sql, /r\.detail_status<>'done'/);
+  assert.match(sql, /cc\.detail_status IN \('queued','running','failed'\)/);
+  assert.doesNotMatch(sql, /\+1/);
 });

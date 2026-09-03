@@ -20,8 +20,9 @@ if (transportCancellation) {
 }
 const existingContent = scenario === "existing_private";
 const dataApiReplay = scenario === "data_api_replay";
+const dataApiCommentMerge = scenario === "data_api_comment_count_preserves_page";
 const dataApiLive = ["data_api_live", "data_api_stale_before_request"].includes(scenario);
-const dataApiScenario = dataApiReplay || dataApiLive;
+const dataApiScenario = dataApiReplay || dataApiCommentMerge || dataApiLive;
 const dispositionWriteRetry = scenario === "disposition_write_retry";
 const flatLiveInProgress = scenario === "live_in_progress_flat";
 const candidateRetryPublicationConflict = scenario === "candidate_retry_publication_conflict";
@@ -47,22 +48,30 @@ globalThis.__pipelineV2DispositionState = {
     thumbnail_url: null,
     content_type: flatLiveInProgress || dataApiLive
       ? "live"
-      : existingContent || dataApiReplay ? "video" : null,
+      : existingContent || dataApiReplay || dataApiCommentMerge ? "video" : null,
     type_status: existingContent || dataApiScenario || flatLiveInProgress ? "resolved" : "unresolved",
     type_source: flatLiveInProgress || dataApiLive
       ? "youtube_uploads_live_flag"
-      : existingContent || dataApiReplay ? "youtube_watch_canonical" : null,
+      : existingContent || dataApiReplay || dataApiCommentMerge
+        ? "youtube_watch_canonical"
+        : null,
     detail_status: scenario === "undisposed_terminal"
       ? "done"
       : candidateRetryPublicationConflict ? "failed"
       : dataApiScenario ? "api_pending" : "queued",
     api_status: dataApiScenario ? "queued" : "not_needed",
-    missing_fields: dataApiLive ? ["comment_count"] : dataApiReplay ? ["access_status"] : [],
+    missing_fields: dataApiLive || dataApiCommentMerge
+      ? ["comment_count"]
+      : dataApiReplay ? ["access_status"] : [],
     attempts: candidateRetryPublicationConflict ? 1 : 0,
     content_key: dataApiLive
       ? "UCsharedDisposition:live:public-without-type"
-      : existingContent ? "UCsharedDisposition:video:public-without-type" : null,
-    disposition: dataApiLive ? "stored" : dataApiReplay ? "deferred" : null,
+      : existingContent || dataApiCommentMerge
+        ? "UCsharedDisposition:video:public-without-type"
+        : null,
+    disposition: dataApiLive || dataApiCommentMerge
+      ? "stored"
+      : dataApiReplay ? "deferred" : null,
     next_attempt_at: dataApiReplay ? deferredDisposition.next_attempt_at : null,
     result_json: {
       flat: {
@@ -148,11 +157,28 @@ globalThis.__pipelineV2DispositionState = {
               view_count: 100,
               view_count_text: "100",
               like_count: 3,
-              comment_count: dataApiLive ? null : 0,
+              comment_count: dataApiLive || dataApiCommentMerge ? null : 0,
               comments_disabled: dataApiLive ? null : false,
+              ...(dataApiCommentMerge
+                ? {
+                    comments_first_page: {
+                      version: 1,
+                      collected_at: "2026-08-31T09:27:20.437Z",
+                      sort: "TOP_COMMENTS",
+                      total_count: null,
+                      returned_count: 1,
+                      comments: [{
+                        comment_id: "existing-comment-page",
+                        text: "Already collected",
+                      }],
+                    },
+                    comments_first_page_status: "collected",
+                    comments_first_page_source: "yt_dlp_top_comments",
+                  }
+                : {}),
               is_live: dataApiLive,
               live_status: dataApiLive ? "is_live" : "not_live",
-              access_status: "unknown",
+              access_status: dataApiCommentMerge ? "public" : "unknown",
               content_type_signals: {
                 source: "yt_dlp_player",
                 canonical_url: "https://www.youtube.com/watch?v=public-without-type",
@@ -168,8 +194,10 @@ globalThis.__pipelineV2DispositionState = {
               canonical_url: "https://www.youtube.com/watch?v=public-without-type",
               authoritative: true,
             },
-            access: { access_status: "unknown", access_status_source: null },
-            disposition: dataApiLive
+            access: dataApiCommentMerge
+              ? { access_status: "public", access_status_source: "yt_dlp_availability" }
+              : { access_status: "unknown", access_status_source: null },
+            disposition: dataApiLive || dataApiCommentMerge
               ? {
                   ...deferredDisposition,
                   kind: "stored",
@@ -188,18 +216,24 @@ globalThis.__pipelineV2DispositionState = {
     crawl_started_at: "2026-07-20T00:00:00.000Z",
     known_content_key: dataApiLive
       ? "UCsharedDisposition:live:public-without-type"
-      : existingContent ? "UCsharedDisposition:video:public-without-type" : null,
-    known_content_type: dataApiLive ? "live" : existingContent ? "video" : null,
+      : existingContent || dataApiCommentMerge
+        ? "UCsharedDisposition:video:public-without-type"
+        : null,
+    known_content_type: dataApiLive
+      ? "live"
+      : existingContent || dataApiCommentMerge ? "video" : null,
     known_content_type_source: dataApiLive
       ? "youtube_watch_live_content"
-      : existingContent ? "youtube_watch_canonical" : null,
+      : existingContent || dataApiCommentMerge ? "youtube_watch_canonical" : null,
   },
   tasks: dataApiScenario
     ? [{
         task_id: 91,
         source_content_id: "public-without-type",
         candidate_ids: [501],
-        missing_fields: dataApiLive ? ["comment_count"] : ["access_status"],
+        missing_fields: dataApiLive || dataApiCommentMerge
+          ? ["comment_count"]
+          : ["access_status"],
         result_json: {
           privacy_status: "public",
           ...(dataApiLive
@@ -288,11 +322,15 @@ if (dispositionWriteRetry) {
   try {
     const operation = () => (dataApiScenario
       ? processDataApiBatchV2({
-        id: dataApiReplay ? "batch:stored-evidence" : "batch:live-api",
+        id: dataApiReplay
+          ? "batch:stored-evidence"
+          : dataApiCommentMerge ? "batch:comment-count" : "batch:live-api",
         name: "youtube-data-api-batch",
         attemptsStarted: 1,
         data: {
-          batch_id: dataApiReplay ? "batch:stored-evidence" : "batch:live-api",
+          batch_id: dataApiReplay
+            ? "batch:stored-evidence"
+            : dataApiCommentMerge ? "batch:comment-count" : "batch:live-api",
           task_ids: [91],
           video_ids: ["public-without-type"],
           ...(dataApiReplay

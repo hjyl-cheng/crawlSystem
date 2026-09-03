@@ -20,6 +20,17 @@ test("the Controller merges Publication Gap repair candidates into bounded final
   assert.match(source, /publicationOpen/);
 });
 
+test("the Controller recovers an unexecuted Detail Repair without consuming another round", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const source = await readFile(new URL("../src/controller.js", import.meta.url), "utf8");
+  assert.match(source, /recoverablePreparedFinalDetailRepairSql/);
+  assert.match(source, /recoverable_prepared_detail_candidates/);
+  assert.match(source, /FinalRepairExecutionRecovery/);
+  assert.match(source, /prepareDetailDispatch/);
+  assert.match(source, /isBusinessComplete/);
+  assert.match(source, /recoveringRecordedDetailRound/);
+});
+
 test("the Controller gives an exhausted Business Run a bounded checkpoint child", async () => {
   const { readFile } = await import("node:fs/promises");
   const source = await readFile(new URL("../src/controller.js", import.meta.url), "utf8");

@@ -212,15 +212,21 @@ import {
   normalizeVideoTextMetadata,
 } from "./videoMetadata.js";
 
-const COMMENT_DETAIL_FIELDS = [
+const COMMENT_COUNT_DETAIL_FIELDS = [
   "comment_count",
   "comment_count_status",
   "comment_count_source",
   "comments_disabled",
   "comments_status_source",
+];
+const COMMENT_PAGE_DETAIL_FIELDS = [
   "comments_first_page",
   "comments_first_page_status",
   "comments_first_page_source",
+];
+const COMMENT_DETAIL_FIELDS = [
+  ...COMMENT_COUNT_DETAIL_FIELDS,
+  ...COMMENT_PAGE_DETAIL_FIELDS,
 ];
 const ACCESS_DETAIL_FIELDS = [
   "access_status",
@@ -366,6 +372,52 @@ function applyMigrationCommentObservation(output, observation) {
   }
 }
 
+function migrationCommentCountEvidenceRank(observation) {
+  if ((observation.count ?? 0) > 0) return 3;
+  if (observation.disabled) return 2;
+  if (observation.count != null || observation.detail?.comments_disabled === false) return 1;
+  return 0;
+}
+
+function migrationCommentPageEvidenceRank(observation) {
+  if (observation.returnedCount > 0) return 3;
+  if ((observation.totalCount ?? 0) > 0) return 2;
+  if (COMMENT_PAGE_DETAIL_FIELDS.some((field) => (
+    Object.prototype.hasOwnProperty.call(observation.detail, field)
+  ))) return 1;
+  return 0;
+}
+
+function selectMigrationCommentEvidence(previous, next, evidenceRank) {
+  if (next.rank !== previous.rank) return next.rank > previous.rank ? next : previous;
+  return evidenceRank(next) >= evidenceRank(previous) ? next : previous;
+}
+
+function mergeMigrationCommentObservations(previous, next) {
+  const countObservation = selectMigrationCommentEvidence(
+    previous,
+    next,
+    migrationCommentCountEvidenceRank,
+  );
+  const pageObservation = selectMigrationCommentEvidence(
+    previous,
+    next,
+    migrationCommentPageEvidenceRank,
+  );
+  const detail = {};
+  for (const [observation, fields] of [
+    [countObservation, COMMENT_COUNT_DETAIL_FIELDS],
+    [pageObservation, COMMENT_PAGE_DETAIL_FIELDS],
+  ]) {
+    for (const field of fields) {
+      if (Object.prototype.hasOwnProperty.call(observation.detail, field)) {
+        detail[field] = observation.detail[field];
+      }
+    }
+  }
+  return migrationCommentObservation(detail);
+}
+
 function applyMigrationAccessObservation(output, detail) {
   for (const field of ACCESS_DETAIL_FIELDS) {
     if (Object.prototype.hasOwnProperty.call(detail, field)) {
@@ -457,9 +509,7 @@ function mergeDetail(base, patch) {
 
   const previousComment = migrationCommentObservation(previous);
   const nextComment = migrationCommentObservation(next);
-  const selectedComment = nextComment.rank >= previousComment.rank
-    ? nextComment
-    : previousComment;
+  const selectedComment = mergeMigrationCommentObservations(previousComment, nextComment);
   if (selectedComment.rank > 0) {
     applyMigrationCommentObservation(output, selectedComment);
   }

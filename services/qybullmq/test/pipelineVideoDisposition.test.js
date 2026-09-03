@@ -335,6 +335,24 @@ test("Data API replay resolves a deferred candidate without losing its prior evi
   );
 });
 
+test("Data API comment totals do not erase an already collected first comment page", () => {
+  const observed = runScenario("data_api_comment_count_preserves_page");
+  const detail = observed.candidate.result_json.detail;
+
+  assert.equal(observed.error, null);
+  assert.equal(observed.value.task_outcomes.done, 1);
+  assert.equal(observed.value.task_outcomes.unavailable, 0);
+  assert.equal(observed.candidate.api_status, "done");
+  assert.deepEqual(observed.candidate.missing_fields, []);
+  assert.equal(detail.comment_count, 1);
+  assert.equal(detail.comment_count_status, "exact");
+  assert.equal(detail.comments_first_page.returned_count, 1);
+  assert.equal(
+    detail.comments_first_page.comments[0].comment_id,
+    "existing-comment-page",
+  );
+});
+
 test("Data API videos.list excludes a running Live instead of repairing comment fields", () => {
   const observed = runScenario("data_api_live");
   assert.equal(observed.error, null);

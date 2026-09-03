@@ -50,7 +50,11 @@ export async function query(sqlValue, params = []) {
   if (sql.includes("setting_key = 'youtube_api'")) {
     return result([{ value_json: {
       fallback_mode: "disabled",
-      api_keys: ["data_api_live", "data_api_stale_before_request"].includes(state().scenario)
+      api_keys: [
+        "data_api_live",
+        "data_api_stale_before_request",
+        "data_api_comment_count_preserves_page",
+      ].includes(state().scenario)
         ? ["test-key"]
         : [],
     } }]);
@@ -420,30 +424,47 @@ export async function fetchChannelDataApiDetails() { return null; }
 export async function fetchChannelUploads() { return null; }
 export async function fetchVideoDataApiDetails(videoIds) {
   state().youtubeRequestAttempts += 1;
-  if (state().scenario !== "data_api_live") return null;
+  const commentCountOnly = state().scenario === "data_api_comment_count_preserves_page";
+  if (state().scenario !== "data_api_live" && !commentCountOnly) return null;
   const detail = {
     id: videoIds[0],
-    title: "Running Live",
-    description: "Live now",
+    title: commentCountOnly ? "Video with a collected comment" : "Running Live",
+    description: commentCountOnly ? "Complete video detail" : "Live now",
     description_status: "exact",
+    description_source: "youtube_data_api_snippet",
     published_at: "2026-07-19T00:00:00.000Z",
     published_at_precision: "second",
+    published_at_status: "exact",
+    published_at_source: "youtube_data_api_snippet",
     view_count: 100,
     view_count_text: "100",
+    view_count_source: "youtube_data_api_statistics",
     like_count: 3,
-    comment_count: null,
-    comments_disabled: null,
+    like_count_source: "youtube_data_api_statistics",
+    comment_count: commentCountOnly ? 1 : null,
+    comments_disabled: commentCountOnly ? false : null,
+    comment_count_status: commentCountOnly ? "exact" : "unresolved",
+    comment_count_source: "youtube_data_api_statistics",
+    comments_status_source: "youtube_data_api_statistics",
     privacy_status: "public",
     access_status: "public",
-    is_live: true,
-    live_status: "is_live",
-    content_type_signals: {
-      source: "youtube_data_api_videos_list",
-      canonical_url: `https://www.youtube.com/watch?v=${videoIds[0]}`,
-      is_live_content: true,
-      is_live: true,
-      is_live_now: true,
-    },
+    duration_seconds: 90,
+    duration_source: "youtube_data_api_content_details",
+    is_live: !commentCountOnly,
+    live_status: commentCountOnly ? "not_live" : "is_live",
+    extractor_version: "data-api-v1",
+    source: "youtube_data_api_videos_list",
+    ...(commentCountOnly
+      ? {}
+      : {
+          content_type_signals: {
+            source: "youtube_data_api_videos_list",
+            canonical_url: `https://www.youtube.com/watch?v=${videoIds[0]}`,
+            is_live_content: true,
+            is_live: true,
+            is_live_now: true,
+          },
+        }),
   };
   return {
     detailsById: new Map([[videoIds[0], detail]]),
