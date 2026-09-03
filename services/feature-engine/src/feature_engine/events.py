@@ -6,6 +6,7 @@ from hashlib import sha256
 import json
 import math
 import re
+from types import MappingProxyType
 from typing import Any, Mapping, TypeAlias
 from uuid import UUID
 
@@ -232,6 +233,34 @@ def canonical_json(value: Any) -> str:
 def canonical_payload_hash(value: Mapping[str, Any]) -> str:
     body = canonical_json(value)
     return f"sha256:{sha256(body.encode('utf-8')).hexdigest()}"
+
+
+def _freeze_json(value: Any, field: str) -> Any:
+    if value is None or isinstance(value, (bool, str)):
+        return value
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if not math.isfinite(float(value)):
+            raise EventValidationError(f"{field} numbers must be finite")
+        return value
+    if isinstance(value, list):
+        return tuple(_freeze_json(item, f"{field}[]") for item in value)
+    if isinstance(value, Mapping):
+        if not all(isinstance(key, str) for key in value):
+            raise EventValidationError(f"{field} object keys must be strings")
+        return MappingProxyType(
+            {key: _freeze_json(item, f"{field}.{key}") for key, item in value.items()}
+        )
+    raise EventValidationError(
+        f"{field} contains unsupported value type: {type(value).__name__}"
+    )
+
+
+def _thaw_json(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {key: _thaw_json(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_thaw_json(item) for item in value]
+    return value
 
 
 def _metric(value: Any, status: Any, field: str) -> tuple[int | None, str]:
@@ -1289,11 +1318,30 @@ class VideoActivityPayload:
 
 
 @dataclass(frozen=True, slots=True)
+class VideoActivityEvidencePayload:
+    raw: Mapping[str, Any]
+
+    @classmethod
+    def from_mapping(
+        cls, source: Mapping[str, Any]
+    ) -> VideoActivityEvidencePayload:
+        if not isinstance(source, Mapping):
+            raise EventValidationError("Video activity_evidence must be an object")
+        frozen = _freeze_json(source, "activity_evidence")
+        assert isinstance(frozen, Mapping)
+        return cls(raw=frozen)
+
+    def as_facts(self) -> dict[str, Any]:
+        return _thaw_json(self.raw)
+
+
+@dataclass(frozen=True, slots=True)
 class VideoPayload:
     discovery_outcome: str
     discovery: VideoDiscoveryPayload
     recent_sampling_outcome: str
     recent_sampling: VideoRecentSamplingPayload | VideoRecentSamplingSkippedPayload
+    activity_evidence: VideoActivityEvidencePayload | None = None
     activity: VideoActivityPayload | None = None
 
     @classmethod
@@ -1301,7 +1349,7 @@ class VideoPayload:
         _required_optional_keys(
             source,
             required=frozenset({"discovery", "recent_sampling"}),
-            optional=frozenset({"activity"}),
+            optional=frozenset({"activity_evidence", "activity"}),
             label="Video payload",
         )
         raw_discovery = source["discovery"]
@@ -1341,6 +1389,19 @@ class VideoPayload:
                 sampling_payload, outcome=sampling_outcome
             )
         )
+        activity_evidence_present = "activity_evidence" in source
+        raw_activity_evidence = source.get("activity_evidence")
+        if activity_evidence_present and raw_activity_evidence is None:
+            raise EventValidationError(
+                "Video activity_evidence must be an object when supplied"
+            )
+        if activity_evidence_present and not isinstance(raw_activity_evidence, Mapping):
+            raise EventValidationError("Video activity_evidence must be an object")
+        activity_evidence = (
+            VideoActivityEvidencePayload.from_mapping(raw_activity_evidence)
+            if activity_evidence_present and isinstance(raw_activity_evidence, Mapping)
+            else None
+        )
         raw_activity = source.get("activity")
         if raw_activity is not None and not isinstance(raw_activity, Mapping):
             raise EventValidationError("Video activity must be an object")
@@ -1361,6 +1422,7 @@ class VideoPayload:
             discovery=discovery,
             recent_sampling_outcome=sampling_outcome,
             recent_sampling=recent_sampling,
+            activity_evidence=activity_evidence,
             activity=activity,
         )
 
@@ -1375,6 +1437,8 @@ class VideoPayload:
                 "payload": self.recent_sampling.as_facts(),
             },
         }
+        if self.activity_evidence is not None:
+            facts["activity_evidence"] = self.activity_evidence.as_facts()
         if self.activity is not None:
             facts["activity"] = self.activity.as_facts()
         return facts

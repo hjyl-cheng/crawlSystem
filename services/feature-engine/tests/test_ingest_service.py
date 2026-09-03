@@ -36,6 +36,31 @@ def event() -> dict:
     }
 
 
+def video_event(
+    *,
+    activity: bool = False,
+    evidence: bool = False,
+    incremental: bool = True,
+    sampling_outcome: str = "complete",
+) -> dict:
+    value = event()
+    value.update(
+        {
+            "plan_id": str(uuid4()) if incremental else None,
+            "observation_kind": "video",
+            "payload": {
+                "discovery": {"outcome": "complete", "payload": {}},
+                "recent_sampling": {"outcome": sampling_outcome, "payload": {}},
+            },
+        }
+    )
+    if activity:
+        value["payload"]["activity"] = {"lifecycle_status": "active"}
+    if evidence:
+        value["payload"]["activity_evidence"] = {"future_field": True}
+    return value
+
+
 class StubApplier:
     def __init__(self, result=None, error=None) -> None:
         self.result = result
@@ -125,6 +150,118 @@ class FeatureIngestApplicationTests(unittest.TestCase):
         ready = app.handle(method="GET", path="/readyz")
         self.assertEqual(health.status, 200)
         self.assertEqual(ready.body["database"], "feature_clock_test")
+
+    def test_warns_when_incremental_activity_evidence_is_missing(self) -> None:
+        value = video_event(activity=True)
+        warnings: list[dict] = []
+        result = ApplyObservationResult(
+            event_id=value["event_id"],
+            observation_id=value["observation_id"],
+            status="applied",
+            duplicate=False,
+            last_applied_sequence=1,
+        )
+        app = FeatureIngestApplication(
+            StubApplier(result=result), token="secret", warning_sink=warnings.append
+        )
+
+        response = self.request(app, value)
+
+        self.assertEqual(response.status, 200)
+        self.assertEqual(
+            {warning["warning_code"] for warning in warnings},
+            {"activity_without_evidence", "incremental_activity_evidence_missing"},
+        )
+        self.assertTrue(
+            all(warning["event_id"] == value["event_id"] for warning in warnings)
+        )
+
+    def test_legacy_activity_without_evidence_only_emits_compatibility_warning(
+        self,
+    ) -> None:
+        value = video_event(activity=True, incremental=False)
+        warnings: list[dict] = []
+        result = ApplyObservationResult(
+            event_id=value["event_id"],
+            observation_id=value["observation_id"],
+            status="applied",
+            duplicate=False,
+            last_applied_sequence=1,
+        )
+
+        self.request(
+            FeatureIngestApplication(
+                StubApplier(result=result),
+                token="secret",
+                warning_sink=warnings.append,
+            ),
+            value,
+        )
+
+        self.assertEqual(
+            [warning["warning_code"] for warning in warnings],
+            ["activity_without_evidence"],
+        )
+
+    def test_skipped_recent_sampling_does_not_require_activity_evidence(self) -> None:
+        value = video_event(sampling_outcome="skipped")
+        warnings: list[dict] = []
+        result = ApplyObservationResult(
+            event_id=value["event_id"],
+            observation_id=value["observation_id"],
+            status="applied",
+            duplicate=False,
+            last_applied_sequence=1,
+        )
+
+        self.request(
+            FeatureIngestApplication(
+                StubApplier(result=result),
+                token="secret",
+                warning_sink=warnings.append,
+            ),
+            value,
+        )
+
+        self.assertEqual(warnings, [])
+
+    def test_does_not_warn_for_present_evidence_or_duplicate_delivery(self) -> None:
+        present = video_event(activity=True, evidence=True)
+        duplicate = video_event(activity=True)
+        warnings: list[dict] = []
+        present_result = ApplyObservationResult(
+            event_id=present["event_id"],
+            observation_id=present["observation_id"],
+            status="applied",
+            duplicate=False,
+            last_applied_sequence=1,
+        )
+        duplicate_result = ApplyObservationResult(
+            event_id=duplicate["event_id"],
+            observation_id=duplicate["observation_id"],
+            status="applied",
+            duplicate=True,
+            last_applied_sequence=1,
+        )
+
+        self.request(
+            FeatureIngestApplication(
+                StubApplier(result=present_result),
+                token="secret",
+                warning_sink=warnings.append,
+            ),
+            present,
+        )
+        self.request(
+            FeatureIngestApplication(
+                StubApplier(result=duplicate_result),
+                token="secret",
+                warning_sink=warnings.append,
+            ),
+            duplicate,
+        )
+
+        self.assertEqual(warnings, [])
 
 
 if __name__ == "__main__":

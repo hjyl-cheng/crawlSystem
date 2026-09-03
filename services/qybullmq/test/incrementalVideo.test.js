@@ -3319,6 +3319,12 @@ test("Video discovery does not persist a live broadcast while it is in progress"
     fixture.state.observationSummaries[0].activity.evidence_scan_rows,
     activityEvidence.evidence_scan_rows,
   );
+  const {
+    lifecycle_status: _lifecycleStatus,
+    conclusive: _conclusive,
+    ...summaryEvidence
+  } = fixture.state.observationSummaries[0].activity;
+  assert.deepEqual(summaryEvidence, activityEvidence);
 });
 
 test("a current-run ended live replay reactivates a dormant channel beyond the history limit", async () => {

@@ -9,6 +9,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    JsonValue,
     StringConstraints,
     TypeAdapter,
     ValidationError,
@@ -560,7 +561,19 @@ class _VideoActivityContract(_ContractModel):
 class _VideoPayloadContract(_ContractModel):
     discovery: _VideoDiscoveryPhaseContract
     recent_sampling: _VideoRecentSamplingPhaseContract
+    activity_evidence: dict[str, JsonValue] | None = None
     activity: _VideoActivityContract | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_null_activity_evidence(cls, value: Any) -> Any:
+        if (
+            isinstance(value, Mapping)
+            and "activity_evidence" in value
+            and value["activity_evidence"] is None
+        ):
+            raise ValueError("activity_evidence must be an object when supplied")
+        return value
 
     @model_validator(mode="after")
     def validate_skipped_sampling(self) -> Self:
