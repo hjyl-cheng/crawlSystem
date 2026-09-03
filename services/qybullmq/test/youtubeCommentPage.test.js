@@ -186,6 +186,47 @@ test("youtubeCommentsDisabled recognizes an explicit disabled surface", () => {
   assert.equal(commentPageHasFirstPage(emptyYoutubeCommentPage({ totalCount: 0 })), true);
 });
 
+test("an inactive comment composer disabledText is not a disabled comment surface", () => {
+  const raw = commentPageFixture({ countText: "38 Comments" });
+  raw.onResponseReceivedEndpoints[0]
+    .reloadContinuationItemsCommand
+    .continuationItems[0]
+    .commentsHeaderRenderer
+    .createRenderer = {
+      commentSimpleboxRenderer: {
+        disabledText: "Comments are turned off.",
+      },
+    };
+
+  assert.equal(youtubeCommentsDisabled(raw), false);
+  const page = normalizeYoutubeCommentPage(raw);
+  assert.equal(page.total_count, 38);
+  assert.equal(page.returned_count, 1);
+  assert.equal(page.comments_disabled, false);
+  assert.deepEqual(classifyYoutubeCommentPage(page), {
+    comments_disabled: false,
+    comment_count: 38,
+    comment_count_status: "exact",
+    comment_count_source: "youtubejs_comments",
+  });
+
+  const zeroCommentRaw = commentPageFixture({ countText: "0 Comments", comments: [] });
+  zeroCommentRaw.onResponseReceivedEndpoints[0]
+    .reloadContinuationItemsCommand
+    .continuationItems[0]
+    .commentsHeaderRenderer
+    .createRenderer = raw.onResponseReceivedEndpoints[0]
+      .reloadContinuationItemsCommand
+      .continuationItems[0]
+      .commentsHeaderRenderer
+      .createRenderer;
+  assert.equal(youtubeCommentsDisabled(zeroCommentRaw), false);
+  assert.equal(
+    classifyYoutubeCommentPage(normalizeYoutubeCommentPage(zeroCommentRaw)).comment_count_status,
+    "zero_from_surface",
+  );
+});
+
 test("classifyYoutubeCommentPage keeps closed, empty, and parse-failed pages distinct", () => {
   assert.deepEqual(classifyYoutubeCommentPage(emptyYoutubeCommentPage({ totalCount: 0 }), {
     disabled: true,

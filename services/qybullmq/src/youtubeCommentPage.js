@@ -103,8 +103,16 @@ function explicitDisabledSignal(value, commentContext = false) {
     return value.some((item) => explicitDisabledSignal(item, commentContext));
   }
   return Object.entries(value).some(([key, child]) => (
-    explicitDisabledSignal(child, commentContext || /comment/i.test(key))
+    key !== "commentSimpleboxRenderer"
+      && explicitDisabledSignal(child, commentContext || /comment/i.test(key))
   ));
+}
+
+function hasReturnedCommentEvidence(raw) {
+  if (commentPageHasFirstPage(raw) && Number(raw.returned_count) > 0) return true;
+  if (isYoutubeJsCommentsResult(raw) && raw.contents.length > 0) return true;
+  return commentThreadNodes(raw).length > 0
+    || allNodes(raw, "commentEntityPayload").length > 0;
 }
 
 export function youtubeCommentSurface(raw) {
@@ -115,7 +123,7 @@ export function youtubeCommentSurface(raw) {
     return { status: "available", continuation: continuation.trim() };
   }
   return {
-    status: explicitDisabledSignal(raw) ? "disabled" : "absent",
+    status: youtubeCommentsDisabled(raw) ? "disabled" : "absent",
     continuation: null,
   };
 }
@@ -482,7 +490,7 @@ export function commentPageHasFirstPage(page) {
 }
 
 export function youtubeCommentsDisabled(raw) {
-  return explicitDisabledSignal(raw) === true;
+  return !hasReturnedCommentEvidence(raw) && explicitDisabledSignal(raw) === true;
 }
 
 export function classifyYoutubeCommentPage(page, {

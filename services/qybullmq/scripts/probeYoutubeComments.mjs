@@ -23,6 +23,10 @@ const targets = VIDEO_IDS.length > 0
   ? VIDEO_IDS
   : ["pbChxZStqo8", "oW983TlO5mI", "H2VpsabLFv0", "DBXNpwTteg4"];
 
+const DISABLED_TEXT = /comments? (?:are |have been )?(?:turned off|disabled)|coment[aá]rios? (?:foram |est[aã]o )?(?:desativad|desabilitad)|commentaires? (?:sont |ont [eé]t[eé] )?(?:d[eé]sactiv)/i;
+
+process.env.YOUTUBEJS_EXTRACTOR_MODE = "full";
+
 function allKeys(value, targetKey, output = 0) {
   if (!value || typeof value !== "object") return output;
   if (Array.isArray(value)) {
@@ -50,6 +54,24 @@ function firstNode(value, targetKey) {
     if (found) return found;
   }
   return null;
+}
+
+function disabledSignalPaths(value, path = "$", output = []) {
+  if (output.length >= 20 || value == null) return output;
+  if (typeof value === "string") {
+    if (DISABLED_TEXT.test(value)) output.push({ path, text: value.slice(0, 300) });
+    return output;
+  }
+  if (typeof value !== "object") return output;
+  if (Array.isArray(value)) {
+    value.forEach((item, index) => disabledSignalPaths(item, `${path}[${index}]`, output));
+    return output;
+  }
+  for (const [key, child] of Object.entries(value)) {
+    disabledSignalPaths(child, `${path}.${key}`, output);
+    if (output.length >= 20) break;
+  }
+  return output;
 }
 
 function summarizeRaw(raw) {
@@ -86,6 +108,7 @@ function summarizeRaw(raw) {
       ?? message?.text?.runs?.map((run) => run?.text || "").join("")
       ?? null,
     disabled_signal: youtubeCommentsDisabled(raw),
+    disabled_signal_paths: disabledSignalPaths(raw),
   };
 }
 
@@ -121,11 +144,13 @@ const reports = [];
 try {
   await rotaSlot.start();
   const runId = `comment-probe:${Date.now()}`;
-  await rotaSlot.executeJob(buildManagedDiagnosticJob({
+  const diagnostic = buildManagedDiagnosticJob({
     kind: "comment_probe",
     channelId: "comment-probe",
     runId,
-  }), {
+  });
+  const job = Object.freeze({ ...diagnostic, attemptsStarted: 1 });
+  await rotaSlot.executeJob(job, {
     prepare: async () => ({
       kind: "ready",
       businessRunId: `comment-probe:${Date.now()}`,
@@ -168,6 +193,8 @@ try {
           } catch (error) {
             report.detail_error = String(error?.message || error);
           }
+          report.evidence_conflict = report.classified?.comments_disabled === true
+            && Number(report.page?.returned_count) > 0;
         } catch (error) {
           report.error = String(error?.message || error);
         }
@@ -189,3 +216,4 @@ try {
 }
 
 console.log(JSON.stringify({ event: "comment_probe_done", reports }, null, 2));
+if (reports.some((report) => report.evidence_conflict === true)) process.exitCode = 1;
