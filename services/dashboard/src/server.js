@@ -1,5 +1,6 @@
 import express from "express";
 import morgan from "morgan";
+import { allowDashboardRequestDuringControlledMigration } from "./controlledWritePolicy.js";
 import pg from "pg";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -4740,8 +4741,7 @@ app.use(express.urlencoded({ extended: true, limit: "5mb" }));
 app.use(express.json({ limit: "5mb" }));
 app.use((req, res, next) => {
   const controlled = String(process.env.CONTROLLED_MIGRATION_ONLY || "").toLowerCase() === "true";
-  const readMethod = req.method === "GET" || req.method === "HEAD" || req.method === "OPTIONS";
-  if (!controlled || readMethod || req.path.startsWith("/migration-channels")) return next();
+  if (!controlled || allowDashboardRequestDuringControlledMigration(req.method, req.path)) return next();
   return res.status(423).type("text").send(
     "Non-Migration writes are disabled during the controlled canary.",
   );
