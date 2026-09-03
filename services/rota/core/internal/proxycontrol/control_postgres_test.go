@@ -991,7 +991,7 @@ func TestPolicyPreferencesOrderCandidatesWithoutReducingCapacity(t *testing.T) {
 	}
 }
 
-func TestPolicyPreferencesNeverExcludeALegacyHealthyProxy(t *testing.T) {
+func TestLegacyHTTPStatusWithoutStructuredHealthEvidenceIsIneligible(t *testing.T) {
 	manager, pool := newProxyControlPostgresWithOptions(t, func(options *Options) {
 		options.ChannelSlots = 1
 		options.IdentityPolicies["qy-test-channel-v1"] = IdentityPolicy{
@@ -1003,6 +1003,13 @@ func TestPolicyPreferencesNeverExcludeALegacyHealthyProxy(t *testing.T) {
 	})
 	ctx := context.Background()
 	proxyID := insertControlProxy(t, pool, "legacy-healthy.example:8080", 10)
+	if _, err := pool.Exec(ctx, `
+		UPDATE proxies
+		SET base_health_status=NULL,youtube_health_status=NULL,last_health_success_at=NULL
+		WHERE id=$1
+	`, proxyID); err != nil {
+		t.Fatalf("remove structured health evidence: %v", err)
+	}
 
 	manager.SetCacheInvalidator(func(string) {})
 	if err := manager.syncResources(ctx); err != nil {
@@ -1017,15 +1024,102 @@ func TestPolicyPreferencesNeverExcludeALegacyHealthyProxy(t *testing.T) {
 		t.Fatalf("load capacity: %v", err)
 	}
 	channel := capacity.Roles[RoleChannel]
-	if capacity.Active != 1 || channel.Eligible != 1 || channel.Assigned != 1 {
-		t.Fatalf("legacy healthy proxy was hard-filtered: capacity=%+v channel=%+v", capacity, channel)
+	if capacity.Active != 0 || channel.Eligible != 0 || channel.Assigned != 0 {
+		t.Fatalf("legacy HTTP status remained eligible: capacity=%+v channel=%+v", capacity, channel)
 	}
 
 	claim, err := manager.Claim(ctx, testClaimRequest(
 		"claim-legacy-healthy", "worker-legacy-healthy", "instance-legacy-healthy",
 	))
-	if err != nil || !claim.Ready || claim.ProxyID == nil || *claim.ProxyID != proxyID {
-		t.Fatalf("legacy healthy proxy claim = %+v, err = %v", claim, err)
+	if err != nil || claim.Ready || claim.ProxyID != nil {
+		t.Fatalf("legacy HTTP-only proxy claim = %+v, err = %v", claim, err)
+	}
+}
+
+func TestClaimRejectsExpiredHealthGrantBeforeReconcile(t *testing.T) {
+	manager, pool := newProxyControlPostgresWithOptions(t, func(options *Options) {
+		options.ChannelSlots = 1
+	})
+	ctx := context.Background()
+	proxyID := insertControlProxy(t, pool, "claim-expired-before-reconcile.example:8080", 10)
+
+	manager.SetCacheInvalidator(func(string) {})
+	if err := manager.syncResources(ctx); err != nil {
+		t.Fatalf("sync managed resources: %v", err)
+	}
+	if _, err := manager.reconcile(ctx); err != nil {
+		t.Fatalf("assign initially verified proxy: %v", err)
+	}
+	capacity, err := manager.Capacity(ctx)
+	if err != nil {
+		t.Fatalf("load preassigned capacity: %v", err)
+	}
+	channel := capacity.Roles[RoleChannel]
+	if channel.Assigned != 1 || channel.Claimed != 0 {
+		t.Fatalf("preassigned channel capacity = %+v, want one unclaimed assignment", channel)
+	}
+
+	if _, err := pool.Exec(ctx, `
+		UPDATE proxies SET next_health_check_at=NOW()-INTERVAL '1 minute' WHERE id=$1
+	`, proxyID); err != nil {
+		t.Fatalf("advance preassigned proxy to recheck: %v", err)
+	}
+	claim, err := manager.Claim(ctx, testClaimRequest(
+		"claim-expired-before-reconcile", "worker-expired-before-reconcile", "instance-expired-before-reconcile",
+	))
+	if err != nil {
+		t.Fatalf("claim expired preassignment: %v", err)
+	}
+	if claim.Ready || claim.ProxyID != nil || claim.Reason != "waiting_for_healthy_proxy" {
+		t.Fatalf("expired preassignment claim = %+v, want waiting without a Proxy", claim)
+	}
+}
+
+func TestExpiredHealthGrantOnUnleasedAssignedSlotIsNotClaimable(t *testing.T) {
+	manager, pool := newProxyControlPostgresWithOptions(t, func(options *Options) {
+		options.ChannelSlots = 1
+	})
+	ctx := context.Background()
+	proxyID := insertControlProxy(t, pool, "expired-preassigned.example:8080", 10)
+
+	manager.SetCacheInvalidator(func(string) {})
+	if err := manager.syncResources(ctx); err != nil {
+		t.Fatalf("sync managed resources: %v", err)
+	}
+	if _, err := manager.reconcile(ctx); err != nil {
+		t.Fatalf("assign initially verified proxy: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		UPDATE proxies SET next_health_check_at=NOW()-INTERVAL '1 minute' WHERE id=$1
+	`, proxyID); err != nil {
+		t.Fatalf("expire preassigned proxy health grant: %v", err)
+	}
+	if _, err := manager.reconcile(ctx); err != nil {
+		t.Fatalf("reconcile expired preassigned proxy: %v", err)
+	}
+
+	var assignedProxyID *int
+	if err := pool.QueryRow(ctx, `
+		SELECT proxy_id FROM proxy_running_slots WHERE role='channel'
+	`).Scan(&assignedProxyID); err != nil {
+		t.Fatalf("load expired preassigned slot: %v", err)
+	}
+	if assignedProxyID != nil {
+		t.Fatalf("expired preassigned proxy remained on an unleased slot: %d", *assignedProxyID)
+	}
+	capacity, err := manager.Capacity(ctx)
+	if err != nil {
+		t.Fatalf("load expired health capacity: %v", err)
+	}
+	if capacity.Active != 0 || capacity.Running != 0 || capacity.Reserve != 0 {
+		t.Fatalf("expired preassigned proxy remained eligible: %+v", capacity)
+	}
+
+	claim, err := manager.Claim(ctx, testClaimRequest(
+		"claim-expired-preassigned", "worker-expired-preassigned", "instance-expired-preassigned",
+	))
+	if err != nil || claim.Ready || claim.ProxyID != nil {
+		t.Fatalf("expired preassigned claim = %+v, err = %v", claim, err)
 	}
 }
 
@@ -1381,8 +1475,9 @@ func insertControlProxy(t *testing.T, pool *pgxpool.Pool, address string, respon
 	if err := pool.QueryRow(context.Background(), `
 		INSERT INTO proxies (
 		  address, protocol, status, base_health_status, youtube_health_status,
+		  last_health_success_at, next_health_check_at,
 		  last_youtube_status, last_rota_youtube_status, avg_response_time
-		) VALUES ($1,'http','active','passed','passed',200,200,$2)
+		) VALUES ($1,'http','active','passed','passed',NOW(),NOW()+INTERVAL '2 hours',200,200,$2)
 		RETURNING id
 	`, address, responseTime).Scan(&id); err != nil {
 		t.Fatalf("insert control proxy: %v", err)

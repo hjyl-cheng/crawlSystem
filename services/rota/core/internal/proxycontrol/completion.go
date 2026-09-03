@@ -155,6 +155,19 @@ func (m *Manager) CompleteTask(ctx context.Context, request CompleteTaskRequest)
 			result.RetryAfterMS = 250
 			result.ReasonCode = "WAITING_FOR_ROUTE_REFRESH"
 		}
+		if state.proxyID != nil {
+			failureKind, err := completionFailureKind(ctx, tx, state)
+			if err != nil {
+				return CompleteTaskResult{}, err
+			}
+			if err := m.quarantineProxy(
+				ctx, tx, *state.proxyID, failureKind,
+				"slot task observation required route replacement",
+				"task_observation_quarantine",
+			); err != nil {
+				return CompleteTaskResult{}, err
+			}
+		}
 	}
 	encodedResult, err := json.Marshal(result)
 	if err != nil {
@@ -210,6 +223,7 @@ func (m *Manager) CompleteTask(ctx context.Context, request CompleteTaskRequest)
 }
 
 type completionTaskState struct {
+	workloadScope       string
 	status              string
 	completionRequestID string
 	slotName            string
@@ -223,6 +237,7 @@ type completionTaskState struct {
 	leaseUntil          time.Time
 	slotRouteGeneration int64
 	pendingAction       string
+	pendingIncidentID   string
 	role                string
 	poolID              int
 	proxyID             *int
@@ -241,17 +256,14 @@ func lockCompletionTask(
 ) (completionTaskState, error) {
 	var state completionTaskState
 	err := tx.QueryRow(ctx, `
-		SELECT t.status,COALESCE(t.completion_request_id,''),t.slot_name,t.worker_id,
+		SELECT t.workload_scope,t.status,COALESCE(t.completion_request_id,''),t.slot_name,t.worker_id,
 		       t.worker_instance_id,t.lease_id,t.route_generation,t.business_run_id,
 		       COALESCE(s.active_task_id,''),COALESCE(s.current_lease_id,''),s.lease_until,
-		       s.assignment_version,COALESCE(s.pending_action,''),s.role,s.pool_id,s.proxy_id,
+		       s.assignment_version,COALESCE(s.pending_action,''),
+		       COALESCE(s.pending_incident_id,''),s.role,s.pool_id,s.proxy_id,
 		       COALESCE(
 		         p.status='active' AND p.revalidation_required=false
-		         AND (p.cooldown_until IS NULL OR p.cooldown_until <= NOW())
-		         AND (
-		           (p.base_health_status='passed' AND p.youtube_health_status='passed')
-		           OR (p.last_youtube_status=200 AND p.last_rota_youtube_status=200)
-		         ),
+		         AND (p.cooldown_until IS NULL OR p.cooldown_until <= NOW()),
 		         false
 		       ),
 		       COALESCE(s.network_identity_key,''),t.identity_policy_id,
@@ -262,10 +274,10 @@ func lockCompletionTask(
 		WHERE t.workload_scope=$1 AND t.task_id=$2
 		FOR UPDATE OF t,s
 	`, workloadScope, taskID).Scan(
-		&state.status, &state.completionRequestID, &state.slotName, &state.workerID,
+		&state.workloadScope, &state.status, &state.completionRequestID, &state.slotName, &state.workerID,
 		&state.workerInstanceID, &state.leaseID, &state.routeGeneration,
 		&state.businessRunID, &state.activeTaskID, &state.currentLeaseID,
-		&state.leaseUntil, &state.slotRouteGeneration, &state.pendingAction,
+		&state.leaseUntil, &state.slotRouteGeneration, &state.pendingAction, &state.pendingIncidentID,
 		&state.role, &state.poolID, &state.proxyID, &state.routeEligible, &state.networkIdentityKey,
 		&state.identityPolicyID, &state.identityPolicyVer, &state.identityPolicyHash,
 	)
@@ -369,7 +381,7 @@ func selectCompletionWarmStandby(
 	policy IdentityPolicy,
 	state completionTaskState,
 ) (*candidate, error) {
-	candidates, err := loadEligibleCandidates(ctx, tx, policy)
+	candidates, err := loadEligibleCandidates(ctx, tx, policy, state.workloadScope)
 	if err != nil {
 		return nil, err
 	}

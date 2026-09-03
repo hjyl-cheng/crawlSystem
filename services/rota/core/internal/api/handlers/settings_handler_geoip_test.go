@@ -11,6 +11,7 @@ func TestMergeWriteOnlySettingsPreservesSecretsAndServiceTimestamp(t *testing.T)
 	updatedAt := time.Date(2026, 8, 12, 10, 0, 0, 0, time.UTC)
 	current := &models.Settings{
 		Authentication: models.AuthenticationSettings{Password: "proxy-secret"},
+		ProxyLifecycle: models.ProxyLifecycleSettings{ActiveRecheckMinutes: 90},
 		GeoIP: models.GeoIPSettings{
 			Provider:          models.GeoIPProviderMaxMind,
 			MaxMindLicenseKey: "license-secret",
@@ -25,6 +26,9 @@ func TestMergeWriteOnlySettingsPreservesSecretsAndServiceTimestamp(t *testing.T)
 
 	if incoming.Authentication.Password != "proxy-secret" {
 		t.Fatalf("proxy password = %q", incoming.Authentication.Password)
+	}
+	if incoming.ProxyLifecycle.ActiveRecheckMinutes != 90 {
+		t.Fatalf("active recheck minutes = %d", incoming.ProxyLifecycle.ActiveRecheckMinutes)
 	}
 	if incoming.GeoIP.MaxMindLicenseKey != "license-secret" {
 		t.Fatalf("license key = %q", incoming.GeoIP.MaxMindLicenseKey)

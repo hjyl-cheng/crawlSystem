@@ -91,7 +91,7 @@ func (m *Manager) Claim(ctx context.Context, request ClaimRequest) (Assignment, 
 		return Assignment{}, fmt.Errorf("load existing worker lease: %w", err)
 	}
 
-	eligible, err := loadEligibleCandidates(ctx, tx, policy)
+	eligible, err := loadEligibleCandidates(ctx, tx, policy, m.options.WorkloadScope)
 	if err != nil {
 		return Assignment{}, err
 	}
@@ -813,10 +813,6 @@ func assignmentSQL() string {
 			           OR (
 			             p.status='active' AND p.revalidation_required=false
 			             AND (p.cooldown_until IS NULL OR p.cooldown_until <= NOW())
-			             AND (
-			               (p.base_health_status='passed' AND p.youtube_health_status='passed')
-			               OR (p.last_youtube_status=200 AND p.last_rota_youtube_status=200)
-			             )
 			           )
 			         )
 			       ) AS ready,

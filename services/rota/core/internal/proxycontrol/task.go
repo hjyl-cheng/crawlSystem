@@ -84,11 +84,7 @@ func (m *Manager) BeginTask(ctx context.Context, request BeginTaskRequest) (Task
 	err = tx.QueryRow(ctx, `
 		SELECT COALESCE(
 		  p.status='active' AND p.revalidation_required=false
-		  AND (p.cooldown_until IS NULL OR p.cooldown_until <= NOW())
-		  AND (
-		    (p.base_health_status='passed' AND p.youtube_health_status='passed')
-		    OR (p.last_youtube_status=200 AND p.last_rota_youtube_status=200)
-		  ), false
+		  AND (p.cooldown_until IS NULL OR p.cooldown_until <= NOW()), false
 		)
 		FROM proxies p
 		WHERE p.id=$1

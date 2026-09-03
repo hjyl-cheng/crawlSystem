@@ -221,6 +221,12 @@ func mergeWriteOnlySettings(incoming, current *models.Settings) {
 	if incoming.Authentication.Password == "" {
 		incoming.Authentication.Password = current.Authentication.Password
 	}
+	if incoming.ProxyLifecycle.ActiveRecheckMinutes == 0 {
+		incoming.ProxyLifecycle.ActiveRecheckMinutes = current.ProxyLifecycle.ActiveRecheckMinutes
+		if incoming.ProxyLifecycle.ActiveRecheckMinutes == 0 {
+			incoming.ProxyLifecycle.ActiveRecheckMinutes = 120
+		}
+	}
 	if incoming.GeoIP.Provider == "" {
 		incoming.GeoIP = current.GeoIP
 		return
@@ -261,6 +267,9 @@ func (h *SettingsHandler) validateSettings(s *models.Settings) error {
 		return fmt.Errorf("healthcheck.workers must be between 1 and 100")
 	}
 
+	if s.ProxyLifecycle.ActiveRecheckMinutes < 15 || s.ProxyLifecycle.ActiveRecheckMinutes > 1440 {
+		return fmt.Errorf("proxy_lifecycle.active_recheck_minutes must be between 15 and 1440")
+	}
 	if s.ProxyLifecycle.HardUnreachableAfterHours < 1 || s.ProxyLifecycle.HardUnreachableAfterHours > 168 {
 		return fmt.Errorf("proxy_lifecycle.hard_unreachable_after_hours must be between 1 and 168")
 	}

@@ -77,7 +77,7 @@ import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Textarea } from "@/components/ui/textarea"
 import { api } from "@/lib/api"
-import { Proxy } from "@/lib/types"
+import { Proxy, ProxyCapacity } from "@/lib/types"
 import { toast } from "@/lib/toast"
 import { TagInput } from "@/components/tag-input"
 
@@ -262,6 +262,7 @@ function originLabel(origin: OriginTag) {
 
 export default function ProxiesPage() {
   const [data, setData] = React.useState<Proxy[]>([])
+  const [capacity, setCapacity] = React.useState<ProxyCapacity | null>(null)
   const [isLoading, setIsLoading] = React.useState(true)
   const latestProxyRequestRef = React.useRef(0)
   const [isAddDialogOpen, setIsAddDialogOpen] = React.useState(false)
@@ -408,6 +409,26 @@ export default function ProxiesPage() {
   React.useEffect(() => {
     fetchTagList()
   }, [fetchTagList])
+
+  React.useEffect(() => {
+    let cancelled = false
+
+    const fetchCapacity = async () => {
+      try {
+        const next = await api.getProxyCapacity()
+        if (!cancelled) setCapacity(next)
+      } catch (error) {
+        if (!cancelled) console.error("Failed to fetch proxy capacity:", error)
+      }
+    }
+
+    void fetchCapacity()
+    const interval = window.setInterval(fetchCapacity, 10_000)
+    return () => {
+      cancelled = true
+      window.clearInterval(interval)
+    }
+  }, [])
 
   const goToPage = (requestedPage: number) => {
     const lastPage = Math.max(pagination.total_pages, 1)
@@ -1212,13 +1233,32 @@ export default function ProxiesPage() {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
         <div>
           <h1 className="text-3xl font-bold tracking-tight">Proxy Management</h1>
           <p className="text-muted-foreground">
             Manage and monitor your proxy infrastructure
           </p>
         </div>
+        {capacity && (
+          <div className="grid w-full grid-cols-3 divide-x border-y lg:w-auto lg:min-w-[30rem]">
+            <div className="px-4 py-2">
+              <div className="text-xs text-muted-foreground">Warm reserve</div>
+              <div className={capacity.reserve_below_minimum ? "text-xl font-semibold text-red-600" : "text-xl font-semibold text-green-600"}>
+                {capacity.reserve.toLocaleString("en-US")}
+              </div>
+              <div className="text-xs text-muted-foreground">Minimum {capacity.minimum_reserve}</div>
+            </div>
+            <div className="px-4 py-2">
+              <div className="text-xs text-muted-foreground">Bound slots</div>
+              <div className="text-xl font-semibold">{capacity.running.toLocaleString("en-US")}</div>
+            </div>
+            <div className="px-4 py-2">
+              <div className="text-xs text-muted-foreground">Eligible total</div>
+              <div className="text-xl font-semibold">{capacity.active.toLocaleString("en-US")}</div>
+            </div>
+          </div>
+        )}
       </div>
 
       <Card>

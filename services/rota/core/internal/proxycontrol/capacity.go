@@ -25,7 +25,9 @@ func (m *Manager) Capacity(ctx context.Context) (Capacity, error) {
 			eligibleByRole[role] = []candidate{}
 			continue
 		}
-		items, err := queryEligibleCandidates(ctx, m.db.Pool, policy, false)
+		items, err := queryEligibleCandidates(
+			ctx, m.db.Pool, policy, m.options.WorkloadScope, false,
+		)
 		if err != nil {
 			return Capacity{}, fmt.Errorf("load %s policy capacity candidates: %w", role, err)
 		}

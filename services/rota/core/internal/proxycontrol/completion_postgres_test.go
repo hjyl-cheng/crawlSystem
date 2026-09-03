@@ -5,6 +5,8 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type completionDataPlaneStub struct {
@@ -358,6 +360,7 @@ func TestCompleteTaskReservesOnlyPolicyEligibleWarmStandbyAfterChallenge(t *test
 			readyAfter, profileEpoch, poolMemberCount, selectedPoolMember,
 		)
 	}
+	assertProxyQuarantinedAfterSlotReplacement(t, pool, currentID, "youtube_unusable")
 }
 
 func TestCompleteTaskPausesAndRevokesFailedRouteWhenNoWarmStandbyExists(t *testing.T) {
@@ -499,6 +502,7 @@ func TestCompleteTaskPausesAndRevokesFailedRouteWhenNoWarmStandbyExists(t *testi
 			routeGeneration, credentialGeneration, readyAfter, poolMemberCount, sourceProfileStatus,
 		)
 	}
+	assertProxyQuarantinedAfterSlotReplacement(t, pool, currentID, "youtube_unusable")
 }
 
 func TestCompleteTaskRetriesDataPlaneActivationAndDoesNotLeakActionIntoNextTask(t *testing.T) {
@@ -703,5 +707,45 @@ func TestCompleteTaskRetriesDataPlaneActivationAndDoesNotLeakActionIntoNextTask(
 	}
 	if pendingAction != "" || pendingIncident != "" {
 		t.Fatalf("replacement action was not consumed: action=%q incident=%q", pendingAction, pendingIncident)
+	}
+}
+
+func assertProxyQuarantinedAfterSlotReplacement(
+	t *testing.T,
+	pool *pgxpool.Pool,
+	proxyID int,
+	wantKind string,
+) {
+	t.Helper()
+	var (
+		status, failureKind                           string
+		failedSince, cooldownUntil, nextHealthCheckAt *time.Time
+		revalidationRequired                          bool
+		eventCount                                    int
+	)
+	if err := pool.QueryRow(context.Background(), `
+		SELECT status,COALESCE(failure_episode_kind,''),failed_since,
+		       cooldown_until,next_health_check_at,revalidation_required
+		FROM proxies WHERE id=$1
+	`, proxyID).Scan(
+		&status, &failureKind, &failedSince, &cooldownUntil,
+		&nextHealthCheckAt, &revalidationRequired,
+	); err != nil {
+		t.Fatalf("load replaced proxy lifecycle: %v", err)
+	}
+	if err := pool.QueryRow(context.Background(), `
+		SELECT COUNT(*) FROM proxy_lifecycle_events
+		WHERE proxy_id=$1 AND event_kind='task_observation_quarantine'
+	`, proxyID).Scan(&eventCount); err != nil {
+		t.Fatalf("count replacement lifecycle events: %v", err)
+	}
+	if status != "failed" || failureKind != wantKind || failedSince == nil ||
+		cooldownUntil == nil || nextHealthCheckAt == nil ||
+		!cooldownUntil.Equal(*nextHealthCheckAt) || revalidationRequired || eventCount != 1 {
+		t.Fatalf(
+			"replaced proxy lifecycle status=%q kind=%q failed=%v cooldown=%v next=%v revalidation=%v events=%d",
+			status, failureKind, failedSince, cooldownUntil, nextHealthCheckAt,
+			revalidationRequired, eventCount,
+		)
 	}
 }

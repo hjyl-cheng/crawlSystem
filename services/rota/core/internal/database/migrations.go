@@ -1457,6 +1457,154 @@ var migrations = []Migration{
 			  ALTER COLUMN network_identity_key DROP DEFAULT;
 		`,
 	},
+	{
+		Version:     1012,
+		Description: "Make active proxies continuously health verified",
+		Up: `
+			INSERT INTO settings (key,value,updated_at)
+			VALUES (
+			  'proxy_lifecycle',
+			  '{"auto_archive_enabled":true,"active_recheck_minutes":120,"hard_unreachable_after_hours":6,"soft_unreachable_after_hours":24,"youtube_unusable_after_hours":72}'::jsonb,
+			  NOW()
+			)
+			ON CONFLICT (key) DO UPDATE
+			SET value=jsonb_set(settings.value,'{active_recheck_minutes}','120'::jsonb,true),
+			    updated_at=NOW();
+
+			UPDATE proxies
+			SET next_health_check_at=NOW(),updated_at=NOW()
+			WHERE status IN ('idle','failed') AND next_health_check_at IS NULL;
+
+			WITH changed AS (
+			  UPDATE proxies p
+			  SET status='idle',failed_since=NULL,continuous_failed_since=NULL,
+			      failure_episode_kind=NULL,next_health_check_at=NOW(),
+			      revalidation_required=false,health_generation=health_generation+1,
+			      health_check_not_before=NOW(),base_health_status=NULL,
+			      youtube_health_status=NULL,last_error=NULL,updated_at=NOW()
+			  WHERE p.status='active'
+			    AND NOT EXISTS (
+			      SELECT 1
+			      FROM proxy_running_slots slot
+			      WHERE slot.proxy_id=p.id
+			        AND slot.current_lease_id IS NOT NULL
+			        AND slot.lease_until > statement_timestamp()
+			        AND EXISTS (
+			          SELECT 1
+			          FROM proxy_control_leases live_lease
+			          WHERE live_lease.lease_id=slot.current_lease_id
+			            AND live_lease.slot_name=slot.slot_name
+			            AND live_lease.status='active'
+			            AND live_lease.lease_until > statement_timestamp()
+			        )
+			    )
+			    AND (
+			      p.revalidation_required
+			      OR p.last_health_success_at IS NULL
+			      OR p.base_health_status IS DISTINCT FROM 'passed'
+			      OR p.youtube_health_status IS DISTINCT FROM 'passed'
+			      OR p.last_health_success_at <= NOW()-INTERVAL '120 minutes'
+			      OR p.cooldown_until > NOW()
+			    )
+			  RETURNING p.id
+			)
+			INSERT INTO proxy_lifecycle_events (
+			  proxy_id,occurred_at,event_kind,previous_status,resulting_status,reason
+			)
+			SELECT id,NOW(),'active_evidence_migration','active','idle',
+			       'active_proxy_requires_structured_revalidation'
+			FROM changed;
+
+			UPDATE proxies
+			SET next_health_check_at=COALESCE(
+			      last_health_success_at+INTERVAL '120 minutes',
+			      NOW()+INTERVAL '120 minutes'
+			    ),
+			    revalidation_required=false,updated_at=NOW()
+			WHERE status='active';
+
+			DROP INDEX IF EXISTS idx_proxies_health_check_due;
+			CREATE INDEX idx_proxies_health_check_due
+			  ON proxies(next_health_check_at,id)
+			  WHERE next_health_check_at IS NOT NULL
+			    AND status IN ('idle','failed','active');
+
+			ALTER TABLE proxies DROP CONSTRAINT IF EXISTS proxies_scheduled_status_has_due;
+			ALTER TABLE proxies ADD CONSTRAINT proxies_scheduled_status_has_due
+			  CHECK (status NOT IN ('idle','failed','active') OR next_health_check_at IS NOT NULL)
+			  NOT VALID;
+			ALTER TABLE proxies VALIDATE CONSTRAINT proxies_scheduled_status_has_due;
+
+			CREATE OR REPLACE VIEW proxy_lifecycle_invariant_violations AS
+			SELECT id AS proxy_id,status,'scheduled_state_without_due'::text AS violation
+			FROM proxies
+			WHERE status IN ('idle','failed','active') AND next_health_check_at IS NULL
+			UNION ALL
+			SELECT id,status,'incomplete_failure_episode'
+			FROM proxies
+			WHERE status='failed'
+			  AND (failed_since IS NULL OR continuous_failed_since IS NULL OR failure_episode_kind IS NULL)
+			UNION ALL
+			SELECT id,status,'invalid_archive_projection'
+			FROM proxies
+			WHERE status='archived'
+			  AND (archived_at IS NULL OR archive_reason IS NULL OR next_health_check_at IS NOT NULL)
+			UNION ALL
+			SELECT p.id,p.status,'archived_proxy_bound_to_running_slot'
+			FROM proxies p
+			JOIN proxy_running_slots slot ON slot.proxy_id=p.id
+			WHERE p.status='archived'
+			UNION ALL
+			SELECT checks.proxy_id,proxies.status,'transition_evidence_not_preserved'
+			FROM proxy_health_checks checks
+			JOIN proxies ON proxies.id=checks.proxy_id
+			WHERE checks.applied=true
+			  AND checks.previous_status IS DISTINCT FROM checks.resulting_status
+			  AND checks.transition_preserved=false;
+
+		`,
+		Down: `
+			CREATE OR REPLACE VIEW proxy_lifecycle_invariant_violations AS
+			SELECT id AS proxy_id,status,'scheduled_state_without_due'::text AS violation
+			FROM proxies
+			WHERE status IN ('idle','failed') AND next_health_check_at IS NULL
+			UNION ALL
+			SELECT id,status,'incomplete_failure_episode'
+			FROM proxies
+			WHERE status='failed'
+			  AND (failed_since IS NULL OR continuous_failed_since IS NULL OR failure_episode_kind IS NULL)
+			UNION ALL
+			SELECT id,status,'invalid_archive_projection'
+			FROM proxies
+			WHERE status='archived'
+			  AND (archived_at IS NULL OR archive_reason IS NULL OR next_health_check_at IS NOT NULL)
+			UNION ALL
+			SELECT p.id,p.status,'archived_proxy_bound_to_running_slot'
+			FROM proxies p
+			JOIN proxy_running_slots slot ON slot.proxy_id=p.id
+			WHERE p.status='archived'
+			UNION ALL
+			SELECT checks.proxy_id,proxies.status,'transition_evidence_not_preserved'
+			FROM proxy_health_checks checks
+			JOIN proxies ON proxies.id=checks.proxy_id
+			WHERE checks.applied=true
+			  AND checks.previous_status IS DISTINCT FROM checks.resulting_status
+			  AND checks.transition_preserved=false;
+
+			ALTER TABLE proxies DROP CONSTRAINT IF EXISTS proxies_scheduled_status_has_due;
+			ALTER TABLE proxies ADD CONSTRAINT proxies_scheduled_status_has_due
+			  CHECK (status NOT IN ('idle','failed') OR next_health_check_at IS NOT NULL)
+			  NOT VALID;
+			DROP INDEX IF EXISTS idx_proxies_health_check_due;
+			CREATE INDEX idx_proxies_health_check_due
+			  ON proxies(next_health_check_at,id)
+			  WHERE next_health_check_at IS NOT NULL
+			    AND (status IN ('idle','failed') OR (status='active' AND revalidation_required));
+			UPDATE settings
+			SET value=value-'active_recheck_minutes',updated_at=NOW()
+			WHERE key='proxy_lifecycle';
+		`,
+	},
 }
 
 // Migrate runs all pending migrations

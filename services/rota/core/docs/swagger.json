@@ -132,6 +132,40 @@
                 }
             }
         },
+        "/dashboard/proxy-capacity": {
+            "get": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Get policy-eligible live Slot and warm-reserve proxy counts",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "dashboard"
+                ],
+                "summary": "Proxy capacity",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_proxycontrol.Capacity"
+                        }
+                    },
+                    "503": {
+                        "description": "Service Unavailable",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                }
+            }
+        },
         "/dashboard/stats": {
             "get": {
                 "description": "Get dashboard statistics including proxy and request metrics",
@@ -1555,6 +1589,9 @@
         "github_com_alpkeskin_rota_core_internal_models.ProxyLifecycleSettings": {
             "type": "object",
             "properties": {
+                "active_recheck_minutes": {
+                    "type": "integer"
+                },
                 "auto_archive_enabled": {
                     "type": "boolean"
                 },
@@ -1884,6 +1921,88 @@
             "properties": {
                 "username": {
                     "type": "string"
+                }
+            }
+        },
+        "github_com_alpkeskin_rota_core_internal_proxycontrol.Capacity": {
+            "type": "object",
+            "properties": {
+                "active": {
+                    "type": "integer"
+                },
+                "archived": {
+                    "type": "integer"
+                },
+                "catalog_digest": {
+                    "type": "string"
+                },
+                "catalog_version": {
+                    "type": "integer"
+                },
+                "cooldown": {
+                    "type": "integer"
+                },
+                "minimum_reserve": {
+                    "type": "integer"
+                },
+                "ok": {
+                    "type": "boolean"
+                },
+                "reserve": {
+                    "type": "integer"
+                },
+                "reserve_below_minimum": {
+                    "type": "boolean"
+                },
+                "roles": {
+                    "type": "object",
+                    "additionalProperties": {
+                        "$ref": "#/definitions/github_com_alpkeskin_rota_core_internal_proxycontrol.RoleCapacity"
+                    }
+                },
+                "running": {
+                    "type": "integer"
+                },
+                "total": {
+                    "type": "integer"
+                },
+                "workload_scope": {
+                    "type": "string"
+                }
+            }
+        },
+        "github_com_alpkeskin_rota_core_internal_proxycontrol.RoleCapacity": {
+            "type": "object",
+            "properties": {
+                "assigned": {
+                    "type": "integer"
+                },
+                "claimed": {
+                    "type": "integer"
+                },
+                "desired": {
+                    "type": "integer"
+                },
+                "eligible": {
+                    "type": "integer"
+                },
+                "identity_policy_hash": {
+                    "type": "string"
+                },
+                "identity_policy_id": {
+                    "type": "string"
+                },
+                "identity_policy_version": {
+                    "type": "integer"
+                },
+                "provisioned": {
+                    "type": "integer"
+                },
+                "ready": {
+                    "type": "integer"
+                },
+                "reserve": {
+                    "type": "integer"
                 }
             }
         },

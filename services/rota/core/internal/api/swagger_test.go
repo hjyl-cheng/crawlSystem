@@ -45,7 +45,11 @@ func TestEmbeddedSwaggerIncludesLocalAndGeoIPContracts(t *testing.T) {
 	if _, ok := document.Paths["/proxies/bulk-tags"]; !ok {
 		t.Fatal("embedded Swagger document is missing /proxies/bulk-tags")
 	}
-	for _, path := range []string{"/settings/geoip/status", "/settings/geoip/update-db"} {
+	for _, path := range []string{
+		"/dashboard/proxy-capacity",
+		"/settings/geoip/status",
+		"/settings/geoip/update-db",
+	} {
 		if _, ok := document.Paths[path]; !ok {
 			t.Fatalf("embedded Swagger document is missing %s", path)
 		}
@@ -54,6 +58,7 @@ func TestEmbeddedSwaggerIncludesLocalAndGeoIPContracts(t *testing.T) {
 		"github_com_alpkeskin_rota_core_internal_models.BulkTagProxyRequest",
 		"github_com_alpkeskin_rota_core_internal_models.GeoIPSettings",
 		"github_com_alpkeskin_rota_core_internal_models.GeoIPStatus",
+		"github_com_alpkeskin_rota_core_internal_proxycontrol.Capacity",
 	} {
 		if _, ok := document.Definitions[definition]; !ok {
 			t.Fatalf("embedded Swagger document is missing %s", definition)

@@ -1376,7 +1376,7 @@ func TestStaleRouteCompensationCannotRetireATakeoverManagersReadyRoute(t *testin
 	}
 }
 
-func TestAppliedHealthVerdictRacesRenewReconcileAndBeginTaskWithoutReusingFailedRoute(t *testing.T) {
+func TestBoundHealthVerdictRacesControlOperationsWithoutChangingTheRoute(t *testing.T) {
 	manager, pool := newProxyControlPostgresWithOptions(t, func(options *Options) {
 		options.ChannelSlots = 2
 	})
@@ -1417,7 +1417,7 @@ func TestAppliedHealthVerdictRacesRenewReconcileAndBeginTaskWithoutReusingFailed
 		END
 		$function$;
 		CREATE TRIGGER gate_health_verdict_race
-		AFTER UPDATE OF health_generation ON proxies
+		AFTER INSERT ON proxy_health_checks
 		FOR EACH ROW EXECUTE FUNCTION gate_health_verdict_race();
 	`); err != nil {
 		t.Fatalf("install health Verdict race gate: %v", err)
@@ -1554,7 +1554,7 @@ func TestAppliedHealthVerdictRacesRenewReconcileAndBeginTaskWithoutReusingFailed
 	if health.err != nil {
 		t.Fatalf("apply failed health Verdict: %v", health.err)
 	}
-	if !health.applied || health.decision.Status != proxylifecycle.StatusFailed {
+	if health.applied || health.decision.Status != proxylifecycle.StatusActive {
 		t.Fatalf("health Verdict applied=%v decision=%+v", health.applied, health.decision)
 	}
 
@@ -1564,8 +1564,8 @@ func TestAppliedHealthVerdictRacesRenewReconcileAndBeginTaskWithoutReusingFailed
 		}
 	}
 	beginErr := <-beginResult
-	if !errors.Is(beginErr, ErrRouteNotReady) && !errors.Is(beginErr, ErrLeaseConflict) {
-		t.Fatalf("concurrent BeginTask error = %v, want route not ready or stale Route fence", beginErr)
+	if beginErr != nil {
+		t.Fatalf("concurrent BeginTask error = %v, want bound Route to remain locally authoritative", beginErr)
 	}
 
 	if _, err := manager.reconcile(ctx); err != nil {
@@ -1582,10 +1582,10 @@ func TestAppliedHealthVerdictRacesRenewReconcileAndBeginTaskWithoutReusingFailed
 	if err != nil {
 		t.Fatalf("renew stable replacement: %v", err)
 	}
-	if !stable.Ready || stable.ProxyID == nil || *stable.ProxyID != reserveProxyID ||
-		stable.AssignmentVersion != claim.AssignmentVersion+1 ||
-		stable.CredentialGeneration != claim.CredentialGeneration+1 ||
-		dataPlane.activations() != claimActivationCalls+1 {
+	if !stable.Ready || stable.ProxyID == nil || *stable.ProxyID != failedProxyID ||
+		stable.AssignmentVersion != claim.AssignmentVersion ||
+		stable.CredentialGeneration != claim.CredentialGeneration ||
+		dataPlane.activations() != claimActivationCalls {
 		t.Fatalf("stable replacement = %+v, activations = %d", stable, dataPlane.activations())
 	}
 
@@ -1598,7 +1598,7 @@ func TestAppliedHealthVerdictRacesRenewReconcileAndBeginTaskWithoutReusingFailed
 	`, failedProxyID).Scan(&assignedCount, &distinctProxyCount, &failedAssignments); err != nil {
 		t.Fatalf("load final Route assignments: %v", err)
 	}
-	if assignedCount != 2 || distinctProxyCount != 2 || failedAssignments != 0 {
+	if assignedCount != 2 || distinctProxyCount != 2 || failedAssignments != 1 {
 		t.Fatalf(
 			"final Route assignments assigned=%d distinct=%d failed=%d; other=%d reserve=%d",
 			assignedCount, distinctProxyCount, failedAssignments, otherSlotProxyID, reserveProxyID,
@@ -1614,8 +1614,8 @@ func TestAppliedHealthVerdictRacesRenewReconcileAndBeginTaskWithoutReusingFailed
 		Scan(&healthGeneration); err != nil {
 		t.Fatalf("load health generation: %v", err)
 	}
-	if taskCount != 0 || healthGeneration != 1 {
-		t.Fatalf("raced task count=%d health generation=%d, want 0/1", taskCount, healthGeneration)
+	if taskCount != 1 || healthGeneration != 0 {
+		t.Fatalf("raced task count=%d health generation=%d, want 1/0", taskCount, healthGeneration)
 	}
 }
 

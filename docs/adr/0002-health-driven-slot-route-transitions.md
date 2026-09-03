@@ -4,7 +4,7 @@ status: accepted
 
 # Health-driven Slot Route transitions
 
-A conclusive Health Incident can make a Proxy ineligible while a Worker still owns its Slot. We will keep an Execution-Locked Slot on its current Route until the active Attempt quiesces and completes; a Health Incident is not a substitute for that Task's Worker Observation and does not create a Task `pending_action`. `BeginTask` remains the final eligibility gate, so the ineligible Route cannot start another Task.
+Background Health Incidents apply to Proxies outside a live Worker Lease, including Proxies merely preassigned to an unleased Slot. While a Proxy is on a live Lease, its Worker's Task Observations are the health authority. An Observation may require a Route replacement, but an Execution-Locked Slot stays on its current Route until the active Attempt quiesces and completes; background probing neither changes the leased Proxy's lifecycle nor creates a Task `pending_action`.
 
 A Lease-Owned Idle Slot uses a same-Lease Idle Route Transition. Rota selects an eligible reserve, rotates credentials, advances the Route generation, prepares the data plane, and then exposes the new Route through Renew. If no reserve exists, Rota clears the unusable Route and returns `PAUSED_NO_RESERVE` while retaining the Lease; a later reconciliation resumes the same transition when capacity returns. Repeated health notifications and reconciliation runs must not advance either generation more than once for the same transition.
 
@@ -24,6 +24,12 @@ Claim load is not a lease renewal. Only a successful Begin or Commit may extend 
 Before reconciliation or managed proxy connections are enabled, Rota rebuilds the activation registry from the complete database Route Fence. A ready live Route is reconstructed as committed; a pending unready Route is reconstructed as activating and blocked. Registry reconstruction failure is fail-closed. The in-memory registry requires single data-plane instance ownership; multiple data-plane replicas require shared persistence or reliable synchronization.
 
 The legacy `/api/v1/proxy-control/swap` protocol is removed because it bypassed the active-Task and activation fences. Every Route change now uses the same Completion or Idle Route Transition state machine.
+
+## Active and Warm Reserve
+
+For unbound inventory, `active` is a renewable health grant rather than a permanent historical label. Only a conclusive probe with both Base and YouTube results equal to `passed` creates the grant and schedules its next recheck. The periodic claimant changes an overdue unbound Proxy to `idle` before probing it, so it cannot be allocated while validation is in flight or inconclusive. Legacy HTTP status fields are not eligibility evidence.
+
+A Warm Reserve is an `active` Proxy that is not assigned to a Slot, is outside cooldown, does not require revalidation, and has a future recheck deadline backed by structured successful evidence. Proxy Control capacity reports this set directly. Only a Proxy protected by a live Slot and Lease-history Fence is excluded from background claims; a mere preassignment is still revalidated. If a Task Observation requires a Route change, Completion first fences the old Route and then changes its Proxy to recoverable `failed` state with a cooldown and scheduled recheck. The Route change never archives the Proxy; only the existing conclusive long-failure policy may do that later.
 
 ## Considered Options
 

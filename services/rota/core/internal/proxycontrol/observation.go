@@ -95,7 +95,6 @@ func (m *Manager) Observe(ctx context.Context, request ObserveRequest) (Observat
 
 	action := actionForObservation(request.Kind)
 	incidentID := ""
-	requestedHealthCheck := false
 	if action != PendingActionNone {
 		incidentID = uuid.NewString()
 	}
@@ -170,14 +169,10 @@ func (m *Manager) Observe(ctx context.Context, request ObserveRequest) (Observat
 		`, request.SlotName, pendingAction, pendingIncident, request.TaskID, request.RouteGeneration); err != nil {
 			return ObservationResult{}, fmt.Errorf("defer proxy observation action: %w", err)
 		}
-		requestedHealthCheck = true
 	}
 
 	if err := tx.Commit(ctx); err != nil {
 		return ObservationResult{}, fmt.Errorf("commit proxy observation: %w", err)
-	}
-	if requestedHealthCheck && state.proxyID != nil {
-		m.requestHealthCheck(*state.proxyID)
 	}
 	return ObservationResult{
 		OK: true, ObservationID: request.ObservationID, TaskID: request.TaskID,

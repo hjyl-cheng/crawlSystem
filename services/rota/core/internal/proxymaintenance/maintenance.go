@@ -383,18 +383,27 @@ func (m *Maintainer) EnsureLifecycleConstraints(ctx context.Context) error {
 	if _, err := m.db.Pool.Exec(ctx, `
 		DO $$
 		BEGIN
-		  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='proxies_scheduled_status_has_due') THEN
+		  IF NOT EXISTS (
+		    SELECT 1 FROM pg_constraint
+		    WHERE conname='proxies_scheduled_status_has_due' AND conrelid='proxies'::regclass
+		  ) THEN
 		    ALTER TABLE proxies ADD CONSTRAINT proxies_scheduled_status_has_due
-		      CHECK (status NOT IN ('idle','failed') OR next_health_check_at IS NOT NULL) NOT VALID;
+		      CHECK (status NOT IN ('idle','failed','active') OR next_health_check_at IS NOT NULL) NOT VALID;
 		  END IF;
-		  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='proxies_failed_episode_complete') THEN
+		  IF NOT EXISTS (
+		    SELECT 1 FROM pg_constraint
+		    WHERE conname='proxies_failed_episode_complete' AND conrelid='proxies'::regclass
+		  ) THEN
 		    ALTER TABLE proxies ADD CONSTRAINT proxies_failed_episode_complete
 		      CHECK (status <> 'failed' OR (
 		        failed_since IS NOT NULL AND continuous_failed_since IS NOT NULL
 		        AND failure_episode_kind IS NOT NULL
 		      )) NOT VALID;
 		  END IF;
-		  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='proxies_archive_projection_complete') THEN
+		  IF NOT EXISTS (
+		    SELECT 1 FROM pg_constraint
+		    WHERE conname='proxies_archive_projection_complete' AND conrelid='proxies'::regclass
+		  ) THEN
 		    ALTER TABLE proxies ADD CONSTRAINT proxies_archive_projection_complete
 		      CHECK (status <> 'archived' OR (
 		        archived_at IS NOT NULL AND archive_reason IS NOT NULL

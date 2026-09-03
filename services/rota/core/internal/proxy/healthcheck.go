@@ -251,6 +251,7 @@ func (h *HealthChecker) applyEvidence(
 		lifecycleSettings.HardUnreachableAfterHours,
 		lifecycleSettings.SoftUnreachableAfterHours,
 		lifecycleSettings.YouTubeUnusableAfterHours,
+		lifecycleSettings.ActiveRecheckMinutes,
 	)
 	decision, applied, err := h.proxyStore.ApplyHealthVerdict(ctx, p.ID, evidence, policy)
 	if err != nil {

@@ -223,7 +223,7 @@ func (m *Manager) loadEligibleCandidatesByRole(
 			result[role] = []candidate{}
 			continue
 		}
-		items, err := loadEligibleCandidates(ctx, tx, policy)
+		items, err := loadEligibleCandidates(ctx, tx, policy, m.options.WorkloadScope)
 		if err != nil {
 			return nil, fmt.Errorf("load %s policy candidates: %w", role, err)
 		}
@@ -400,8 +400,9 @@ func loadEligibleCandidates(
 	ctx context.Context,
 	tx pgx.Tx,
 	policy IdentityPolicy,
+	workloadScope string,
 ) ([]candidate, error) {
-	return queryEligibleCandidates(ctx, tx, policy, true)
+	return queryEligibleCandidates(ctx, tx, policy, workloadScope, true)
 }
 
 type candidateQueryer interface {
@@ -412,13 +413,14 @@ func queryEligibleCandidates(
 	ctx context.Context,
 	query candidateQueryer,
 	policy IdentityPolicy,
+	workloadScope string,
 	lock bool,
 ) ([]candidate, error) {
 	allowedTags := append([]string(nil), policy.AllowedProxyTags...)
 	if allowedTags == nil {
 		allowedTags = []string{}
 	}
-	statement := `
+	statement := fmt.Sprintf(`
 		SELECT id, protocol, COALESCE(tags,'{}'), COALESCE(avg_response_time,0),
 		       youtube_avg_response_time, COALESCE(youtube_failure_score,0),
 		       COALESCE(network_identity_key,''),
@@ -455,16 +457,26 @@ func queryEligibleCandidates(
 		  AND revalidation_required=false
 		  AND (cooldown_until IS NULL OR cooldown_until <= NOW())
 		  AND (
-		    (base_health_status='passed' AND youtube_health_status='passed')
-		    OR (last_youtube_status=200 AND last_rota_youtube_status=200)
+		    (
+		      last_health_success_at IS NOT NULL
+		      AND base_health_status='passed'
+		      AND youtube_health_status='passed'
+		      AND next_health_check_at > NOW()
+		    )
+		    OR EXISTS (
+		      SELECT 1 FROM proxy_running_slots slot
+		      WHERE slot.proxy_id=proxies.id
+		        AND %s
+		    )
 		  )
 		ORDER BY id
-	`
+	`, liveLeaseFencePredicate(5))
 	if lock {
 		statement += " FOR UPDATE"
 	}
 	rows, err := query.Query(ctx, statement, policy.RequiredEgressCountry, allowedTags,
-		policy.GeoFreshnessWindow.Milliseconds(), policy.AttemptSafetyWindow.Milliseconds())
+		policy.GeoFreshnessWindow.Milliseconds(), policy.AttemptSafetyWindow.Milliseconds(),
+		workloadScope)
 	if err != nil {
 		return nil, fmt.Errorf("load eligible proxy candidates: %w", err)
 	}

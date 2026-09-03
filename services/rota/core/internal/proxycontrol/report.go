@@ -118,10 +118,7 @@ func (m *Manager) Report(ctx context.Context, request ReportRequest) (ReportResu
 		return ReportResult{}, fmt.Errorf("commit proxy report: %w", err)
 	}
 	if request.Outcome == "failure" && result.Action == "cooldown" {
-		// The transaction already persisted the revalidation fence and due time.
-		// This in-memory request is only a latency optimization.
-		_ = m.requestHealthCheck(*proxyID)
-		result.HealthCheckRequested = true
+		m.requestReconcile()
 	}
 	return result, nil
 }
@@ -268,8 +265,9 @@ func (m *Manager) applyFailureReport(
 	proxyID int,
 	request ReportRequest,
 ) (ReportResult, error) {
+	failureKind := reportFailureKind(request)
 	cooldown := m.options.FailureCooldown
-	if request.ErrorType == "proxy_unavailable" || request.Status != nil && *request.Status == 502 {
+	if failureKind == "hard_unreachable" || failureKind == "soft_unreachable" {
 		cooldown = m.options.NetworkCooldown
 	}
 	status := request.Status
@@ -278,25 +276,22 @@ func (m *Manager) applyFailureReport(
 		firstNonEmpty(request.ErrorType, "proxy_failure"),
 		firstNonEmpty(request.Sample, "crawler request failed"),
 	), 500)
+	if err := m.quarantineProxy(
+		ctx, tx, proxyID, failureKind, errorText, "crawler_failure",
+	); err != nil {
+		return ReportResult{}, err
+	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE proxies
 		SET youtube_failed_requests=youtube_failed_requests+1,
 		    youtube_failure_score=LEAST(1,youtube_failure_score*0.8+0.2),
 		    last_youtube_failure=NOW(),
-			    cooldown_until=GREATEST(
-			      COALESCE(cooldown_until,NOW()),
-			      NOW()+$2::double precision*interval '1 second'
-			    ),
-		    last_youtube_status=$3,
-		    last_youtube_error=$4,
+		    last_youtube_status=$2,
+		    last_youtube_error=$3,
 		    last_youtube_check=NOW(),
-		    revalidation_required=true,
-		    next_health_check_at=NOW(),
-		    health_check_not_before=NOW(),
-		    health_generation=health_generation+1,
 		    updated_at=NOW()
 		WHERE id=$1
-	`, proxyID, cooldown.Seconds(), status, errorText); err != nil {
+	`, proxyID, status, errorText); err != nil {
 		return ReportResult{}, fmt.Errorf("cool down reported proxy: %w", err)
 	}
 	return ReportResult{

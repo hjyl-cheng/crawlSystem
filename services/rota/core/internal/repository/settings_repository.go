@@ -184,6 +184,7 @@ func (r *SettingsRepository) Reset(ctx context.Context) error {
 		},
 		"proxy_lifecycle": {
 			"auto_archive_enabled":         true,
+			"active_recheck_minutes":       120,
 			"hard_unreachable_after_hours": 6,
 			"soft_unreachable_after_hours": 24,
 			"youtube_unusable_after_hours": 72,
