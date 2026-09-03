@@ -17,7 +17,7 @@ func TestLegacyRepairUsesAuthoritativeHistoryAndRetentionPreservesUncopiedTransi
 	db, pool := newMaintenancePostgres(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	now := time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)
+	now := time.Now().UTC()
 	maintainer := New(db, logger.New("error"), Options{
 		RepairBatchSize:    10,
 		RepairSpread:       time.Hour,

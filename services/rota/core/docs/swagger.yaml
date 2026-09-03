@@ -337,6 +337,8 @@ definitions:
     type: object
   github_com_alpkeskin_rota_core_internal_models.ProxyLifecycleSettings:
     properties:
+      active_recheck_minutes:
+        type: integer
       auto_archive_enabled:
         type: boolean
       hard_unreachable_after_hours:
@@ -559,6 +561,60 @@ definitions:
       username:
         type: string
     type: object
+  github_com_alpkeskin_rota_core_internal_proxycontrol.Capacity:
+    properties:
+      active:
+        type: integer
+      archived:
+        type: integer
+      catalog_digest:
+        type: string
+      catalog_version:
+        type: integer
+      cooldown:
+        type: integer
+      minimum_reserve:
+        type: integer
+      ok:
+        type: boolean
+      reserve:
+        type: integer
+      reserve_below_minimum:
+        type: boolean
+      roles:
+        additionalProperties:
+          $ref: '#/definitions/github_com_alpkeskin_rota_core_internal_proxycontrol.RoleCapacity'
+        type: object
+      running:
+        type: integer
+      total:
+        type: integer
+      workload_scope:
+        type: string
+    type: object
+  github_com_alpkeskin_rota_core_internal_proxycontrol.RoleCapacity:
+    properties:
+      assigned:
+        type: integer
+      claimed:
+        type: integer
+      desired:
+        type: integer
+      eligible:
+        type: integer
+      identity_policy_hash:
+        type: string
+      identity_policy_id:
+        type: string
+      identity_policy_version:
+        type: integer
+      provisioned:
+        type: integer
+      ready:
+        type: integer
+      reserve:
+        type: integer
+    type: object
   internal_api_handlers.CPUMetrics:
     properties:
       cores:
@@ -701,6 +757,27 @@ paths:
           schema:
             $ref: '#/definitions/github_com_alpkeskin_rota_core_internal_models.ErrorResponse'
       summary: Success rate chart
+      tags:
+      - dashboard
+  /dashboard/proxy-capacity:
+    get:
+      description: Get policy-eligible live Slot and warm-reserve proxy counts
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/github_com_alpkeskin_rota_core_internal_proxycontrol.Capacity'
+        "503":
+          description: Service Unavailable
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      security:
+      - BearerAuth: []
+      summary: Proxy capacity
       tags:
       - dashboard
   /dashboard/stats:

@@ -849,6 +849,26 @@ export default function SettingsPage() {
             </div>
 
             <div className="space-y-2">
+              <Label htmlFor="active-recheck-minutes">Active Recheck Interval (minutes)</Label>
+              <Input
+                id="active-recheck-minutes"
+                type="number"
+                min={15}
+                max={1440}
+                value={settings.proxy_lifecycle.active_recheck_minutes}
+                onChange={(e) =>
+                  setSettings({
+                    ...settings,
+                    proxy_lifecycle: {
+                      ...settings.proxy_lifecycle,
+                      active_recheck_minutes: parseInt(e.target.value),
+                    },
+                  })
+                }
+              />
+            </div>
+
+            <div className="space-y-2">
               <Label htmlFor="hard-unreachable-hours">Hard Unreachable Window (hours)</Label>
               <Input
                 id="hard-unreachable-hours"

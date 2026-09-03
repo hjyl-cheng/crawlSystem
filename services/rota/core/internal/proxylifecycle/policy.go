@@ -76,6 +76,7 @@ type Policy struct {
 	SoftUnreachableWindow time.Duration
 	YouTubeUnusableWindow time.Duration
 	InconclusiveRetry     time.Duration
+	ActiveRecheckInterval time.Duration
 }
 
 func DefaultPolicy() Policy {
@@ -85,10 +86,11 @@ func DefaultPolicy() Policy {
 		SoftUnreachableWindow: 24 * time.Hour,
 		YouTubeUnusableWindow: 72 * time.Hour,
 		InconclusiveRetry:     30 * time.Minute,
+		ActiveRecheckInterval: 2 * time.Hour,
 	}
 }
 
-func PolicyFromHours(autoArchive bool, hard, soft, youtube int) Policy {
+func PolicyFromHours(autoArchive bool, hard, soft, youtube, activeRecheckMinutes int) Policy {
 	policy := DefaultPolicy()
 	policy.AutoArchiveEnabled = autoArchive
 	if hard > 0 {
@@ -99,6 +101,9 @@ func PolicyFromHours(autoArchive bool, hard, soft, youtube int) Policy {
 	}
 	if youtube > 0 {
 		policy.YouTubeUnusableWindow = time.Duration(youtube) * time.Hour
+	}
+	if activeRecheckMinutes > 0 {
+		policy.ActiveRecheckInterval = time.Duration(activeRecheckMinutes) * time.Minute
 	}
 	return policy
 }
@@ -120,10 +125,27 @@ func (p Policy) Decide(now time.Time, current Snapshot, verdict Verdict) Decisio
 	}
 
 	if verdict.Healthy && verdict.Conclusive && verdict.ControlPathHealthy {
-		return Decision{Status: StatusActive}
+		interval := p.ActiveRecheckInterval
+		if interval <= 0 {
+			interval = DefaultPolicy().ActiveRecheckInterval
+		}
+		return Decision{
+			Status:            StatusActive,
+			NextHealthCheckAt: timePtr(now.Add(interval)),
+		}
 	}
 
 	if !verdict.Conclusive || !verdict.ControlPathHealthy || !validFailureKind(verdict.Kind) {
+		retry := p.InconclusiveRetry
+		if retry <= 0 {
+			retry = DefaultPolicy().InconclusiveRetry
+		}
+		if current.Status == StatusActive {
+			return Decision{
+				Status:            StatusIdle,
+				NextHealthCheckAt: timePtr(now.Add(retry)),
+			}
+		}
 		decision := Decision{
 			Status:                current.Status,
 			FailedSince:           cloneTime(current.FailedSince),
@@ -132,10 +154,6 @@ func (p Policy) Decide(now time.Time, current Snapshot, verdict Verdict) Decisio
 			RevalidationRequired:  current.RevalidationRequired,
 		}
 		if current.Status == StatusFailed || current.Status == StatusIdle || current.RevalidationRequired {
-			retry := p.InconclusiveRetry
-			if retry <= 0 {
-				retry = 30 * time.Minute
-			}
 			decision.NextHealthCheckAt = timePtr(now.Add(retry))
 		}
 		return decision

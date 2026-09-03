@@ -50,9 +50,10 @@ func TestPolicyClearsFailureEpisodeOnHealthSuccess(t *testing.T) {
 	}, HealthyVerdict())
 
 	assertStatus(t, decision, StatusActive)
-	if decision.FailedSince != nil || decision.FailureKind != FailureNone || decision.NextHealthCheckAt != nil {
+	if decision.FailedSince != nil || decision.FailureKind != FailureNone {
 		t.Fatalf("healthy transition retained failure episode: %#v", decision)
 	}
+	assertTime(t, "next check", decision.NextHealthCheckAt, now.Add(2*time.Hour))
 }
 
 func TestPolicyRestartsObservationWhenFailureKindChanges(t *testing.T) {
@@ -95,16 +96,15 @@ func TestPolicyArchivesContinuousFailureEvenWhenFailureKindKeepsChanging(t *test
 	}
 }
 
-func TestPolicyKeepsIncidentFenceAndSchedulesInconclusiveActiveRevalidation(t *testing.T) {
+func TestPolicyMovesInconclusiveActiveProxyBackToPendingValidation(t *testing.T) {
 	now := time.Date(2026, 8, 11, 10, 0, 0, 0, time.UTC)
 	decision := DefaultPolicy().Decide(now, Snapshot{
-		Status:               StatusActive,
-		RevalidationRequired: true,
+		Status: StatusActive,
 	}, Verdict{})
 
-	assertStatus(t, decision, StatusActive)
-	if !decision.RevalidationRequired {
-		t.Fatal("inconclusive probe cleared incident revalidation fence")
+	assertStatus(t, decision, StatusIdle)
+	if decision.RevalidationRequired {
+		t.Fatal("pending-validation proxy retained a separate active eligibility fence")
 	}
 	assertTime(t, "next check", decision.NextHealthCheckAt, now.Add(30*time.Minute))
 }

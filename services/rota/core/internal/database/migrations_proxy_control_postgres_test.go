@@ -110,7 +110,7 @@ func newProxyControlMigrationPostgres(t *testing.T) (*DB, *pgxpool.Pool) {
 		admin.Close()
 		t.Fatalf("parse PostgreSQL config: %v", err)
 	}
-	config.ConnConfig.RuntimeParams["search_path"] = schema
+	config.ConnConfig.RuntimeParams["search_path"] = schema + ",public"
 	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {
 		_, _ = admin.Exec(context.Background(), "DROP SCHEMA "+quotedSchema+" CASCADE")

@@ -217,7 +217,7 @@ func TestEveryAppliedHealthVerdictNotifiesProxyControlAfterPersistence(t *testin
 		{
 			name: "inconclusive", initialStatus: proxylifecycle.StatusActive,
 			directBaseStatus: http.StatusBadGateway, proxyBaseStatus: http.StatusBadGateway,
-			proxyYouTubeState: http.StatusOK, wantStatus: "active", wantConclusive: false,
+			proxyYouTubeState: http.StatusOK, wantStatus: "idle", wantConclusive: false,
 		},
 		{
 			name: "failed", initialStatus: proxylifecycle.StatusActive,
@@ -324,7 +324,7 @@ func TestHealthCheckerTreatsTargetFiveHundredAsInconclusive(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CheckProxy: %v", err)
 	}
-	if result.Status != "active" || result.Conclusive || result.FailureKind != nil {
+	if result.Status != "idle" || result.Conclusive || result.FailureKind != nil {
 		t.Fatalf("result = %#v", result)
 	}
 }

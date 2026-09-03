@@ -199,6 +199,10 @@ func newManagedActivationPostgres(t *testing.T) *pgxpool.Pool {
 		  last_error TEXT,
 		  cooldown_until TIMESTAMPTZ,
 		  revalidation_required BOOLEAN NOT NULL DEFAULT false,
+		  last_health_success_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		  base_health_status TEXT NOT NULL DEFAULT 'passed',
+		  youtube_health_status TEXT NOT NULL DEFAULT 'passed',
+		  next_health_check_at TIMESTAMPTZ NOT NULL DEFAULT (NOW()+INTERVAL '2 hours'),
 		  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 		  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		);

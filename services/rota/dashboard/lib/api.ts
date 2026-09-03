@@ -2,6 +2,7 @@ import {
   Proxy,
   ProxiesResponse,
   DashboardStats,
+  ProxyCapacity,
   ChartResponse,
   LogEntry,
   LogsResponse,
@@ -168,6 +169,10 @@ class ApiClient {
   // Dashboard
   async getDashboardStats(): Promise<DashboardStats> {
     return this.request<DashboardStats>("/api/v1/dashboard/stats")
+  }
+
+  async getProxyCapacity(): Promise<ProxyCapacity> {
+    return this.request<ProxyCapacity>("/api/v1/dashboard/proxy-capacity")
   }
 
   async getResponseTimeChart(interval: string = "4h"): Promise<ChartResponse> {

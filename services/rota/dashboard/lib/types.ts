@@ -64,6 +64,35 @@ export interface DashboardStats {
   response_time_delta: number
 }
 
+export interface ProxyRoleCapacity {
+  identity_policy_id?: string
+  identity_policy_version?: number
+  identity_policy_hash?: string
+  desired: number
+  provisioned: number
+  eligible: number
+  assigned: number
+  ready: number
+  claimed: number
+  reserve: number
+}
+
+export interface ProxyCapacity {
+  workload_scope: string
+  catalog_version: number
+  catalog_digest: string
+  ok: boolean
+  active: number
+  cooldown: number
+  total: number
+  archived: number
+  running: number
+  reserve: number
+  minimum_reserve: number
+  reserve_below_minimum: boolean
+  roles: Record<string, ProxyRoleCapacity>
+}
+
 export interface ChartDataPoint {
   time: string
   value?: number
@@ -158,6 +187,7 @@ export interface Settings {
   }
   proxy_lifecycle: {
     auto_archive_enabled: boolean
+    active_recheck_minutes: number
     hard_unreachable_after_hours: number
     soft_unreachable_after_hours: number
     youtube_unusable_after_hours: number

@@ -57,11 +57,9 @@ type DataPlaneController interface {
 }
 
 type Manager struct {
-	db            *database.DB
-	proxyStore    ProxyStore
-	healthChecker HealthChecker
-	options       Options
-	logger        *logger.Logger
+	db      *database.DB
+	options Options
+	logger  *logger.Logger
 
 	invalidateMu sync.RWMutex
 	invalidate   func(string)
@@ -69,9 +67,6 @@ type Manager struct {
 
 	reconcileMu       sync.Mutex
 	reconcileRequests chan struct{}
-	healthRequests    chan int
-	healthMu          sync.Mutex
-	healthPending     map[int]struct{}
 }
 
 func (m *Manager) policyForRole(role string) (IdentityPolicy, bool) {
@@ -92,8 +87,8 @@ func (m *Manager) policyForRole(role string) (IdentityPolicy, bool) {
 
 func New(
 	db *database.DB,
-	proxyStore ProxyStore,
-	healthChecker HealthChecker,
+	_ ProxyStore,
+	_ HealthChecker,
 	options Options,
 	log *logger.Logger,
 ) *Manager {
@@ -123,13 +118,9 @@ func New(
 	}
 	return &Manager{
 		db:                db,
-		proxyStore:        proxyStore,
-		healthChecker:     healthChecker,
 		options:           options,
 		logger:            log,
 		reconcileRequests: make(chan struct{}, 1),
-		healthRequests:    make(chan int, 1024),
-		healthPending:     make(map[int]struct{}),
 	}
 }
 
@@ -183,15 +174,6 @@ func (m *Manager) Run(ctx context.Context) {
 		m.logError("initial proxy control reconciliation failed", err)
 	}
 
-	var healthWorkers sync.WaitGroup
-	for range 5 {
-		healthWorkers.Add(1)
-		go func() {
-			defer healthWorkers.Done()
-			m.runHealthWorker(ctx)
-		}()
-	}
-	defer healthWorkers.Wait()
 	reconcileTicker := time.NewTicker(m.options.ReconcileInterval)
 	resourceTicker := time.NewTicker(m.options.ResourceSyncInterval)
 	defer reconcileTicker.Stop()
@@ -231,58 +213,6 @@ func (m *Manager) requestReconcile() {
 func (m *Manager) NotifyHealthVerdictApplied(proxyID int) {
 	if proxyID > 0 {
 		m.requestReconcile()
-	}
-}
-
-func (m *Manager) requestHealthCheck(proxyID int) bool {
-	if proxyID <= 0 || m.healthChecker == nil || m.proxyStore == nil {
-		return false
-	}
-	m.healthMu.Lock()
-	if _, found := m.healthPending[proxyID]; found {
-		m.healthMu.Unlock()
-		return true
-	}
-	m.healthPending[proxyID] = struct{}{}
-	m.healthMu.Unlock()
-
-	select {
-	case m.healthRequests <- proxyID:
-		return true
-	default:
-		m.healthMu.Lock()
-		delete(m.healthPending, proxyID)
-		m.healthMu.Unlock()
-		return false
-	}
-}
-
-func (m *Manager) runHealthWorker(ctx context.Context) {
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case proxyID := <-m.healthRequests:
-			m.runRequestedHealthCheck(ctx, proxyID)
-			m.healthMu.Lock()
-			delete(m.healthPending, proxyID)
-			m.healthMu.Unlock()
-			m.requestReconcile()
-		}
-	}
-}
-
-func (m *Manager) runRequestedHealthCheck(ctx context.Context, proxyID int) {
-	proxy, err := m.proxyStore.GetByID(ctx, proxyID)
-	if err != nil {
-		m.logError("load proxy for requested self-check failed", err, "proxy_id", proxyID)
-		return
-	}
-	if proxy == nil || proxy.Status == "archived" {
-		return
-	}
-	if _, err := m.healthChecker.CheckProxy(ctx, proxy); err != nil {
-		m.logError("requested proxy self-check failed", err, "proxy_id", proxyID)
 	}
 }
 

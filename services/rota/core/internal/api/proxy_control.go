@@ -107,6 +107,16 @@ func (h *ProxyControlHandler) Release(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// Capacity reports verified Slot and warm-reserve capacity.
+//
+//	@Summary		Proxy capacity
+//	@Description	Get policy-eligible live Slot and warm-reserve proxy counts
+//	@Tags			dashboard
+//	@Produce		json
+//	@Security		BearerAuth
+//	@Success		200	{object}	proxycontrol.Capacity
+//	@Failure		503	{object}	map[string]string
+//	@Router			/dashboard/proxy-capacity [get]
 func (h *ProxyControlHandler) Capacity(w http.ResponseWriter, r *http.Request) {
 	result, err := h.control.Capacity(r.Context())
 	if err != nil {

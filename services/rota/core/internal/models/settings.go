@@ -81,6 +81,7 @@ type ProxyCleanupSettings struct {
 // ProxyLifecycleSettings controls failure observation and automatic archival.
 type ProxyLifecycleSettings struct {
 	AutoArchiveEnabled        bool `json:"auto_archive_enabled"`
+	ActiveRecheckMinutes      int  `json:"active_recheck_minutes"`
 	HardUnreachableAfterHours int  `json:"hard_unreachable_after_hours"`
 	SoftUnreachableAfterHours int  `json:"soft_unreachable_after_hours"`
 	YouTubeUnusableAfterHours int  `json:"youtube_unusable_after_hours"`
