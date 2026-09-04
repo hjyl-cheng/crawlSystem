@@ -128,12 +128,15 @@ test("YouTubeJS checkpoint executor finalizes once and replays without network",
     await pool.query(
       `INSERT INTO crawler.contents (
          content_key,channel_id,run_id,content_type,content_type_source,
-         source_content_id,title,url,published_at,published_at_status,
-         published_at_precision,access_status,access_status_source,
+         source_content_id,title,url,thumbnail_url,description,description_status,keywords,
+         published_at,published_at_status,published_at_precision,
+         duration_seconds,duration_status,access_status,access_status_source,
          first_seen_at,last_seen_at
        ) VALUES (
          $1,$2,$3,'video','youtube_watch_canonical',$4,'Stored recent Video',$5,
-         '2026-09-01T00:00:00Z','exact','date_only','public','youtubejs_player',now(),now()
+         'https://i.ytimg.com/vi/stored/default.jpg','Stored description','exact',ARRAY['stored'],
+         '2026-09-01T00:00:00Z','exact','date_only',45,'exact',
+         'public','youtubejs_player',now(),now()
        )`,
       [
         recentContentKey,
@@ -253,16 +256,24 @@ test("YouTubeJS checkpoint executor finalizes once and replays without network",
     assert.equal(content.comment_count, "0");
     assert.match(content.publication_item_hash, /^sha256:[a-f0-9]{64}$/);
     const recentContent = (await pool.query(
-      `SELECT title,view_count,published_at,player_last_observed_at,publication_item_hash
+      `SELECT title,thumbnail_url,description,keywords,duration_seconds,
+              view_count,like_count,comment_count,published_at,
+              player_last_observed_at,publication_item_hash
        FROM crawler.contents
        WHERE content_key=$1`,
       [recentContentKey],
     )).rows[0];
-    assert.equal(recentContent.title, `YouTubeJS ${recentVideoId}`);
+    assert.equal(recentContent.title, "Stored recent Video");
+    assert.equal(recentContent.thumbnail_url, "https://i.ytimg.com/vi/stored/default.jpg");
+    assert.equal(recentContent.description, "Stored description");
+    assert.deepEqual(recentContent.keywords, ["stored"]);
+    assert.equal(recentContent.duration_seconds, 45);
     assert.equal(recentContent.view_count, "321");
+    assert.equal(recentContent.like_count, "12");
+    assert.equal(recentContent.comment_count, "0");
     assert.equal(
       new Date(recentContent.published_at).toISOString(),
-      "2026-09-02T12:00:00.000Z",
+      "2026-09-01T00:00:00.000Z",
     );
     assert.equal(
       new Date(recentContent.player_last_observed_at).toISOString(),

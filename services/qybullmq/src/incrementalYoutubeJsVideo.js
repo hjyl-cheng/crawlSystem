@@ -431,16 +431,64 @@ function detailFacts(detail) {
   };
 }
 
+function missingStoredText(value) {
+  return text(value) == null;
+}
+
+function recentStorageFacts(row, facts, { allowStaticRepair = false } = {}) {
+  if (allowStaticRepair) {
+    return {
+      title: facts.title,
+      thumbnail_url: facts.thumbnail_url,
+      description: facts.description,
+      description_source: facts.description_source,
+      description_observed: facts.description_observed,
+      hashtags: facts.hashtags,
+      hashtags_observed: facts.hashtags_observed,
+      keywords: facts.keywords,
+      keywords_observed: facts.keywords_observed,
+      duration_seconds: facts.duration_seconds,
+      duration_source: facts.duration_source,
+      live_scheduled_at: facts.live_scheduled_at,
+      live_started_at: facts.live_started_at,
+      live_ended_at: facts.live_ended_at,
+    };
+  }
+  const descriptionResolved = ["exact", "empty"].includes(text(row.description_status));
+  const descriptionMissing = missingStoredText(row.description) && !descriptionResolved;
+  const durationMissing = positiveInteger(row.duration_seconds) == null;
+  return {
+    title: missingStoredText(row.title) ? facts.title : null,
+    thumbnail_url: missingStoredText(row.thumbnail_url) ? facts.thumbnail_url : null,
+    description: descriptionMissing ? facts.description : null,
+    description_source: descriptionMissing ? facts.description_source : null,
+    description_observed: descriptionMissing && facts.description_observed,
+    hashtags: [],
+    hashtags_observed: false,
+    keywords: [],
+    keywords_observed: false,
+    duration_seconds: durationMissing ? facts.duration_seconds : null,
+    duration_source: durationMissing ? facts.duration_source : null,
+    live_scheduled_at: row.live_scheduled_at == null ? facts.live_scheduled_at : null,
+    live_started_at: row.live_started_at == null ? facts.live_started_at : null,
+    live_ended_at: row.live_ended_at == null ? facts.live_ended_at : null,
+  };
+}
+
 export async function fetchIncrementalYoutubeJsVideoDetail(videoId, {
   fetchYoutubeJs = fetchYoutubeJsVideoDetail,
   signal = null,
+  phase = "first_seen",
+  target = null,
 } = {}) {
   const effectiveSignal = combineAbortSignals(signal, currentChannelExecutionAbortSignal());
   const assertNotAborted = () => throwIfAborted(effectiveSignal);
+  const requiresFullSurface = phase !== "recent" || target?.enrich_pending === true;
   assertNotAborted();
   const detail = assertYoutubeContentObservation(await fetchYoutubeJs(videoId, {
     signal: effectiveSignal,
     strictRequiredSurfaces: true,
+    detailMode: requiresFullSurface ? "full" : "metrics",
   }), {
     videoId,
     source: "youtubejs_player",
@@ -465,7 +513,17 @@ export async function fetchIncrementalYoutubeJsVideoDetail(videoId, {
   const classification = resolveYoutubeContentType({ videoId, detail });
   const terminalAccess = ["members_only", "private", "unavailable"]
     .includes(detailAccess(detail));
+  if (!requiresFullSurface && !terminalAccess && detailViewCount(detail) == null) {
+    const error = new Error(
+      `YouTube.js parser gap: required Video metrics surface is incomplete for ${videoId}`,
+    );
+    error.name = "YoutubeJsRequiredSurfaceError";
+    error.required_surface = "player";
+    error.partial_detail = detail;
+    throw error;
+  }
   if (!terminalAccess
+      && requiresFullSurface
       && !isUpcomingLiveDetail(detail)
       && (classification?.authoritative !== true || !hasCompletePublicVideoSurface(detail))) {
     const error = new Error(
@@ -2035,6 +2093,7 @@ export async function applyIncrementalVideoDetail(client, {
   collectNext = false,
   changeAlpha = 0.4,
   detailMetadataKey = "incremental_detail",
+  allowStaticRepair = true,
 }) {
   if (!detail) throw new TypeError("detail is required");
   const facts = detailFacts(detail);
@@ -2063,8 +2122,15 @@ export async function applyIncrementalVideoDetail(client, {
       && previousComment !== facts.comment_count);
   const changeProbability = nextVideoChangeProbability(row, facts, changeAlpha);
   const commentsObserved = facts.comments_disabled === true || facts.comment_count != null;
-  const storedPublication = row.stored_publication ?? row;
-  const publicationSelection = selectPublicationEvidence(storedPublication, facts);
+  const storageFacts = recentStorageFacts(row, facts, { allowStaticRepair });
+  const storedPublication = normalizePublicationEvidence(row.stored_publication ?? row);
+  const publicationSelection = allowStaticRepair || storedPublication.published_at == null
+    ? selectPublicationEvidence(storedPublication, facts)
+    : {
+        evidence: storedPublication,
+        selected: "current",
+        reason_code: "immutable_publication_retained",
+      };
   const publication = publicationSelection.evidence;
   const publicationConflict = publicationEvidenceConflictRecord(publicationSelection);
   const isRecent = publication.published_at == null
@@ -2074,7 +2140,10 @@ export async function applyIncrementalVideoDetail(client, {
     `UPDATE crawler.contents
      SET content_type=CASE WHEN $36::text IS NULL THEN content_type ELSE $36 END,
          content_type_source=CASE WHEN $36::text IS NULL THEN content_type_source ELSE $37 END,
-         url=CASE WHEN $36::text IS NULL THEN url ELSE $38 END,
+         url=CASE
+           WHEN $43::boolean THEN COALESCE($38,url)
+           WHEN NULLIF(btrim(COALESCE(url,'')),'') IS NULL THEN COALESCE($38,url)
+           ELSE url END,
          title=COALESCE($10,title),
          thumbnail_url=COALESCE($11,thumbnail_url),
          description=CASE
@@ -2100,10 +2169,21 @@ export async function applyIncrementalVideoDetail(client, {
            WHEN $18::boolean AND (
              COALESCE(cardinality($17::text[]),0)>0 OR COALESCE(cardinality(keywords),0)=0
            ) THEN $17::text[] ELSE keywords END,
-         published_at=$19::timestamptz,
-         published_at_status=$41::text,
-         published_at_source=$20::text,
-         published_at_precision=$21::text,
+         published_at=CASE
+           WHEN $43::boolean THEN $19::timestamptz
+           ELSE COALESCE(published_at,$19::timestamptz) END,
+         published_at_status=CASE
+           WHEN $43::boolean THEN $41::text
+           WHEN published_at IS NULL AND $19::timestamptz IS NOT NULL THEN $41
+           ELSE published_at_status END,
+         published_at_source=CASE
+           WHEN $43::boolean THEN $20::text
+           WHEN published_at IS NULL AND $19::timestamptz IS NOT NULL THEN $20
+           ELSE published_at_source END,
+         published_at_precision=CASE
+           WHEN $43::boolean THEN $21::text
+           WHEN published_at IS NULL AND $19::timestamptz IS NOT NULL THEN $21
+           ELSE published_at_precision END,
          is_recent=COALESCE($22::boolean,is_recent),
          duration_seconds=COALESCE($23::integer,duration_seconds),
          duration_status=CASE WHEN $23::integer IS NULL THEN duration_status ELSE 'exact' END,
@@ -2164,39 +2244,40 @@ export async function applyIncrementalVideoDetail(client, {
       collectNext,
       observationId,
       changeProbability,
-      facts.title,
-      facts.thumbnail_url,
-      facts.description,
-      facts.description_observed,
-      facts.description_source,
-      facts.hashtags,
-      facts.hashtags_observed,
-      facts.keywords,
-      facts.keywords_observed,
+      storageFacts.title,
+      storageFacts.thumbnail_url,
+      storageFacts.description,
+      storageFacts.description_observed,
+      storageFacts.description_source,
+      storageFacts.hashtags,
+      storageFacts.hashtags_observed,
+      storageFacts.keywords,
+      storageFacts.keywords_observed,
       publication.published_at,
       publication.published_at_source,
       publication.published_at_precision,
       isRecent,
-      facts.duration_seconds,
-      facts.duration_source,
+      storageFacts.duration_seconds,
+      storageFacts.duration_source,
       facts.view_count_source,
       facts.like_count_source,
       facts.comment_count_source,
       facts.access_status,
       facts.access_status_source,
       facts.extractor_version,
-      facts.live_scheduled_at,
-      facts.live_started_at,
-      facts.live_ended_at,
+      storageFacts.live_scheduled_at,
+      storageFacts.live_started_at,
+      storageFacts.live_ended_at,
       detailSource(detail),
       commentsObserved,
-      storageAction.kind === "upsert" ? storageAction.content_type : null,
-      storageAction.kind === "upsert" ? storageAction.type_source : null,
+      allowStaticRepair && storageAction.kind === "upsert" ? storageAction.content_type : null,
+      allowStaticRepair && storageAction.kind === "upsert" ? storageAction.type_source : null,
       storageAction.kind === "upsert" ? classification.canonical_url : null,
       facts.comments_first_page == null ? null : JSON.stringify(facts.comments_first_page),
       detailMetadataKey,
       publication.published_at_status,
       publicationConflict == null ? null : JSON.stringify(publicationConflict),
+      allowStaticRepair,
     ],
   );
   return {
@@ -2873,7 +2954,11 @@ async function fetchCheckpointItemDetail({ item, fetchDetail, withTransaction, h
   let detail;
   let fetchError = null;
   try {
-    detail = await fetchDetail(item.video_id, { signal: liveClaim.signal });
+    detail = await fetchDetail(item.video_id, {
+      signal: liveClaim.signal,
+      phase: item.phase,
+      target: item.target_json,
+    });
     throwIfAborted(liveClaim.signal);
   } catch (error) {
     fetchError = error;
@@ -3215,12 +3300,19 @@ function preparedSamplingFromCheckpoint(batch) {
     const error = item.error_json == null ? null : checkpointErrorFromJson(item.error_json);
     const outcome = item.status === "settled_error"
       ? contentEnrichFailureOutcome(task, error, completedAt, clockContentEnrichRetryOptions())
-      : contentEnrichDetailOutcome(
-          task,
-          item.detail_json,
-          completedAt,
-          clockContentEnrichRetryOptions(),
-        );
+      : row.enrich_pending === true
+        ? contentEnrichDetailOutcome(
+            task,
+            item.detail_json,
+            completedAt,
+            clockContentEnrichRetryOptions(),
+          )
+        : recentMetricsDetailOutcome(
+            task,
+            item.detail_json,
+            completedAt,
+            clockContentEnrichRetryOptions(),
+          );
     preparedCaptures.set(row.content_key, {
       state: outcome.detail == null ? "failure" : "publication",
       currentTask,
@@ -3229,6 +3321,36 @@ function preparedSamplingFromCheckpoint(batch) {
     });
   }
   return { samplePlan, preparedCaptures };
+}
+
+function recentMetricsDetailOutcome(task, detail, observedAt, retryOptions) {
+  const accessStatus = detailAccess(detail);
+  if (!["members_only", "private", "unavailable"].includes(accessStatus)
+      && detailViewCount(detail) == null) {
+    const error = Object.assign(
+      new Error("Incremental Video detail is missing the required metrics surface"),
+      {
+        youtube_failure_decision: {
+          kind: "incomplete_detail",
+          retry_mode: "same_identity",
+          reason_code: "required_metrics_surface_missing",
+        },
+      },
+    );
+    return contentEnrichFailureOutcome(task, error, observedAt, retryOptions);
+  }
+  return {
+    task_id: task?.task_id ?? null,
+    dispatch_generation: task?.dispatch_generation ?? null,
+    kind: ["members_only", "private", "unavailable"].includes(accessStatus)
+      ? "terminal"
+      : "done",
+    detail,
+    access_status: accessStatus,
+    observed_at: observedAt.toISOString(),
+    next_retry_at: videoAccessRecheckAt(accessStatus, observedAt),
+    error_message: null,
+  };
 }
 
 async function applyRecentSampling({
@@ -3301,6 +3423,7 @@ async function applyRecentSampling({
       observationId,
       collectNext: spec?.collect_next === true,
       changeAlpha,
+      allowStaticRepair: spec?.enrich_pending === true,
     });
     await persistClockContentEnrichOutcome(transactionClient, {
       currentTask: ownership.currentTask ?? prepared.currentTask,

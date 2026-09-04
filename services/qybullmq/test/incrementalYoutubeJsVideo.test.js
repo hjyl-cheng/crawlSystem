@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   INCREMENTAL_YOUTUBEJS_VIDEO_CLAIM_SQL,
   INCREMENTAL_YOUTUBEJS_VIDEO_SETTLE_SQL,
+  applyIncrementalVideoDetail,
   captureIncrementalYoutubeJsVideoCheckpointPhase,
   fetchIncrementalYoutubeJsVideoDetail,
   incrementalYoutubeJsVideoCycleKey,
@@ -31,7 +32,7 @@ test("an active Item claim is awaited without consuming a retry", async () => {
             phase: "recent",
             ordinal: 0,
             video_id: "video-claim-wait",
-            target_json: {},
+            target_json: { enrich_pending: false },
             status: "claimed",
             claim_token: claimToken,
             claim_expires_at: new Date(Date.now() + 30_000),
@@ -73,9 +74,11 @@ test("an active Item claim is awaited without consuming a retry", async () => {
     phase: "recent",
     query: stateQuery,
     withTransaction: async (action) => action(client),
-    fetchDetail: async (videoId) => {
+    fetchDetail: async (videoId, options) => {
       detailCalls += 1;
       assert.equal(videoId, "video-claim-wait");
+      assert.equal(options.phase, "recent");
+      assert.deepEqual(options.target, { enrich_pending: false });
       return detail(videoId);
     },
     signal: null,
@@ -259,6 +262,167 @@ test("incremental detail fetch uses one strict YouTubeJS request and never falls
     (error) => error === original,
   );
   assert.equal(calls, 2);
+});
+
+test("incremental recent detail uses the metrics contract unless a repair is pending", async () => {
+  const metrics = {
+    id: "stored-video",
+    view_count: 43,
+    view_count_text: "43",
+    like_count: 2,
+    comment_count: 1,
+    comment_count_status: "exact",
+    comments_disabled: false,
+    access_status: "public",
+    content_type_signals: { source: "youtubei_player", is_live: false, is_upcoming: false },
+  };
+  const optionsSeen = [];
+  const observed = await fetchIncrementalYoutubeJsVideoDetail("stored-video", {
+    phase: "recent",
+    target: { enrich_pending: false },
+    fetchYoutubeJs: async (_videoId, options) => {
+      optionsSeen.push(options);
+      return metrics;
+    },
+  });
+
+  assert.equal(observed, metrics);
+  assert.equal(optionsSeen[0].detailMode, "metrics");
+  assert.equal(optionsSeen[0].strictRequiredSurfaces, true);
+
+  await assert.rejects(
+    fetchIncrementalYoutubeJsVideoDetail("stored-video", {
+      phase: "recent",
+      target: { enrich_pending: true },
+      fetchYoutubeJs: async (_videoId, options) => {
+        optionsSeen.push(options);
+        return metrics;
+      },
+    }),
+    (error) => error.name === "YoutubeJsRequiredSurfaceError"
+      && error.required_surface === "player",
+  );
+  assert.equal(optionsSeen[1].detailMode, "full");
+});
+
+test("recent storage updates metrics while guarding populated static fields", async () => {
+  let update = null;
+  const client = {
+    async query(sql, params) {
+      update = { sql, params };
+      return { rowCount: 1, rows: [] };
+    },
+  };
+  await applyIncrementalVideoDetail(client, {
+    row: {
+      content_key: "UCstored:video:stored-video",
+      channel_id: "UCstored",
+      source_content_id: "stored-video",
+      content_type: "video",
+      content_type_source: "youtube_watch_canonical",
+      title: "Stored title",
+      published_at: "2026-08-18T22:16:14.000Z",
+      published_at_status: "exact",
+      published_at_precision: "second",
+      published_at_source: "yt_dlp_timestamp",
+      duration_seconds: 23,
+      view_count: 40,
+      like_count: 1,
+      comment_count: 0,
+      video_change_probability: 0.5,
+    },
+    detail: {
+      ...detail("stored-video"),
+      title: "Fresh response title",
+      published_at: "2026-08-18T00:00:00.000Z",
+      published_at_precision: "date_only",
+      published_at_source: "youtubejs_next_date_text",
+      duration_seconds: 99,
+      view_count: 43,
+      like_count: 2,
+      comment_count: 1,
+    },
+    observedAt: "2026-09-04T04:10:27.469Z",
+    allowStaticRepair: false,
+  });
+
+  assert.match(update.sql, /title=COALESCE\(\$10,title\)/);
+  assert.match(update.sql, /ELSE COALESCE\(published_at,\$19::timestamptz\) END/);
+  assert.match(update.sql, /duration_seconds=COALESCE\(\$23::integer,duration_seconds\)/);
+  assert.equal(update.params[2], 43);
+  assert.equal(update.params[3], 2);
+  assert.equal(update.params[4], 1);
+  assert.equal(update.params[9], null);
+  assert.equal(update.params[18], "2026-08-18T22:16:14.000Z");
+  assert.equal(update.params[20], "second");
+  assert.equal(update.params[22], null);
+  assert.equal(update.params[42], false);
+  assert.equal(update.params.length, 43);
+});
+
+test("recent storage repairs missing static fields without replacing populated values", async () => {
+  const updates = [];
+  const client = {
+    async query(sql, params) {
+      updates.push({ sql, params });
+      return { rowCount: 1, rows: [] };
+    },
+  };
+  const row = {
+    content_key: "UCstored:video:stored-video",
+    channel_id: "UCstored",
+    source_content_id: "stored-video",
+    content_type: "video",
+    content_type_source: "youtube_watch_canonical",
+    title: null,
+    thumbnail_url: null,
+    description: null,
+    description_status: "unresolved",
+    published_at: null,
+    published_at_status: "unresolved",
+    published_at_precision: "unknown",
+    published_at_source: null,
+    duration_seconds: null,
+    view_count: 40,
+  };
+  const observedDetail = {
+    ...detail("stored-video"),
+    title: "Recovered title",
+    thumbnail_url: "https://i.ytimg.com/vi/stored-video/default.jpg",
+    description: "Recovered description",
+    description_observed: true,
+    published_at: "2026-08-18T00:00:00.000Z",
+    published_at_status: "exact",
+    published_at_precision: "date_only",
+    published_at_source: "youtubejs_next_date_text",
+    duration_seconds: 99,
+    view_count: 43,
+  };
+
+  await applyIncrementalVideoDetail(client, {
+    row,
+    detail: observedDetail,
+    observedAt: "2026-09-04T04:10:27.469Z",
+    allowStaticRepair: false,
+  });
+  await applyIncrementalVideoDetail(client, {
+    row: { ...row, title: "Existing title" },
+    detail: observedDetail,
+    observedAt: "2026-09-04T04:10:27.469Z",
+  });
+
+  const opportunisticRepair = updates[0].params;
+  assert.equal(opportunisticRepair[9], "Recovered title");
+  assert.equal(opportunisticRepair[10], "https://i.ytimg.com/vi/stored-video/default.jpg");
+  assert.equal(opportunisticRepair[11], "Recovered description");
+  assert.equal(opportunisticRepair[18], "2026-08-18T00:00:00.000Z");
+  assert.equal(opportunisticRepair[20], "date_only");
+  assert.equal(opportunisticRepair[22], 99);
+  assert.equal(opportunisticRepair[42], false);
+
+  const explicitRepair = updates[1].params;
+  assert.equal(explicitRepair[9], "Recovered title");
+  assert.equal(explicitRepair[42], true);
 });
 
 test("incremental detail fetch preserves terminal facts and checkpoints parser gaps as partial", async () => {

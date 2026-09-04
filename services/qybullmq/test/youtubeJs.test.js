@@ -879,6 +879,44 @@ test("normalizeYoutubeJsVideoInfo retains genuine date-only precision", () => {
   assert.equal(detail.published_at_precision, "date_only");
 });
 
+test("normalizeYoutubeJsVideoInfo accepts a localized absolute Next publication date", () => {
+  const info = infoFixture();
+  delete info.page[0].microformat.publish_date;
+  delete info.page[0].microformat.upload_date;
+  info.primary_info = { published: "18 de ago. de 2026" };
+
+  const detail = normalizeYoutubeJsVideoInfo(info, null, { locale: "pt-BR" });
+
+  assert.equal(detail.published_at, "2026-08-18T00:00:00.000Z");
+  assert.equal(detail.published_text, "18 de ago. de 2026");
+  assert.equal(detail.published_at_status, "exact");
+  assert.equal(detail.published_at_precision, "date_only");
+  assert.equal(detail.published_at_source, "youtubejs_next_date_text");
+});
+
+test("normalizeYoutubeJsVideoInfo keeps Player seconds over a Next date", () => {
+  const info = infoFixture();
+  info.primary_info = { published: "18 de ago. de 2026" };
+
+  const detail = normalizeYoutubeJsVideoInfo(info, null, { locale: "pt-BR" });
+
+  assert.equal(detail.published_at, "2026-07-10T00:00:09.000Z");
+  assert.equal(detail.published_at_precision, "second");
+  assert.equal(detail.published_at_source, "youtubejs_player_microformat");
+});
+
+test("normalizeYoutubeJsVideoInfo uses an exact Next view count when Player omits it", () => {
+  const info = infoFixture({ basic_info: { view_count: null } });
+  delete info.page[0].microformat.view_count;
+  info.primary_info = { view_count: "43 views" };
+
+  const detail = normalizeYoutubeJsVideoInfo(info, null, { locale: "en" });
+
+  assert.equal(detail.view_count, 43);
+  assert.equal(detail.view_count_status, "exact");
+  assert.equal(detail.view_count_source, "youtubejs_next");
+});
+
 test("generic WEB playability errors do not override a complete public metadata surface", () => {
   const detail = normalizeYoutubeJsVideoInfo(infoFixture({
     playability_status: { status: "UNPLAYABLE", reason: "Video unavailable" },
@@ -1140,6 +1178,88 @@ test("Video Detail requests a new Route when playable clients lack the required 
     ["getInfo", "incomplete-public-video", "ANDROID"],
     ["getBasicInfo", "incomplete-public-video", "ANDROID"],
   ]);
+});
+
+test("Video Detail accepts a mobile Player when Next supplies a localized absolute date", async () => {
+  const calls = [];
+  const web = infoFixture({ playability_status: { status: "OK", reason: null } });
+  delete web.page[0].microformat.publish_date;
+  delete web.page[0].microformat.upload_date;
+  const mobile = infoFixture({ playability_status: { status: "OK", reason: null } });
+  delete mobile.page[0].microformat.publish_date;
+  delete mobile.page[0].microformat.upload_date;
+  mobile.primary_info = { published: "18 de ago. de 2026" };
+  const client = {
+    async getInfo(videoId, options) {
+      calls.push([videoId, options.client]);
+      return options.client === "WEB" ? web : mobile;
+    },
+  };
+
+  const result = await fetchYoutubeJsVideoInfoWithTerminalFallback(client, "localized-date", {
+    locale: "pt-BR",
+  });
+
+  assert.equal(result.kind, "info");
+  assert.equal(result.client, "IOS");
+  assert.deepEqual(calls, [
+    ["localized-date", "WEB"],
+    ["localized-date", "IOS"],
+  ]);
+});
+
+test("Video metrics mode does not require fresh publication or duration", async () => {
+  const calls = [];
+  const metrics = infoFixture({
+    basic_info: { duration: null, view_count: 43 },
+    playability_status: { status: "OK", reason: null },
+  });
+  delete metrics.page[0].microformat.publish_date;
+  delete metrics.page[0].microformat.upload_date;
+  delete metrics.page[0].microformat.length_seconds;
+  const client = {
+    async getInfo(videoId, options) {
+      calls.push([videoId, options.client]);
+      return metrics;
+    },
+  };
+
+  const result = await fetchYoutubeJsVideoInfoWithTerminalFallback(client, "metrics-only", {
+    detailMode: "metrics",
+  });
+
+  assert.equal(result.kind, "info");
+  assert.equal(result.client, "WEB");
+  assert.deepEqual(calls, [["metrics-only", "WEB"]]);
+});
+
+test("Video metrics mode still rejects an inconclusive sign-in response with only a view count", async () => {
+  const metrics = infoFixture({
+    basic_info: { duration: null, view_count: 43 },
+    playability_status: { status: "LOGIN_REQUIRED", reason: "Please sign in" },
+  });
+  delete metrics.page[0].microformat.publish_date;
+  delete metrics.page[0].microformat.upload_date;
+  delete metrics.page[0].microformat.length_seconds;
+  const calls = [];
+  const client = {
+    async getInfo(_videoId, options) {
+      calls.push(options.client);
+      return metrics;
+    },
+    async getBasicInfo(_videoId, options) {
+      calls.push(`basic:${options.client}`);
+      return metrics;
+    },
+  };
+
+  await assert.rejects(
+    fetchYoutubeJsVideoInfoWithTerminalFallback(client, "sign-in-metrics", {
+      detailMode: "metrics",
+    }),
+    (error) => decideYoutubeFailure({ error }).kind === "youtube_challenge",
+  );
+  assert.deepEqual(calls, ["WEB", "IOS", "ANDROID", "basic:ANDROID"]);
 });
 
 test("Video Detail does not run a terminal probe for an unrelated request failure", async () => {
