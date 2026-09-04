@@ -459,7 +459,6 @@ func queryEligibleCandidates(
 		  AND (
 		    (
 		      last_health_success_at IS NOT NULL
-		      AND base_health_status='passed'
 		      AND youtube_health_status='passed'
 		      AND next_health_check_at > NOW()
 		    )

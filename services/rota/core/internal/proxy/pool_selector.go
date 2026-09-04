@@ -50,7 +50,6 @@ func (ps *PoolSelector) Refresh(ctx context.Context) error {
 		    (p.status = 'active' AND p.revalidation_required=false
 		      AND (p.cooldown_until IS NULL OR p.cooldown_until <= NOW())
 		      AND p.last_health_success_at IS NOT NULL
-		      AND p.base_health_status='passed'
 		      AND p.youtube_health_status='passed'
 		      AND p.next_health_check_at > NOW())
 		    OR (

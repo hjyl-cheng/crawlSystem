@@ -1605,6 +1605,57 @@ var migrations = []Migration{
 			WHERE key='proxy_lifecycle';
 		`,
 	},
+	{
+		Version:     1013,
+		Description: "Use one bounded random YouTube search health probe",
+		Up: `
+			INSERT INTO settings (key,value,updated_at)
+			VALUES (
+			  'healthcheck',
+			  '{"timeout":15,"workers":20,"base_url":"https://www.google.com/generate_204","base_status":204,"url":"https://www.youtube.com/results?search_query=","status":200,"headers":["User-Agent: Rota-HealthCheck/1.0"],"strict_tls":false}'::jsonb,
+			  NOW()
+			)
+			ON CONFLICT (key) DO UPDATE
+			SET value=jsonb_set(
+			      jsonb_set(
+			        jsonb_set(settings.value,'{timeout}','15'::jsonb,true),
+			        '{url}',
+			        '"https://www.youtube.com/results?search_query="'::jsonb,
+			        true
+			      ),
+			      '{status}',
+			      '200'::jsonb,
+			      true
+			    ),
+			    updated_at=NOW();
+
+			UPDATE proxy_pools
+			SET health_check_url='https://www.youtube.com/results?search_query=',updated_at=NOW()
+			WHERE health_check_url IN (
+			  'https://api.ipify.org',
+			  'https://www.youtube.com/watch?v=_xXsXvsYAhA'
+			);
+			ALTER TABLE proxy_pools
+			ALTER COLUMN health_check_url SET DEFAULT 'https://www.youtube.com/results?search_query=';
+		`,
+		Down: `
+			UPDATE settings
+			SET value=jsonb_set(
+			      jsonb_set(value,'{timeout}','60'::jsonb,true),
+			      '{url}',
+			      '"https://www.youtube.com/watch?v=_xXsXvsYAhA"'::jsonb,
+			      true
+			    ),
+			    updated_at=NOW()
+			WHERE key='healthcheck';
+
+			UPDATE proxy_pools
+			SET health_check_url='https://www.youtube.com/watch?v=_xXsXvsYAhA',updated_at=NOW()
+			WHERE health_check_url='https://www.youtube.com/results?search_query=';
+			ALTER TABLE proxy_pools
+			ALTER COLUMN health_check_url SET DEFAULT 'https://www.youtube.com/watch?v=_xXsXvsYAhA';
+		`,
+	},
 }
 
 // Migrate runs all pending migrations

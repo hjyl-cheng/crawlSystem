@@ -75,18 +75,17 @@ func (r *ProxyRepository) ApplyHealthVerdict(
 			RevalidationRequired:  revalidationRequired,
 		}
 		if evidence.Verdict.Healthy &&
-			(evidence.Base.Status != proxylifecycle.ProbePassed ||
-				evidence.YouTube.Status != proxylifecycle.ProbePassed) {
+			evidence.YouTube.Status != proxylifecycle.ProbePassed {
 			evidence.Verdict.Healthy = false
 			evidence.Verdict.Conclusive = false
 			if evidence.Error == "" {
-				evidence.Error = "healthy verdict is missing passed base or YouTube evidence"
+				evidence.Error = "healthy verdict is missing passed YouTube evidence"
 			}
 		}
 		decision = policy.Decide(evidence.CheckedAt, current, evidence.Verdict)
 		verifiedHealthy := decision.Status == proxylifecycle.StatusActive &&
 			evidence.Verdict.Healthy && evidence.Verdict.Conclusive &&
-			evidence.Verdict.ControlPathHealthy
+			evidence.YouTube.Status == proxylifecycle.ProbePassed
 
 		if current.Status == proxylifecycle.StatusArchived || boundToSlot ||
 			healthEvidenceIsStale(evidence, lastHealthCheckAt, healthCheckNotBefore) {
@@ -247,10 +246,10 @@ func firstNonEmptyString(values ...string) string {
 }
 
 func verdictName(verdict proxylifecycle.Verdict) string {
-	if verdict.Healthy && verdict.Conclusive && verdict.ControlPathHealthy {
+	if verdict.Healthy && verdict.Conclusive {
 		return "healthy"
 	}
-	if !verdict.Conclusive || !verdict.ControlPathHealthy || verdict.Kind == proxylifecycle.FailureNone {
+	if !verdict.Conclusive || verdict.Kind == proxylifecycle.FailureNone {
 		return "inconclusive"
 	}
 	return string(verdict.Kind)

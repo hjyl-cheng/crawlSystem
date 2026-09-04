@@ -1350,6 +1350,7 @@ const docTemplate = `{
                     "type": "integer"
                 },
                 "base_url": {
+                    "description": "BaseURL and BaseStatus are retained for settings API compatibility; the probe does not use them.",
                     "type": "string"
                 },
                 "headers": {
@@ -1359,16 +1360,22 @@ const docTemplate = `{
                     }
                 },
                 "status": {
-                    "type": "integer"
+                    "type": "integer",
+                    "default": 200
                 },
                 "strict_tls": {
                     "type": "boolean"
                 },
                 "timeout": {
-                    "type": "integer"
+                    "type": "integer",
+                    "default": 15,
+                    "maximum": 15,
+                    "minimum": 1
                 },
                 "url": {
-                    "type": "string"
+                    "description": "URL and Status expose the fixed YouTube search prefix and expected HTTP 200 contract.",
+                    "type": "string",
+                    "default": "https://www.youtube.com/results?search_query="
                 },
                 "workers": {
                     "type": "integer"
@@ -1639,6 +1646,7 @@ const docTemplate = `{
                     "type": "boolean"
                 },
                 "control_path_healthy": {
+                    "description": "ControlPathHealthy is deprecated and false because server-direct control probes are not run.",
                     "type": "boolean"
                 },
                 "error": {

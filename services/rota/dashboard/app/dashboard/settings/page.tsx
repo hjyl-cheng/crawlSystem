@@ -673,7 +673,7 @@ export default function SettingsPage() {
               <CardTitle>Health Check</CardTitle>
             </div>
             <CardDescription>
-              Configure proxy health monitoring
+              Configure YouTube proxy health monitoring
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
@@ -682,6 +682,8 @@ export default function SettingsPage() {
               <Input
                 id="healthcheck-timeout"
                 type="number"
+                min={1}
+                max={15}
                 value={settings.healthcheck.timeout}
                 onChange={(e) =>
                   setSettings({
@@ -708,71 +710,6 @@ export default function SettingsPage() {
               <p className="text-xs text-muted-foreground">
                 Number of concurrent workers to check proxies
               </p>
-            </div>
-
-            <div className="space-y-2">
-              <Label htmlFor="healthcheck-base-url">Base Connectivity URL</Label>
-              <Input
-                id="healthcheck-base-url"
-                type="url"
-                value={settings.healthcheck.base_url}
-                onChange={(e) =>
-                  setSettings({
-                    ...settings,
-                    healthcheck: { ...settings.healthcheck, base_url: e.target.value },
-                  })
-                }
-              />
-            </div>
-
-            <div className="space-y-2">
-              <Label htmlFor="healthcheck-base-status">Base Expected Status Code</Label>
-              <Input
-                id="healthcheck-base-status"
-                type="number"
-                min={100}
-                max={599}
-                value={settings.healthcheck.base_status}
-                onChange={(e) =>
-                  setSettings({
-                    ...settings,
-                    healthcheck: { ...settings.healthcheck, base_status: parseInt(e.target.value) },
-                  })
-                }
-              />
-            </div>
-
-            <div className="space-y-2">
-              <Label htmlFor="healthcheck-url">YouTube Check URL</Label>
-              <Input
-                id="healthcheck-url"
-                type="url"
-                value={settings.healthcheck.url}
-                onChange={(e) =>
-                  setSettings({
-                    ...settings,
-                    healthcheck: { ...settings.healthcheck, url: e.target.value },
-                  })
-                }
-              />
-              <p className="text-xs text-muted-foreground">
-                Only GET method is supported
-              </p>
-            </div>
-
-            <div className="space-y-2">
-              <Label htmlFor="healthcheck-status">YouTube Expected Status Code</Label>
-              <Input
-                id="healthcheck-status"
-                type="number"
-                value={settings.healthcheck.status}
-                onChange={(e) =>
-                  setSettings({
-                    ...settings,
-                    healthcheck: { ...settings.healthcheck, status: parseInt(e.target.value) },
-                  })
-                }
-              />
             </div>
 
             <div className="space-y-2">

@@ -161,11 +161,11 @@ func (r *SettingsRepository) Reset(ctx context.Context) error {
 			"max_requests": 100,
 		},
 		"healthcheck": {
-			"timeout":     60,
+			"timeout":     15,
 			"workers":     20,
 			"base_url":    "https://www.google.com/generate_204",
 			"base_status": 204,
-			"url":         "https://www.youtube.com/watch?v=_xXsXvsYAhA",
+			"url":         models.YouTubeSearchURLPrefix,
 			"status":      200,
 			"headers":     []string{"User-Agent: Rota-HealthCheck/1.0"},
 			"strict_tls":  false,

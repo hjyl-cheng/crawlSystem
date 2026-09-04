@@ -158,7 +158,7 @@ func TestPolicyArchivesOnlyAfterWindowAndFinalConclusiveFailure(t *testing.T) {
 	}
 }
 
-func TestPolicyDoesNotArchiveWithoutHealthyControlPath(t *testing.T) {
+func TestPolicyDoesNotRequireLegacyControlPathForConclusiveFailure(t *testing.T) {
 	started := time.Date(2026, 8, 11, 10, 0, 0, 0, time.UTC)
 	now := started.Add(72 * time.Hour)
 	decision := DefaultPolicy().Decide(now, Snapshot{
@@ -167,9 +167,9 @@ func TestPolicyDoesNotArchiveWithoutHealthyControlPath(t *testing.T) {
 		FailureKind: FailureYouTubeUnusable,
 	}, Verdict{Kind: FailureYouTubeUnusable, Conclusive: true, ControlPathHealthy: false})
 
-	assertStatus(t, decision, StatusFailed)
-	if decision.ArchivedAt != nil {
-		t.Fatal("unhealthy control path archived proxy")
+	assertStatus(t, decision, StatusArchived)
+	if decision.ArchivedAt == nil {
+		t.Fatal("conclusive proxy failure was blocked by legacy control-path evidence")
 	}
 }
 

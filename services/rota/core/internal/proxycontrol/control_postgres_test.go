@@ -1036,6 +1036,34 @@ func TestLegacyHTTPStatusWithoutStructuredHealthEvidenceIsIneligible(t *testing.
 	}
 }
 
+func TestYouTubeOnlyHealthEvidenceIsClaimable(t *testing.T) {
+	manager, pool := newProxyControlPostgresWithOptions(t, func(options *Options) {
+		options.ChannelSlots = 1
+	})
+	ctx := context.Background()
+	proxyID := insertControlProxy(t, pool, "youtube-only-healthy.example:8080", 10)
+	if _, err := pool.Exec(ctx, `
+		UPDATE proxies SET base_health_status='not_run' WHERE id=$1
+	`, proxyID); err != nil {
+		t.Fatalf("set YouTube-only health evidence: %v", err)
+	}
+
+	manager.SetCacheInvalidator(func(string) {})
+	if err := manager.syncResources(ctx); err != nil {
+		t.Fatalf("sync managed resources: %v", err)
+	}
+	if _, err := manager.reconcile(ctx); err != nil {
+		t.Fatalf("reconcile YouTube-only healthy proxy: %v", err)
+	}
+
+	claim, err := manager.Claim(ctx, testClaimRequest(
+		"claim-youtube-only", "worker-youtube-only", "instance-youtube-only",
+	))
+	if err != nil || !claim.Ready || claim.ProxyID == nil || *claim.ProxyID != proxyID {
+		t.Fatalf("YouTube-only healthy claim = %+v, err = %v", claim, err)
+	}
+}
+
 func TestClaimRejectsExpiredHealthGrantBeforeReconcile(t *testing.T) {
 	manager, pool := newProxyControlPostgresWithOptions(t, func(options *Options) {
 		options.ChannelSlots = 1
