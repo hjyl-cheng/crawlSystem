@@ -38,6 +38,7 @@
     "publication:recover-retraction-projections": "node scripts/recoverBusinessRetractionProjectionDeadLetters.mjs",
     "recover:stored-data-api-evidence": "node scripts/recoverStoredDataApiEvidence.mjs",
     "probe:incremental-youtubejs-video": "node scripts/probeIncrementalYoutubeJsVideo.mjs",
+    "recover:incremental-youtubejs-terminal-probe": "node scripts/recoverIncrementalYoutubeJsTerminalProbeFailures.mjs",
     "recover:migration-business-run-intent": "node scripts/recoverMigrationBusinessRunIntentFailures.mjs",
     "recover:migration-retry-intent": "node scripts/createMigrationRetryIntent.mjs",
     "repair:disabled-comment-counts": "node scripts/repairDisabledCommentCounts.mjs",
