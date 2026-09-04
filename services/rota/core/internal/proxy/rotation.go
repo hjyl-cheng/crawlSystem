@@ -253,7 +253,6 @@ func (b *BaseSelector) loadActiveProxiesWithSettings(ctx context.Context, settin
 		  AND revalidation_required = false
 		  AND (cooldown_until IS NULL OR cooldown_until <= NOW())
 		  AND last_health_success_at IS NOT NULL
-		  AND base_health_status = 'passed'
 		  AND youtube_health_status = 'passed'
 		  AND next_health_check_at > NOW()
 		ORDER BY address

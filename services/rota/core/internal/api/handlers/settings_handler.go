@@ -89,6 +89,7 @@ func (h *SettingsHandler) Update(w http.ResponseWriter, r *http.Request) {
 	}
 	mergeWriteOnlySettings(&settings, currentSettings)
 	settings.GeoIP = services.NormalizeGeoIPSettings(settings.GeoIP)
+	normalizeHealthCheckSettings(&settings)
 
 	// Validate settings
 	if err := h.validateSettings(&settings); err != nil {
@@ -245,6 +246,14 @@ func redactSettingsSecrets(settings *models.Settings) {
 	settings.GeoIP.MaxMindLicenseKey = ""
 }
 
+func normalizeHealthCheckSettings(settings *models.Settings) {
+	if settings == nil {
+		return
+	}
+	settings.HealthCheck.URL = models.YouTubeSearchURLPrefix
+	settings.HealthCheck.Status = http.StatusOK
+}
+
 // validateSettings validates settings configuration
 func (h *SettingsHandler) validateSettings(s *models.Settings) error {
 	// Validate rotation timeout
@@ -258,8 +267,8 @@ func (h *SettingsHandler) validateSettings(s *models.Settings) error {
 	}
 
 	// Validate healthcheck timeout
-	if s.HealthCheck.Timeout < 1 || s.HealthCheck.Timeout > 300 {
-		return fmt.Errorf("healthcheck.timeout must be between 1 and 300")
+	if s.HealthCheck.Timeout < 1 || s.HealthCheck.Timeout > models.MaxHealthCheckTimeoutSeconds {
+		return fmt.Errorf("healthcheck.timeout must be between 1 and %d", models.MaxHealthCheckTimeoutSeconds)
 	}
 
 	// Validate healthcheck workers

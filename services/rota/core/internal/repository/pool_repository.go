@@ -137,10 +137,7 @@ func (r *PoolRepository) Create(ctx context.Context, req models.CreatePoolReques
 		          rotation_method, stick_count, health_check_url, health_check_cron,
 		          health_check_enabled, auto_sync, COALESCE(sync_mode,'auto'), enabled, created_at, updated_at
 	`
-	hcURL := req.HealthCheckURL
-	if hcURL == "" {
-		hcURL = "https://www.youtube.com/watch?v=_xXsXvsYAhA"
-	}
+	hcURL := models.YouTubeSearchURLPrefix
 	hcCron := req.HealthCheckCron
 	if hcCron == "" {
 		hcCron = "*/30 * * * *"
@@ -199,7 +196,7 @@ func (r *PoolRepository) Update(ctx context.Context, id int, req models.UpdatePo
 	var pool models.ProxyPool
 	err := r.db.Pool.QueryRow(ctx, query,
 		req.Name, req.Description, req.CountryCode, req.RegionName, req.CityName,
-		req.RotationMethod, req.StickCount, req.HealthCheckURL, req.HealthCheckCron,
+		req.RotationMethod, req.StickCount, models.YouTubeSearchURLPrefix, req.HealthCheckCron,
 		req.HealthCheckEnabled, req.AutoSync, req.SyncMode, req.Enabled, id,
 	).Scan(
 		&pool.ID, &pool.Name, &pool.Description,

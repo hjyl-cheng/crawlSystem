@@ -22,6 +22,8 @@ import {
 import { Switch } from "@/components/ui/switch"
 import { Label } from "@/components/ui/label"
 
+const YOUTUBE_SEARCH_URL_PREFIX = "https://www.youtube.com/results?search_query="
+
 // ─────────────────────────────────────────────────────────────────────────────
 
 interface SelectedFilter {
@@ -55,7 +57,6 @@ export function GeoSelector({ countries, existingPools, onCreated }: Props) {
   const [poolName, setPoolName] = useState("")
   const [rotation, setRotation] = useState("roundrobin")
   const [stickCount, setStickCount] = useState(10)
-  const [hcUrl, setHcUrl] = useState("https://www.youtube.com/watch?v=_xXsXvsYAhA")
   const [hcCron, setHcCron] = useState("*/30 * * * *")
   const [autoSync, setAutoSync] = useState(true)
   const [saving, setSaving] = useState(false)
@@ -137,7 +138,7 @@ export function GeoSelector({ countries, existingPools, onCreated }: Props) {
         geo_filters: filters,
         rotation_method: rotation as CreatePoolRequest["rotation_method"],
         stick_count: stickCount,
-        health_check_url: hcUrl,
+        health_check_url: YOUTUBE_SEARCH_URL_PREFIX,
         health_check_cron: hcCron,
         health_check_enabled: true,
         auto_sync: autoSync,
@@ -447,11 +448,7 @@ export function GeoSelector({ countries, existingPools, onCreated }: Props) {
               </div>
             )}
 
-            <div className="grid grid-cols-2 gap-3">
-              <div className="flex flex-col gap-1.5">
-                <Label>Health check URL</Label>
-                <Input value={hcUrl} onChange={e => setHcUrl(e.target.value)} />
-              </div>
+            <div>
               <div className="flex flex-col gap-1.5">
                 <Label>Cron</Label>
                 <Input value={hcCron} onChange={e => setHcCron(e.target.value)} placeholder="*/30 * * * *" />

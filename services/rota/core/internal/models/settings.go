@@ -2,6 +2,11 @@ package models
 
 import "time"
 
+const (
+	YouTubeSearchURLPrefix       = "https://www.youtube.com/results?search_query="
+	MaxHealthCheckTimeoutSeconds = 15
+)
+
 // Settings represents system configuration
 type Settings struct {
 	Authentication AuthenticationSettings `json:"authentication"`
@@ -52,14 +57,16 @@ type RateLimitSettings struct {
 
 // HealthCheckSettings represents health check configuration
 type HealthCheckSettings struct {
-	Timeout    int      `json:"timeout"`
-	Workers    int      `json:"workers"`
-	BaseURL    string   `json:"base_url"`
-	BaseStatus int      `json:"base_status"`
-	URL        string   `json:"url"`
-	Status     int      `json:"status"`
-	Headers    []string `json:"headers"`
-	StrictTLS  bool     `json:"strict_tls"`
+	Timeout int `json:"timeout" minimum:"1" maximum:"15" default:"15"`
+	Workers int `json:"workers"`
+	// BaseURL and BaseStatus are retained for settings API compatibility; the probe does not use them.
+	BaseURL    string `json:"base_url"`
+	BaseStatus int    `json:"base_status"`
+	// URL and Status expose the fixed YouTube search prefix and expected HTTP 200 contract.
+	URL       string   `json:"url" default:"https://www.youtube.com/results?search_query="`
+	Status    int      `json:"status" default:"200"`
+	Headers   []string `json:"headers"`
+	StrictTLS bool     `json:"strict_tls"`
 }
 
 // LogRetentionSettings represents log retention and cleanup configuration

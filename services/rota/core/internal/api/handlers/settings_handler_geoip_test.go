@@ -1,6 +1,8 @@
 package handlers
 
 import (
+	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -55,5 +57,47 @@ func TestRedactSettingsSecretsDoesNotMutateOtherGeoIPState(t *testing.T) {
 	}
 	if settings.GeoIP.Provider != models.GeoIPProviderMaxMind || settings.GeoIP.MaxMindDBPath == "" {
 		t.Fatalf("non-secret GeoIP state changed: %+v", settings.GeoIP)
+	}
+}
+
+func TestNormalizeHealthCheckSettingsUsesFixedYouTubeSearchContract(t *testing.T) {
+	settings := &models.Settings{HealthCheck: models.HealthCheckSettings{
+		URL:    "https://www.youtube.com/watch?v=legacy",
+		Status: http.StatusNoContent,
+	}}
+
+	normalizeHealthCheckSettings(settings)
+
+	if settings.HealthCheck.URL != models.YouTubeSearchURLPrefix ||
+		settings.HealthCheck.Status != http.StatusOK {
+		t.Fatalf("health settings = %+v", settings.HealthCheck)
+	}
+}
+
+func TestValidateSettingsRejectsHealthTimeoutAboveFifteenSeconds(t *testing.T) {
+	settings := validSettingsForValidation()
+	settings.HealthCheck.Timeout = models.MaxHealthCheckTimeoutSeconds + 1
+
+	err := (&SettingsHandler{}).validateSettings(settings)
+	if err == nil || !strings.Contains(err.Error(), "between 1 and 15") {
+		t.Fatalf("validation error = %v", err)
+	}
+
+	settings.HealthCheck.Timeout = models.MaxHealthCheckTimeoutSeconds
+	if err := (&SettingsHandler{}).validateSettings(settings); err != nil {
+		t.Fatalf("15-second timeout rejected: %v", err)
+	}
+}
+
+func validSettingsForValidation() *models.Settings {
+	return &models.Settings{
+		Rotation:    models.RotationSettings{Timeout: 30, Retries: 1},
+		HealthCheck: models.HealthCheckSettings{Timeout: 15, Workers: 1},
+		ProxyLifecycle: models.ProxyLifecycleSettings{
+			ActiveRecheckMinutes:      120,
+			HardUnreachableAfterHours: 6,
+			SoftUnreachableAfterHours: 24,
+			YouTubeUnusableAfterHours: 72,
+		},
 	}
 }

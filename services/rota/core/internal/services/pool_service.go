@@ -183,16 +183,14 @@ func (ps *PoolService) SyncPool(ctx context.Context, poolID int) (int, error) {
 // checkProxiesByIDs runs a health check on the specified proxy IDs only.
 // Used by auto-sync to test newly-added pool members immediately instead of
 // waiting for the next scheduled */30 cron tick.
-func (ps *PoolService) checkProxiesByIDs(ctx context.Context, checkURL string, proxyIDs []int, workers int) error {
+func (ps *PoolService) checkProxiesByIDs(ctx context.Context, _ string, proxyIDs []int, workers int) error {
 	if len(proxyIDs) == 0 {
 		return nil
 	}
 	if workers <= 0 {
 		workers = 20
 	}
-	if checkURL == "" {
-		checkURL = "https://www.youtube.com/watch?v=_xXsXvsYAhA"
-	}
+	checkURL := models.YouTubeSearchURLPrefix
 
 	// Load the proxy rows for the given IDs
 	rows, err := ps.proxyRepo.GetDB().Pool.Query(ctx, `
@@ -232,17 +230,14 @@ func (ps *PoolService) checkProxiesByIDs(ctx context.Context, checkURL string, p
 	return nil
 }
 
-// HealthCheckPool tests all proxies in a pool against the pool's custom URL
-func (ps *PoolService) HealthCheckPool(ctx context.Context, poolID int, checkURL string, workers int) (*models.PoolHealthCheckResult, error) {
+// HealthCheckPool tests all proxies in a pool with the authoritative YouTube probe.
+func (ps *PoolService) HealthCheckPool(ctx context.Context, poolID int, _ string, workers int) (*models.PoolHealthCheckResult, error) {
 	pool, err := ps.poolRepo.GetByID(ctx, poolID)
 	if err != nil || pool == nil {
 		return nil, fmt.Errorf("pool not found")
 	}
 
-	url := checkURL
-	if url == "" {
-		url = pool.HealthCheckURL
-	}
+	url := models.YouTubeSearchURLPrefix
 	if workers <= 0 {
 		workers = 20
 	}
@@ -322,7 +317,7 @@ func (ps *PoolService) checkOneProxyTimeout(ctx context.Context, p *models.Proxy
 func (ps *PoolService) HealthCheckPoolWithProgress(
 	ctx context.Context,
 	poolID int,
-	checkURL string,
+	_ string,
 	workers int,
 	progressFn func(checked, active, failed int),
 ) (*models.PoolHealthCheckResult, error) {
@@ -331,10 +326,7 @@ func (ps *PoolService) HealthCheckPoolWithProgress(
 		return nil, fmt.Errorf("pool not found")
 	}
 
-	url := checkURL
-	if url == "" {
-		url = pool.HealthCheckURL
-	}
+	url := models.YouTubeSearchURLPrefix
 	if workers <= 0 {
 		workers = 20
 	}

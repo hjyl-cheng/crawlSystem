@@ -17,7 +17,7 @@ Persisted, conclusive background health evidence for a Proxy outside a live Work
 _Avoid_: Observation, Worker failure
 
 **Verified Active Proxy**:
-An unleased Proxy with a current successful Base and YouTube health grant, or a Proxy on a live Worker Lease under Task Observation authority. An unleased grant ends when scheduled revalidation becomes due.
+An unleased Proxy with a current successful YouTube search health grant, or a Proxy on a live Worker Lease under Task Observation authority. An unleased grant ends when scheduled revalidation becomes due.
 _Avoid_: Legacy healthy Proxy, HTTP-200 Proxy
 
 **Warm Reserve**:
@@ -25,7 +25,7 @@ A Verified Active Proxy that is not assigned to a Slot, is not cooling down, and
 _Avoid_: Active count, unassigned inventory
 
 **Quarantined Proxy**:
-A `failed` Proxy that was removed from a Slot after a route-changing Task Observation. It remains recoverable, waits through its cooldown, and returns to `active` only after the authoritative probes pass. It is not archived by the route change itself.
+A `failed` Proxy that was removed from a Slot after a route-changing Task Observation. It remains recoverable, waits through its cooldown, and returns to `active` only after the authoritative YouTube probe passes. It is not archived by the route change itself.
 _Avoid_: Archived Proxy, stale Route
 
 **Task Observation**:

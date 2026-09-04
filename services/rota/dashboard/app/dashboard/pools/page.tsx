@@ -45,6 +45,8 @@ const ROTATION_LABELS: Record<string, string> = {
 const FLAG_CDN = (cc: string) =>
   `https://flagcdn.com/16x12/${cc.toLowerCase()}.png`
 
+const YOUTUBE_SEARCH_URL_PREFIX = "https://www.youtube.com/results?search_query="
+
 const statusColor = (s: string) =>
   s === "active"
     ? "text-green-500"
@@ -62,7 +64,7 @@ const DEFAULT_POOL_FORM: CreatePoolRequest = {
   city_name: undefined,
   rotation_method: "roundrobin",
   stick_count: 10,
-  health_check_url: "https://www.youtube.com/watch?v=_xXsXvsYAhA",
+  health_check_url: YOUTUBE_SEARCH_URL_PREFIX,
   health_check_cron: "*/30 * * * *",
   health_check_enabled: true,
   auto_sync: true,
@@ -168,7 +170,7 @@ export default function PoolsPage() {
       city_name: p.city_name,
       rotation_method: p.rotation_method,
       stick_count: p.stick_count,
-      health_check_url: p.health_check_url,
+      health_check_url: YOUTUBE_SEARCH_URL_PREFIX,
       health_check_cron: p.health_check_cron,
       health_check_enabled: p.health_check_enabled,
       auto_sync: p.auto_sync,
@@ -1063,14 +1065,6 @@ export default function PoolsPage() {
                 </div>
               )}
 
-              <div className="col-span-2 flex flex-col gap-1.5">
-                <Label>YouTube check URL</Label>
-                <Input
-                  placeholder="https://www.youtube.com/watch?v=..."
-                  value={form.health_check_url}
-                  onChange={e => setForm({ ...form, health_check_url: e.target.value })}
-                />
-              </div>
               <div className="col-span-2 flex flex-col gap-1.5">
                 <Label>Health check cron</Label>
                 <Input

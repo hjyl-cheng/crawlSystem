@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net"
 	"net/http"
 	"net/url"
@@ -24,12 +25,9 @@ import (
 )
 
 const (
-	defaultBaseHealthURL    = "https://www.google.com/generate_204"
-	defaultYouTubeHealthURL = "https://www.youtube.com/watch?v=_xXsXvsYAhA"
-	controlCacheTTL         = 30 * time.Second
-	maxHealthResponseBody   = 1024 * 1024
-	defaultPeriodicBatch    = 20
-	defaultPeriodicWorkers  = 4
+	maxHealthResponseBody  = 1024 * 1024
+	defaultPeriodicBatch   = 20
+	defaultPeriodicWorkers = 4
 )
 
 var ErrArchivedProxy = errors.New("archived proxy must be restored before testing")
@@ -48,11 +46,6 @@ type HealthSettingsStore interface {
 	GetAll(ctx context.Context) (*models.Settings, error)
 }
 
-type controlCacheEntry struct {
-	healthy   bool
-	expiresAt time.Time
-}
-
 type HealthVerdictEvent struct {
 	ProxyID         int
 	ResultingStatus string
@@ -61,18 +54,16 @@ type HealthVerdictEvent struct {
 	CheckedAt       time.Time
 }
 
-// HealthChecker performs a base-connectivity probe followed by a YouTube
-// probe, then submits one structured verdict to the lifecycle repository.
+// HealthChecker performs one authoritative YouTube probe through a proxy and
+// submits its structured verdict to the lifecycle repository.
 type HealthChecker struct {
 	proxyStore    HealthLifecycleStore
 	settingsStore HealthSettingsStore
 	logger        *logger.Logger
 	probeGate     chan struct{}
 
-	controlMu    sync.Mutex
-	controlCache map[string]controlCacheEntry
-	verdictMu    sync.RWMutex
-	onVerdict    func(HealthVerdictEvent)
+	verdictMu sync.RWMutex
+	onVerdict func(HealthVerdictEvent)
 }
 
 func (h *HealthChecker) SetOnVerdictApplied(callback func(HealthVerdictEvent)) {
@@ -115,7 +106,6 @@ func NewHealthCheckerWithLimit(
 		settingsStore: settingsStore,
 		logger:        log,
 		probeGate:     make(chan struct{}, maxConcurrency),
-		controlCache:  make(map[string]controlCacheEntry),
 	}
 }
 
@@ -127,16 +117,12 @@ func (h *HealthChecker) CheckProxy(ctx context.Context, p *models.Proxy) (*model
 	return h.checkProxyWithSettings(ctx, p, settings.HealthCheck, settings.ProxyLifecycle)
 }
 
-// CheckProxyAgainst runs the standard base and YouTube probes. A pool may
-// select a different YouTube watch URL, but arbitrary targets cannot replace
-// the authoritative YouTube lifecycle probe.
-func (h *HealthChecker) CheckProxyAgainst(ctx context.Context, p *models.Proxy, targetURL string) (*models.ProxyTestResult, error) {
+// CheckProxyAgainst keeps the legacy pool-check interface while using the
+// same authoritative YouTube search probe as every other health-check path.
+func (h *HealthChecker) CheckProxyAgainst(ctx context.Context, p *models.Proxy, _ string) (*models.ProxyTestResult, error) {
 	settings, err := h.settingsStore.GetAll(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("load health settings: %w", err)
-	}
-	if parsed, parseErr := url.Parse(strings.TrimSpace(targetURL)); parseErr == nil && isYouTubeHost(parsed.Hostname()) {
-		settings.HealthCheck.URL = strings.TrimSpace(targetURL)
 	}
 	return h.checkProxyWithSettings(ctx, p, settings.HealthCheck, settings.ProxyLifecycle)
 }
@@ -168,9 +154,9 @@ func (h *HealthChecker) checkProxyWithSettings(
 
 	transport, err := CreateProxyTransport(p)
 	if err != nil {
-		evidence.Base = failedProbe(sanitizeHealthError(p, err.Error()))
-		evidence.Verdict = h.transportCreationVerdict(ctx, err, healthSettings)
-		evidence.Error = evidence.Base.Error
+		evidence.YouTube = failedProbe(sanitizeHealthError(p, err.Error()))
+		evidence.Verdict = transportCreationVerdict(err)
+		evidence.Error = evidence.YouTube.Error
 		return h.applyEvidence(ctx, p, startedAt, evidence, lifecycleSettings)
 	}
 	defer transport.CloseIdleConnections()
@@ -181,18 +167,10 @@ func (h *HealthChecker) checkProxyWithSettings(
 		Timeout:   time.Duration(healthSettings.Timeout) * time.Second,
 	}
 
-	evidence.Base = runProbe(ctx, client, healthSettings.BaseURL, healthSettings.BaseStatus, healthSettings.Headers)
-	evidence.Base.Error = sanitizeHealthError(p, evidence.Base.Error)
-	if evidence.Base.Status != proxylifecycle.ProbePassed {
-		evidence.Verdict = h.baseFailureVerdict(ctx, evidence.Base, healthSettings)
-		evidence.Error = evidence.Base.Error
-		return h.applyEvidence(ctx, p, startedAt, evidence, lifecycleSettings)
-	}
-
-	evidence.YouTube = runProbe(ctx, client, healthSettings.URL, healthSettings.Status, healthSettings.Headers)
+	evidence.YouTube = runProbe(ctx, client, randomYouTubeHealthURL(), http.StatusOK, healthSettings.Headers)
 	evidence.YouTube.Error = sanitizeHealthError(p, evidence.YouTube.Error)
 	if evidence.YouTube.Status != proxylifecycle.ProbePassed {
-		evidence.Verdict = h.youtubeFailureVerdict(ctx, evidence.YouTube, healthSettings)
+		evidence.Verdict = youtubeFailureVerdict(evidence.YouTube)
 		evidence.Error = evidence.YouTube.Error
 		return h.applyEvidence(ctx, p, startedAt, evidence, lifecycleSettings)
 	}
@@ -292,84 +270,51 @@ func (h *HealthChecker) applyEvidence(
 	return result, nil
 }
 
-func (h *HealthChecker) transportCreationVerdict(
-	ctx context.Context,
-	err error,
-	settings models.HealthCheckSettings,
-) proxylifecycle.Verdict {
+func transportCreationVerdict(err error) proxylifecycle.Verdict {
 	kind := classifyConnectionFailure(err)
 	if endpointConfigurationFailure(err) {
 		kind = proxylifecycle.FailureHardUnreachable
 	}
-	controlHealthy := h.controlPathHealthy(ctx, settings.BaseURL, settings.BaseStatus, settings)
+	if kind == proxylifecycle.FailureNone {
+		kind = proxylifecycle.FailureSoftUnreachable
+	}
 	return proxylifecycle.Verdict{
-		Kind:               kind,
-		Conclusive:         kind != proxylifecycle.FailureNone && controlHealthy,
-		ControlPathHealthy: controlHealthy,
+		Kind:       kind,
+		Conclusive: true,
 	}
 }
 
-func (h *HealthChecker) baseFailureVerdict(
-	ctx context.Context,
-	probe proxylifecycle.ProbeEvidence,
-	settings models.HealthCheckSettings,
-) proxylifecycle.Verdict {
-	kind := baseFailureKind(probe)
-	controlHealthy := h.controlPathHealthy(ctx, settings.BaseURL, settings.BaseStatus, settings)
+func youtubeFailureVerdict(probe proxylifecycle.ProbeEvidence) proxylifecycle.Verdict {
+	kind := proxylifecycle.FailureYouTubeUnusable
+	if probe.HTTPStatus != nil && *probe.HTTPStatus == http.StatusProxyAuthRequired {
+		kind = proxylifecycle.FailureHardUnreachable
+	} else if probe.HTTPStatus == nil {
+		message := strings.ToLower(probe.Error)
+		switch {
+		case strings.Contains(message, "403"), strings.Contains(message, "forbidden"),
+			strings.Contains(message, "429"), strings.Contains(message, "too many requests"):
+			kind = proxylifecycle.FailureYouTubeUnusable
+		default:
+			kind = classifyConnectionFailure(errors.New(probe.Error))
+			if kind == proxylifecycle.FailureNone && !strings.Contains(message, "context canceled") {
+				kind = proxylifecycle.FailureSoftUnreachable
+			}
+		}
+	}
 	return proxylifecycle.Verdict{
-		Kind:               kind,
-		Conclusive:         kind != proxylifecycle.FailureNone && controlHealthy,
-		ControlPathHealthy: controlHealthy,
+		Kind:       kind,
+		Conclusive: kind != proxylifecycle.FailureNone,
 	}
 }
 
-func (h *HealthChecker) youtubeFailureVerdict(
-	ctx context.Context,
-	probe proxylifecycle.ProbeEvidence,
-	settings models.HealthCheckSettings,
-) proxylifecycle.Verdict {
-	controlHealthy := h.controlPathHealthy(ctx, settings.URL, settings.Status, settings)
-	return proxylifecycle.Verdict{
-		Kind:               proxylifecycle.FailureYouTubeUnusable,
-		Conclusive:         controlHealthy,
-		ControlPathHealthy: controlHealthy,
+func randomYouTubeHealthURL() string {
+	length := rand.IntN(6) + 1
+	digits := make([]byte, length)
+	digits[0] = byte('1' + rand.IntN(9))
+	for i := 1; i < length; i++ {
+		digits[i] = byte('0' + rand.IntN(10))
 	}
-}
-
-func (h *HealthChecker) controlPathHealthy(
-	ctx context.Context,
-	targetURL string,
-	expectedStatus int,
-	settings models.HealthCheckSettings,
-) bool {
-	key := fmt.Sprintf("%s|%d|%s", targetURL, expectedStatus, strings.Join(settings.Headers, "\n"))
-	now := time.Now()
-	h.controlMu.Lock()
-	entry, found := h.controlCache[key]
-	if found && now.Before(entry.expiresAt) {
-		h.controlMu.Unlock()
-		return entry.healthy
-	}
-	h.controlMu.Unlock()
-
-	directTransport := &http.Transport{}
-	if defaultTransport, ok := http.DefaultTransport.(*http.Transport); ok {
-		directTransport = defaultTransport.Clone()
-	}
-	directTransport.Proxy = nil
-	defer directTransport.CloseIdleConnections()
-	timeout := time.Duration(settings.Timeout) * time.Second
-	if timeout <= 0 || timeout > 15*time.Second {
-		timeout = 15 * time.Second
-	}
-	client := &http.Client{Transport: directTransport, Timeout: timeout}
-	probe := runProbe(ctx, client, targetURL, expectedStatus, settings.Headers)
-	healthy := probe.Status == proxylifecycle.ProbePassed
-
-	h.controlMu.Lock()
-	h.controlCache[key] = controlCacheEntry{healthy: healthy, expiresAt: now.Add(controlCacheTTL)}
-	h.controlMu.Unlock()
-	return healthy
+	return models.YouTubeSearchURLPrefix + string(digits)
 }
 
 func runProbe(
@@ -541,16 +486,6 @@ func failedProbe(message string) proxylifecycle.ProbeEvidence {
 	return proxylifecycle.ProbeEvidence{Status: proxylifecycle.ProbeFailed, Error: message}
 }
 
-func baseFailureKind(probe proxylifecycle.ProbeEvidence) proxylifecycle.FailureKind {
-	if probe.HTTPStatus != nil {
-		if *probe.HTTPStatus == http.StatusProxyAuthRequired {
-			return proxylifecycle.FailureHardUnreachable
-		}
-		return proxylifecycle.FailureSoftUnreachable
-	}
-	return classifyConnectionFailure(errors.New(probe.Error))
-}
-
 func classifyConnectionFailure(err error) proxylifecycle.FailureKind {
 	if err == nil {
 		return proxylifecycle.FailureNone
@@ -578,7 +513,8 @@ func classifyConnectionFailure(err error) proxylifecycle.FailureKind {
 		"temporary failure", "server misbehaving", "name resolution", "x509:",
 		"failed to verify certificate", "certificate signed by unknown authority",
 		"certificate has expired", "certificate is not yet valid",
-		"closed pipe", "unexpected eof",
+		"closed pipe", "broken pipe", "unexpected eof", "connection reset",
+		"connection aborted", "use of closed network connection",
 	} {
 		if strings.Contains(message, marker) {
 			return proxylifecycle.FailureSoftUnreachable
@@ -627,24 +563,14 @@ func sanitizeHealthError(p *models.Proxy, message string) string {
 }
 
 func normalizedHealthSettings(settings models.HealthCheckSettings) models.HealthCheckSettings {
-	if settings.Timeout <= 0 {
-		settings.Timeout = 60
+	if settings.Timeout <= 0 || settings.Timeout > models.MaxHealthCheckTimeoutSeconds {
+		settings.Timeout = models.MaxHealthCheckTimeoutSeconds
 	}
 	if settings.Workers <= 0 {
 		settings.Workers = 20
 	}
-	if strings.TrimSpace(settings.BaseURL) == "" {
-		settings.BaseURL = defaultBaseHealthURL
-	}
-	if settings.BaseStatus <= 0 {
-		settings.BaseStatus = http.StatusNoContent
-	}
-	if strings.TrimSpace(settings.URL) == "" || settings.URL == "https://api.ipify.org" {
-		settings.URL = defaultYouTubeHealthURL
-	}
-	if settings.Status <= 0 {
-		settings.Status = http.StatusOK
-	}
+	settings.URL = models.YouTubeSearchURLPrefix
+	settings.Status = http.StatusOK
 	return settings
 }
 

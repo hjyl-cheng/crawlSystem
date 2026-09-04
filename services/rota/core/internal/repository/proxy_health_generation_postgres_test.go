@@ -9,6 +9,76 @@ import (
 	"github.com/alpkeskin/rota/core/internal/proxylifecycle"
 )
 
+func TestYouTubeOnlyHealthyVerdictActivatesProxy(t *testing.T) {
+	_, pool := newSourceInventoryPostgres(t)
+	ctx := context.Background()
+	extendLiveLeaseFixture(t, pool)
+	if _, err := pool.Exec(ctx, `
+		ALTER TABLE proxies
+		  ADD COLUMN cooldown_until TIMESTAMPTZ,
+		  ADD COLUMN last_health_check_at TIMESTAMPTZ,
+		  ADD COLUMN last_health_success_at TIMESTAMPTZ,
+		  ADD COLUMN last_health_verdict JSONB,
+		  ADD COLUMN last_check TIMESTAMPTZ,
+		  ADD COLUMN last_rota_youtube_status INTEGER,
+		  ADD COLUMN last_rota_youtube_error TEXT,
+		  ADD COLUMN last_rota_youtube_check TIMESTAMPTZ;
+		CREATE TABLE proxy_health_checks (
+		  id BIGSERIAL PRIMARY KEY,
+		  proxy_id INTEGER NOT NULL REFERENCES proxies(id),
+		  started_at TIMESTAMPTZ NOT NULL,
+		  checked_at TIMESTAMPTZ NOT NULL,
+		  base_result JSONB NOT NULL,
+		  youtube_result JSONB NOT NULL,
+		  verdict TEXT NOT NULL,
+		  conclusive BOOLEAN NOT NULL,
+		  control_path_healthy BOOLEAN NOT NULL,
+		  previous_status TEXT NOT NULL,
+		  resulting_status TEXT NOT NULL,
+		  applied BOOLEAN NOT NULL,
+		  transition_preserved BOOLEAN NOT NULL,
+		  error TEXT
+		);
+		UPDATE proxies
+		SET status='idle',next_health_check_at=NOW(),health_check_not_before=NULL
+		WHERE id=1
+	`); err != nil {
+		t.Fatalf("extend YouTube-only health fixture: %v", err)
+	}
+
+	checkedAt := time.Now().UTC()
+	evidence := proxylifecycle.HealthEvidence{
+		StartedAt: checkedAt.Add(-time.Second),
+		CheckedAt: checkedAt,
+		Base:      proxylifecycle.ProbeEvidence{Status: proxylifecycle.ProbeNotRun},
+		YouTube: proxylifecycle.ProbeEvidence{
+			Status:     proxylifecycle.ProbePassed,
+			HTTPStatus: intPointer(200),
+		},
+		Verdict: proxylifecycle.HealthyVerdict(),
+	}
+	repo := NewProxyRepository(&database.DB{Pool: pool})
+	decision, applied, err := repo.ApplyHealthVerdict(ctx, 1, evidence, proxylifecycle.DefaultPolicy())
+	if err != nil {
+		t.Fatalf("apply YouTube-only health verdict: %v", err)
+	}
+	if !applied || decision.Status != proxylifecycle.StatusActive {
+		t.Fatalf("decision = %+v, applied = %v", decision, applied)
+	}
+
+	var status, baseStatus, youtubeStatus string
+	var lastSuccess *time.Time
+	if err := pool.QueryRow(ctx, `
+		SELECT status,base_health_status,youtube_health_status,last_health_success_at
+		FROM proxies WHERE id=1
+	`).Scan(&status, &baseStatus, &youtubeStatus, &lastSuccess); err != nil {
+		t.Fatalf("load YouTube-only health state: %v", err)
+	}
+	if status != "active" || baseStatus != "not_run" || youtubeStatus != "passed" || lastSuccess == nil {
+		t.Fatalf("health state = status %q base %q YouTube %q success %v", status, baseStatus, youtubeStatus, lastSuccess)
+	}
+}
+
 func TestHealthVerdictAdvancesGenerationButIgnoresStaleOrBoundEvidence(t *testing.T) {
 	_, pool := newSourceInventoryPostgres(t)
 	ctx := context.Background()
@@ -240,4 +310,8 @@ func TestHealthVerdictObservesConcurrentSlotBindingAfterProxyLockWait(t *testing
 	if status != "active" || generation != 0 {
 		t.Fatalf("lifecycle after binding race = status %q generation %d", status, generation)
 	}
+}
+
+func intPointer(value int) *int {
+	return &value
 }

@@ -32,10 +32,11 @@ type Snapshot struct {
 }
 
 type Verdict struct {
-	Healthy            bool        `json:"healthy"`
-	Kind               FailureKind `json:"kind,omitempty"`
-	Conclusive         bool        `json:"conclusive"`
-	ControlPathHealthy bool        `json:"control_path_healthy"`
+	Healthy    bool        `json:"healthy"`
+	Kind       FailureKind `json:"kind,omitempty"`
+	Conclusive bool        `json:"conclusive"`
+	// Deprecated: retained for stored-evidence and API compatibility only.
+	ControlPathHealthy bool `json:"control_path_healthy"`
 }
 
 type ProbeStatus string
@@ -64,9 +65,8 @@ type HealthEvidence struct {
 
 func HealthyVerdict() Verdict {
 	return Verdict{
-		Healthy:            true,
-		Conclusive:         true,
-		ControlPathHealthy: true,
+		Healthy:    true,
+		Conclusive: true,
 	}
 }
 
@@ -124,7 +124,7 @@ func (p Policy) Decide(now time.Time, current Snapshot, verdict Verdict) Decisio
 		return Decision{Status: StatusArchived}
 	}
 
-	if verdict.Healthy && verdict.Conclusive && verdict.ControlPathHealthy {
+	if verdict.Healthy && verdict.Conclusive {
 		interval := p.ActiveRecheckInterval
 		if interval <= 0 {
 			interval = DefaultPolicy().ActiveRecheckInterval
@@ -135,7 +135,7 @@ func (p Policy) Decide(now time.Time, current Snapshot, verdict Verdict) Decisio
 		}
 	}
 
-	if !verdict.Conclusive || !verdict.ControlPathHealthy || !validFailureKind(verdict.Kind) {
+	if !verdict.Conclusive || !validFailureKind(verdict.Kind) {
 		retry := p.InconclusiveRetry
 		if retry <= 0 {
 			retry = DefaultPolicy().InconclusiveRetry
