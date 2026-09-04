@@ -16,13 +16,13 @@ func TestPolicyStartsHardFailureEpisodeAtFirstConclusiveFailure(t *testing.T) {
 	assertStatus(t, decision, StatusFailed)
 	assertTime(t, "failed since", decision.FailedSince, now)
 	assertTime(t, "continuous failed since", decision.ContinuousFailedSince, now)
-	assertTime(t, "next check", decision.NextHealthCheckAt, now.Add(15*time.Minute))
+	assertTime(t, "next check", decision.NextHealthCheckAt, now.Add(30*time.Minute))
 	if decision.FailureKind != FailureHardUnreachable {
 		t.Fatalf("failure kind = %q", decision.FailureKind)
 	}
 }
 
-func TestPolicyUsesFixedRecheckPointsInsteadOfFailureCounts(t *testing.T) {
+func TestPolicyRechecksConclusiveFailuresAtAFixedInterval(t *testing.T) {
 	started := time.Date(2026, 8, 11, 10, 0, 0, 0, time.UTC)
 	now := started.Add(time.Hour)
 	decision := DefaultPolicy().Decide(now, Snapshot{
@@ -37,7 +37,34 @@ func TestPolicyUsesFixedRecheckPointsInsteadOfFailureCounts(t *testing.T) {
 
 	assertStatus(t, decision, StatusFailed)
 	assertTime(t, "failed since", decision.FailedSince, started)
+	assertTime(t, "next check", decision.NextHealthCheckAt, now.Add(30*time.Minute))
+}
+
+func TestPolicyChecksAtArchiveDeadlineWhenItComesBeforeRecheck(t *testing.T) {
+	started := time.Date(2026, 8, 11, 10, 0, 0, 0, time.UTC)
+	now := started.Add(5*time.Hour + 50*time.Minute)
+	decision := DefaultPolicy().Decide(now, Snapshot{
+		Status:                StatusFailed,
+		FailedSince:           &started,
+		ContinuousFailedSince: &started,
+		FailureKind:           FailureHardUnreachable,
+	}, Verdict{Kind: FailureHardUnreachable, Conclusive: true})
+
+	assertStatus(t, decision, StatusFailed)
 	assertTime(t, "next check", decision.NextHealthCheckAt, started.Add(6*time.Hour))
+}
+
+func TestPolicyAllowsFailureRecheckIntervalOverride(t *testing.T) {
+	now := time.Date(2026, 8, 11, 10, 0, 0, 0, time.UTC)
+	policy := DefaultPolicy()
+	policy.FailureRecheckInterval = 10 * time.Minute
+	decision := policy.Decide(now, Snapshot{Status: StatusActive}, Verdict{
+		Kind:       FailureYouTubeUnusable,
+		Conclusive: true,
+	})
+
+	assertStatus(t, decision, StatusFailed)
+	assertTime(t, "next check", decision.NextHealthCheckAt, now.Add(10*time.Minute))
 }
 
 func TestPolicyClearsFailureEpisodeOnHealthSuccess(t *testing.T) {

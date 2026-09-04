@@ -95,9 +95,9 @@ const originTags: OriginTag[] = ["origin:paid", "origin:free", "origin:unknown"]
 
 const proxyProtocols: Proxy["protocol"][] = [
   "http", "https", "socks4", "socks4a", "socks5",
-  "vless", "vmess", "trojan", "shadowsocks",
+  "vless", "vmess", "trojan", "shadowsocks", "hysteria2",
 ]
-const shareProtocols = new Set<Proxy["protocol"]>(["vless", "vmess", "trojan", "shadowsocks"])
+const shareProtocols = new Set<Proxy["protocol"]>(["vless", "vmess", "trojan", "shadowsocks", "hysteria2"])
 
 function isShareProtocol(protocol: Proxy["protocol"]) {
   return shareProtocols.has(protocol)
@@ -125,7 +125,7 @@ function getExplicitProxyPort(value: string) {
 function parseProxyUrl(raw: string, value: string, protocol?: Proxy["protocol"]): ImportedProxy | null {
   try {
     const url = new URL(value)
-    const port = url.port || getExplicitProxyPort(value)
+    const port = url.port || getExplicitProxyPort(value) || (protocol === "hysteria2" ? "443" : "")
     if (!url.hostname || !port || !isValidProxyPort(port)) return null
 
     return {
@@ -172,7 +172,7 @@ function parseImportedProxyLine(line: string): ImportedProxy | null {
   const schemeMatch = raw.match(/^([a-z0-9+.-]+):\/\//i)
   if (schemeMatch) {
     const scheme = schemeMatch[1].toLowerCase()
-    const protocol = (scheme === "ss" ? "shadowsocks" : scheme) as Proxy["protocol"]
+    const protocol = (scheme === "ss" ? "shadowsocks" : scheme === "hy2" ? "hysteria2" : scheme) as Proxy["protocol"]
     if (!proxyProtocols.includes(protocol)) return null
     if (isShareProtocol(protocol)) {
       const parsed = parseProxyUrl(raw, raw, protocol)
@@ -1470,6 +1470,7 @@ export default function ProxiesPage() {
                         <SelectItem value="vmess">VMess</SelectItem>
                         <SelectItem value="trojan">Trojan</SelectItem>
                         <SelectItem value="shadowsocks">Shadowsocks</SelectItem>
+                        <SelectItem value="hysteria2">Hysteria2</SelectItem>
                       </SelectContent>
                     </Select>
                   </div>
@@ -1683,6 +1684,7 @@ export default function ProxiesPage() {
                   <SelectItem value="vmess">VMess</SelectItem>
                   <SelectItem value="trojan">Trojan</SelectItem>
                   <SelectItem value="shadowsocks">Shadowsocks</SelectItem>
+                  <SelectItem value="hysteria2">Hysteria2</SelectItem>
                 </SelectContent>
               </Select>
             </div>
@@ -1786,6 +1788,7 @@ export default function ProxiesPage() {
                     <SelectItem value="vmess" disabled={editingProxy.protocol !== "vmess"}>VMess</SelectItem>
                     <SelectItem value="trojan" disabled={editingProxy.protocol !== "trojan"}>Trojan</SelectItem>
                     <SelectItem value="shadowsocks" disabled={editingProxy.protocol !== "shadowsocks"}>Shadowsocks</SelectItem>
+                    <SelectItem value="hysteria2" disabled={editingProxy.protocol !== "hysteria2"}>Hysteria2</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
@@ -1932,7 +1935,7 @@ export default function ProxiesPage() {
                     Drop a TXT file here or click to browse
                   </p>
                   <p className="text-sm text-muted-foreground">
-                    HOST:PORT, USER:PASS@HOST:PORT, or a VLESS URI
+                    HOST:PORT, USER:PASS@HOST:PORT, or a share URI
                   </p>
                 </div>
 
@@ -1945,7 +1948,7 @@ export default function ProxiesPage() {
                     disabled={isImporting}
                     rows={7}
                     className="min-h-40 font-mono text-sm"
-                    placeholder={'host:port\nhttp://username:password@host:port\nvless://...\nvmess://...\ntrojan://...\nss://...'}
+                    placeholder={'host:port\nhttp://username:password@host:port\nvless://...\nvmess://...\ntrojan://...\nss://...\nhysteria2://...'}
                   />
                   {importText.trim() && (
                     <p
@@ -2026,6 +2029,7 @@ export default function ProxiesPage() {
                           <SelectItem value="vmess">VMess</SelectItem>
                           <SelectItem value="trojan">Trojan</SelectItem>
                           <SelectItem value="shadowsocks">Shadowsocks</SelectItem>
+                          <SelectItem value="hysteria2">Hysteria2</SelectItem>
                         </SelectContent>
                       </Select>
                     </div>

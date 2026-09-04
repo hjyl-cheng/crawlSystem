@@ -10,7 +10,7 @@ import (
 
 	"github.com/alpkeskin/rota/core/internal/database"
 	"github.com/alpkeskin/rota/core/internal/models"
-	"github.com/alpkeskin/rota/core/internal/xraynode"
+	"github.com/alpkeskin/rota/core/internal/sharenode"
 	"github.com/alpkeskin/rota/core/pkg/logger"
 )
 
@@ -288,7 +288,7 @@ func connectViaProxyStandalone(ctx context.Context, p *models.Proxy, host string
 	case "http", "https":
 		return connectViaHTTPStandalone(p, host, timeout)
 	default:
-		if xraynode.IsProtocol(p.Protocol) {
+		if sharenode.IsProtocol(p.Protocol) {
 			dialer, err := shareNodeDialContext(p)
 			if err != nil {
 				return nil, err

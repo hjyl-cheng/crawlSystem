@@ -1656,6 +1656,52 @@ var migrations = []Migration{
 			ALTER COLUMN health_check_url SET DEFAULT 'https://www.youtube.com/watch?v=_xXsXvsYAhA';
 		`,
 	},
+	{
+		Version:     1014,
+		Description: "Enable Hysteria2 for default protocol rotation",
+		Up: `
+			UPDATE settings
+			SET value=jsonb_set(
+			      value,
+			      '{allowed_protocols}',
+			      (value->'allowed_protocols') || '"hysteria2"'::jsonb,
+			      true
+			    ),
+			    updated_at=NOW()
+			WHERE key='rotation'
+			  AND jsonb_typeof(value->'allowed_protocols')='array'
+			  AND jsonb_array_length(value->'allowed_protocols')=9
+			  AND value->'allowed_protocols' @> '["http","https","socks4","socks4a","socks5","vless","vmess","trojan","shadowsocks"]'::jsonb;
+
+			UPDATE settings
+			SET value=jsonb_set(
+			      value,
+			      '{allowed_protocols}',
+			      '["http","https","socks4","socks4a","socks5","vless","vmess","trojan","shadowsocks","hysteria2"]'::jsonb,
+			      true
+			    ),
+			    updated_at=NOW()
+			WHERE key='rotation'
+			  AND NOT (value ? 'allowed_protocols');
+		`,
+		Down: `
+			UPDATE settings
+			SET value=jsonb_set(
+			      value,
+			      '{allowed_protocols}',
+			      COALESCE((
+			        SELECT jsonb_agg(protocol)
+			        FROM jsonb_array_elements(value->'allowed_protocols') AS protocol
+			        WHERE protocol <> '"hysteria2"'::jsonb
+			      ), '[]'::jsonb),
+			      true
+			    ),
+			    updated_at=NOW()
+			WHERE key='rotation'
+			  AND jsonb_typeof(value->'allowed_protocols')='array'
+			  AND value->'allowed_protocols' ? 'hysteria2';
+		`,
+	},
 }
 
 // Migrate runs all pending migrations

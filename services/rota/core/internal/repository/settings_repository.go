@@ -150,7 +150,7 @@ func (r *SettingsRepository) Reset(ctx context.Context) error {
 			"retries":              3,
 			"allowed_protocols": []string{
 				"http", "https", "socks4", "socks4a", "socks5",
-				"vless", "vmess", "trojan", "shadowsocks",
+				"vless", "vmess", "trojan", "shadowsocks", "hysteria2",
 			},
 			"max_response_time": 0,   // 0 means no limit
 			"min_success_rate":  0.0, // 0 means no minimum

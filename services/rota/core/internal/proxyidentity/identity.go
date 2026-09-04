@@ -27,7 +27,7 @@ func Credential(canonical string) string {
 // whose tests or internal callers bypass request normalization.
 func ForProxy(protocol, address string, credential *string) string {
 	switch strings.ToLower(strings.TrimSpace(protocol)) {
-	case "vless", "vmess", "trojan", "shadowsocks":
+	case "vless", "vmess", "trojan", "shadowsocks", "hysteria2":
 		if credential != nil && strings.TrimSpace(*credential) != "" {
 			return Credential(*credential)
 		}

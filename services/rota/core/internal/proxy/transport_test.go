@@ -191,6 +191,22 @@ func TestCreateProxyTransport_VLESSRequiresCredential(t *testing.T) {
 	}
 }
 
+func TestCreateProxyTransport_Hysteria2UsesShareNodeDialer(t *testing.T) {
+	credential := testHysteria2URI
+	p := &models.Proxy{
+		Address:  "hy2.example.com:443",
+		Protocol: "hysteria2",
+		Password: &credential,
+	}
+	transport, err := CreateProxyTransport(p)
+	if err != nil {
+		t.Fatalf("CreateProxyTransport: %v", err)
+	}
+	if transport.DialContext == nil || transport.Proxy != nil {
+		t.Fatal("Hysteria2 transport was not wired to its TCP dialer")
+	}
+}
+
 func TestVLESSDialContextRejectsEndpointMismatchWithoutLeakingCredential(t *testing.T) {
 	credential := testVLESSURI
 	p := &models.Proxy{

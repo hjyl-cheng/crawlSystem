@@ -1198,7 +1198,8 @@
                         "vless",
                         "vmess",
                         "trojan",
-                        "shadowsocks"
+                        "shadowsocks",
+                        "hysteria2"
                     ]
                 },
                 "source_id": {
@@ -1910,7 +1911,8 @@
                         "vless",
                         "vmess",
                         "trojan",
-                        "shadowsocks"
+                        "shadowsocks",
+                        "hysteria2"
                     ]
                 },
                 "tags": {

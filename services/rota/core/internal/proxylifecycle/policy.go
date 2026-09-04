@@ -1,7 +1,6 @@
 package proxylifecycle
 
 import (
-	"sort"
 	"time"
 )
 
@@ -71,22 +70,24 @@ func HealthyVerdict() Verdict {
 }
 
 type Policy struct {
-	AutoArchiveEnabled    bool
-	HardUnreachableWindow time.Duration
-	SoftUnreachableWindow time.Duration
-	YouTubeUnusableWindow time.Duration
-	InconclusiveRetry     time.Duration
-	ActiveRecheckInterval time.Duration
+	AutoArchiveEnabled     bool
+	HardUnreachableWindow  time.Duration
+	SoftUnreachableWindow  time.Duration
+	YouTubeUnusableWindow  time.Duration
+	InconclusiveRetry      time.Duration
+	FailureRecheckInterval time.Duration
+	ActiveRecheckInterval  time.Duration
 }
 
 func DefaultPolicy() Policy {
 	return Policy{
-		AutoArchiveEnabled:    true,
-		HardUnreachableWindow: 6 * time.Hour,
-		SoftUnreachableWindow: 24 * time.Hour,
-		YouTubeUnusableWindow: 72 * time.Hour,
-		InconclusiveRetry:     30 * time.Minute,
-		ActiveRecheckInterval: 2 * time.Hour,
+		AutoArchiveEnabled:     true,
+		HardUnreachableWindow:  6 * time.Hour,
+		SoftUnreachableWindow:  24 * time.Hour,
+		YouTubeUnusableWindow:  72 * time.Hour,
+		InconclusiveRetry:      30 * time.Minute,
+		FailureRecheckInterval: 30 * time.Minute,
+		ActiveRecheckInterval:  2 * time.Hour,
 	}
 }
 
@@ -203,14 +204,21 @@ func (p Policy) Decide(now time.Time, current Snapshot, verdict Verdict) Decisio
 		}
 	}
 
-	next := nextCheckpoint(*failedSince, now, p.checkpoints(verdict.Kind, window))
-	if next == nil {
-		next = timePtr(now.Add(window))
+	recheck := p.FailureRecheckInterval
+	if recheck <= 0 {
+		recheck = DefaultPolicy().FailureRecheckInterval
 	}
-	if continuousWindow > 0 {
+	next := now.Add(recheck)
+	if p.AutoArchiveEnabled {
+		failureDeadline := failedSince.Add(window)
+		if failureDeadline.After(now) && failureDeadline.Before(next) {
+			next = failureDeadline
+		}
+	}
+	if p.AutoArchiveEnabled && continuousWindow > 0 {
 		continuousDeadline := continuousFailedSince.Add(continuousWindow)
-		if continuousDeadline.After(now) && (next == nil || continuousDeadline.Before(*next)) {
-			next = timePtr(continuousDeadline)
+		if continuousDeadline.After(now) && continuousDeadline.Before(next) {
+			next = continuousDeadline
 		}
 	}
 	return Decision{
@@ -218,7 +226,7 @@ func (p Policy) Decide(now time.Time, current Snapshot, verdict Verdict) Decisio
 		FailedSince:           cloneTime(failedSince),
 		ContinuousFailedSince: cloneTime(continuousFailedSince),
 		FailureKind:           verdict.Kind,
-		NextHealthCheckAt:     next,
+		NextHealthCheckAt:     timePtr(next),
 	}
 }
 
@@ -244,41 +252,6 @@ func (p Policy) windowFor(kind FailureKind) time.Duration {
 	default:
 		return 0
 	}
-}
-
-func (p Policy) checkpoints(kind FailureKind, window time.Duration) []time.Duration {
-	var points []time.Duration
-	switch kind {
-	case FailureHardUnreachable:
-		points = []time.Duration{15 * time.Minute, time.Hour}
-	case FailureSoftUnreachable:
-		points = []time.Duration{30 * time.Minute, 6 * time.Hour}
-	case FailureYouTubeUnusable:
-		points = []time.Duration{30 * time.Minute, 6 * time.Hour, 24 * time.Hour}
-	}
-	points = append(points, window)
-	sort.Slice(points, func(i, j int) bool { return points[i] < points[j] })
-
-	filtered := points[:0]
-	for _, point := range points {
-		if point <= 0 || point > window {
-			continue
-		}
-		if len(filtered) == 0 || filtered[len(filtered)-1] != point {
-			filtered = append(filtered, point)
-		}
-	}
-	return filtered
-}
-
-func nextCheckpoint(started, now time.Time, checkpoints []time.Duration) *time.Time {
-	elapsed := now.Sub(started)
-	for _, checkpoint := range checkpoints {
-		if checkpoint > elapsed {
-			return timePtr(started.Add(checkpoint))
-		}
-	}
-	return nil
 }
 
 func validFailureKind(kind FailureKind) bool {

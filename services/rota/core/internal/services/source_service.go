@@ -19,8 +19,8 @@ import (
 	"github.com/alpkeskin/rota/core/internal/models"
 	proxycore "github.com/alpkeskin/rota/core/internal/proxy"
 	"github.com/alpkeskin/rota/core/internal/repository"
+	"github.com/alpkeskin/rota/core/internal/sharenode"
 	"github.com/alpkeskin/rota/core/internal/sourceinventory"
-	"github.com/alpkeskin/rota/core/internal/xraynode"
 	"github.com/alpkeskin/rota/core/pkg/logger"
 	"go.yaml.in/yaml/v3"
 )
@@ -60,8 +60,8 @@ func parseProxyLine(line string) (parsedProxy, bool, error) {
 		return parsedProxy{}, false, nil
 	}
 
-	if _, shareURI := xraynode.SchemeProtocol(line); shareURI {
-		node, err := xraynode.Parse(line)
+	if _, shareURI := sharenode.SchemeProtocol(line); shareURI {
+		node, err := sharenode.Parse(line)
 		if err != nil {
 			return parsedProxy{}, false, err
 		}
@@ -626,7 +626,7 @@ func parseProxyListWithStats(r io.Reader) (parsedProxyList, error) {
 		total++
 		p, ok, err := parseProxyLine(line)
 		if err != nil {
-			if _, shareURI := xraynode.SchemeProtocol(line); shareURI {
+			if _, shareURI := sharenode.SchemeProtocol(line); shareURI {
 				skipped++
 				continue
 			}
@@ -658,13 +658,22 @@ func parseProxyListWithStats(r io.Reader) (parsedProxyList, error) {
 }
 
 type clashProxy struct {
-	Name     string `yaml:"name"`
-	Type     string `yaml:"type"`
-	Server   string `yaml:"server"`
-	Port     int    `yaml:"port"`
-	Username string `yaml:"username"`
-	Password string `yaml:"password"`
-	TLS      bool   `yaml:"tls"`
+	Name           string `yaml:"name"`
+	Type           string `yaml:"type"`
+	Server         string `yaml:"server"`
+	Port           int    `yaml:"port"`
+	Username       string `yaml:"username"`
+	Password       string `yaml:"password"`
+	TLS            bool   `yaml:"tls"`
+	SNI            string `yaml:"sni"`
+	SkipCertVerify bool   `yaml:"skip-cert-verify"`
+	Insecure       bool   `yaml:"insecure"`
+	Fingerprint    string `yaml:"fingerprint"`
+	PinSHA256      string `yaml:"pinSHA256"`
+	Ports          string `yaml:"ports"`
+	MPort          string `yaml:"mport"`
+	Obfs           string `yaml:"obfs"`
+	ObfsPassword   string `yaml:"obfs-password"`
 }
 
 func parseClashProxyList(data []byte) ([]parsedProxy, bool, error) {
@@ -690,6 +699,21 @@ func parseClashProxyList(data []byte) ([]parsedProxy, bool, error) {
 	seen := make(map[string]int, len(entries))
 	for _, entry := range entries {
 		protocol := strings.ToLower(strings.TrimSpace(entry.Type))
+		if protocol == "hysteria2" || protocol == "hy2" {
+			proxy, ok := parseClashHysteria2(entry)
+			if !ok {
+				continue
+			}
+			if index, exists := seen[proxy.nodeIdentity]; exists {
+				for _, tag := range proxy.tags {
+					proxies[index].tags = appendProxyTag(proxies[index].tags, tag)
+				}
+				continue
+			}
+			seen[proxy.nodeIdentity] = len(proxies)
+			proxies = append(proxies, proxy)
+			continue
+		}
 		if protocol == "http" && entry.TLS {
 			protocol = "https"
 		}
@@ -729,6 +753,64 @@ func parseClashProxyList(data []byte) ([]parsedProxy, bool, error) {
 		proxies = append(proxies, proxy)
 	}
 	return proxies, true, nil
+}
+
+func parseClashHysteria2(entry clashProxy) (parsedProxy, bool) {
+	host := strings.TrimSpace(entry.Server)
+	if !isValidProxyHost(host) || entry.Port < 1 || entry.Port > 65535 {
+		return parsedProxy{}, false
+	}
+	query := url.Values{}
+	if sni := strings.TrimSpace(entry.SNI); sni != "" {
+		query.Set("sni", sni)
+	}
+	if entry.SkipCertVerify || entry.Insecure {
+		query.Set("insecure", "1")
+	}
+	pin := strings.TrimSpace(entry.PinSHA256)
+	if pin == "" {
+		pin = strings.TrimSpace(entry.Fingerprint)
+	}
+	if pin != "" {
+		query.Set("pinSHA256", pin)
+	}
+	ports := strings.TrimSpace(entry.Ports)
+	if ports == "" {
+		ports = strings.TrimSpace(entry.MPort)
+	}
+	if ports != "" {
+		query.Set("mport", ports)
+	}
+	if obfsType := strings.TrimSpace(entry.Obfs); obfsType != "" {
+		query.Set("obfs", obfsType)
+		query.Set("obfs-password", entry.ObfsPassword)
+	}
+	var user *url.Userinfo
+	if entry.Password != "" {
+		user = url.User(entry.Password)
+	}
+	raw := (&url.URL{
+		Scheme:   "hysteria2",
+		User:     user,
+		Host:     net.JoinHostPort(host, strconv.Itoa(entry.Port)),
+		Fragment: strings.TrimSpace(entry.Name),
+		RawQuery: query.Encode(),
+	}).String()
+	node, err := sharenode.Parse(raw)
+	if err != nil {
+		return parsedProxy{}, false
+	}
+	credential := node.Credential()
+	proxy := parsedProxy{
+		address:      node.Address(),
+		protocol:     node.Protocol(),
+		password:     &credential,
+		nodeIdentity: node.Identity(),
+	}
+	if node.Name() != "" {
+		proxy.tags = []string{node.Name()}
+	}
+	return proxy, true
 }
 
 func decodeBase64Subscription(data []byte) []byte {

@@ -10,6 +10,7 @@ export type ProxyProtocol =
   | "vmess"
   | "trojan"
   | "shadowsocks"
+  | "hysteria2"
 
 export type SourceProtocol = "auto" | ProxyProtocol
 

@@ -77,7 +77,7 @@ type ProxyWithStats struct {
 // CreateProxyRequest represents a request to create a proxy
 type CreateProxyRequest struct {
 	Address      string   `json:"address" validate:"required"`
-	Protocol     string   `json:"protocol" validate:"required,oneof=http https socks4 socks4a socks5 vless vmess trojan shadowsocks"`
+	Protocol     string   `json:"protocol" validate:"required,oneof=http https socks4 socks4a socks5 vless vmess trojan shadowsocks hysteria2"`
 	Username     *string  `json:"username,omitempty"`
 	Password     *string  `json:"password,omitempty"`
 	Tags         []string `json:"tags,omitempty"`
@@ -88,7 +88,7 @@ type CreateProxyRequest struct {
 // UpdateProxyRequest represents a request to update a proxy
 type UpdateProxyRequest struct {
 	Address      string   `json:"address"`
-	Protocol     string   `json:"protocol" validate:"omitempty,oneof=http https socks4 socks4a socks5 vless vmess trojan shadowsocks"`
+	Protocol     string   `json:"protocol" validate:"omitempty,oneof=http https socks4 socks4a socks5 vless vmess trojan shadowsocks hysteria2"`
 	Username     *string  `json:"username,omitempty"`
 	Password     *string  `json:"password,omitempty"`
 	Tags         []string `json:"tags,omitempty"`

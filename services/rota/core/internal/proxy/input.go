@@ -6,7 +6,7 @@ import (
 
 	"github.com/alpkeskin/rota/core/internal/models"
 	"github.com/alpkeskin/rota/core/internal/proxyidentity"
-	"github.com/alpkeskin/rota/core/internal/xraynode"
+	"github.com/alpkeskin/rota/core/internal/sharenode"
 )
 
 var supportedProtocols = map[string]struct{}{
@@ -19,9 +19,10 @@ var supportedProtocols = map[string]struct{}{
 	"vmess":       {},
 	"trojan":      {},
 	"shadowsocks": {},
+	"hysteria2":   {},
 }
 
-// NormalizeCreateRequest validates external proxy input. Xray share nodes keep
+// NormalizeCreateRequest validates external proxy input. Share nodes keep
 // their public endpoint in address and their canonical URI in write-only password.
 func NormalizeCreateRequest(req *models.CreateProxyRequest) error {
 	req.Protocol = strings.ToLower(strings.TrimSpace(req.Protocol))
@@ -36,15 +37,15 @@ func NormalizeCreateRequest(req *models.CreateProxyRequest) error {
 		return fmt.Errorf("address is required")
 	}
 
-	if !xraynode.IsProtocol(req.Protocol) {
-		if _, shareURI := xraynode.SchemeProtocol(req.Address); shareURI {
+	if !sharenode.IsProtocol(req.Protocol) {
+		if _, shareURI := sharenode.SchemeProtocol(req.Address); shareURI {
 			return fmt.Errorf("share URI requires its matching protocol")
 		}
 		req.NodeIdentity = proxyidentity.Endpoint(req.Protocol, req.Address)
 		return nil
 	}
 
-	node, err := xraynode.ParseForProtocol(req.Protocol, shareCredentialInput(req.Address, req.Password))
+	node, err := sharenode.ParseForProtocol(req.Protocol, shareCredentialInput(req.Address, req.Password))
 	if err != nil {
 		return err
 	}
@@ -69,13 +70,13 @@ func NormalizeUpdateRequest(existing *models.Proxy, req *models.UpdateProxyReque
 		return fmt.Errorf("unsupported proxy protocol")
 	}
 
-	existingShare := xraynode.IsProtocol(existing.Protocol)
-	targetShare := xraynode.IsProtocol(targetProtocol)
+	existingShare := sharenode.IsProtocol(existing.Protocol)
+	targetShare := sharenode.IsProtocol(targetProtocol)
 	if existingShare && targetProtocol != existing.Protocol {
 		return fmt.Errorf("a share node cannot be converted to another protocol")
 	}
 	if !targetShare {
-		if _, shareURI := xraynode.SchemeProtocol(req.Address); shareURI {
+		if _, shareURI := sharenode.SchemeProtocol(req.Address); shareURI {
 			return fmt.Errorf("share URI requires its matching protocol")
 		}
 		address := strings.TrimSpace(req.Address)
@@ -87,15 +88,15 @@ func NormalizeUpdateRequest(existing *models.Proxy, req *models.UpdateProxyReque
 	}
 
 	raw := ""
-	if _, shareURI := xraynode.SchemeProtocol(req.Address); shareURI {
+	if _, shareURI := sharenode.SchemeProtocol(req.Address); shareURI {
 		raw = req.Address
 	} else if req.Password != nil {
-		if _, shareURI := xraynode.SchemeProtocol(*req.Password); shareURI {
+		if _, shareURI := sharenode.SchemeProtocol(*req.Password); shareURI {
 			raw = *req.Password
 		}
 	}
 	if raw != "" {
-		node, err := xraynode.ParseForProtocol(targetProtocol, raw)
+		node, err := sharenode.ParseForProtocol(targetProtocol, raw)
 		if err != nil {
 			return err
 		}
@@ -117,7 +118,7 @@ func NormalizeUpdateRequest(existing *models.Proxy, req *models.UpdateProxyReque
 		return fmt.Errorf("changing a share node endpoint requires a complete share URI")
 	}
 	if existing.Password != nil && strings.TrimSpace(*existing.Password) != "" {
-		node, err := xraynode.ParseForProtocol(existing.Protocol, *existing.Password)
+		node, err := sharenode.ParseForProtocol(existing.Protocol, *existing.Password)
 		if err != nil {
 			return fmt.Errorf("stored share credential is invalid")
 		}
@@ -142,7 +143,7 @@ func IsSupportedSourceProtocol(protocol string) bool {
 }
 
 func shareCredentialInput(address string, password *string) string {
-	if _, ok := xraynode.SchemeProtocol(address); ok {
+	if _, ok := sharenode.SchemeProtocol(address); ok {
 		return address
 	}
 	if password != nil && strings.TrimSpace(*password) != "" {
