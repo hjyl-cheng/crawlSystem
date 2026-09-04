@@ -1,5 +1,6 @@
 import {
   FINALIZABLE_CHANNEL_STATUSES,
+  finalizeDispatchRevision,
   SUCCESSFUL_PUBLICATION_FINALIZE_STATUSES,
 } from "./finalizePolicy.js";
 import { buildPublicationGapRepairTarget } from "./publicationGapRepairExecution.js";
@@ -24,6 +25,35 @@ function boundedLimit(value) {
 
 export function publicationGapRepairTarget(row = {}) {
   return buildPublicationGapRepairTarget(row);
+}
+
+export function finalizeRecoveryDispatchRevision(row = {}) {
+  return finalizeDispatchRevision({
+    channel_id: row.channel_id,
+    latest_run_id: row.latest_run_id,
+    channel_status: row.channel_status,
+    agent_status: row.agent_status,
+    detail_status: row.detail_status,
+    expected_content_count: row.expected_content_count,
+    pipeline_cycle_id: row.pipeline_cycle_id,
+    run_final_repair: row.run_final_repair,
+    candidate_count: row.candidate_count,
+    candidate_updated_at: row.candidate_updated_at,
+    content_count: row.content_count,
+    content_updated_at: row.content_updated_at,
+    agent_updated_at: row.agent_updated_at,
+  });
+}
+
+export function finalizeRecoveryJobData(row = {}, pipelineCycleId = null) {
+  const sourceRevision = finalizeRecoveryDispatchRevision(row);
+  return {
+    channel_id: row.channel_id,
+    run_id: row.run_id,
+    reason: "controller-finalize-reconcile",
+    source_revision: sourceRevision,
+    pipeline_cycle_id: optionalText(pipelineCycleId),
+  };
 }
 
 function asPublicationGapRow(row = {}) {
@@ -270,7 +300,16 @@ export async function loadFinalizeRecoveryCandidates(queryValue, {
   const query = requiredQuery(queryValue);
   const rows = await query(
     `/* finalize-recovery:candidates */
-     SELECT channel.channel_id,run.run_id,
+     SELECT channel.channel_id,channel.latest_run_id,
+            channel.status AS channel_status,channel.agent_status,
+            run.run_id,run.detail_status,run.expected_content_count,
+            run.result_json->>'pipeline_cycle_id' AS pipeline_cycle_id,
+            run.result_json->'final_repair' AS run_final_repair,
+            COALESCE(candidate_revision.candidate_count,0)::int AS candidate_count,
+            candidate_revision.updated_at AS candidate_updated_at,
+            COALESCE(content_revision.content_count,0)::int AS content_count,
+            content_revision.updated_at AS content_updated_at,
+            agent.updated_at AS agent_updated_at,
             greatest(
               channel.updated_at,
               COALESCE(agent.updated_at,'epoch'::timestamptz),
@@ -287,14 +326,17 @@ export async function loadFinalizeRecoveryCandidates(queryValue, {
       AND agent.agent_mode='basic'
       AND agent.status='success'
      LEFT JOIN LATERAL (
-       SELECT max(candidate.updated_at) AS updated_at
+       SELECT count(*) AS candidate_count,max(candidate.updated_at) AS updated_at
        FROM crawler.content_candidates candidate
        WHERE candidate.run_id=run.run_id
+         AND candidate.channel_id=channel.channel_id
      ) candidate_revision ON true
      LEFT JOIN LATERAL (
-       SELECT max(COALESCE(content.last_enriched_at,content.last_seen_at)) AS updated_at
+       SELECT count(*) AS content_count,
+              max(COALESCE(content.last_enriched_at,content.last_seen_at)) AS updated_at
        FROM crawler.contents content
        WHERE content.run_id=run.run_id
+         AND content.channel_id=channel.channel_id
      ) content_revision ON true
      LEFT JOIN crawler.finalized_profiles finalized ON finalized.channel_id=channel.channel_id
      WHERE channel.status=ANY($3::text[])

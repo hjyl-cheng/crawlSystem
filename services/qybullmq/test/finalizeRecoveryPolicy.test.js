@@ -5,6 +5,8 @@ import {
   SUCCESSFUL_PUBLICATION_FINALIZE_STATUSES,
 } from "../src/finalizePolicy.js";
 import {
+  finalizeRecoveryDispatchRevision,
+  finalizeRecoveryJobData,
   hasOpenPipelineCrawlerWork,
   loadFinalizeRecoveryCandidates,
   loadPipelineFinalizeBlockers,
@@ -35,6 +37,44 @@ test("Finalize recovery is database-driven and can scan after a scheduler stops"
   assert.match(calls[0].sql, /run\.publication_finalized_status IS NULL/);
   assert.match(calls[0].sql, /finalized\.status=ANY\(\$4::text\[\]\)/);
   assert.match(calls[0].sql, /\$1::text IS NULL/);
+  assert.match(calls[0].sql, /AS candidate_count/);
+  assert.match(calls[0].sql, /AS content_count/);
+  assert.match(calls[0].sql, /AS pipeline_cycle_id/);
+});
+
+test("Finalize recovery derives the fenced dispatch revision from its database snapshot", () => {
+  const row = {
+    channel_id: "UC-recovery",
+    run_id: "run:recovery",
+    latest_run_id: "run:recovery",
+    channel_status: "active",
+    agent_status: "done",
+    detail_status: "done",
+    expected_content_count: 2,
+    pipeline_cycle_id: "legacy-results-manual-v2",
+    run_final_repair: null,
+    candidate_count: 2,
+    candidate_updated_at: "2026-09-04T01:00:00.000Z",
+    content_count: 2,
+    content_updated_at: "2026-09-04T01:01:00.000Z",
+    agent_updated_at: "2026-09-04T01:02:00.000Z",
+  };
+
+  const revision = finalizeRecoveryDispatchRevision(row);
+  assert.match(revision, /^[a-f0-9]{64}$/);
+  assert.equal(revision, finalizeRecoveryDispatchRevision(structuredClone(row)));
+  assert.notEqual(revision, finalizeRecoveryDispatchRevision({
+    ...row,
+    candidate_count: 3,
+  }));
+
+  assert.deepEqual(finalizeRecoveryJobData(row, "legacy-results-manual-v2"), {
+    channel_id: "UC-recovery",
+    run_id: "run:recovery",
+    reason: "controller-finalize-reconcile",
+    source_revision: revision,
+    pipeline_cycle_id: "legacy-results-manual-v2",
+  });
 });
 
 test("pipeline completion counts an unfinalized dormant Promotion Run", async () => {

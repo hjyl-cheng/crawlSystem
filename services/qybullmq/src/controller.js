@@ -78,6 +78,7 @@ import { closeProxyControlClient, proxyControlClient } from "./proxyControlClien
 import { normalizeRotaCapacity } from "./rotaCapacity.js";
 import {
   activeFinalRepairExclusions,
+  finalizeRecoveryJobData,
   hasOpenPipelineCrawlerWork,
   loadFinalizeRecoveryCandidates,
   loadPublicationGapRepairCandidates,
@@ -1014,8 +1015,9 @@ async function reconcileFinalizeQueue(actions, pipelineCycleId) {
   let enqueued = 0;
   for (const row of rows) {
     if (representedRunIds.has(String(row.run_id))) continue;
-    const sourceUpdatedAt = new Date(row.source_updated_at).toISOString();
-    const jobId = safeJobId("finalize-reconcile", row.run_id, sourceUpdatedAt);
+    const jobData = finalizeRecoveryJobData(row, pipelineCycleId);
+    const sourceRevision = jobData.source_revision;
+    const jobId = safeJobId("finalize-reconcile", row.run_id, sourceRevision);
     const existing = await queues[queuesByRole.finalize].getJob(jobId);
     if (existing) {
       const state = await existing.getState();
@@ -1028,12 +1030,7 @@ async function reconcileFinalizeQueue(actions, pipelineCycleId) {
     }
     await queues[queuesByRole.finalize].add(
       "finalize-channel",
-      {
-        channel_id: row.channel_id,
-        run_id: row.run_id,
-        reason: "controller-finalize-reconcile",
-        pipeline_cycle_id: pipelineCycleId,
-      },
+      jobData,
       { jobId },
     );
     enqueued += 1;

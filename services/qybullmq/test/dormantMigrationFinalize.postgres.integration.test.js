@@ -7,9 +7,11 @@ import { normalizeAboutMetrics } from "../src/aboutMetrics.js";
 import { observationFactsHash } from "../src/crawlObservationStore.js";
 import { commitFinalizedProfile } from "../src/finalizedProfileStore.js";
 import {
+  finalizeRecoveryDispatchRevision,
   loadFinalizeRecoveryCandidates,
   loadPipelineFinalizeBlockers,
 } from "../src/finalizeRecoveryPolicy.js";
+import { readFinalizeSource } from "../src/finalizeSourceFence.js";
 import { resolveFinalizeStatus } from "../src/finalizePolicy.js";
 import { executeIncrementalVideo } from "../src/incrementalVideo.js";
 import { recordInitialFullObservations } from "../src/initialFullObservations.js";
@@ -668,6 +670,14 @@ test("Finalize recovery repairs a successful active profile missing its Run proo
     assert.deepEqual(
       recoverable.map((row) => [row.channel_id, row.run_id]),
       [[channelId, runId]],
+    );
+    const finalizeSource = await readFinalizeSource(client.query.bind(client), {
+      channelId,
+      runId,
+    });
+    assert.equal(
+      finalizeRecoveryDispatchRevision(recoverable[0]),
+      finalizeSource.dispatchRevision,
     );
     assert.deepEqual(
       await loadPipelineFinalizeBlockers(client.query.bind(client), batchId),
