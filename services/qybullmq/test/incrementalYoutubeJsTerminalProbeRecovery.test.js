@@ -34,7 +34,7 @@ function row(target) {
     batch_status: "fetching",
     item_phase: "recent",
     item_status: "pending",
-    item_ordinal: 1,
+    item_ordinal: 0,
     failure_observation_id: `observation:${target.plan_id}`,
     failure_outcome: "failed",
     failure_reason_code: privateVideo ? "video_parser_failure" : "video_crawler_failure",

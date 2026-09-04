@@ -161,6 +161,14 @@ function positiveInteger(value, field) {
   return parsed;
 }
 
+function nonNegativeInteger(value, field) {
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 0) {
+    throw new TypeError(`${field} must be a non-negative integer`);
+  }
+  return parsed;
+}
+
 function normalizedPlanDay(value) {
   const output = requiredText(value, "planDay");
   if (output !== PLAN_DAY) {
@@ -227,7 +235,7 @@ function normalizedTarget(row) {
   if (!["first_seen", "recent"].includes(String(row.item_phase ?? ""))) {
     throw new Error(`invalid target Item phase: ${expected.plan_id}`);
   }
-  positiveInteger(row.item_ordinal, "item_ordinal");
+  nonNegativeInteger(row.item_ordinal, "item_ordinal");
   assertSame(row.failure_outcome, "failed", "latest Video Observation outcome");
   assertSame(
     row.failure_reason_code,
