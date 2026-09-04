@@ -1101,6 +1101,47 @@ test("Video Detail requests a new Route after every supported client stays incon
   ]);
 });
 
+test("Video Detail requests a new Route when playable clients lack the required public surface", async () => {
+  const calls = [];
+  const loginRequired = infoFixture({
+    basic_info: { view_count: null },
+    playability_status: { status: "LOGIN_REQUIRED", reason: "Please sign in" },
+  });
+  delete loginRequired.page[0].microformat.publish_date;
+  delete loginRequired.page[0].microformat.upload_date;
+  delete loginRequired.page[0].microformat.view_count;
+  const incompletePublic = infoFixture({
+    playability_status: { status: "OK", reason: null },
+  });
+  delete incompletePublic.page[0].microformat.publish_date;
+  delete incompletePublic.page[0].microformat.upload_date;
+  const client = {
+    async getInfo(videoId, options) {
+      calls.push(["getInfo", videoId, options.client]);
+      return options.client === "WEB" ? loginRequired : incompletePublic;
+    },
+    async getBasicInfo(videoId, options) {
+      calls.push(["getBasicInfo", videoId, options.client]);
+      return incompletePublic;
+    },
+  };
+
+  await assert.rejects(
+    fetchYoutubeJsVideoInfoWithTerminalFallback(client, "incomplete-public-video"),
+    (error) => {
+      assert.equal(decideYoutubeFailure({ error }).kind, "youtube_challenge");
+      assert.equal(error.youtube_client_attempts.at(-1)?.playability_status, "OK");
+      return true;
+    },
+  );
+  assert.deepEqual(calls, [
+    ["getInfo", "incomplete-public-video", "WEB"],
+    ["getInfo", "incomplete-public-video", "IOS"],
+    ["getInfo", "incomplete-public-video", "ANDROID"],
+    ["getBasicInfo", "incomplete-public-video", "ANDROID"],
+  ]);
+});
+
 test("Video Detail does not run a terminal probe for an unrelated request failure", async () => {
   const original = new Error("socket connection reset by peer");
   let probeCalls = 0;

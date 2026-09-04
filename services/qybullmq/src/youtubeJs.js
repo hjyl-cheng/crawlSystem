@@ -1543,16 +1543,25 @@ function youtubeJsExplicitTerminalDetail(videoId, value, {
   };
 }
 
-function youtubeJsInfoNeedsTerminalProbe(info) {
+function youtubeJsInfoNeedsAlternateClient(info) {
   const playabilitySurface = youtubeJsPlayabilitySurface(info);
   const playability = resolveYoutubePlayability(playabilitySurface);
-  if (playability.retry_mode !== "alternate_client") return false;
   const player = info?.page?.[0];
   const microformat = player?.microformat || {};
   const basic = info?.basic_info || {};
+  if (basic.is_upcoming === true) return false;
+  if (playability.kind === "content" && playability.access_status !== "public") return false;
   const published = isoTimestamp(microformat.publish_date || microformat.upload_date);
   const viewCount = finiteInteger(basic.view_count ?? microformat.view_count);
-  return !Boolean(published.value && viewCount != null) && basic.is_upcoming !== true;
+  const title = renderedText(basic.title ?? microformat.title);
+  const duration = positiveInteger(basic.duration ?? microformat.length_seconds);
+  const completePublicSurface = Boolean(
+    title
+    && published.value
+    && viewCount != null
+    && (duration != null || basic.is_live === true),
+  );
+  return !completePublicSurface;
 }
 
 function youtubeJsErrorNeedsTerminalProbe(error) {
@@ -1579,7 +1588,7 @@ function youtubeJsInfoResolution(videoId, info, clientName, source = "youtubejs_
   }
   const detail = youtubeJsExplicitTerminalDetail(videoId, info, { clientName, source });
   if (detail) return { kind: "terminal", detail };
-  if (youtubeJsInfoNeedsTerminalProbe(info)) return null;
+  if (youtubeJsInfoNeedsAlternateClient(info)) return null;
   return { kind: "info", info, client: clientName };
 }
 
