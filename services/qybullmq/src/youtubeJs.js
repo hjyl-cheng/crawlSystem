@@ -36,6 +36,7 @@ import {
 import {
   assertYoutubeContentObservation,
   resolveYoutubePlayability,
+  YoutubeCollectionFailureError,
 } from "./youtubePlayability.js";
 
 const VERSION = "17.2.0";
@@ -44,6 +45,7 @@ const DEFAULT_COUNTRY = process.env.YOUTUBE_COUNTRY || "BR";
 const DEFAULT_TIMEOUT_MS = Math.max(1000, Number(process.env.YOUTUBEJS_TIMEOUT_MS || 30000));
 const MAX_TAB_PAGES = Math.max(1, Number(process.env.YOUTUBEJS_MAX_TAB_PAGES || 20));
 const TERMINAL_DETAIL_PROBE_CLIENT = "ANDROID";
+const VIDEO_DETAIL_CLIENTS = Object.freeze(["WEB", "IOS", "ANDROID"]);
 const EXPLICIT_TERMINAL_REASON_CODES = new Set(["private", "uploader_removed"]);
 
 let runtime = null;
@@ -818,6 +820,11 @@ function jsonRequestBody(body) {
   return null;
 }
 
+function youtubeJsRequestClient(body) {
+  const payload = jsonRequestBody(body);
+  return String(payload?.context?.client?.clientName ?? "WEB").trim().toUpperCase() || "WEB";
+}
+
 function capturePlayerTypeSurface(url, body, responseText, playerTypeSurfaces) {
   if (url.pathname !== "/youtubei/v1/player" || !responseText) return;
   const videoId = String(jsonRequestBody(body)?.videoId ?? "").trim();
@@ -847,6 +854,7 @@ async function createFetch(proxyUrl, dispatcher, stats, playerTypeSurfaces) {
       body = await input.clone().arrayBuffer();
     }
     throwIfAborted(externalSignal);
+    const requestClient = youtubeJsRequestClient(body);
     const timeoutSignal = AbortSignal.timeout(DEFAULT_TIMEOUT_MS);
     const signal = combineAbortSignals(externalSignal, timeoutSignal);
     let recorded = false;
@@ -878,11 +886,11 @@ async function createFetch(proxyUrl, dispatcher, stats, playerTypeSurfaces) {
             body: responseSample,
             source: "youtubejs_fetch",
             targetUrl: url.toString(),
-            client: "WEB",
+            client: requestClient,
           });
           recordChannelExecutionRequest({
             engine: "youtubejs",
-            client: "WEB",
+            client: requestClient,
             status: 200,
             durationMs: Date.now() - startedAt,
             ok: false,
@@ -899,7 +907,7 @@ async function createFetch(proxyUrl, dispatcher, stats, playerTypeSurfaces) {
       const requestOk = response.ok && response.status !== 403 && response.status !== 429;
       recordChannelExecutionRequest({
         engine: "youtubejs",
-        client: "WEB",
+        client: requestClient,
         status: response.status,
         durationMs: Date.now() - startedAt,
         ok: requestOk,
@@ -914,7 +922,7 @@ async function createFetch(proxyUrl, dispatcher, stats, playerTypeSurfaces) {
           body: responseSample,
           source: "youtubejs_fetch",
           targetUrl: url.toString(),
-          client: "WEB",
+          client: requestClient,
         });
       }
       return response;
@@ -924,12 +932,12 @@ async function createFetch(proxyUrl, dispatcher, stats, playerTypeSurfaces) {
       const annotated = annotateYoutubeFailure(error, {
         source: error?.youtube_failure_evidence?.source || "youtubejs_fetch",
         targetUrl: url.toString(),
-        client: "WEB",
+        client: requestClient,
       });
       if (!recorded) {
         recordChannelExecutionRequest({
           engine: "youtubejs",
-          client: "WEB",
+          client: requestClient,
           status: annotated.youtube_failure_evidence?.status,
           durationMs: Date.now() - startedAt,
           ok: false,
@@ -1553,37 +1561,109 @@ function youtubeJsErrorNeedsTerminalProbe(error) {
     const playability = resolveYoutubePlayability(playabilitySurface);
     if (playability.retry_mode === "alternate_client") return true;
   }
-  return /^(?:this )?video is unavailable[.!]?$/i.test(String(error?.message || "").trim());
+  return /^(?:this )?video is unavailable[.!]?$/i.test(String(error?.message || "").trim())
+    || /login_required|please sign in|sign in to continue|not available on this app/i.test(
+      String(error?.message || ""),
+    );
 }
 
-async function probeYoutubeJsExplicitTerminalDetail(client, videoId) {
+function youtubeJsInfoResolution(videoId, info, clientName, source = "youtubejs_get_info") {
+  const playabilitySurface = youtubeJsPlayabilitySurface(info);
+  if (isYoutubeJsBotChallenge(playabilitySurface.status, playabilitySurface.reason)) {
+    throwYoutubeJsBotChallenge(
+      videoId,
+      playabilitySurface.status,
+      playabilitySurface.reason,
+      { clientName },
+    );
+  }
+  const detail = youtubeJsExplicitTerminalDetail(videoId, info, { clientName, source });
+  if (detail) return { kind: "terminal", detail };
+  if (youtubeJsInfoNeedsTerminalProbe(info)) return null;
+  return { kind: "info", info, client: clientName };
+}
+
+function youtubeJsClientAttempt(clientName, value, error = null) {
+  const playabilitySurface = youtubeJsPlayabilitySurface(value ?? error?.info);
+  return {
+    client: clientName,
+    playability_status: playabilitySurface.status == null
+      ? null
+      : String(playabilitySurface.status),
+    playability_reason: playabilitySurface.reason == null
+      ? null
+      : String(playabilitySurface.reason),
+    error: error == null ? null : String(error?.message || error).slice(0, 500),
+  };
+}
+
+async function probeYoutubeJsBasicDetail(client, videoId, clientName) {
   try {
     const info = await fetchYoutubeJsBasicPlayerInfo(client, videoId, {
-      clientName: TERMINAL_DETAIL_PROBE_CLIENT,
+      clientName,
     });
     throwIfYoutubeJsOperationAborted();
-    const playabilitySurface = youtubeJsPlayabilitySurface(info);
+    return {
+      resolution: youtubeJsInfoResolution(videoId, info, clientName, "youtubejs_get_basic_info"),
+      attempt: youtubeJsClientAttempt(clientName, info),
+    };
+  } catch (error) {
+    throwIfYoutubeJsOperationAborted();
+    const detail = youtubeJsExplicitTerminalDetail(videoId, error?.info, {
+      clientName,
+      source: "youtubejs_get_basic_info",
+    });
+    if (detail) return {
+      resolution: { kind: "terminal", detail },
+      attempt: youtubeJsClientAttempt(clientName, error?.info, error),
+    };
+    const playabilitySurface = youtubeJsPlayabilitySurface(error?.info);
     if (isYoutubeJsBotChallenge(playabilitySurface.status, playabilitySurface.reason)) {
       throwYoutubeJsBotChallenge(
         videoId,
         playabilitySurface.status,
         playabilitySurface.reason,
-        { clientName: TERMINAL_DETAIL_PROBE_CLIENT },
+        { clientName },
       );
     }
-    return youtubeJsExplicitTerminalDetail(videoId, info, {
-      clientName: TERMINAL_DETAIL_PROBE_CLIENT,
-      source: "youtubejs_get_basic_info",
-    });
-  } catch (error) {
-    throwIfYoutubeJsOperationAborted();
-    const detail = youtubeJsExplicitTerminalDetail(videoId, error?.info, {
-      clientName: TERMINAL_DETAIL_PROBE_CLIENT,
-      source: "youtubejs_get_basic_info",
-    });
-    if (detail) return detail;
-    throw error;
+    if (!youtubeJsErrorNeedsTerminalProbe(error)) throw error;
+    return {
+      resolution: null,
+      attempt: youtubeJsClientAttempt(clientName, error?.info, error),
+    };
   }
+}
+
+function throwYoutubeJsAlternateClientsExhausted(videoId, attempts) {
+  const last = attempts.at(-1) ?? { client: TERMINAL_DETAIL_PROBE_CLIENT };
+  const reason = last.playability_reason || last.error || "ambiguous playability response";
+  const error = annotateYoutubeFailure(new YoutubeCollectionFailureError(
+    `YouTube.js alternate clients exhausted for ${videoId}: ${reason}`,
+    {
+      reasonCode: "alternate_clients_exhausted",
+      retryMode: "new_identity",
+      source: "youtubejs_player",
+      videoId,
+      reason,
+    },
+  ), {
+    status: 200,
+    body: reason,
+    source: "youtubejs_player",
+    targetUrl: `https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}`,
+    client: last.client,
+  });
+  error.youtube_client_attempts = attempts;
+  recordChannelExecutionFailure({
+    error,
+    engine: "youtubejs",
+    client: last.client,
+    status: error.youtube_failure_evidence.status,
+    body: reason,
+    source: "youtubejs_player",
+    targetUrl: error.youtube_failure_evidence.target_url,
+  });
+  throw error;
 }
 
 export async function fetchYoutubeJsVideoInfoWithTerminalFallback(client, videoId) {
@@ -1592,27 +1672,44 @@ export async function fetchYoutubeJsVideoInfoWithTerminalFallback(client, videoI
   }
   const cleanVideoId = String(videoId ?? "").trim();
   if (!cleanVideoId) throw new Error("video_id is required");
-  let info;
-  try {
-    info = await client.getInfo(cleanVideoId, { client: "WEB" });
-    throwIfYoutubeJsOperationAborted();
-  } catch (error) {
-    throwIfYoutubeJsOperationAborted();
-    const primaryTerminal = youtubeJsExplicitTerminalDetail(cleanVideoId, error?.info, {
-      clientName: "WEB",
-      source: "youtubejs_get_info",
-    });
-    if (primaryTerminal) return { kind: "terminal", detail: primaryTerminal };
-    if (!youtubeJsErrorNeedsTerminalProbe(error)) throw error;
-    const detail = await probeYoutubeJsExplicitTerminalDetail(client, cleanVideoId);
-    if (detail) return { kind: "terminal", detail };
-    throw error;
+  const attempts = [];
+  for (const clientName of VIDEO_DETAIL_CLIENTS) {
+    let info;
+    try {
+      info = await client.getInfo(cleanVideoId, { client: clientName });
+      throwIfYoutubeJsOperationAborted();
+    } catch (error) {
+      throwIfYoutubeJsOperationAborted();
+      const detail = youtubeJsExplicitTerminalDetail(cleanVideoId, error?.info, {
+        clientName,
+        source: "youtubejs_get_info",
+      });
+      if (detail) return { kind: "terminal", detail };
+      const playabilitySurface = youtubeJsPlayabilitySurface(error?.info);
+      if (isYoutubeJsBotChallenge(playabilitySurface.status, playabilitySurface.reason)) {
+        throwYoutubeJsBotChallenge(
+          cleanVideoId,
+          playabilitySurface.status,
+          playabilitySurface.reason,
+          { clientName },
+        );
+      }
+      if (!youtubeJsErrorNeedsTerminalProbe(error)) throw error;
+      attempts.push(youtubeJsClientAttempt(clientName, error?.info, error));
+      continue;
+    }
+    const resolution = youtubeJsInfoResolution(cleanVideoId, info, clientName);
+    if (resolution) return resolution;
+    attempts.push(youtubeJsClientAttempt(clientName, info));
   }
-  if (youtubeJsInfoNeedsTerminalProbe(info)) {
-    const detail = await probeYoutubeJsExplicitTerminalDetail(client, cleanVideoId);
-    if (detail) return { kind: "terminal", detail };
-  }
-  return { kind: "info", info, client: "WEB" };
+  const basic = await probeYoutubeJsBasicDetail(
+    client,
+    cleanVideoId,
+    TERMINAL_DETAIL_PROBE_CLIENT,
+  );
+  if (basic.resolution) return basic.resolution;
+  attempts.push(basic.attempt);
+  return throwYoutubeJsAlternateClientsExhausted(cleanVideoId, attempts);
 }
 
 export async function fetchYoutubeJsBasicPlayerInfo(client, videoId, {
@@ -1775,6 +1872,7 @@ export async function fetchYoutubeJsVideoDetail(videoId, {
     throwIfYoutubeJsOperationAborted();
     const detail = {
       ...normalizeYoutubeJsVideoInfo(info, comments, { commentsError, contentTypeSignals }),
+      youtubejs_client: resolution.client,
       youtubejs_duration_ms: Date.now() - startedAt,
       youtubejs_request_count: current.stats.requests - requestStart,
       youtubejs_comments_error: commentsError,

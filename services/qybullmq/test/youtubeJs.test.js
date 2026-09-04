@@ -14,7 +14,9 @@ import {
   youtubeJsChannelVerification,
   youtubeJsDetailEnabled,
 } from "../src/youtubeJs.js";
+import { decideYoutubeFailure } from "../src/youtubeFailurePolicy.js";
 import { isParserContractError } from "../src/localizedParsing.js";
+import { retryableRotaFailure } from "../src/managedWorkerExecution.js";
 
 function infoFixture(values = {}) {
   return {
@@ -947,6 +949,8 @@ test("Video Detail recovers an uploader-removed terminal reason hidden by WEB", 
 
   assert.deepEqual(calls, [
     ["getInfo", "Ue6kayghUeQ", "WEB"],
+    ["getInfo", "Ue6kayghUeQ", "IOS"],
+    ["getInfo", "Ue6kayghUeQ", "ANDROID"],
     ["getBasicInfo", "Ue6kayghUeQ", "ANDROID"],
   ]);
   assert.equal(result.kind, "terminal");
@@ -985,7 +989,8 @@ test("Video Detail recovers a private terminal reason hidden by WEB", async () =
   assert.equal(result.detail.youtubejs_client, "ANDROID");
 });
 
-test("Video Detail does not turn an alternate-client public response into a terminal fact", async () => {
+test("Video Detail accepts a complete IOS response after an inconclusive WEB response", async () => {
+  const calls = [];
   const primary = infoFixture({
     basic_info: { view_count: null },
     playability_status: { status: "LOGIN_REQUIRED", reason: "Please sign in" },
@@ -997,15 +1002,103 @@ test("Video Detail does not turn an alternate-client public response into a term
     playability_status: { status: "OK", reason: null },
   });
   const client = {
-    getInfo: async () => primary,
-    getBasicInfo: async () => publicInfo,
+    async getInfo(videoId, options) {
+      calls.push(["getInfo", videoId, options.client]);
+      return options.client === "IOS" ? publicInfo : primary;
+    },
+    async getBasicInfo() {
+      throw new Error("basic probe must not run after IOS succeeds");
+    },
+  };
+
+  const result = await fetchYoutubeJsVideoInfoWithTerminalFallback(client, "r4zSQjKMVno");
+
+  assert.deepEqual(calls, [
+    ["getInfo", "r4zSQjKMVno", "WEB"],
+    ["getInfo", "r4zSQjKMVno", "IOS"],
+  ]);
+  assert.equal(result.kind, "info");
+  assert.equal(result.info, publicInfo);
+  assert.equal(result.client, "IOS");
+});
+
+test("Video Detail falls through IOS and accepts a complete ANDROID response", async () => {
+  const calls = [];
+  const inconclusive = infoFixture({
+    basic_info: { view_count: null },
+    playability_status: { status: "LOGIN_REQUIRED", reason: "Please sign in" },
+  });
+  delete inconclusive.page[0].microformat.publish_date;
+  delete inconclusive.page[0].microformat.upload_date;
+  delete inconclusive.page[0].microformat.view_count;
+  const publicInfo = infoFixture({
+    playability_status: { status: "OK", reason: null },
+  });
+  const client = {
+    async getInfo(videoId, options) {
+      calls.push(["getInfo", videoId, options.client]);
+      return options.client === "ANDROID" ? publicInfo : inconclusive;
+    },
+    async getBasicInfo() {
+      throw new Error("basic probe must not run after ANDROID succeeds");
+    },
   };
 
   const result = await fetchYoutubeJsVideoInfoWithTerminalFallback(client, "69tt-8JAqO4");
 
+  assert.deepEqual(calls, [
+    ["getInfo", "69tt-8JAqO4", "WEB"],
+    ["getInfo", "69tt-8JAqO4", "IOS"],
+    ["getInfo", "69tt-8JAqO4", "ANDROID"],
+  ]);
   assert.equal(result.kind, "info");
-  assert.equal(result.info, primary);
-  assert.equal(result.client, "WEB");
+  assert.equal(result.info, publicInfo);
+  assert.equal(result.client, "ANDROID");
+});
+
+test("Video Detail requests a new Route after every supported client stays inconclusive", async () => {
+  const calls = [];
+  const inconclusive = infoFixture({
+    basic_info: { view_count: null },
+    playability_status: { status: "LOGIN_REQUIRED", reason: "Please sign in" },
+  });
+  delete inconclusive.page[0].microformat.publish_date;
+  delete inconclusive.page[0].microformat.upload_date;
+  delete inconclusive.page[0].microformat.view_count;
+  const client = {
+    async getInfo(videoId, options) {
+      calls.push(["getInfo", videoId, options.client]);
+      return inconclusive;
+    },
+    async getBasicInfo(videoId, options) {
+      calls.push(["getBasicInfo", videoId, options.client]);
+      return inconclusive;
+    },
+  };
+
+  await assert.rejects(
+    fetchYoutubeJsVideoInfoWithTerminalFallback(client, "gQtq0Dyjo0A"),
+    (error) => {
+      assert.equal(isParserContractError(error), false);
+      assert.equal(error.youtube_collection_failure, true);
+      assert.equal(error.video_id, "gQtq0Dyjo0A");
+      const decision = decideYoutubeFailure({ error });
+      assert.equal(decision.kind, "youtube_challenge");
+      assert.equal(decision.retry_mode, "new_identity");
+      assert.notEqual(decision.proxy_action, "none");
+      assert.deepEqual(retryableRotaFailure(error), {
+        observation: "youtube_challenge",
+        source: "youtubejs_player",
+      });
+      return true;
+    },
+  );
+  assert.deepEqual(calls, [
+    ["getInfo", "gQtq0Dyjo0A", "WEB"],
+    ["getInfo", "gQtq0Dyjo0A", "IOS"],
+    ["getInfo", "gQtq0Dyjo0A", "ANDROID"],
+    ["getBasicInfo", "gQtq0Dyjo0A", "ANDROID"],
+  ]);
 });
 
 test("Video Detail does not run a terminal probe for an unrelated request failure", async () => {
