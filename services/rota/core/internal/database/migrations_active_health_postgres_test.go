@@ -81,7 +81,78 @@ func TestActiveHealthMigrationRevalidatesOnlyUnboundLegacyActiveProxies(t *testi
 	}
 }
 
+func TestYouTubeOnlyHealthMigrationUpdatesSettingsWithoutTouchingProxyState(t *testing.T) {
+	db, pool := newActiveHealthMigrationPostgresSkipping(t, 1013)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO settings (key,value) VALUES (
+		  'healthcheck',
+		  '{"timeout":60,"workers":7,"base_url":"https://base.example/","base_status":204,"url":"https://www.youtube.com/watch?v=legacy","status":204,"headers":["X-Test: retained"],"strict_tls":true}'::jsonb
+		);
+		INSERT INTO proxy_pools (health_check_url)
+		VALUES ('https://www.youtube.com/watch?v=_xXsXvsYAhA')
+	`); err != nil {
+		t.Fatalf("insert legacy health settings: %v", err)
+	}
+
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatalf("apply YouTube-only health migration: %v", err)
+	}
+
+	var timeout, status, workers int
+	var healthURL, baseURL, header string
+	var strictTLS bool
+	if err := pool.QueryRow(ctx, `
+		SELECT (value->>'timeout')::int,(value->>'status')::int,
+		       (value->>'workers')::int,value->>'url',value->>'base_url',
+		       value->'headers'->>0,(value->>'strict_tls')::boolean
+		FROM settings WHERE key='healthcheck'
+	`).Scan(&timeout, &status, &workers, &healthURL, &baseURL, &header, &strictTLS); err != nil {
+		t.Fatalf("load migrated health settings: %v", err)
+	}
+	if timeout != 15 || status != 200 ||
+		healthURL != "https://www.youtube.com/results?search_query=" {
+		t.Fatalf("health settings = timeout %d status %d url %q", timeout, status, healthURL)
+	}
+	if workers != 7 || baseURL != "https://base.example/" || header != "X-Test: retained" || !strictTLS {
+		t.Fatalf("unrelated health settings changed: workers=%d base=%q header=%q strict=%v", workers, baseURL, header, strictTLS)
+	}
+	var poolHealthURL, poolHealthDefault string
+	if err := pool.QueryRow(ctx, `
+		SELECT health_check_url,
+		       pg_get_expr(adbin,adrelid)
+		FROM proxy_pools
+		JOIN pg_attrdef ON adrelid='proxy_pools'::regclass
+		  AND adnum=(SELECT attnum FROM pg_attribute
+		             WHERE attrelid='proxy_pools'::regclass AND attname='health_check_url')
+		LIMIT 1
+	`).Scan(&poolHealthURL, &poolHealthDefault); err != nil {
+		t.Fatalf("load migrated pool health URL: %v", err)
+	}
+	if poolHealthURL != "https://www.youtube.com/results?search_query=" ||
+		!strings.Contains(poolHealthDefault, "https://www.youtube.com/results?search_query=") {
+		t.Fatalf("pool health URL = %q default %q", poolHealthURL, poolHealthDefault)
+	}
+
+	var activeStatus, activeBase, activeYouTube string
+	var activeSuccess *time.Time
+	if err := pool.QueryRow(ctx, `
+		SELECT status,base_health_status,youtube_health_status,last_health_success_at
+		FROM proxies WHERE id=3
+	`).Scan(&activeStatus, &activeBase, &activeYouTube, &activeSuccess); err != nil {
+		t.Fatalf("load unchanged active proxy: %v", err)
+	}
+	if activeStatus != "active" || activeBase != "passed" || activeYouTube != "passed" || activeSuccess == nil {
+		t.Fatalf("migration changed active proxy: status=%q base=%q YouTube=%q success=%v", activeStatus, activeBase, activeYouTube, activeSuccess)
+	}
+}
+
 func newActiveHealthMigrationPostgres(t *testing.T) (*DB, *pgxpool.Pool) {
+	return newActiveHealthMigrationPostgresSkipping(t, 1012)
+}
+
+func newActiveHealthMigrationPostgresSkipping(t *testing.T, pendingVersion int) (*DB, *pgxpool.Pool) {
 	t.Helper()
 	dsn := os.Getenv("ROTA_TEST_DATABASE_URL")
 	if dsn == "" {
@@ -121,7 +192,7 @@ func newActiveHealthMigrationPostgres(t *testing.T) (*DB, *pgxpool.Pool) {
 		t.Fatalf("create active health migration fixture: %v", err)
 	}
 	for _, migration := range migrations {
-		if migration.Version == 1012 {
+		if migration.Version == pendingVersion {
 			continue
 		}
 		if _, err := pool.Exec(ctx, `
@@ -142,6 +213,11 @@ CREATE TABLE schema_migrations (
 CREATE TABLE settings (
   key TEXT PRIMARY KEY,
   value JSONB NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE TABLE proxy_pools (
+  id SERIAL PRIMARY KEY,
+  health_check_url TEXT NOT NULL DEFAULT 'https://www.youtube.com/watch?v=_xXsXvsYAhA',
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE TABLE proxies (

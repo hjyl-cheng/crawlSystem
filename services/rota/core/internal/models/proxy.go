@@ -144,17 +144,18 @@ type BulkRestoreProxyRequest struct {
 
 // ProxyTestResult represents the result of testing a proxy
 type ProxyTestResult struct {
-	ID                  int       `json:"id"`
-	Address             string    `json:"address"`
-	Status              string    `json:"status"`
-	ResponseTime        *int      `json:"response_time,omitempty"`
-	Error               *string   `json:"error,omitempty"`
-	TestedAt            time.Time `json:"tested_at"`
-	FailureKind         *string   `json:"failure_kind,omitempty"`
-	Conclusive          bool      `json:"conclusive"`
-	ControlPathHealthy  bool      `json:"control_path_healthy"`
-	BaseHealthStatus    string    `json:"base_health_status"`
-	YouTubeHealthStatus string    `json:"youtube_health_status"`
+	ID           int       `json:"id"`
+	Address      string    `json:"address"`
+	Status       string    `json:"status"`
+	ResponseTime *int      `json:"response_time,omitempty"`
+	Error        *string   `json:"error,omitempty"`
+	TestedAt     time.Time `json:"tested_at"`
+	FailureKind  *string   `json:"failure_kind,omitempty"`
+	Conclusive   bool      `json:"conclusive"`
+	// ControlPathHealthy is deprecated and false because server-direct control probes are not run.
+	ControlPathHealthy  bool   `json:"control_path_healthy"`
+	BaseHealthStatus    string `json:"base_health_status"`
+	YouTubeHealthStatus string `json:"youtube_health_status"`
 }
 
 // ProxyListResponse represents a paginated list of proxies

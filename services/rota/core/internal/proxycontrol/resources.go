@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"slices"
 
+	"github.com/alpkeskin/rota/core/internal/models"
 	"github.com/jackc/pgx/v5"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -149,7 +150,7 @@ func ensureManagedPool(ctx context.Context, tx pgx.Tx, spec slotSpec) (int, erro
 			  auto_sync, sync_mode, enabled
 			) VALUES ($1,$2,'roundrobin',1,$3,'*/30 * * * *',false,false,'manual',true)
 			RETURNING id
-		`, spec.Name, managedPoolDescription(spec), "https://www.youtube.com/watch?v=_xXsXvsYAhA").Scan(&poolID)
+		`, spec.Name, managedPoolDescription(spec), models.YouTubeSearchURLPrefix).Scan(&poolID)
 	}
 	if err != nil {
 		return 0, fmt.Errorf("ensure managed pool %s: %w", spec.Name, err)
@@ -161,7 +162,7 @@ func ensureManagedPool(ctx context.Context, tx pgx.Tx, spec slotSpec) (int, erro
 		    health_check_enabled=false, auto_sync=false, sync_mode='manual',
 		    enabled=true, updated_at=NOW()
 		WHERE id=$1
-	`, poolID, managedPoolDescription(spec), "https://www.youtube.com/watch?v=_xXsXvsYAhA"); err != nil {
+	`, poolID, managedPoolDescription(spec), models.YouTubeSearchURLPrefix); err != nil {
 		return 0, fmt.Errorf("configure managed pool %s: %w", spec.Name, err)
 	}
 	return poolID, nil

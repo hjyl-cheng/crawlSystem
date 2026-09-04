@@ -6,9 +6,11 @@ import (
 	"errors"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"regexp"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -151,6 +153,113 @@ func TestPeriodicHealthCheckLoopWaitsAfterEveryCompletedBatch(t *testing.T) {
 	}
 }
 
+func TestHealthCheckerUsesOneRandomYouTubeSearchRequest(t *testing.T) {
+	var proxyConnections atomic.Int32
+	var youtubeRequests atomic.Int32
+	var requestPath, searchQuery, requestHost string
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if isYouTubeHost(strings.Split(r.Host, ":")[0]) {
+			youtubeRequests.Add(1)
+			requestHost = r.Host
+			requestPath = r.URL.Path
+			searchQuery = r.URL.Query().Get("search_query")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`<script>var ytInitialData = {};</script>`))
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(upstream.Close)
+	proxyServer := connectTunnelProxy(t, upstream.URL, &proxyConnections)
+
+	store := &healthLifecycleStoreStub{status: proxylifecycle.StatusIdle}
+	settings := &healthSettingsStoreStub{settings: models.Settings{
+		HealthCheck: models.HealthCheckSettings{
+			Timeout:    60,
+			Workers:    1,
+			BaseURL:    "https://www.google.com/generate_204",
+			BaseStatus: http.StatusNoContent,
+			URL:        "https://www.youtube.com/watch?v=legacy",
+			Status:     http.StatusOK,
+		},
+		ProxyLifecycle: models.ProxyLifecycleSettings{
+			AutoArchiveEnabled:        true,
+			HardUnreachableAfterHours: 6,
+			SoftUnreachableAfterHours: 24,
+			YouTubeUnusableAfterHours: 72,
+		},
+	}}
+	checker := NewHealthChecker(store, settings, nil)
+
+	result, err := checker.CheckProxyAgainst(
+		context.Background(),
+		httpProxyModel(proxyServer.URL),
+		"https://www.youtube.com/watch?v=legacy-pool-target",
+	)
+	if err != nil {
+		t.Fatalf("CheckProxy: %v", err)
+	}
+	if result.Status != string(proxylifecycle.StatusActive) || !result.Conclusive {
+		t.Fatalf("result = %#v", result)
+	}
+	if got := proxyConnections.Load(); got != 1 {
+		t.Fatalf("proxy connections = %d, want exactly one", got)
+	}
+	if got := youtubeRequests.Load(); got != 1 {
+		t.Fatalf("YouTube requests = %d, want exactly one", got)
+	}
+	if requestHost != "www.youtube.com" || requestPath != "/results" {
+		t.Fatalf("YouTube target = host %q path %q", requestHost, requestPath)
+	}
+	if !regexp.MustCompile(`^[1-9][0-9]{0,5}$`).MatchString(searchQuery) {
+		t.Fatalf("search_query = %q, want a 1-6 digit positive number", searchQuery)
+	}
+	if store.evidence.Base.Status != proxylifecycle.ProbeNotRun ||
+		store.evidence.YouTube.Status != proxylifecycle.ProbePassed {
+		t.Fatalf("evidence = %#v", store.evidence)
+	}
+}
+
+func TestHealthCheckTimeoutIsCappedAtFifteenSeconds(t *testing.T) {
+	for _, configured := range []int{0, 15, 60, 300} {
+		settings := normalizedHealthSettings(models.HealthCheckSettings{Timeout: configured})
+		if settings.Timeout != 15 {
+			t.Fatalf("normalized timeout for %d = %d, want 15", configured, settings.Timeout)
+		}
+	}
+}
+
+func TestHealthCheckerTreatsRequestTimeoutAsSoftFailure(t *testing.T) {
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(1500 * time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`<script>var ytInitialData = {};</script>`))
+	}))
+	t.Cleanup(upstream.Close)
+	var connections atomic.Int32
+	proxyServer := connectTunnelProxy(t, upstream.URL, &connections)
+	settings := healthSettings(t, "", "")
+	settings.settings.HealthCheck.Timeout = 1
+	store := &healthLifecycleStoreStub{status: proxylifecycle.StatusActive}
+	checker := NewHealthChecker(store, settings, nil)
+
+	startedAt := time.Now()
+	result, err := checker.CheckProxy(context.Background(), httpProxyModel(proxyServer.URL))
+	if err != nil {
+		t.Fatalf("CheckProxy: %v", err)
+	}
+	if elapsed := time.Since(startedAt); elapsed >= 3*time.Second {
+		t.Fatalf("timed-out health request returned after %s", elapsed)
+	}
+	if result.Status != string(proxylifecycle.StatusFailed) || !result.Conclusive ||
+		result.FailureKind == nil || *result.FailureKind != string(proxylifecycle.FailureSoftUnreachable) {
+		t.Fatalf("timeout result = %#v", result)
+	}
+	if store.evidence.Base.Status != proxylifecycle.ProbeNotRun || connections.Load() != 1 {
+		t.Fatalf("timeout evidence = %#v, proxy connections = %d", store.evidence, connections.Load())
+	}
+}
+
 func TestClosedPipeIsAConclusiveSoftEndpointFailure(t *testing.T) {
 	for _, err := range []error{
 		io.ErrClosedPipe,
@@ -163,28 +272,66 @@ func TestClosedPipeIsAConclusiveSoftEndpointFailure(t *testing.T) {
 		}
 	}
 
-	control := statusServer(t, http.StatusOK)
-	checker := NewHealthChecker(
-		&healthLifecycleStoreStub{status: proxylifecycle.StatusActive},
-		healthSettings(t, control.URL, control.URL),
-		nil,
-	)
-	verdict := checker.transportCreationVerdict(
-		context.Background(),
-		io.ErrClosedPipe,
-		models.HealthCheckSettings{Timeout: 1, BaseURL: control.URL, BaseStatus: http.StatusOK},
-	)
-	if verdict.Kind != proxylifecycle.FailureSoftUnreachable || !verdict.Conclusive || !verdict.ControlPathHealthy {
+	verdict := transportCreationVerdict(io.ErrClosedPipe)
+	if verdict.Kind != proxylifecycle.FailureSoftUnreachable || !verdict.Conclusive || verdict.ControlPathHealthy {
 		t.Fatalf("transport creation verdict = %#v", verdict)
 	}
 }
 
-func TestHealthCheckerActivatesProxyOnlyWhenBaseAndYouTubePass(t *testing.T) {
-	base := statusServer(t, http.StatusOK)
-	youtube := statusServer(t, http.StatusOK)
-	upstream := statusProxy(t, http.StatusOK, http.StatusOK)
+func TestYouTubeFailureClassification(t *testing.T) {
+	tests := []struct {
+		name       string
+		probe      proxylifecycle.ProbeEvidence
+		wantKind   proxylifecycle.FailureKind
+		conclusive bool
+	}{
+		{
+			name: "timeout", probe: failedProbe("context deadline exceeded (Client.Timeout exceeded)"),
+			wantKind: proxylifecycle.FailureSoftUnreachable, conclusive: true,
+		},
+		{
+			name: "connection refused", probe: failedProbe("dial tcp: connection refused"),
+			wantKind: proxylifecycle.FailureHardUnreachable, conclusive: true,
+		},
+		{
+			name: "forbidden", probe: proxylifecycle.ProbeEvidence{
+				Status: proxylifecycle.ProbeFailed, HTTPStatus: intPtr(http.StatusForbidden),
+			},
+			wantKind: proxylifecycle.FailureYouTubeUnusable, conclusive: true,
+		},
+		{
+			name: "proxy CONNECT forbidden", probe: failedProbe("proxyconnect tcp: 403 Forbidden"),
+			wantKind: proxylifecycle.FailureYouTubeUnusable, conclusive: true,
+		},
+		{
+			name: "proxy CONNECT rate limited", probe: failedProbe("proxyconnect tcp: 429 Too Many Requests"),
+			wantKind: proxylifecycle.FailureYouTubeUnusable, conclusive: true,
+		},
+		{
+			name: "proxy authentication", probe: proxylifecycle.ProbeEvidence{
+				Status: proxylifecycle.ProbeFailed, HTTPStatus: intPtr(http.StatusProxyAuthRequired),
+			},
+			wantKind: proxylifecycle.FailureHardUnreachable, conclusive: true,
+		},
+		{
+			name: "caller canceled", probe: failedProbe("context canceled"),
+			wantKind: proxylifecycle.FailureNone, conclusive: false,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			verdict := youtubeFailureVerdict(test.probe)
+			if verdict.Kind != test.wantKind || verdict.Conclusive != test.conclusive {
+				t.Fatalf("verdict = %#v, want kind %q conclusive %v", verdict, test.wantKind, test.conclusive)
+			}
+		})
+	}
+}
+
+func TestHealthCheckerActivatesProxyWhenYouTubePasses(t *testing.T) {
+	upstream := youtubeStatusProxy(t, http.StatusOK)
 	store := &healthLifecycleStoreStub{status: proxylifecycle.StatusIdle}
-	checker := NewHealthChecker(store, healthSettings(t, base.URL, youtube.URL+"/youtube"), nil)
+	checker := NewHealthChecker(store, healthSettings(t, "", ""), nil)
 
 	result, err := checker.CheckProxy(context.Background(), httpProxyModel(upstream.URL))
 	if err != nil {
@@ -193,7 +340,7 @@ func TestHealthCheckerActivatesProxyOnlyWhenBaseAndYouTubePass(t *testing.T) {
 	if result.Status != "active" || !result.Conclusive {
 		t.Fatalf("result = %#v", result)
 	}
-	if store.evidence.Base.Status != proxylifecycle.ProbePassed ||
+	if store.evidence.Base.Status != proxylifecycle.ProbeNotRun ||
 		store.evidence.YouTube.Status != proxylifecycle.ProbePassed {
 		t.Fatalf("evidence = %#v", store.evidence)
 	}
@@ -201,37 +348,26 @@ func TestHealthCheckerActivatesProxyOnlyWhenBaseAndYouTubePass(t *testing.T) {
 
 func TestEveryAppliedHealthVerdictNotifiesProxyControlAfterPersistence(t *testing.T) {
 	tests := []struct {
-		name              string
-		initialStatus     proxylifecycle.Status
-		directBaseStatus  int
-		proxyBaseStatus   int
-		proxyYouTubeState int
-		wantStatus        string
-		wantConclusive    bool
+		name           string
+		initialStatus  proxylifecycle.Status
+		youtubeStatus  int
+		wantStatus     string
+		wantConclusive bool
 	}{
 		{
 			name: "healthy", initialStatus: proxylifecycle.StatusIdle,
-			directBaseStatus: http.StatusOK, proxyBaseStatus: http.StatusOK,
-			proxyYouTubeState: http.StatusOK, wantStatus: "active", wantConclusive: true,
-		},
-		{
-			name: "inconclusive", initialStatus: proxylifecycle.StatusActive,
-			directBaseStatus: http.StatusBadGateway, proxyBaseStatus: http.StatusBadGateway,
-			proxyYouTubeState: http.StatusOK, wantStatus: "idle", wantConclusive: false,
+			youtubeStatus: http.StatusOK, wantStatus: "active", wantConclusive: true,
 		},
 		{
 			name: "failed", initialStatus: proxylifecycle.StatusActive,
-			directBaseStatus: http.StatusOK, proxyBaseStatus: http.StatusOK,
-			proxyYouTubeState: http.StatusForbidden, wantStatus: "failed", wantConclusive: true,
+			youtubeStatus: http.StatusForbidden, wantStatus: "failed", wantConclusive: true,
 		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			base := statusServer(t, test.directBaseStatus)
-			youtube := statusServer(t, http.StatusOK)
-			upstream := statusProxy(t, test.proxyBaseStatus, test.proxyYouTubeState)
+			upstream := youtubeStatusProxy(t, test.youtubeStatus)
 			store := &healthLifecycleStoreStub{status: test.initialStatus}
-			checker := NewHealthChecker(store, healthSettings(t, base.URL, youtube.URL+"/youtube"), nil)
+			checker := NewHealthChecker(store, healthSettings(t, "", ""), nil)
 			var events []HealthVerdictEvent
 			checker.SetOnVerdictApplied(func(event HealthVerdictEvent) {
 				events = append(events, event)
@@ -259,12 +395,10 @@ func TestEveryAppliedHealthVerdictNotifiesProxyControlAfterPersistence(t *testin
 }
 
 func TestUnappliedHealthVerdictDoesNotNotifyProxyControl(t *testing.T) {
-	base := statusServer(t, http.StatusOK)
-	youtube := statusServer(t, http.StatusOK)
-	upstream := statusProxy(t, http.StatusOK, http.StatusOK)
+	upstream := youtubeStatusProxy(t, http.StatusOK)
 	applied := false
 	store := &healthLifecycleStoreStub{status: proxylifecycle.StatusIdle, applied: &applied}
-	checker := NewHealthChecker(store, healthSettings(t, base.URL, youtube.URL+"/youtube"), nil)
+	checker := NewHealthChecker(store, healthSettings(t, "", ""), nil)
 	notified := false
 	checker.SetOnVerdictApplied(func(HealthVerdictEvent) { notified = true })
 
@@ -276,12 +410,10 @@ func TestUnappliedHealthVerdictDoesNotNotifyProxyControl(t *testing.T) {
 	}
 }
 
-func TestHealthCheckerClassifiesBasePassYouTubeBlockSeparately(t *testing.T) {
-	base := statusServer(t, http.StatusOK)
-	youtube := statusServer(t, http.StatusOK)
-	upstream := statusProxy(t, http.StatusOK, http.StatusForbidden)
+func TestHealthCheckerClassifiesYouTubeBlockSeparately(t *testing.T) {
+	upstream := youtubeStatusProxy(t, http.StatusForbidden)
 	store := &healthLifecycleStoreStub{status: proxylifecycle.StatusActive}
-	checker := NewHealthChecker(store, healthSettings(t, base.URL, youtube.URL+"/youtube"), nil)
+	checker := NewHealthChecker(store, healthSettings(t, "", ""), nil)
 
 	result, err := checker.CheckProxy(context.Background(), httpProxyModel(upstream.URL))
 	if err != nil {
@@ -291,17 +423,15 @@ func TestHealthCheckerClassifiesBasePassYouTubeBlockSeparately(t *testing.T) {
 		*result.FailureKind != string(proxylifecycle.FailureYouTubeUnusable) {
 		t.Fatalf("result = %#v", result)
 	}
-	if !result.ControlPathHealthy || !result.Conclusive {
+	if result.ControlPathHealthy || !result.Conclusive {
 		t.Fatalf("control verdict = %#v", result)
 	}
 }
 
 func TestHealthCheckerTreatsProxySpecificFiveHundredAsConclusive(t *testing.T) {
-	base := statusServer(t, http.StatusOK)
-	youtube := statusServer(t, http.StatusOK)
-	upstream := statusProxy(t, http.StatusOK, http.StatusBadGateway)
+	upstream := youtubeStatusProxy(t, http.StatusBadGateway)
 	store := &healthLifecycleStoreStub{status: proxylifecycle.StatusActive}
-	checker := NewHealthChecker(store, healthSettings(t, base.URL, youtube.URL+"/youtube"), nil)
+	checker := NewHealthChecker(store, healthSettings(t, "", ""), nil)
 
 	result, err := checker.CheckProxy(context.Background(), httpProxyModel(upstream.URL))
 	if err != nil {
@@ -313,18 +443,17 @@ func TestHealthCheckerTreatsProxySpecificFiveHundredAsConclusive(t *testing.T) {
 	}
 }
 
-func TestHealthCheckerTreatsTargetFiveHundredAsInconclusive(t *testing.T) {
-	base := statusServer(t, http.StatusOK)
-	youtube := statusServer(t, http.StatusBadGateway)
-	upstream := statusProxy(t, http.StatusOK, http.StatusBadGateway)
+func TestHealthCheckerTreatsTooManyRequestsAsYouTubeUnusable(t *testing.T) {
+	upstream := youtubeStatusProxy(t, http.StatusTooManyRequests)
 	store := &healthLifecycleStoreStub{status: proxylifecycle.StatusActive}
-	checker := NewHealthChecker(store, healthSettings(t, base.URL, youtube.URL+"/youtube"), nil)
+	checker := NewHealthChecker(store, healthSettings(t, "", ""), nil)
 
 	result, err := checker.CheckProxy(context.Background(), httpProxyModel(upstream.URL))
 	if err != nil {
 		t.Fatalf("CheckProxy: %v", err)
 	}
-	if result.Status != "idle" || result.Conclusive || result.FailureKind != nil {
+	if result.Status != "failed" || !result.Conclusive || result.FailureKind == nil ||
+		*result.FailureKind != string(proxylifecycle.FailureYouTubeUnusable) {
 		t.Fatalf("result = %#v", result)
 	}
 }
@@ -371,24 +500,11 @@ func TestHealthCheckTLSModes(t *testing.T) {
 	}
 }
 
-func TestTLSCertificateFailureUsesControlPathAndLifecycleWindow(t *testing.T) {
-	control := statusServer(t, http.StatusOK)
-	checker := NewHealthChecker(
-		&healthLifecycleStoreStub{status: proxylifecycle.StatusActive},
-		healthSettings(t, control.URL, control.URL),
-		nil,
-	)
-	settings := models.HealthCheckSettings{
-		Timeout:    1,
-		BaseURL:    control.URL,
-		BaseStatus: http.StatusOK,
-	}
-	verdict := checker.baseFailureVerdict(
-		context.Background(),
+func TestTLSCertificateFailureUsesSoftLifecycleWindow(t *testing.T) {
+	verdict := youtubeFailureVerdict(
 		failedProbe("tls: failed to verify certificate: x509: certificate signed by unknown authority"),
-		settings,
 	)
-	if verdict.Kind != proxylifecycle.FailureSoftUnreachable || !verdict.Conclusive || !verdict.ControlPathHealthy {
+	if verdict.Kind != proxylifecycle.FailureSoftUnreachable || !verdict.Conclusive || verdict.ControlPathHealthy {
 		t.Fatalf("verdict = %#v", verdict)
 	}
 	decision := proxylifecycle.DefaultPolicy().Decide(
@@ -474,6 +590,61 @@ func statusProxy(t *testing.T, baseStatus, youtubeStatus int) *httptest.Server {
 			return
 		}
 		w.WriteHeader(baseStatus)
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+
+func youtubeStatusProxy(t *testing.T, status int) *httptest.Server {
+	t.Helper()
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(status)
+		if status == http.StatusOK {
+			_, _ = w.Write([]byte(`<script>var ytInitialData = {};</script>`))
+		}
+	}))
+	t.Cleanup(upstream.Close)
+	var connections atomic.Int32
+	return connectTunnelProxy(t, upstream.URL, &connections)
+}
+
+func connectTunnelProxy(t *testing.T, upstreamURL string, connections *atomic.Int32) *httptest.Server {
+	t.Helper()
+	upstream, err := url.Parse(upstreamURL)
+	if err != nil {
+		t.Fatalf("parse tunnel upstream: %v", err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		connections.Add(1)
+		if r.Method != http.MethodConnect {
+			http.Error(w, "CONNECT required", http.StatusMethodNotAllowed)
+			return
+		}
+		upstreamConn, dialErr := net.DialTimeout("tcp", upstream.Host, time.Second)
+		if dialErr != nil {
+			http.Error(w, dialErr.Error(), http.StatusBadGateway)
+			return
+		}
+		clientConn, buffered, hijackErr := w.(http.Hijacker).Hijack()
+		if hijackErr != nil {
+			_ = upstreamConn.Close()
+			return
+		}
+		defer clientConn.Close()
+		defer upstreamConn.Close()
+		_, _ = buffered.WriteString("HTTP/1.1 200 Connection Established\r\n\r\n")
+		if flushErr := buffered.Flush(); flushErr != nil {
+			return
+		}
+
+		upstreamDone := make(chan struct{})
+		go func() {
+			_, _ = io.Copy(upstreamConn, clientConn)
+			_ = upstreamConn.(*net.TCPConn).CloseWrite()
+			close(upstreamDone)
+		}()
+		_, _ = io.Copy(clientConn, upstreamConn)
+		<-upstreamDone
 	}))
 	t.Cleanup(server.Close)
 	return server

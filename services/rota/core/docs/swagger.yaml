@@ -173,18 +173,27 @@ definitions:
       base_status:
         type: integer
       base_url:
+        description: BaseURL and BaseStatus are retained for settings API compatibility;
+          the probe does not use them.
         type: string
       headers:
         items:
           type: string
         type: array
       status:
+        default: 200
         type: integer
       strict_tls:
         type: boolean
       timeout:
+        default: 15
+        maximum: 15
+        minimum: 1
         type: integer
       url:
+        default: https://www.youtube.com/results?search_query=
+        description: URL and Status expose the fixed YouTube search prefix and expected
+          HTTP 200 contract.
         type: string
       workers:
         type: integer
@@ -366,6 +375,8 @@ definitions:
       conclusive:
         type: boolean
       control_path_healthy:
+        description: ControlPathHealthy is deprecated and false because server-direct
+          control probes are not run.
         type: boolean
       error:
         type: string
