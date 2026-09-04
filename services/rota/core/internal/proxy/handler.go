@@ -14,7 +14,7 @@ import (
 
 	"github.com/alpkeskin/rota/core/internal/models"
 	"github.com/alpkeskin/rota/core/internal/proxycontrol"
-	"github.com/alpkeskin/rota/core/internal/xraynode"
+	"github.com/alpkeskin/rota/core/internal/sharenode"
 	"github.com/alpkeskin/rota/core/pkg/logger"
 	"github.com/google/uuid"
 	proxyDialer "golang.org/x/net/proxy"
@@ -861,7 +861,7 @@ func (h *UpstreamProxyHandler) connectViaProxy(ctx context.Context, proxy *model
 	case "http", "https":
 		return h.connectViaHTTPProxy(proxy, host, settings)
 	default:
-		if xraynode.IsProtocol(proxy.Protocol) {
+		if sharenode.IsProtocol(proxy.Protocol) {
 			dialer, err := shareNodeDialContext(proxy)
 			if err != nil {
 				return nil, err

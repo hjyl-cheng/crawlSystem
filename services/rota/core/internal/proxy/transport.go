@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/alpkeskin/rota/core/internal/models"
-	"github.com/alpkeskin/rota/core/internal/xraynode"
+	"github.com/alpkeskin/rota/core/internal/sharenode"
 	proxyDialer "golang.org/x/net/proxy"
 	"h12.io/socks"
 )
@@ -35,11 +35,11 @@ func ClearTransportCache() {
 	})
 }
 
-// CloseRuntimeResources releases process-wide transport and Xray node caches.
+// CloseRuntimeResources releases process-wide transport and share-node caches.
 // It is called only after both HTTP servers have stopped accepting work.
 func CloseRuntimeResources() error {
 	ClearTransportCache()
-	return xraynode.CloseAllRuntimes()
+	return sharenode.CloseAllRuntimes()
 }
 
 // GetOrCreateTransport returns a cached transport for the given proxy,
@@ -78,7 +78,7 @@ func CreateProxyTransport(p *models.Proxy) (*http.Transport, error) {
 		ResponseHeaderTimeout: 60 * time.Second,
 		ExpectContinueTimeout: 10 * time.Second,
 	}
-	if xraynode.IsProtocol(p.Protocol) {
+	if sharenode.IsProtocol(p.Protocol) {
 		dialer, err := shareNodeDialContext(p)
 		if err != nil {
 			return nil, err
@@ -165,12 +165,12 @@ func shareNodeDialContext(p *models.Proxy) (func(context.Context, string, string
 	if p.Password == nil || strings.TrimSpace(*p.Password) == "" {
 		return nil, fmt.Errorf("share node credential is missing")
 	}
-	node, err := xraynode.ParseForProtocol(p.Protocol, *p.Password)
+	node, err := sharenode.ParseForProtocol(p.Protocol, *p.Password)
 	if err != nil {
 		return nil, err
 	}
 	if node.Address() != p.Address {
 		return nil, fmt.Errorf("share node credential endpoint does not match stored endpoint")
 	}
-	return xraynode.NewNodeDialer(node), nil
+	return sharenode.NewDialer(p.Protocol, node.Credential())
 }

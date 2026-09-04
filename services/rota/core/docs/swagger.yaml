@@ -74,6 +74,7 @@ definitions:
         - vmess
         - trojan
         - shadowsocks
+        - hysteria2
         type: string
       source_id:
         description: set internally when importing from a source
@@ -559,6 +560,7 @@ definitions:
         - vmess
         - trojan
         - shadowsocks
+        - hysteria2
         type: string
       tags:
         items:

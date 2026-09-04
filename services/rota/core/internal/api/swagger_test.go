@@ -114,7 +114,7 @@ func TestEmbeddedSwaggerIncludesLocalAndGeoIPContracts(t *testing.T) {
 	}
 	for _, protocol := range []string{
 		"http", "https", "socks4", "socks4a", "socks5",
-		"vless", "vmess", "trojan", "shadowsocks",
+		"vless", "vmess", "trojan", "shadowsocks", "hysteria2",
 	} {
 		if !protocols[protocol] {
 			t.Fatalf("embedded Swagger CreateProxyRequest protocol enum is missing %s", protocol)

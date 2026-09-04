@@ -1204,7 +1204,8 @@ const docTemplate = `{
                         "vless",
                         "vmess",
                         "trojan",
-                        "shadowsocks"
+                        "shadowsocks",
+                        "hysteria2"
                     ]
                 },
                 "source_id": {
@@ -1916,7 +1917,8 @@ const docTemplate = `{
                         "vless",
                         "vmess",
                         "trojan",
-                        "shadowsocks"
+                        "shadowsocks",
+                        "hysteria2"
                     ]
                 },
                 "tags": {

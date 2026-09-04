@@ -30,7 +30,7 @@ type ProxySource struct {
 type CreateProxySourceRequest struct {
 	Name            string   `json:"name"     validate:"required"`
 	URL             string   `json:"url"      validate:"required,url"`
-	Protocol        string   `json:"protocol" validate:"required,oneof=auto http https socks4 socks4a socks5 vless vmess trojan shadowsocks"`
+	Protocol        string   `json:"protocol" validate:"required,oneof=auto http https socks4 socks4a socks5 vless vmess trojan shadowsocks hysteria2"`
 	Enabled         bool     `json:"enabled"`
 	IntervalMinutes int      `json:"interval_minutes" validate:"min=1"`
 	DefaultTags     []string `json:"default_tags,omitempty"`
@@ -40,7 +40,7 @@ type CreateProxySourceRequest struct {
 type UpdateProxySourceRequest struct {
 	Name            string    `json:"name"`
 	URL             string    `json:"url"`
-	Protocol        string    `json:"protocol" validate:"omitempty,oneof=auto http https socks4 socks4a socks5 vless vmess trojan shadowsocks"`
+	Protocol        string    `json:"protocol" validate:"omitempty,oneof=auto http https socks4 socks4a socks5 vless vmess trojan shadowsocks hysteria2"`
 	Enabled         *bool     `json:"enabled"`
 	IntervalMinutes int       `json:"interval_minutes" validate:"omitempty,min=1"`
 	DefaultTags     *[]string `json:"default_tags,omitempty"`

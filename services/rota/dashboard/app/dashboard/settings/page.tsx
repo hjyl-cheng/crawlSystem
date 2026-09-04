@@ -45,7 +45,7 @@ import { toast } from "sonner"
 
 const SUPPORTED_PROXY_PROTOCOLS = [
   "http", "https", "socks4", "socks4a", "socks5",
-  "vless", "vmess", "trojan", "shadowsocks",
+  "vless", "vmess", "trojan", "shadowsocks", "hysteria2",
 ]
 
 export default function SettingsPage() {

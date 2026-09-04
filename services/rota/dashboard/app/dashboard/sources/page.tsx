@@ -27,7 +27,7 @@ import { TagInput } from "@/components/tag-input"
 
 const PROTOCOLS = [
   "auto", "http", "https", "socks4", "socks4a", "socks5",
-  "vless", "vmess", "trojan", "shadowsocks",
+  "vless", "vmess", "trojan", "shadowsocks", "hysteria2",
 ] as const
 const DEFAULT_FORM: CreateSourceRequest = {
   name: "",

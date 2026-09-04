@@ -239,6 +239,28 @@ func TestParseProxyListDecodesAndDeduplicatesVLESSSubscription(t *testing.T) {
 	}
 }
 
+func TestParseProxyListImportsAndDeduplicatesHysteria2Aliases(t *testing.T) {
+	first := "hysteria2://paid-secret@hy2.example.com:443/?mport=20000-20010&sni=cdn.example.com&insecure=false&pinSHA256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa#Alias%20One"
+	second := strings.Replace(strings.Replace(first, "hysteria2://", "hy2://", 1), "Alias%20One", "Alias%20Two", 1)
+	encoded := base64.StdEncoding.EncodeToString([]byte(first + "\n" + second + "\n"))
+
+	parsed, err := parseProxyListWithStats(strings.NewReader(encoded))
+	if err != nil {
+		t.Fatalf("parseProxyListWithStats: %v", err)
+	}
+	if parsed.total != 2 || parsed.supported != 2 || parsed.skipped != 0 || len(parsed.proxies) != 1 {
+		t.Fatalf("stats = total:%d supported:%d skipped:%d proxies:%d",
+			parsed.total, parsed.supported, parsed.skipped, len(parsed.proxies))
+	}
+	node := parsed.proxies[0]
+	if node.address != "hy2.example.com:443" || node.protocol != "hysteria2" || node.password == nil {
+		t.Fatalf("proxy = %#v", node)
+	}
+	if len(node.tags) != 2 || node.tags[0] != "Alias One" || node.tags[1] != "Alias Two" {
+		t.Fatalf("tags = %#v", node.tags)
+	}
+}
+
 func TestParseProxyListReadsSupportedClashYAML(t *testing.T) {
 	yaml := `
 proxies:
@@ -285,6 +307,51 @@ proxy-groups:
 	}
 	if deref(got[1].username) != "alice" || deref(got[1].password) != "secret" {
 		t.Fatal("Clash proxy credentials were not preserved")
+	}
+}
+
+func TestParseProxyListReadsHysteria2ClashYAML(t *testing.T) {
+	yaml := `
+proxies:
+  - name: Paid HY2
+    type: hysteria2
+    server: hy2.example.com
+    port: 443
+    password: paid-secret
+    ports: 20000-20010
+    sni: cdn.example.com
+    skip-cert-verify: false
+    fingerprint: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    obfs: salamander
+    obfs-password: obfs-secret
+  - name: Paid HY2 Alias
+    type: hy2
+    server: hy2.example.com
+    port: 443
+    password: paid-secret
+    ports: 20000-20010
+    sni: cdn.example.com
+    fingerprint: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    obfs: salamander
+    obfs-password: obfs-secret
+`
+
+	got, err := parseProxyList(strings.NewReader(yaml))
+	if err != nil {
+		t.Fatalf("parseProxyList: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("len = %d, want 1", len(got))
+	}
+	node := got[0]
+	if node.protocol != "hysteria2" || node.address != "hy2.example.com:443" || node.password == nil || node.nodeIdentity == "" {
+		t.Fatalf("proxy = %#v", node)
+	}
+	if strings.Contains(*node.password, "#") || !strings.Contains(*node.password, "mport=20000-20010") {
+		t.Fatal("Hysteria2 Clash configuration was not canonicalized")
+	}
+	if strings.Join(node.tags, ",") != "Paid HY2,Paid HY2 Alias" {
+		t.Fatalf("tags = %#v", node.tags)
 	}
 }
 
