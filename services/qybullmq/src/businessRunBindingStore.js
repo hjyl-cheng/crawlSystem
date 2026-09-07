@@ -1,4 +1,5 @@
 import { createHash, randomUUID as nodeRandomUUID } from "node:crypto";
+import { LEGACY_FULL_CRAWL_FETCH_CONTRACT } from "./fullCrawlFetchContract.js";
 
 export const BUSINESS_RUN_INTENT_SCHEMA_VERSION = 1;
 
@@ -66,6 +67,10 @@ function optionalNullCompatibleIntent(value) {
     if (!Object.prototype.hasOwnProperty.call(normalizedIntent, field)) {
       normalizedIntent[field] = null;
     }
+  }
+  if (["full", "full_repair"].includes(immutableIntent.run_kind)
+      && !Object.prototype.hasOwnProperty.call(normalizedIntent, "fetch_contract")) {
+    normalizedIntent.fetch_contract = LEGACY_FULL_CRAWL_FETCH_CONTRACT;
   }
   return canonicalValue({ ...immutableIntent, intent: normalizedIntent });
 }
@@ -211,14 +216,29 @@ export async function materializeBusinessRunBinding(client, {
     `UPDATE crawler.channel_runs run
      SET identity_policy_id=binding.identity_policy_id,
          identity_policy_version=binding.identity_policy_version,
-         identity_policy_hash=binding.identity_policy_hash,updated_at=now()
+         identity_policy_hash=binding.identity_policy_hash,
+         result_json=CASE
+           WHEN binding.intent_json#>'{intent,fetch_contract}' IS NULL THEN run.result_json
+           ELSE jsonb_set(
+             COALESCE(run.result_json,'{}'::jsonb),
+             '{fetch_contract}',
+             binding.intent_json#>'{intent,fetch_contract}',
+             true
+           )
+         END,
+         updated_at=now()
      FROM crawler.business_run_bindings binding
      WHERE binding.business_run_key=$1 AND binding.business_run_id=$2
        AND run.run_id=binding.business_run_id
        AND (run.identity_policy_id IS NULL OR run.identity_policy_id=binding.identity_policy_id)
        AND (run.identity_policy_version IS NULL OR run.identity_policy_version=binding.identity_policy_version)
        AND (run.identity_policy_hash IS NULL OR run.identity_policy_hash=binding.identity_policy_hash)
-     RETURNING run.run_id`,
+       AND (
+         binding.intent_json#>'{intent,fetch_contract}' IS NULL
+         OR run.result_json->'fetch_contract' IS NULL
+         OR run.result_json->'fetch_contract'=binding.intent_json#>'{intent,fetch_contract}'
+       )
+     RETURNING run.run_id,run.result_json`,
     [key, runId],
   );
   if (frozen.rowCount !== 1) throw new BusinessRunBindingConflictError(key);

@@ -128,7 +128,6 @@ import {
 } from "./detailPolicy.js";
 import {
   finalizedProfileIsCurrent,
-  finalizeDispatchRevision,
   finalizePublicationContext,
   finalizeStatusCanAdvance,
   isFinalizableChannelStatus,
@@ -136,6 +135,7 @@ import {
   isCurrentChannelRun,
   resolveFinalizeStatus,
 } from "./finalizePolicy.js";
+import { dispatchFinalizeForRun } from "./finalizeDispatch.js";
 import { reconcileFullCrawlAgentState } from "./fullCrawlAgentState.js";
 import { classifyFullAgentBatchSettlement } from "./agentBatchSettlement.js";
 import {
@@ -981,41 +981,13 @@ async function applyMigrationActivityGate(runId, detailStatus, options = {}) {
 }
 
 async function queueFinalize(channelId, runId, reason, { candidateAttemptFence = null } = {}) {
-  const enqueue = async (activeQuery) => {
-    const revisionRows = await activeQuery(
-      `SELECT
-         c.channel_id,c.latest_run_id,c.status AS channel_status,c.agent_status,c.updated_at AS channel_updated_at,
-         r.detail_status,r.expected_content_count,
-         r.result_json->'final_repair' AS run_final_repair,
-         r.result_json->>'pipeline_cycle_id' AS pipeline_cycle_id,
-         (SELECT count(*)::int FROM crawler.content_candidates cc WHERE cc.run_id=$2) AS candidate_count,
-         (SELECT max(cc.updated_at) FROM crawler.content_candidates cc WHERE cc.run_id=$2) AS candidate_updated_at,
-         (SELECT count(*)::int FROM crawler.contents ct WHERE ct.channel_id=$1 AND ct.run_id=$2) AS content_count,
-         (SELECT max(COALESCE(ct.last_enriched_at,ct.last_seen_at))
-          FROM crawler.contents ct WHERE ct.channel_id=$1 AND ct.run_id=$2) AS content_updated_at,
-         (SELECT ap.updated_at FROM crawler.agent_profiles ap
-          WHERE ap.channel_id=$1 AND ap.agent_mode='basic' AND ap.status='success' LIMIT 1) AS agent_updated_at
-       FROM crawler.channels c
-       LEFT JOIN crawler.channel_runs r ON r.run_id=$2
-       WHERE c.channel_id=$1
-       LIMIT 1`,
-      [channelId, runId],
-    );
-    const sourceRevision = finalizeDispatchRevision(
-      revisionRows.rows[0] ?? { channel_id: channelId, run_id: runId },
-    );
-    await queues[queuesByRole.finalize].add(
-      "finalize-channel",
-      {
-        channel_id: channelId,
-        run_id: runId,
-        reason,
-        source_revision: sourceRevision,
-        pipeline_cycle_id: revisionRows.rows[0]?.pipeline_cycle_id ?? null,
-      },
-      { jobId: safeJobId("finalize", runId || channelId, sourceRevision) },
-    );
-  };
+  const enqueue = (activeQuery) => dispatchFinalizeForRun({
+    query: activeQuery,
+    queue: queues[queuesByRole.finalize],
+    channelId,
+    runId,
+    reason,
+  });
   if (!candidateAttemptFence) return enqueue(query);
   return withTransaction(async (client) => {
     const transactionQuery = client.query.bind(client);

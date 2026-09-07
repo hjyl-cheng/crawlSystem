@@ -17,7 +17,7 @@ import {
   parseRequiredLocalizedCount,
 } from "./localizedCount.js";
 import { ParserContractError } from "./localizedParsing.js";
-import { localizedPublishedUtcDay } from "./localizedTime.js";
+import { localizedAbsoluteUtcDay, localizedPublishedUtcDay } from "./localizedTime.js";
 import { publicationLinkTarget } from "./publicationLinks.js";
 import { normalizeVideoKeywords, normalizeVideoTextMetadata } from "./videoMetadata.js";
 import { annotateYoutubeFailure } from "./youtubeFailurePolicy.js";
@@ -32,10 +32,12 @@ import {
   normalizeYoutubeCommentPage,
   youtubeCommentPageFromGetComments,
   youtubeCommentsDisabled,
+  youtubeNewestCommentsEndpoint,
 } from "./youtubeCommentPage.js";
 import {
   assertYoutubeContentObservation,
   resolveYoutubePlayability,
+  YoutubeCollectionFailureError,
 } from "./youtubePlayability.js";
 
 const VERSION = "17.2.0";
@@ -43,6 +45,9 @@ const DEFAULT_LANGUAGE = process.env.YOUTUBE_CONTROL_LANGUAGE || process.env.YOU
 const DEFAULT_COUNTRY = process.env.YOUTUBE_COUNTRY || "BR";
 const DEFAULT_TIMEOUT_MS = Math.max(1000, Number(process.env.YOUTUBEJS_TIMEOUT_MS || 30000));
 const MAX_TAB_PAGES = Math.max(1, Number(process.env.YOUTUBEJS_MAX_TAB_PAGES || 20));
+const TERMINAL_DETAIL_PROBE_CLIENT = "ANDROID";
+const VIDEO_DETAIL_CLIENTS = Object.freeze(["WEB", "IOS", "ANDROID"]);
+const EXPLICIT_TERMINAL_REASON_CODES = new Set(["private", "uploader_removed"]);
 
 let runtime = null;
 let runtimePromise = null;
@@ -124,7 +129,9 @@ export async function fetchYoutubeJsCommentFirstPage(videoId, {
   });
 }
 
-export async function fetchYoutubeJsCommentsSection(client, videoId) {
+export async function fetchYoutubeJsCommentsSection(client, videoId, {
+  fallbackToNewest = false,
+} = {}) {
   if (!client?.actions || typeof client.actions.execute !== "function") {
     throw new TypeError("YouTube.js client with actions.execute() is required");
   }
@@ -154,7 +161,27 @@ export async function fetchYoutubeJsCommentsSection(client, videoId) {
   if (response?.success === false) {
     throw new Error(`YouTube comments request failed HTTP ${response.status_code ?? "unknown"}`);
   }
-  return response?.data ?? response;
+  const raw = response?.data ?? response;
+  if (!fallbackToNewest) return raw;
+  const page = normalizeYoutubeCommentPage(raw);
+  const newestEndpoint = youtubeNewestCommentsEndpoint(raw);
+  if (page.comments_disabled || !(page.total_count > 0) || page.returned_count > 0 || !newestEndpoint) return raw;
+  throwIfYoutubeJsOperationAborted();
+  const diagnostics = { reason: "positive_total_empty_top", top_returned_count: 0 };
+  try {
+    const fallback = await new YTNodes.NavigationEndpoint(newestEndpoint).call(client.actions);
+    throwIfYoutubeJsOperationAborted();
+    if (fallback?.success === false) throw new Error(`YouTube newest comments request failed HTTP ${fallback.status_code ?? "unknown"}`);
+    const newest = fallback?.data ?? fallback;
+    const newestPage = normalizeYoutubeCommentPage(newest, { totalCount: page.total_count });
+    return { ...newest, youtubejs_comment_sort: "NEWEST_FIRST",
+      youtubejs_comment_fetch: { ...diagnostics, fallback_status: newestPage.returned_count > 0 ? "collected" : "empty" },
+      youtubejs_comment_total: page.total_count };
+  } catch (error) {
+    throwIfYoutubeJsOperationAborted();
+    return { ...raw, youtubejs_comment_fetch: { ...diagnostics,
+      fallback_status: "failed", fallback_error: String(error?.message || error) } };
+  }
 }
 
 function currentProxyUrl() {
@@ -250,6 +277,43 @@ function isoTimestamp(value) {
     value: precision === "second" ? parsed.toISOString() : parsed.toISOString().slice(0, 10),
     precision,
   };
+}
+
+function youtubeJsPublication(info, { locale = DEFAULT_LANGUAGE } = {}) {
+  const player = info?.page?.[0];
+  const microformat = player?.microformat || {};
+  const playerPublished = isoTimestamp(microformat.publish_date || microformat.upload_date);
+  if (playerPublished.value) {
+    return {
+      ...playerPublished,
+      text: playerPublished.value.slice(0, 10),
+      source: "youtubejs_player_microformat",
+    };
+  }
+  const nextPublishedText = renderedText(
+    info?.primary_info?.published?.text ?? info?.primary_info?.published,
+  );
+  const nextPublishedDay = localizedAbsoluteUtcDay(nextPublishedText, { locale });
+  if (nextPublishedDay) {
+    return {
+      value: `${nextPublishedDay}T00:00:00.000Z`,
+      precision: "date_only",
+      text: nextPublishedText,
+      source: "youtubejs_next_date_text",
+    };
+  }
+  return {
+    value: null,
+    precision: "unknown",
+    text: nextPublishedText,
+    source: null,
+  };
+}
+
+function normalizedVideoDetailMode(value) {
+  const mode = String(value ?? "full").trim().toLowerCase();
+  if (["full", "metrics"].includes(mode)) return mode;
+  throw new TypeError(`unsupported YouTube.js Video detail mode: ${value}`);
 }
 
 function itemId(item) {
@@ -816,6 +880,11 @@ function jsonRequestBody(body) {
   return null;
 }
 
+function youtubeJsRequestClient(body) {
+  const payload = jsonRequestBody(body);
+  return String(payload?.context?.client?.clientName ?? "WEB").trim().toUpperCase() || "WEB";
+}
+
 function capturePlayerTypeSurface(url, body, responseText, playerTypeSurfaces) {
   if (url.pathname !== "/youtubei/v1/player" || !responseText) return;
   const videoId = String(jsonRequestBody(body)?.videoId ?? "").trim();
@@ -845,6 +914,7 @@ async function createFetch(proxyUrl, dispatcher, stats, playerTypeSurfaces) {
       body = await input.clone().arrayBuffer();
     }
     throwIfAborted(externalSignal);
+    const requestClient = youtubeJsRequestClient(body);
     const timeoutSignal = AbortSignal.timeout(DEFAULT_TIMEOUT_MS);
     const signal = combineAbortSignals(externalSignal, timeoutSignal);
     let recorded = false;
@@ -876,11 +946,11 @@ async function createFetch(proxyUrl, dispatcher, stats, playerTypeSurfaces) {
             body: responseSample,
             source: "youtubejs_fetch",
             targetUrl: url.toString(),
-            client: "WEB",
+            client: requestClient,
           });
           recordChannelExecutionRequest({
             engine: "youtubejs",
-            client: "WEB",
+            client: requestClient,
             status: 200,
             durationMs: Date.now() - startedAt,
             ok: false,
@@ -897,7 +967,7 @@ async function createFetch(proxyUrl, dispatcher, stats, playerTypeSurfaces) {
       const requestOk = response.ok && response.status !== 403 && response.status !== 429;
       recordChannelExecutionRequest({
         engine: "youtubejs",
-        client: "WEB",
+        client: requestClient,
         status: response.status,
         durationMs: Date.now() - startedAt,
         ok: requestOk,
@@ -912,7 +982,7 @@ async function createFetch(proxyUrl, dispatcher, stats, playerTypeSurfaces) {
           body: responseSample,
           source: "youtubejs_fetch",
           targetUrl: url.toString(),
-          client: "WEB",
+          client: requestClient,
         });
       }
       return response;
@@ -922,12 +992,12 @@ async function createFetch(proxyUrl, dispatcher, stats, playerTypeSurfaces) {
       const annotated = annotateYoutubeFailure(error, {
         source: error?.youtube_failure_evidence?.source || "youtubejs_fetch",
         targetUrl: url.toString(),
-        client: "WEB",
+        client: requestClient,
       });
       if (!recorded) {
         recordChannelExecutionRequest({
           engine: "youtubejs",
-          client: "WEB",
+          client: requestClient,
           status: annotated.youtube_failure_evidence?.status,
           durationMs: Date.now() - startedAt,
           ok: false,
@@ -1115,6 +1185,72 @@ export function youtubeJsState() {
   };
 }
 
+async function collectYoutubeJsChannelUploads(current, channelId, limit, {
+  hasContent = true,
+  locale = DEFAULT_LANGUAGE,
+  now = Date.now(),
+} = {}) {
+  const cleanLimit = Math.max(1, Math.min(Number(limit) || 30, 100));
+  const bundleStartedAt = Date.now();
+  const bundleRequestStart = current.stats.requests;
+  const {
+    playlistId,
+    uploads,
+    entries,
+    contentTypeCounts,
+    activityEvidenceComplete,
+  } = await collectYoutubeJsUploadBundle(
+    current.client,
+    channelId,
+    cleanLimit,
+    { hasContent, locale, now },
+  );
+  return {
+    channel_id: channelId,
+    playlist_id: playlistId,
+    playlist_url: `https://www.youtube.com/playlist?list=${encodeURIComponent(playlistId)}`,
+    entries,
+    tab_counts: contentTypeCounts,
+    uploads_missing: Boolean(uploads.absent),
+    activity_evidence_complete: activityEvidenceComplete,
+    activity_parse_gap_count: uploads.parse_gap_count,
+    scan: {
+      pages: uploads.pages,
+      inspected_count: uploads.inspected_count,
+      parse_gap_count: uploads.parse_gap_count,
+      selected_count: entries.length,
+      stop_reason: uploads.stop_reason,
+      terminal_reason: uploads.terminal_reason,
+      complete: uploads.complete,
+    },
+    untyped_ids: entries.filter((entry) => !entry.content_type).map((entry) => entry.video_id),
+    raw: {
+      engine: `youtubei.js@${VERSION}`,
+      channel_id: channelId,
+      playlist_id: playlistId,
+      elapsed_ms: Date.now() - bundleStartedAt,
+      request_count: current.stats.requests - bundleRequestStart,
+      upload_pages: uploads.pages,
+      uploads_inspected_count: uploads.inspected_count,
+      uploads_parse_gap_count: uploads.parse_gap_count,
+      tab_pages: {},
+      tab_counts: contentTypeCounts,
+      counts_scope: "selected_uploads",
+      classification_source: "uploads_order+watch_detail",
+      entries,
+      untyped_ids: entries.filter((entry) => !entry.content_type).map((entry) => entry.video_id),
+    },
+  };
+}
+
+export async function fetchYoutubeJsChannelUploads(channelId, limit = 30, options = {}) {
+  if (!youtubeJsChannelEnabled()) throw new Error("YouTube.js channel extraction is disabled");
+  const cleanChannelId = String(channelId ?? "").trim();
+  if (!cleanChannelId) throw new Error("channel_id is required");
+  const current = await getRuntime();
+  return collectYoutubeJsChannelUploads(current, cleanChannelId, limit, options);
+}
+
 export async function openYoutubeJsChannel(channelId, { includeAbout = true } = {}) {
   if (!youtubeJsChannelEnabled()) throw new Error("YouTube.js channel extraction is disabled");
   const cleanChannelId = String(channelId ?? "").trim();
@@ -1167,62 +1303,12 @@ export async function openYoutubeJsChannel(channelId, { includeAbout = true } = 
       metadata,
     },
     async fetchContents(limit = 30, { locale = DEFAULT_LANGUAGE, now = Date.now() } = {}) {
-      const cleanLimit = Math.max(1, Math.min(Number(limit) || 30, 100));
-      const bundleStartedAt = Date.now();
-      const bundleRequestStart = current.stats.requests;
       const hasContent = Boolean(root.has_videos || root.has_shorts || root.has_live_streams);
-      const {
-        playlistId,
-        uploads,
-        entries,
-        contentTypeCounts,
-        activityEvidenceComplete,
-      } = await collectYoutubeJsUploadBundle(
-        current.client,
-        cleanChannelId,
-        cleanLimit,
-        {
-          hasContent,
-          locale,
-          now,
-        },
-      );
-      return {
-        channel_id: cleanChannelId,
-        playlist_id: playlistId,
-        playlist_url: `https://www.youtube.com/playlist?list=${encodeURIComponent(playlistId)}`,
-        entries,
-        tab_counts: contentTypeCounts,
-        uploads_missing: Boolean(uploads.absent),
-        activity_evidence_complete: activityEvidenceComplete,
-        activity_parse_gap_count: uploads.parse_gap_count,
-        scan: {
-          pages: uploads.pages,
-          inspected_count: uploads.inspected_count,
-          parse_gap_count: uploads.parse_gap_count,
-          selected_count: entries.length,
-          stop_reason: uploads.stop_reason,
-          terminal_reason: uploads.terminal_reason,
-          complete: uploads.complete,
-        },
-        untyped_ids: entries.filter((entry) => !entry.content_type).map((entry) => entry.video_id),
-        raw: {
-          engine: `youtubei.js@${VERSION}`,
-          channel_id: cleanChannelId,
-          playlist_id: playlistId,
-          elapsed_ms: Date.now() - bundleStartedAt,
-          request_count: current.stats.requests - bundleRequestStart,
-          upload_pages: uploads.pages,
-          uploads_inspected_count: uploads.inspected_count,
-          uploads_parse_gap_count: uploads.parse_gap_count,
-          tab_pages: {},
-          tab_counts: contentTypeCounts,
-          counts_scope: "selected_uploads",
-          classification_source: "uploads_order+watch_detail",
-          entries,
-          untyped_ids: entries.filter((entry) => !entry.content_type).map((entry) => entry.video_id),
-        },
-      };
+      return collectYoutubeJsChannelUploads(current, cleanChannelId, limit, {
+        hasContent,
+        locale,
+        now,
+      });
     },
     async scanUploads({ anchors = [], maxPages = MAX_TAB_PAGES, catchUpMaxItems = 50 } = {}) {
       const playlistId = cleanChannelId.startsWith("UC")
@@ -1288,16 +1374,36 @@ function isEmptyAgeGateCommentsResponse(info, commentsError) {
     && /comments page did not have any content/i.test(youtubeErrorText(commentsError));
 }
 
+function youtubeJsLikeCount(info, locale) {
+  const basicCount = finiteInteger(info?.basic_info?.like_count);
+  if (basicCount != null && basicCount >= 0) {
+    return { value: basicCount, source: "youtubejs_next" };
+  }
+  const segmented = Array.from(info?.primary_info?.menu?.top_level_buttons ?? [])
+    .find((button) => button?.like_button || /LikeDislike/i.test(String(button?.type ?? "")));
+  const likeButton = segmented?.like_button?.toggle_button?.default_button;
+  for (const candidate of [segmented?.like_count, segmented?.short_like_count, likeButton?.title]) {
+    const count = parseYoutubeJsCount(candidate, locale);
+    if (count != null && count >= 0) return { value: count, source: "youtubejs_next_button" };
+  }
+  if (renderedText(likeButton?.title) === "Like"
+      && renderedText(likeButton?.accessibility_text) === "Like") {
+    return { value: 0, source: "youtubejs_like_count_not_public", status: "zero_from_empty" };
+  }
+  return { value: null, source: null };
+}
+
 export function normalizeYoutubeJsVideoInfo(info, comments = null, {
   commentsError = null,
   contentTypeSignals = null,
+  locale = DEFAULT_LANGUAGE,
 } = {}) {
   const player = info?.page?.[0];
   const microformat = player?.microformat || {};
   const basic = info?.basic_info || {};
   const playabilityStatus = info?.playability_status?.status || null;
   const playabilityReason = info?.playability_status?.reason || null;
-  const published = isoTimestamp(microformat.publish_date || microformat.upload_date);
+  const published = youtubeJsPublication(info, { locale });
   const commentHint = parseObservedYoutubeJsCount(
     info?.comments_entry_point_header?.comment_count,
     {
@@ -1320,7 +1426,11 @@ export function normalizeYoutubeJsVideoInfo(info, comments = null, {
         })
         : null;
   const classified = classifyYoutubeCommentPage(commentsPage, {
-    disabled: youtubeCommentsDisabled(comments) || commentsPage?.comments_disabled === true,
+    disabled: youtubeCommentsDisabled(comments)
+      || commentsPage?.comments_disabled === true
+      || youtubeCommentsDisabled({ messages: Array.from(
+        info?.page?.[1]?.contents_memo?.getType?.(YTNodes.Message) ?? [],
+      ).map((message) => renderedText(message.text)) }),
     commentsError,
   });
   let commentCount = classified.comments_disabled === true
@@ -1353,8 +1463,15 @@ export function normalizeYoutubeJsVideoInfo(info, comments = null, {
   const startTimestamp = isoTimestamp(basic.start_timestamp || microformat.start_timestamp).value;
   const endTimestamp = isoTimestamp(basic.end_timestamp || microformat.end_timestamp).value;
   const duration = positiveInteger(basic.duration ?? microformat.length_seconds);
-  const viewCount = finiteInteger(basic.view_count ?? microformat.view_count);
-  const likeCount = finiteInteger(basic.like_count);
+  const playerViewCount = finiteInteger(basic.view_count ?? microformat.view_count);
+  const nextViewCount = playerViewCount == null
+    ? parseYoutubeJsCount(info?.primary_info?.view_count, locale)
+    : null;
+  const viewCount = playerViewCount ?? nextViewCount;
+  const viewCountSource = playerViewCount != null
+    ? "youtubejs_player"
+    : nextViewCount != null ? "youtubejs_next" : null;
+  const likeCount = youtubeJsLikeCount(info, locale);
   const isUnlisted = microformat.is_unlisted === true || basic.is_unlisted === true;
   const publicMetadataComplete = Boolean(published.value && viewCount != null);
   const playability = resolveYoutubePlayability({
@@ -1377,6 +1494,14 @@ export function normalizeYoutubeJsVideoInfo(info, comments = null, {
       : inconclusivePublicSurface || (!playabilityStatus && publicMetadataComplete)
         ? "public"
         : "unknown";
+  // An absent live comment surface is policy zero, not an exact count or disabled comments.
+  if (commentCount == null && !commentsError && commentsPage?.surface === "absent"
+      && ["public", "unlisted"].includes(accessStatus) && (isUpcoming || isLive)) {
+    commentCount = 0;
+    commentStatus = isUpcoming ? "zero_from_upcoming" : "zero_from_empty";
+    commentsSource = isUpcoming
+      ? "youtubejs_upcoming_comments_not_public" : "youtubejs_live_comments_not_public";
+  }
   if (
     playability.kind === "inconclusive"
     && playabilityStatus
@@ -1421,14 +1546,18 @@ export function normalizeYoutubeJsVideoInfo(info, comments = null, {
     url: basic.id ? `https://www.youtube.com/watch?v=${encodeURIComponent(basic.id)}` : null,
     thumbnail_url: bestThumbnail(basic.thumbnail, microformat.thumbnails),
     duration_seconds: duration,
+    duration_status: duration == null ? "unresolved" : "exact",
     duration_source: duration == null ? null : "youtubejs_player",
     length_text: duration == null
       ? null
       : `${Math.floor(duration / 60)}:${String(duration % 60).padStart(2, "0")}`,
+    view_count: viewCount,
     view_count_text: viewCount == null ? null : String(viewCount),
-    view_count_source: viewCount == null ? null : "youtubejs_player",
-    like_count: likeCount,
-    like_count_source: likeCount == null ? null : "youtubejs_next",
+    view_count_status: viewCount == null ? "unresolved" : "exact",
+    view_count_source: viewCountSource,
+    like_count: likeCount.value,
+    like_count_status: likeCount.status ?? (likeCount.value == null ? "unresolved" : "exact"),
+    like_count_source: likeCount.source,
     comment_count: commentCount,
     comment_count_status: commentStatus,
     comments_disabled: commentsDisabled,
@@ -1438,10 +1567,10 @@ export function normalizeYoutubeJsVideoInfo(info, comments = null, {
       ? emptyYoutubeCommentPage({ totalCount: 0 })
       : commentsPage,
     published_at: published.value,
-    published_text: published.value?.slice(0, 10) ?? null,
+    published_text: published.text,
     published_at_status: published.value ? "exact" : "unresolved",
     published_at_precision: published.precision,
-    published_at_source: published.value ? "youtubejs_player_microformat" : null,
+    published_at_source: published.source,
     availability,
     access_status: accessStatus,
     is_unlisted: isUnlisted,
@@ -1488,27 +1617,278 @@ export function normalizeYoutubeJsVideoInfo(info, comments = null, {
   };
 }
 
-export async function fetchYoutubeJsBasicPlayerInfo(client, videoId) {
+function youtubeJsPlayabilitySurface(value) {
+  const nested = value?.playability_status;
+  return {
+    status: nested?.status ?? value?.status ?? null,
+    reason: nested?.reason ?? value?.reason ?? null,
+  };
+}
+
+function youtubeJsExplicitTerminalDetail(videoId, value, {
+  clientName,
+  source,
+} = {}) {
+  const cleanVideoId = String(videoId ?? "").trim();
+  const playabilitySurface = youtubeJsPlayabilitySurface(value);
+  const playability = resolveYoutubePlayability(playabilitySurface);
+  if (
+    playability.kind !== "content"
+    || !EXPLICIT_TERMINAL_REASON_CODES.has(playability.reason_code)
+  ) {
+    return null;
+  }
+  const basic = value?.basic_info && typeof value.basic_info === "object"
+    ? value.basic_info
+    : {};
+  const player = Array.isArray(value?.page) ? value.page[0] : null;
+  const normalized = normalizeYoutubeJsVideoInfo({
+    page: player ? [player] : [],
+    basic_info: { ...basic, id: basic.id || cleanVideoId },
+    playability_status: playabilitySurface,
+    comments_entry_point_header: null,
+  });
+  return {
+    ...normalized,
+    id: cleanVideoId,
+    youtubejs_client: String(clientName || TERMINAL_DETAIL_PROBE_CLIENT),
+    source: String(source || "youtubejs_get_basic_info"),
+    youtubejs_raw_summary: {
+      ...normalized.youtubejs_raw_summary,
+      terminal_probe: true,
+    },
+  };
+}
+
+function youtubeJsInfoNeedsAlternateClient(info, {
+  detailMode = "full",
+  locale = DEFAULT_LANGUAGE,
+} = {}) {
+  const mode = normalizedVideoDetailMode(detailMode);
+  const playabilitySurface = youtubeJsPlayabilitySurface(info);
+  const playability = resolveYoutubePlayability(playabilitySurface);
+  const player = info?.page?.[0];
+  const microformat = player?.microformat || {};
+  const basic = info?.basic_info || {};
+  if (basic.is_upcoming === true) return false;
+  if (playability.kind === "content" && playability.access_status !== "public") return false;
+  const published = youtubeJsPublication(info, { locale });
+  const viewCount = finiteInteger(basic.view_count ?? microformat.view_count)
+    ?? parseYoutubeJsCount(info?.primary_info?.view_count, locale);
+  if (mode === "metrics") {
+    const status = String(playabilitySurface.status ?? "").toUpperCase();
+    if (playability.kind === "inconclusive" && status && status !== "OK") {
+      return !(published.value && viewCount != null);
+    }
+    return viewCount == null;
+  }
+  const title = renderedText(basic.title ?? microformat.title);
+  const duration = positiveInteger(basic.duration ?? microformat.length_seconds);
+  const completePublicSurface = Boolean(
+    title
+    && published.value
+    && viewCount != null
+    && (duration != null || basic.is_live === true),
+  );
+  return !completePublicSurface;
+}
+
+function youtubeJsErrorNeedsTerminalProbe(error) {
+  const playabilitySurface = youtubeJsPlayabilitySurface(error?.info);
+  if (playabilitySurface.status || playabilitySurface.reason) {
+    const playability = resolveYoutubePlayability(playabilitySurface);
+    if (playability.retry_mode === "alternate_client") return true;
+  }
+  return /^(?:this )?video is unavailable[.!]?$/i.test(String(error?.message || "").trim())
+    || /login_required|please sign in|sign in to continue|not available on this app/i.test(
+      String(error?.message || ""),
+    );
+}
+
+function youtubeJsInfoResolution(videoId, info, clientName, source = "youtubejs_get_info", options = {}) {
+  const playabilitySurface = youtubeJsPlayabilitySurface(info);
+  if (isYoutubeJsBotChallenge(playabilitySurface.status, playabilitySurface.reason)) {
+    throwYoutubeJsBotChallenge(
+      videoId,
+      playabilitySurface.status,
+      playabilitySurface.reason,
+      { clientName },
+    );
+  }
+  const detail = youtubeJsExplicitTerminalDetail(videoId, info, { clientName, source });
+  if (detail) return { kind: "terminal", detail };
+  if (youtubeJsInfoNeedsAlternateClient(info, options)) return null;
+  return { kind: "info", info, client: clientName };
+}
+
+function youtubeJsClientAttempt(clientName, value, error = null) {
+  const playabilitySurface = youtubeJsPlayabilitySurface(value ?? error?.info);
+  return {
+    client: clientName,
+    playability_status: playabilitySurface.status == null
+      ? null
+      : String(playabilitySurface.status),
+    playability_reason: playabilitySurface.reason == null
+      ? null
+      : String(playabilitySurface.reason),
+    error: error == null ? null : String(error?.message || error).slice(0, 500),
+  };
+}
+
+async function probeYoutubeJsBasicDetail(client, videoId, clientName, options = {}) {
+  try {
+    const info = await fetchYoutubeJsBasicPlayerInfo(client, videoId, {
+      clientName,
+    });
+    throwIfYoutubeJsOperationAborted();
+    return {
+      resolution: youtubeJsInfoResolution(
+        videoId,
+        info,
+        clientName,
+        "youtubejs_get_basic_info",
+        options,
+      ),
+      attempt: youtubeJsClientAttempt(clientName, info),
+    };
+  } catch (error) {
+    throwIfYoutubeJsOperationAborted();
+    const detail = youtubeJsExplicitTerminalDetail(videoId, error?.info, {
+      clientName,
+      source: "youtubejs_get_basic_info",
+    });
+    if (detail) return {
+      resolution: { kind: "terminal", detail },
+      attempt: youtubeJsClientAttempt(clientName, error?.info, error),
+    };
+    const playabilitySurface = youtubeJsPlayabilitySurface(error?.info);
+    if (isYoutubeJsBotChallenge(playabilitySurface.status, playabilitySurface.reason)) {
+      throwYoutubeJsBotChallenge(
+        videoId,
+        playabilitySurface.status,
+        playabilitySurface.reason,
+        { clientName },
+      );
+    }
+    if (!youtubeJsErrorNeedsTerminalProbe(error)) throw error;
+    return {
+      resolution: null,
+      attempt: youtubeJsClientAttempt(clientName, error?.info, error),
+    };
+  }
+}
+
+function throwYoutubeJsAlternateClientsExhausted(videoId, attempts) {
+  const last = attempts.at(-1) ?? { client: TERMINAL_DETAIL_PROBE_CLIENT };
+  const reason = last.playability_reason || last.error || "ambiguous playability response";
+  const error = annotateYoutubeFailure(new YoutubeCollectionFailureError(
+    `YouTube.js alternate clients exhausted for ${videoId}: ${reason}`,
+    {
+      reasonCode: "alternate_clients_exhausted",
+      retryMode: "new_identity",
+      source: "youtubejs_player",
+      videoId,
+      reason,
+    },
+  ), {
+    status: 200,
+    body: reason,
+    source: "youtubejs_player",
+    targetUrl: `https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}`,
+    client: last.client,
+  });
+  error.youtube_client_attempts = attempts;
+  recordChannelExecutionFailure({
+    error,
+    engine: "youtubejs",
+    client: last.client,
+    status: error.youtube_failure_evidence.status,
+    body: reason,
+    source: "youtubejs_player",
+    targetUrl: error.youtube_failure_evidence.target_url,
+  });
+  throw error;
+}
+
+export async function fetchYoutubeJsVideoInfoWithTerminalFallback(client, videoId, {
+  detailMode = "full",
+  locale = DEFAULT_LANGUAGE,
+} = {}) {
+  if (!client || typeof client.getInfo !== "function") {
+    throw new TypeError("YouTube.js client with getInfo() is required");
+  }
+  const cleanVideoId = String(videoId ?? "").trim();
+  if (!cleanVideoId) throw new Error("video_id is required");
+  const mode = normalizedVideoDetailMode(detailMode);
+  const attempts = [];
+  for (const clientName of VIDEO_DETAIL_CLIENTS) {
+    let info;
+    try {
+      info = await client.getInfo(cleanVideoId, { client: clientName });
+      throwIfYoutubeJsOperationAborted();
+    } catch (error) {
+      throwIfYoutubeJsOperationAborted();
+      const detail = youtubeJsExplicitTerminalDetail(cleanVideoId, error?.info, {
+        clientName,
+        source: "youtubejs_get_info",
+      });
+      if (detail) return { kind: "terminal", detail };
+      const playabilitySurface = youtubeJsPlayabilitySurface(error?.info);
+      if (isYoutubeJsBotChallenge(playabilitySurface.status, playabilitySurface.reason)) {
+        throwYoutubeJsBotChallenge(
+          cleanVideoId,
+          playabilitySurface.status,
+          playabilitySurface.reason,
+          { clientName },
+        );
+      }
+      if (!youtubeJsErrorNeedsTerminalProbe(error)) throw error;
+      attempts.push(youtubeJsClientAttempt(clientName, error?.info, error));
+      continue;
+    }
+    const resolution = youtubeJsInfoResolution(cleanVideoId, info, clientName, "youtubejs_get_info", {
+      detailMode: mode,
+      locale,
+    });
+    if (resolution) return resolution;
+    attempts.push(youtubeJsClientAttempt(clientName, info));
+  }
+  const basic = await probeYoutubeJsBasicDetail(
+    client,
+    cleanVideoId,
+    TERMINAL_DETAIL_PROBE_CLIENT,
+    { detailMode: mode, locale },
+  );
+  if (basic.resolution) return basic.resolution;
+  attempts.push(basic.attempt);
+  return throwYoutubeJsAlternateClientsExhausted(cleanVideoId, attempts);
+}
+
+export async function fetchYoutubeJsBasicPlayerInfo(client, videoId, {
+  clientName = "WEB",
+} = {}) {
   if (!client || typeof client.getBasicInfo !== "function") {
     throw new TypeError("YouTube.js client with getBasicInfo() is required");
   }
   const cleanVideoId = String(videoId ?? "").trim();
   if (!cleanVideoId) throw new Error("video_id is required");
-  return client.getBasicInfo(cleanVideoId, { client: "WEB" });
+  return client.getBasicInfo(cleanVideoId, { client: String(clientName || "WEB") });
 }
 
-function throwYoutubeJsBotChallenge(videoId, playabilityStatus, playabilityReason) {
+function throwYoutubeJsBotChallenge(videoId, playabilityStatus, playabilityReason, {
+  clientName = "WEB",
+} = {}) {
   const error = annotateYoutubeFailure(new Error(`YouTube bot challenge: ${playabilityReason || playabilityStatus}`), {
     status: 200,
     body: String(playabilityReason || playabilityStatus),
     source: "youtubejs_player",
     targetUrl: `https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}`,
-    client: "WEB",
+    client: clientName,
   });
   recordChannelExecutionFailure({
     error,
     engine: "youtubejs",
-    client: "WEB",
+    client: clientName,
     status: 200,
     body: String(playabilityReason || playabilityStatus),
     source: "youtubejs_player",
@@ -1572,10 +1952,16 @@ export async function fetchYoutubeJsPlayerTypeDetail(videoId) {
   });
 }
 
-export async function fetchYoutubeJsVideoDetail(videoId, { signal = null } = {}) {
+export async function fetchYoutubeJsVideoDetail(videoId, {
+  signal = null,
+  strictRequiredSurfaces = false,
+  optionalComments = false,
+  detailMode = "full",
+} = {}) {
   if (!youtubeJsDetailEnabled()) throw new Error("YouTube.js detail extraction is disabled");
   const cleanVideoId = String(videoId ?? "").trim();
   if (!cleanVideoId) throw new Error("video_id is required");
+  const mode = normalizedVideoDetailMode(detailMode);
   throwIfAborted(signal);
   const current = await getRuntime();
   return operationSignalStorage.run(signal, async () => {
@@ -1583,15 +1969,29 @@ export async function fetchYoutubeJsVideoDetail(videoId, { signal = null } = {})
     const startedAt = Date.now();
     const requestStart = current.stats.requests;
     current.playerTypeSurfaces.delete(cleanVideoId);
-    let info;
+    let resolution;
     let contentTypeSignals;
     try {
-      info = await current.client.getInfo(cleanVideoId, { client: "WEB" });
+      resolution = await fetchYoutubeJsVideoInfoWithTerminalFallback(
+        current.client,
+        cleanVideoId,
+        { detailMode: mode, locale: DEFAULT_LANGUAGE },
+      );
       throwIfYoutubeJsOperationAborted();
       contentTypeSignals = current.playerTypeSurfaces.get(cleanVideoId) ?? null;
     } finally {
       current.playerTypeSurfaces.delete(cleanVideoId);
     }
+    if (resolution.kind === "terminal") {
+      return {
+        ...resolution.detail,
+        ...(contentTypeSignals ? { content_type_signals: contentTypeSignals } : {}),
+        youtubejs_duration_ms: Date.now() - startedAt,
+        youtubejs_request_count: current.stats.requests - requestStart,
+        youtubejs_comments_error: null,
+      };
+    }
+    const info = resolution.info;
     const playabilityStatus = info?.playability_status?.status || null;
     const playabilityReason = info?.playability_status?.reason || null;
     if (isYoutubeJsBotChallenge(playabilityStatus, playabilityReason)) {
@@ -1599,6 +1999,7 @@ export async function fetchYoutubeJsVideoDetail(videoId, { signal = null } = {})
     }
     let comments = null;
     let commentsError = null;
+    let commentsFailure = null;
     const hint = parseObservedYoutubeJsCount(
       info?.comments_entry_point_header?.comment_count,
       {
@@ -1608,7 +2009,9 @@ export async function fetchYoutubeJsVideoDetail(videoId, { signal = null } = {})
       },
     );
     try {
-      const raw = await fetchYoutubeJsCommentsSection(current.client, cleanVideoId);
+      const raw = await fetchYoutubeJsCommentsSection(current.client, cleanVideoId, {
+        fallbackToNewest: optionalComments,
+      });
       throwIfYoutubeJsOperationAborted();
       if (youtubeCommentsDisabled(raw)) {
         comments = emptyYoutubeCommentPage({ totalCount: 0 });
@@ -1622,14 +2025,35 @@ export async function fetchYoutubeJsVideoDetail(videoId, { signal = null } = {})
     } catch (error) {
       throwIfYoutubeJsOperationAborted();
       commentsError = String(error?.message || error);
+      commentsFailure = error;
     }
     throwIfYoutubeJsOperationAborted();
-    return {
-      ...normalizeYoutubeJsVideoInfo(info, comments, { commentsError, contentTypeSignals }),
+    const detail = {
+      ...normalizeYoutubeJsVideoInfo(info, comments, {
+        commentsError,
+        contentTypeSignals,
+        locale: DEFAULT_LANGUAGE,
+      }),
+      youtubejs_client: resolution.client,
       youtubejs_duration_ms: Date.now() - startedAt,
       youtubejs_request_count: current.stats.requests - requestStart,
       youtubejs_comments_error: commentsError,
     };
+    const commentsRequired = !["members_only", "private", "unavailable"]
+      .includes(detail.access_status)
+      && detail.is_upcoming !== true
+      && detail.comments_disabled !== true;
+    if (strictRequiredSurfaces === true && !optionalComments && commentsRequired && commentsFailure != null) {
+      const error = new Error(
+        `YouTube.js required comments surface failed for ${cleanVideoId}: ${commentsError}`,
+        { cause: commentsFailure },
+      );
+      error.name = "YoutubeJsRequiredSurfaceError";
+      error.required_surface = "comments";
+      error.partial_detail = detail;
+      throw error;
+    }
+    return detail;
   });
 }
 

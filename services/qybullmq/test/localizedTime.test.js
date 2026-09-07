@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  localizedAbsoluteUtcDay,
   localizedPublishedUtcDay,
   parseLocalizedAgeDays,
   parseRequiredLocalizedAgeDays,
@@ -39,6 +40,37 @@ test("localized publication text resolves only to a UTC calendar day", () => {
   assert.equal(localizedPublishedUtcDay("2026-07-10", { locale: "en", now }), "2026-07-10");
   assert.equal(localizedPublishedUtcDay("2026-02-30", { locale: "en", now }), null);
   assert.equal(localizedPublishedUtcDay("unknown", { locale: "en", now }), null);
+});
+
+test("localized absolute publication dates resolve to a UTC calendar day", () => {
+  assert.equal(
+    localizedAbsoluteUtcDay("18 de ago. de 2026", { locale: "pt-BR" }),
+    "2026-08-18",
+  );
+  assert.equal(localizedAbsoluteUtcDay("Aug 18, 2026", { locale: "en-US" }), "2026-08-18");
+  assert.equal(localizedAbsoluteUtcDay("18 Aug 2026", { locale: "en-GB" }), "2026-08-18");
+  assert.equal(localizedAbsoluteUtcDay("18 de ago. de 2026", { locale: "en" }), null);
+  assert.equal(localizedAbsoluteUtcDay("31 de fev. de 2026", { locale: "pt-BR" }), null);
+});
+
+test("localized absolute dates round-trip across YouTube locales", () => {
+  const date = new Date("2026-08-18T00:00:00.000Z");
+  for (const locale of YOUTUBE_UI_LANGUAGE_CODES) {
+    for (const month of ["long", "short"]) {
+      const value = new Intl.DateTimeFormat(locale, {
+        calendar: "gregory",
+        timeZone: "UTC",
+        year: "numeric",
+        month,
+        day: "numeric",
+      }).format(date);
+      assert.equal(
+        localizedAbsoluteUtcDay(value, { locale }),
+        "2026-08-18",
+        `${locale}/${month}: ${value}`,
+      );
+    }
+  }
 });
 
 test("unsupported nonempty publication text is a parser contract error", () => {

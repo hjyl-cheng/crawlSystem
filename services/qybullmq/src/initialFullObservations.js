@@ -11,6 +11,7 @@ import {
 } from "./crawlObservationStore.js";
 import { refreshVideoPublicationItemHashes } from "./videoPublicationItemStore.js";
 import { VIDEO_INITIAL_CANDIDATE_LIMIT_TERMINAL } from "./publicationContract.js";
+import { fullCrawlUploadScan } from "./fullCrawlScanEvidence.js";
 import {
   evaluateVideoPublicationWindowCoverage,
   VIDEO_WINDOW_MAX_AGE_DAYS,
@@ -195,7 +196,7 @@ function fullCrawlScanProof({
     && detailFailures === 0
     && (uploadScan.stop_reason === "max_items" || uploadScan.terminal_reason === "max_items");
   let terminalCondition = null;
-  if (parseGapCount === 0) {
+  if (parseGapCount === 0 && uploadScan.detail_processing_complete !== false) {
     if (coverage.qualified_count >= VIDEO_WINDOW_MAX_ITEMS) {
       terminalCondition = "qualified_item_limit";
     } else if (candidateLimitProcessed) {
@@ -368,7 +369,8 @@ export async function recordInitialFullObservations({
       [channelId, runId],
     );
     const candidateProofRows = await client.query(
-      `SELECT detail_status,missing_fields,result_json->'scope' AS scope
+      `SELECT detail_status,missing_fields,disposition,source_content_id,position,source_url,
+              result_json->'scope' AS scope,result_json->'full_crawl_target' AS target
        FROM crawler.content_candidates
        WHERE run_id=$1
        ORDER BY position`,
@@ -506,15 +508,16 @@ export async function recordInitialFullObservations({
 
     if (!existing.has("video")) {
       const ageBoundaryObserved = candidateProofRows.rows.some((row) => (
-        ["older_than_max_age", "after_chronological_age_cutoff"].includes(row.scope?.reason)
+        ["older_than_max_age", "after_chronological_age_cutoff", "outside_content_window"].includes(row.scope?.reason)
       ));
       const detailFailureCount = candidateProofRows.rows.filter((row) => (
         row.detail_status === "unavailable"
+        || row.disposition === "deferred"
         || (Array.isArray(row.missing_fields) && row.missing_fields.length > 0)
       )).length;
       const baseline = initialFullVideoBaseline(contentRows.rows, eventTime, {
         channelId,
-        uploadScan: run.result_json?.upload_scan ?? null,
+        uploadScan: fullCrawlUploadScan(run, candidateProofRows.rows),
         ageBoundaryObserved,
         detailFailureCount,
       });

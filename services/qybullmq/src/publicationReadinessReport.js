@@ -71,7 +71,17 @@ SELECT cursor.channel_id,cursor.observation_kind,
        to_jsonb(cursor) AS cursor,
        to_jsonb(latest_observation) AS latest_observation,
        to_jsonb(complete_observation) AS complete_observation,
-       to_jsonb(run) AS run
+       to_jsonb(run) AS run,
+       CASE WHEN cursor.observation_kind='video'
+              AND run.result_json#>>'{fetch_contract,executor_id}'='youtubejs_full'
+         THEN COALESCE((SELECT jsonb_agg(jsonb_build_object(
+           'detail_status',candidate.detail_status,'disposition',candidate.disposition,
+           'source_content_id',candidate.source_content_id,'position',candidate.position,
+           'source_url',candidate.source_url,'target',candidate.result_json->'full_crawl_target'
+         ) ORDER BY candidate.position)
+         FROM crawler.content_candidates candidate
+         WHERE candidate.run_id=run.run_id AND candidate.channel_id=cursor.channel_id), '[]'::jsonb)
+         ELSE NULL END AS full_crawl_candidates
 FROM crawler.channel_domain_cursors cursor
 LEFT JOIN crawler.crawl_observations latest_observation
   ON latest_observation.observation_id=cursor.latest_observation_id

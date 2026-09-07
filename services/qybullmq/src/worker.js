@@ -50,6 +50,9 @@ import {
   processFinalizeV2,
   signalReadyDiscoveryPageQualifications,
 } from "./pipelineV2.js";
+import { closeFullCrawlYoutubeJsQueues, executeFullCrawlYoutubeJs } from "./fullCrawlYoutubeJs.js";
+import { isYoutubeJsFullCrawlFetchContract } from "./fullCrawlFetchContract.js";
+import { assertFullCrawlWorkerLane, fullCrawlWorkerPrefix } from "./fullCrawlCanary.js";
 import { getQueryScheduler } from "./queryScheduler.js";
 import { scoreQueryBatch } from "./queryQuality.js";
 import { reconcilePublication } from "./publicationReconciler.js";
@@ -1277,7 +1280,11 @@ async function executeJob(job, { resumeMode = "initial", prepared = null } = {})
     case queuesByRole.channelCrawl:
       if (job.name === "channel-detail-repair") return processContentDetailBatchV2(job);
       if (job.name === "channel-checkpoint-repair") return processCheckpointRepairV2(job);
-      return processChannelCrawlV2(job, { resumeMode });
+      return isYoutubeJsFullCrawlFetchContract(
+        prepared?.fetchContract ?? job.data?.fetch_contract,
+      )
+        ? executeFullCrawlYoutubeJs(job, { resumeMode })
+        : processChannelCrawlV2(job, { resumeMode });
     case queuesByRole.channelIncremental:
       return incrementalChannelRunner.execute(job);
     case queuesByRole.contentEnrich:
@@ -1516,6 +1523,7 @@ async function persistManagedRetryCheckpoint({ job, prepared, error, failure }) 
 }
 
 async function processJob(job, token) {
+  assertFullCrawlWorkerLane(job, process.env.FULL_CRAWL_CANARY_WORKER === "true");
   if (job?.data?.retry_intent_id) {
     const entry = await enterMigrationRetryIntentWorkerJob(query, job);
     if (entry.action === "finished_replay") {
@@ -1586,6 +1594,11 @@ const enabledQueues = String(process.env.WORKER_QUEUES || queueNames.join(","))
   .split(",")
   .map((item) => item.trim())
   .filter(Boolean);
+const intakePrefix = fullCrawlWorkerPrefix({
+  prefix: bullmqPrefix,
+  enabledQueues,
+  canary: process.env.FULL_CRAWL_CANARY_WORKER === "true",
+});
 const workerQueueConfiguration = validateWorkerQueueConfiguration({
   role: proxySlotRole,
   enabledQueues,
@@ -1615,6 +1628,7 @@ function shutdown(signal) {
     await shutdownStep("bullmq_intake", () => Promise.all(workers.map((worker) => worker.pause(true))));
     if (rotaSlot) await shutdownStep("rota_slot", () => rotaSlot.close());
     await shutdownStep("bullmq_workers", () => Promise.all(workers.map((worker) => worker.close())));
+    await shutdownStep("full_crawl_youtubejs_queues", closeFullCrawlYoutubeJsQueues);
     await shutdownStep("proxy_control", closeProxyControlClient);
     await shutdownStep("http", closePersistentHttpClient);
     await shutdownStep("storage", async () => closeStorage());
@@ -1662,9 +1676,9 @@ async function startWorkerRuntime() {
   workers = enabledQueues.map((queueName) => {
     const worker = new Worker(queueName, processJob, {
       connection: redisOptions,
-      concurrency: concurrencyFor(queueName),
+      concurrency: process.env.FULL_CRAWL_CANARY_WORKER === "true" ? 1 : concurrencyFor(queueName),
       ...bullmqWorkerTimingOptions(),
-      ...(bullmqPrefix ? { prefix: bullmqPrefix } : {}),
+      ...(intakePrefix ? { prefix: intakePrefix } : {}),
     });
 
     worker.on("completed", async (job) => {

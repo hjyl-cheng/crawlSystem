@@ -9,6 +9,7 @@ import {
   prepareContentDetailExecutionRequeue,
 } from "./contentDetailExecutionFence.js";
 import { queuesByRole, safeJobId } from "./queues.js";
+import { isYoutubeJsFullCrawlFetchContract } from "./fullCrawlFetchContract.js";
 
 const ACTIVE_RETRY_STATUSES = Object.freeze(["retrying", "dispatched"]);
 const REPRESENTED_JOB_STATES = new Set([
@@ -822,6 +823,8 @@ export class MigrationSystemRetryRecoveryReconciler {
               run.status AS run_status,run.detail_status AS run_detail_status,
               run.expected_content_count,run.detail_job_epoch AS run_content_detail_job_epoch,
               run.result_json->'final_repair' AS run_final_repair,
+              run.result_json->'fetch_contract' AS run_fetch_contract,
+              run.result_json->>'job_id' AS run_fetch_job_id,
               run.result_json->>'pipeline_cycle_id' AS run_pipeline_cycle_id,
               run.result_json->>'content_max_age_days' AS run_content_max_age_days,
               COALESCE(run.result_json->>'dispatch_batch_id',
@@ -1501,6 +1504,33 @@ export class MigrationSystemRetryRecoveryReconciler {
         continue;
       }
       if (row.run_detail_status !== "done") {
+        if (isYoutubeJsFullCrawlFetchContract(row.run_fetch_contract)) {
+          requiredQueues.add(queuesByRole.channelCrawl);
+          const original = row.run_fetch_job_id
+            ? await this.queues[queuesByRole.channelCrawl].getJob(row.run_fetch_job_id)
+            : null;
+          if (!original || original.name !== "channel-snapshot"
+              || original.data?.run_id !== row.recovery_run_id
+              || Number(original.data?.candidate_id) !== Number(row.candidate_id)
+              || Number(original.data?.dispatch_generation) !== Number(row.snapshot_dispatch_generation)
+              || Number(row.api_open_count ?? 0) > 0) {
+            console.error(JSON.stringify({
+              event: "youtubejs_full_recovery_blocked",
+              run_id: row.recovery_run_id,
+              reason: "original_fetch_job_missing_or_conflicting",
+            }));
+            stale += 1;
+            continue;
+          }
+          const state = await original.getState();
+          if (["failed", "completed"].includes(state)) {
+            await original.retry(state);
+            terminalJobsRequeued += 1;
+          } else if (!REPRESENTED_JOB_STATES.has(state)) {
+            stale += 1;
+          }
+          continue;
+        }
         if (Number(row.api_open_count ?? 0) > 0) {
           const dispatchBatchId = text(row.failed_dispatch_batch_id);
           if (!dispatchBatchId) {

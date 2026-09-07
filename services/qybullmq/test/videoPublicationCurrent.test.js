@@ -175,6 +175,19 @@ function withItemHash(row) {
   };
 }
 
+test("an unconfirmed optional comment count does not exclude the video or publish a guessed count", () => {
+  const row = videoRow("optional-comments", {
+    comment_count: 17,
+    comment_count_status: "unresolved",
+    comments_first_page: { surface: "absent", returned_count: 0, comments: [] },
+  });
+  const result = buildVideoPublicationItem(row, { channelId: CHANNEL_ID });
+  assert.equal(result.ready, true);
+  assert.equal(result.payload.comment_count, null);
+  assert.equal(result.payload.comment_count_status, "unresolved");
+  assert.equal(row.comment_count, 17);
+});
+
 test("Video Item hash contains business state and excludes transport audit noise", () => {
   const first = buildVideoPublicationItem(videoRow(), { channelId: CHANNEL_ID });
   const second = buildVideoPublicationItem(videoRow("video-01", {

@@ -1,4 +1,5 @@
 import { observationFactsHash } from "./crawlObservationStore.js";
+import { fullCrawlUploadScan } from "./fullCrawlScanEvidence.js";
 import {
   PUBLICATION_CONTRACT_VERSION,
   VIDEO_INITIAL_CANDIDATE_LIMIT_TERMINAL,
@@ -105,6 +106,7 @@ function countCurrent(row, name, {
   resolved,
   unresolved,
   observedAtRequired = false,
+  allowUnconfirmedValue = false,
 }) {
   const statusBase = name === "duration_seconds" ? "duration" : name;
   const status = text(row?.[`${statusBase}_status`]);
@@ -122,7 +124,7 @@ function countCurrent(row, name, {
   const isUnresolved = unresolved.has(status);
   const valid = isResolved
     ? value !== null && Boolean(source) && (!observedAtRequired || Boolean(observedAt))
-    : isUnresolved && rawValue == null;
+    : isUnresolved && (rawValue == null || (allowUnconfirmedValue && value !== null));
   return {
     value: isResolved ? value : null,
     status,
@@ -175,6 +177,8 @@ export function buildVideoPublicationItem(rowValue, { channelId } = {}) {
     resolved: new Set(["exact", "zero_from_empty", "zero_from_surface", "zero_from_upcoming", "disabled"]),
     unresolved: new Set(["unavailable", "unresolved"]),
     observedAtRequired: true,
+    // Keep provisional counts in crawler evidence, not in the business payload.
+    allowUnconfirmedValue: true,
   });
   const descriptionStatus = text(content.description_status);
   const description = content.description == null ? null : String(content.description);
@@ -296,13 +300,19 @@ function processedInitialCandidateLimit(source) {
   const discovery = object(latestDiscovery(source));
   const sourceCursor = object(object(source?.cursor).source_cursor);
   const run = object(source?.run);
-  const uploadScan = object(object(run.result_json).upload_scan);
+  let uploadScan;
+  try {
+    uploadScan = object(fullCrawlUploadScan(run, source?.full_crawl_candidates));
+  } catch {
+    return false;
+  }
   const requestedLimit = nonnegativeInteger(uploadScan.requested_limit);
   const selectedCount = nonnegativeInteger(uploadScan.selected_count);
   const inspectedCount = nonnegativeInteger(uploadScan.inspected_count);
   const scanStoppedAtLimit = text(uploadScan.stop_reason) === "max_items"
     || text(uploadScan.terminal_reason) === "max_items";
   return completeObservation.outcome === "complete"
+    && uploadScan.detail_processing_complete !== false
     && FULL_CRAWL_VIDEO_COMPLETE_REASONS.has(text(completeObservation.outcome_reason_code))
     && text(completeObservation.run_id) === text(run.run_id)
     && text(run.crawl_mode) === "full"

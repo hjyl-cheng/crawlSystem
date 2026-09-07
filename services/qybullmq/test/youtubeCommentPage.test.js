@@ -79,6 +79,44 @@ function commentPageFixture({
   };
 }
 
+test("an observed comment total is independent of optional first-page rows", () => {
+  const page = normalizeYoutubeCommentPage(commentPageFixture({ countText: "17 Comments", comments: [] }));
+  assert.equal(page.returned_count, 0);
+  const result = classifyYoutubeCommentPage(page);
+  assert.equal(result.comment_count, 17);
+  assert.equal(result.comment_count_status, "exact");
+});
+
+test("optional comments fall back once to the server's newest endpoint when top has no rows", async () => {
+  const top = commentPageFixture({ countText: "3 Comments", comments: [] });
+  top.onResponseReceivedEndpoints[0].reloadContinuationItemsCommand.continuationItems[0]
+    .commentsHeaderRenderer.sortMenu = { sortFilterSubMenuRenderer: { subMenuItems: [
+      { selected: true, serviceEndpoint: { continuationCommand: { token: "top-token", request: "CONTINUATION_REQUEST_TYPE_WATCH_NEXT" } } },
+      { selected: false, serviceEndpoint: { continuationCommand: { token: "newest-token", request: "CONTINUATION_REQUEST_TYPE_WATCH_NEXT" } } },
+    ] } };
+  for (const scenario of ["collected", "empty", "failed"]) {
+    let calls = 0;
+    const client = { actions: { execute: async (path, request) => {
+      calls += 1;
+      assert.equal(path, "next");
+      if (calls === 1) return { success: true, data: top };
+      assert.equal(calls, 2);
+      assert.equal(request.continuation, "newest-token");
+      if (scenario === "failed") throw new Error("comments timeout");
+      return { success: true, data: scenario === "empty" ? top : commentPageFixture({ countText: "3 Comments" }) };
+    } } };
+    const raw = await fetchYoutubeJsCommentsSection(client, "video-id", { fallbackToNewest: true });
+    const page = normalizeYoutubeCommentPage(raw);
+    assert.equal(calls, 2);
+    assert.equal(page.sort, scenario === "failed" ? "TOP_COMMENTS" : "NEWEST_FIRST");
+    assert.equal(commentPageHasFirstPage(page), true);
+    assert.equal(page.total_count, 3);
+    assert.equal(page.returned_count, scenario === "collected" ? 1 : 0);
+    assert.equal(classifyYoutubeCommentPage(page).comment_count_status, "exact");
+    assert.equal(page.fetch_diagnostics.fallback_status, scenario);
+  }
+});
+
 test("normalizeYoutubeCommentPage reads the header count and first-page comments from raw JSON", () => {
   const page = normalizeYoutubeCommentPage(commentPageFixture());
   assert.equal(page.version, 1);
@@ -186,7 +224,48 @@ test("youtubeCommentsDisabled recognizes an explicit disabled surface", () => {
   assert.equal(commentPageHasFirstPage(emptyYoutubeCommentPage({ totalCount: 0 })), true);
 });
 
-test("classifyYoutubeCommentPage keeps closed, empty, and parse-failed pages distinct", () => {
+test("an inactive comment composer disabledText is not a disabled comment surface", () => {
+  const raw = commentPageFixture({ countText: "38 Comments" });
+  raw.onResponseReceivedEndpoints[0]
+    .reloadContinuationItemsCommand
+    .continuationItems[0]
+    .commentsHeaderRenderer
+    .createRenderer = {
+      commentSimpleboxRenderer: {
+        disabledText: "Comments are turned off.",
+      },
+    };
+
+  assert.equal(youtubeCommentsDisabled(raw), false);
+  const page = normalizeYoutubeCommentPage(raw);
+  assert.equal(page.total_count, 38);
+  assert.equal(page.returned_count, 1);
+  assert.equal(page.comments_disabled, false);
+  assert.deepEqual(classifyYoutubeCommentPage(page), {
+    comments_disabled: false,
+    comment_count: 38,
+    comment_count_status: "exact",
+    comment_count_source: "youtubejs_comments",
+  });
+
+  const zeroCommentRaw = commentPageFixture({ countText: "0 Comments", comments: [] });
+  zeroCommentRaw.onResponseReceivedEndpoints[0]
+    .reloadContinuationItemsCommand
+    .continuationItems[0]
+    .commentsHeaderRenderer
+    .createRenderer = raw.onResponseReceivedEndpoints[0]
+      .reloadContinuationItemsCommand
+      .continuationItems[0]
+      .commentsHeaderRenderer
+      .createRenderer;
+  assert.equal(youtubeCommentsDisabled(zeroCommentRaw), false);
+  assert.equal(
+    classifyYoutubeCommentPage(normalizeYoutubeCommentPage(zeroCommentRaw)).comment_count_status,
+    "zero_from_surface",
+  );
+});
+
+test("classifyYoutubeCommentPage keeps closed, zero and positive totals distinct from body collection", () => {
   assert.deepEqual(classifyYoutubeCommentPage(emptyYoutubeCommentPage({ totalCount: 0 }), {
     disabled: true,
   }), {
@@ -207,7 +286,7 @@ test("classifyYoutubeCommentPage keeps closed, empty, and parse-failed pages dis
     comments: [],
   });
   assert.equal(failed.comment_count, 12);
-  assert.equal(failed.comment_count_status, "unresolved");
+  assert.equal(failed.comment_count_status, "exact");
 });
 
 test("two-source empty evidence remains unresolved until the official API confirms it", () => {

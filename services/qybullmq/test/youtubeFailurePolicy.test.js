@@ -56,6 +56,43 @@ test("nested transport evidence is retained", () => {
   assert.match(youtubeFailureText(error), /ERR_SSL_WRONG_VERSION_NUMBER/);
 });
 
+test("a required YouTube.js surface shape failure is a parser runtime failure", () => {
+  const cause = new TypeError("Cannot read properties of undefined (reading 'contents')");
+  const error = Object.assign(
+    new Error(`YouTube.js required comments surface failed: ${cause.message}`, { cause }),
+    {
+      name: "YoutubeJsRequiredSurfaceError",
+      required_surface: "comments",
+    },
+  );
+
+  const result = decideYoutubeFailure({ error });
+
+  assert.equal(result.kind, "parser_runtime");
+  assert.equal(result.retry_mode, "default");
+  assert.equal(result.proxy_action, "none");
+});
+
+test("a required YouTube.js surface wrapper does not hide a nested rate limit", () => {
+  const cause = annotateYoutubeFailure(new Error("Too Many Requests"), {
+    status: 429,
+    source: "youtubejs_fetch",
+  });
+  const error = Object.assign(
+    new Error("YouTube.js required comments surface failed", { cause }),
+    {
+      name: "YoutubeJsRequiredSurfaceError",
+      required_surface: "comments",
+    },
+  );
+
+  const result = decideYoutubeFailure({ error });
+
+  assert.equal(result.kind, "youtube_rate_limited");
+  assert.equal(result.retry_mode, "new_identity");
+  assert.equal(result.proxy_action, "cooldown_rate_limit");
+});
+
 test("trusted source on a wrapper cannot borrow TLS text from its cause", () => {
   const error = annotateYoutubeFailure(new TypeError("fetch failed", {
     cause: Object.assign(new Error("SSL wrong version number"), {

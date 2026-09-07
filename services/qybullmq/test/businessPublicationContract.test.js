@@ -133,6 +133,13 @@ function rehashVideoItem(item) {
   return { ...item, item_hash: observationFactsHash(businessValue) };
 }
 
+test("Business Contract accepts an unknown optional comment count without comment bodies", () => {
+  const channelId = "UCoptionalcomments";
+  const item = rehashVideoItem({ ...videoItem(channelId), comment_count: null, comment_count_status: "unresolved" });
+  assert.doesNotThrow(() => validateBusinessPublicationEnvelope(videoDeltaEnvelope(channelId, { upserts: [item] })));
+  assert.equal(Object.hasOwn(item, "comments_first_page"), false);
+});
+
 function videoDeltaEnvelope(channelId, {
   upserts = [],
   retractions = [],

@@ -1,4 +1,5 @@
 import { nanoid } from "nanoid";
+import { isFullCrawlCanaryBatch } from "./fullCrawlCanary.js";
 import { createHash } from "node:crypto";
 import { ensureDefaultAgentConfig, listEnabledAgentConfigs } from "./agentConfig.js";
 import { automaticLocalAgentConfigs } from "./agentExecutionPolicy.js";
@@ -2347,6 +2348,7 @@ async function maybeDispatchContentCompletenessRepairs(
   proxyCapacity,
   now = Date.now(),
 ) {
+  if (isFullCrawlCanaryBatch(queryScheduler.pipeline_cycle_id)) return 0;
   if (!automaticFinalizationActive(queryScheduler)) return 0;
   if (!queryScheduler.pipeline_cycle_id) return 0;
   if (now - lastContentRepairAt < contentRepairIntervalMs) return 0;
@@ -2493,6 +2495,7 @@ async function maybeCompleteAutomaticPipeline(actions, queryScheduler) {
 }
 
 async function maybeRepairFailedChannelRuns(actions, stats, queryScheduler, proxyCapacity, now = Date.now()) {
+  if (isFullCrawlCanaryBatch(queryScheduler.pipeline_cycle_id)) return 0;
   if (now - lastFinalRepairAt < finalRepairIntervalMs) return 0;
   if (!automaticFinalizationActive(queryScheduler)) return 0;
   if (!queryScheduler.pipeline_cycle_id) return 0;

@@ -13,6 +13,7 @@ import {
 } from "../src/migrationSystemRetryRecovery.js";
 import { finalizeDispatchRevision } from "../src/finalizePolicy.js";
 import { queuesByRole } from "../src/queues.js";
+import { YOUTUBEJS_FULL_CRAWL_FETCH_CONTRACT } from "../src/fullCrawlFetchContract.js";
 
 function recoveryAgentJob(overrides = {}) {
   return {
@@ -448,3 +449,55 @@ test("active and legacy recovery scans are both selected under a permanent activ
 
   assert.deepEqual(selectedKinds, ["active", "active", "active", "active", "legacy"]);
 });
+
+for (const originalPresent of [true, false]) {
+  test(`YouTubeJS recovery ${originalPresent ? "retries its original Job" : "blocks a missing original Job"} without dispatching legacy Detail`, async () => {
+    const row = {
+      system_retry_id: 1, candidate_id: 2, status: "dispatched",
+      retry_dispatch_generation: 1, failed_dispatch_generation: 1,
+      snapshot_dispatch_generation: 1,
+      candidate_dispatch_batch_id: "fullcrawl-youtubejs-canary-test",
+      failed_dispatch_batch_id: "fullcrawl-youtubejs-canary-test",
+      run_dispatch_batch_id: "fullcrawl-youtubejs-canary-test",
+      candidate_status: "accepted", candidate_channel_id: "UCtest",
+      run_channel_id: "UCtest", run_candidate_id: 2,
+      run_id: "run-canary", recovery_run_id: "run-canary", channel_latest_run_id: "run-canary",
+      channel_status: "active", run_detail_status: "queued",
+      run_fetch_contract: YOUTUBEJS_FULL_CRAWL_FETCH_CONTRACT,
+      run_fetch_job_id: "original-fetch", api_open_count: 0,
+    };
+    const retried = [];
+    const original = {
+      name: "channel-snapshot",
+      data: { run_id: "run-canary", candidate_id: 2, dispatch_generation: 1 },
+      async getState() { return "failed"; },
+      async retry(state) { retried.push(state); },
+    };
+    const databaseQuery = async (sql, params) => {
+      if (sql.includes("SELECT retry.system_retry_id,retry.migration_intent_id")) {
+        return { rows: params[3] ? [row] : [] };
+      }
+      if (sql.includes("SET recovery_run_id=COALESCE")) {
+        return { rowCount: 1, rows: [{ recovery_run_id: "run-canary" }] };
+      }
+      throw new Error(`Unexpected recovery SQL: ${sql}`);
+    };
+    const reconciler = new MigrationSystemRetryRecoveryReconciler({
+      query: databaseQuery,
+      withTransaction: (action) => action({ query: databaseQuery }),
+      queues: {
+        [queuesByRole.channelCrawl]: {
+          async getJob(id) {
+            assert.equal(id, "original-fetch");
+            return originalPresent ? original : null;
+          },
+        },
+      },
+    });
+    const result = await reconciler.reconcileAvailable({ limit: 1 });
+    assert.deepEqual(retried, originalPresent ? ["failed"] : []);
+    assert.equal(result.detailEnqueued, 0);
+    assert.equal(result.stale, originalPresent ? 0 : 1);
+    assert.deepEqual(result.requiredQueues, [queuesByRole.channelCrawl]);
+  });
+}

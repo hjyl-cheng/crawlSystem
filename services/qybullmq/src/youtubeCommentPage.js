@@ -103,8 +103,16 @@ function explicitDisabledSignal(value, commentContext = false) {
     return value.some((item) => explicitDisabledSignal(item, commentContext));
   }
   return Object.entries(value).some(([key, child]) => (
-    explicitDisabledSignal(child, commentContext || /comment/i.test(key))
+    key !== "commentSimpleboxRenderer"
+      && explicitDisabledSignal(child, commentContext || /comment/i.test(key))
   ));
+}
+
+function hasReturnedCommentEvidence(raw) {
+  if (commentPageHasFirstPage(raw) && Number(raw.returned_count) > 0) return true;
+  if (isYoutubeJsCommentsResult(raw) && raw.contents.length > 0) return true;
+  return commentThreadNodes(raw).length > 0
+    || allNodes(raw, "commentEntityPayload").length > 0;
 }
 
 export function youtubeCommentSurface(raw) {
@@ -115,7 +123,7 @@ export function youtubeCommentSurface(raw) {
     return { status: "available", continuation: continuation.trim() };
   }
   return {
-    status: explicitDisabledSignal(raw) ? "disabled" : "absent",
+    status: youtubeCommentsDisabled(raw) ? "disabled" : "absent",
     continuation: null,
   };
 }
@@ -339,7 +347,7 @@ export function commentPageFromDataApiThreads(raw, {
 
 export function isYoutubeJsCommentsResult(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  if (value.version === 1 && value.sort === "TOP_COMMENTS" && Array.isArray(value.comments)) {
+  if (value.version === 1 && ["TOP_COMMENTS", "NEWEST_FIRST"].includes(value.sort) && Array.isArray(value.comments)) {
     return false;
   }
   if (!Array.isArray(value.contents)) return false;
@@ -452,19 +460,31 @@ export function normalizeYoutubeCommentPage(raw, {
     ?? nonnegativeCount(header?.commentsCount, { locale })
     ?? nonnegativeCount(header?.count, { locale })
     ?? nonnegativeCount(header?.commentsCount?.content, { locale });
-  const fallbackTotal = Number.isSafeInteger(totalCount) && totalCount >= 0 ? totalCount : null;
+  const observedTotal = totalCount ?? raw?.youtubejs_comment_total;
+  const fallbackTotal = Number.isSafeInteger(observedTotal) && observedTotal >= 0 ? observedTotal : null;
   const disabled = youtubeCommentsDisabled(raw);
   const surface = youtubeCommentSurface(raw);
   return {
     version: 1,
     collected_at: collectedAtUtc,
-    sort: "TOP_COMMENTS",
+    sort: raw?.youtubejs_comment_sort === "NEWEST_FIRST" ? "NEWEST_FIRST" : "TOP_COMMENTS",
     total_count: parsedTotal ?? fallbackTotal,
     returned_count: comments.length,
     comments,
     comments_disabled: disabled,
     surface: disabled ? "disabled" : surface.status,
+    ...(raw?.youtubejs_comment_fetch ? { fetch_diagnostics: raw.youtubejs_comment_fetch } : {}),
   };
+}
+
+export function youtubeNewestCommentsEndpoint(raw) {
+  const header = firstNode(raw, "commentsHeaderRenderer")
+    ?? firstNode(raw, "commentsHeaderViewModel");
+  // YouTube.js Comments.applySort uses the second item for NEWEST_FIRST.
+  const menu = firstNode(header, "sortFilterSubMenuRenderer");
+  const endpoint = menu?.subMenuItems?.[1]?.serviceEndpoint;
+  return endpoint?.continuationCommand?.request === "CONTINUATION_REQUEST_TYPE_WATCH_NEXT"
+    && typeof endpoint.continuationCommand.token === "string" ? endpoint : null;
 }
 
 export function commentPageTotalCount(page) {
@@ -476,13 +496,13 @@ export function commentPageTotalCount(page) {
 export function commentPageHasFirstPage(page) {
   return page != null
     && page.version === 1
-    && page.sort === "TOP_COMMENTS"
+    && ["TOP_COMMENTS", "NEWEST_FIRST"].includes(page.sort)
     && Array.isArray(page.comments)
     && Number(page.returned_count) === page.comments.length;
 }
 
 export function youtubeCommentsDisabled(raw) {
-  return explicitDisabledSignal(raw) === true;
+  return !hasReturnedCommentEvidence(raw) && explicitDisabledSignal(raw) === true;
 }
 
 export function classifyYoutubeCommentPage(page, {
@@ -518,7 +538,7 @@ export function classifyYoutubeCommentPage(page, {
     return {
       comments_disabled: false,
       comment_count: total,
-      comment_count_status: "unresolved",
+      comment_count_status: "exact",
       comment_count_source: "youtubejs_comments",
     };
   }

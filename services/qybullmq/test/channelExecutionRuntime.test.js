@@ -6,6 +6,7 @@ import {
   ProxyIdentityChangedError,
   recordChannelExecutionRequest,
 } from "../src/channelExecutionContext.js";
+import { YOUTUBEJS_FULL_CRAWL_FETCH_CONTRACT } from "../src/fullCrawlFetchContract.js";
 
 const proxy = {
   proxy_id: 7,
@@ -95,6 +96,46 @@ test("channel runtime binds both client profiles and checkpoints cookies without
   assert.deepEqual(calls.finishes[0].value.result.failure_decisions, []);
   assert.doesNotMatch(JSON.stringify(calls.finishes[0].value.result), /cookie-secret/);
   assert.equal(runtime.activeAttemptId, null);
+});
+
+test("YouTubeJS Full Crawl acquires only YouTubeJS and checkpoints no yt-dlp state", async () => {
+  const currentProxy = { value: { ...proxy } };
+  const leases = [];
+  const releases = [];
+  const { runtime, calls } = runtimeFixture({
+    runtime: {
+      acquireYtDlp: async () => {
+        leases.push("ytdlp");
+        return { enabled: true };
+      },
+      releaseYtDlp: async () => {
+        releases.push("ytdlp");
+        return { cookie_state: { unexpected: true } };
+      },
+      acquireYoutube: async () => {
+        leases.push("youtubejs");
+        return { enabled: true, mode: "full" };
+      },
+      releaseYoutube: async () => {
+        releases.push("youtubejs");
+        return { duration_ms: 10 };
+      },
+    },
+  });
+  const output = await runtime.run({
+    ...context(currentProxy),
+    prepared: {
+      workloadKind: "channel_full",
+      fetchContract: YOUTUBEJS_FULL_CRAWL_FETCH_CONTRACT,
+    },
+  }, async () => ({ ok: true }));
+
+  assert.deepEqual(leases, ["youtubejs"]);
+  assert.deepEqual(releases, ["youtubejs"]);
+  assert.equal(calls.checkpoints.length, 1);
+  assert.equal(calls.checkpoints[0].state.ytdlp_safari, undefined);
+  assert.equal(output.sessions.ytdlp, null);
+  assert.equal(output.sessions.youtubejs.mode, "full");
 });
 
 test("channel runtime writes the persisted dispatch generation into execution audit", async () => {

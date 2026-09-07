@@ -1787,7 +1787,7 @@ CHECK (
   OR (
     jsonb_typeof(comments_first_page) = 'object'
     AND comments_first_page->>'version' = '1'
-    AND comments_first_page->>'sort' = 'TOP_COMMENTS'
+    AND comments_first_page->>'sort' IN ('TOP_COMMENTS', 'NEWEST_FIRST')
     AND jsonb_typeof(comments_first_page->'comments') = 'array'
     AND (comments_first_page->>'returned_count') ~ '^[0-9]+$'
     AND (comments_first_page->>'returned_count')::int = jsonb_array_length(comments_first_page->'comments')
