@@ -4,8 +4,10 @@ import { ParserContractError } from "./localizedParsing.js";
 const DEFAULT_LOCALE = process.env.YOUTUBE_LANGUAGE || "pt-BR";
 const DAY_MS = 86400000;
 const profileCache = new Map();
+const absoluteDateProfileCache = new Map();
 const NUMBER_TYPES = new Set(["integer", "group", "decimal", "fraction"]);
 const NUMBER_PATTERN = "([\\p{Decimal_Number}](?:[\\p{Decimal_Number}\\s\\u00a0\\u202f.,，．٫٬'’_]*?[\\p{Decimal_Number}])?)";
+const DATE_PART_PATTERN = "[\\p{Decimal_Number}]";
 const UNIT_DAYS = {
   second: 0,
   minute: 0,
@@ -130,6 +132,95 @@ function localeProfile(locale) {
   return profileCache.get(canonical);
 }
 
+function validUtcDay(year, month, day) {
+  if (!Number.isSafeInteger(year) || year < 1900 || year > 3000
+      || !Number.isSafeInteger(month) || month < 1 || month > 12
+      || !Number.isSafeInteger(day) || day < 1 || day > 31) return null;
+  const timestamp = Date.UTC(year, month - 1, day);
+  if (!Number.isFinite(timestamp)) return null;
+  const parsed = new Date(timestamp);
+  if (parsed.getUTCFullYear() !== year
+      || parsed.getUTCMonth() !== month - 1
+      || parsed.getUTCDate() !== day) return null;
+  return parsed.toISOString().slice(0, 10);
+}
+
+function buildAbsoluteDateProfile(localeValue) {
+  const locale = canonicalLocale(localeValue);
+  const patterns = [];
+  const seen = new Set();
+  for (const monthStyle of ["long", "short", "numeric", "2-digit"]) {
+    const formatter = new Intl.DateTimeFormat(locale, {
+      calendar: "gregory",
+      timeZone: "UTC",
+      year: "numeric",
+      month: monthStyle,
+      day: "numeric",
+    });
+    const monthNumbers = new Map();
+    if (!["numeric", "2-digit"].includes(monthStyle)) {
+      for (let month = 1; month <= 12; month += 1) {
+        const monthPart = formatter.formatToParts(new Date(Date.UTC(2006, month - 1, 22)))
+          .find((part) => part.type === "month")?.value;
+        const token = normalize(monthPart, locale);
+        if (token) monthNumbers.set(token, month);
+      }
+    }
+    const parts = formatter.formatToParts(new Date(Date.UTC(2006, 10, 22)));
+    if (!parts.some((part) => part.type === "year")
+        || !parts.some((part) => part.type === "month")
+        || !parts.some((part) => part.type === "day")) continue;
+    const source = parts.map((part) => {
+      if (part.type === "year") return `(?<year>${DATE_PART_PATTERN}{4})`;
+      if (part.type === "day") return `(?<day>${DATE_PART_PATTERN}{1,2})`;
+      if (part.type !== "month") return `\\s*${literalPattern(part.value, locale)}\\s*`;
+      if (["numeric", "2-digit"].includes(monthStyle)) {
+        return `(?<month>${DATE_PART_PATTERN}{1,2})`;
+      }
+      const alternatives = [...monthNumbers.keys()]
+        .sort((left, right) => right.length - left.length)
+        .map((token) => literalPattern(token, locale));
+      return alternatives.length > 0 ? `(?<month>${alternatives.join("|")})` : "";
+    }).join("");
+    if (!source || seen.has(source)) continue;
+    seen.add(source);
+    patterns.push({ regex: new RegExp(source, "u"), monthNumbers });
+  }
+  return { locale, patterns };
+}
+
+function absoluteDateProfile(locale) {
+  const canonical = canonicalLocale(locale);
+  if (!absoluteDateProfileCache.has(canonical)) {
+    absoluteDateProfileCache.set(canonical, buildAbsoluteDateProfile(canonical));
+  }
+  return absoluteDateProfileCache.get(canonical);
+}
+
+export function localizedAbsoluteUtcDay(value, { locale = DEFAULT_LOCALE } = {}) {
+  const raw = String(value ?? "").trim();
+  if (!raw) return null;
+  const isoDate = raw.match(/^(\d{4})-(\d{2})-(\d{2})(?:$|[T\s])/);
+  if (isoDate) {
+    return validUtcDay(Number(isoDate[1]), Number(isoDate[2]), Number(isoDate[3]));
+  }
+
+  const profile = absoluteDateProfile(locale);
+  const normalized = normalize(raw, profile.locale);
+  for (const pattern of profile.patterns) {
+    const match = pattern.regex.exec(normalized);
+    if (!match?.groups) continue;
+    const year = parseLocalizedCount(match.groups.year, { locale: profile.locale });
+    const day = parseLocalizedCount(match.groups.day, { locale: profile.locale });
+    const month = pattern.monthNumbers.size === 0
+      ? parseLocalizedCount(match.groups.month, { locale: profile.locale })
+      : pattern.monthNumbers.get(normalize(match.groups.month, profile.locale));
+    const result = validUtcDay(year, month, day);
+    if (result) return result;
+  }
+  return null;
+}
+
 export function parseLocalizedAgeDays(value, { locale = DEFAULT_LOCALE, now = Date.now() } = {}) {
   const raw = String(value ?? "").trim();
   if (!raw) return null;
@@ -182,13 +273,9 @@ export function localizedPublishedUtcDay(value, {
 } = {}) {
   const raw = String(value ?? "").trim();
   if (!raw) return null;
-  const isoDate = raw.match(/^(\d{4})-(\d{2})-(\d{2})/);
-  if (isoDate) {
-    const publishedAt = Date.UTC(Number(isoDate[1]), Number(isoDate[2]) - 1, Number(isoDate[3]));
-    if (!Number.isFinite(publishedAt)) return null;
-    const roundTrip = new Date(publishedAt).toISOString().slice(0, 10);
-    return roundTrip === `${isoDate[1]}-${isoDate[2]}-${isoDate[3]}` ? roundTrip : null;
-  }
+  const absoluteDay = localizedAbsoluteUtcDay(raw, { locale });
+  if (absoluteDay) return absoluteDay;
+  if (/^\d{4}-\d{2}-\d{2}(?:$|[T\s])/.test(raw)) return null;
 
   const ageDays = parseLocalizedAgeDays(raw, { locale, now });
   if (ageDays == null || !Number.isFinite(ageDays)) return null;

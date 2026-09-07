@@ -21,6 +21,7 @@ import {
   youtubeJsState,
 } from "./youtubeJs.js";
 import { selectYoutubeFailure } from "./youtubeFailurePolicy.js";
+import { isYoutubeJsFullCrawlFetchContract } from "./fullCrawlFetchContract.js";
 
 function zeroBasedBullmqAttempt(job) {
   const attemptsStarted = Number(job?.attemptsStarted);
@@ -53,6 +54,11 @@ function executionSummary({ attemptId, proxy, profileGroup }) {
     youtubejs_profile_id: profileGroup.clients.youtubejs_chrome?.profile_id ?? null,
     ytdlp_profile_id: profileGroup.clients.ytdlp_safari?.profile_id ?? null,
   };
+}
+
+function requiresYtDlp(prepared) {
+  return prepared?.workloadKind !== "channel_full"
+    || !isYoutubeJsFullCrawlFetchContract(prepared.fetchContract);
 }
 
 function errorFromEvidence(evidence) {
@@ -160,6 +166,7 @@ export class ChannelExecutionRuntime {
     managedRequestTracker = null,
   }, callback) {
     if (this.activeAttemptId) throw new Error(`channel execution runtime is already active: ${this.activeAttemptId}`);
+    const shouldAcquireYtDlp = requiresYtDlp(prepared);
     this.activeAttemptId = `preparing:${workerId}:${job?.id ?? "unknown"}`;
     let attemptId = null;
     let store = null;
@@ -251,11 +258,13 @@ export class ChannelExecutionRuntime {
         abort_signal: abortSignal,
       }, async () => {
         assertChannelExecutionIdentity();
-        ytdlpLease = await this.acquireYtDlp(channelId, language, {
-          profile: profileGroup.clients.ytdlp_safari,
-          proxyUrl,
-        });
-        if (!ytdlpLease?.enabled) throw new Error(`yt-dlp fingerprint session unavailable: ${ytdlpLease?.error || "disabled"}`);
+        if (shouldAcquireYtDlp) {
+          ytdlpLease = await this.acquireYtDlp(channelId, language, {
+            profile: profileGroup.clients.ytdlp_safari,
+            proxyUrl,
+          });
+          if (!ytdlpLease?.enabled) throw new Error(`yt-dlp fingerprint session unavailable: ${ytdlpLease?.error || "disabled"}`);
+        }
         youtubeLease = await this.acquireYoutube(channelId, {
           profile: profileGroup.clients.youtubejs_chrome,
           proxyUrl,
@@ -294,20 +303,22 @@ export class ChannelExecutionRuntime {
         cleanupError = cleanupError || caught;
       }
       refreshAttemptState();
-      const ytdlpReleaseStartedCancelled = attemptCancelled();
-      try {
-        ytdlpRelease = await this.releaseYtDlp({
-          cancelled: ytdlpReleaseStartedCancelled,
-          reason: error,
-          signal: abortSignal,
-        });
-      } catch (caught) {
-        cleanupError = cleanupError || caught;
+      const ytdlpReleaseStartedCancelled = ytdlpLease ? attemptCancelled() : false;
+      if (ytdlpLease) {
+        try {
+          ytdlpRelease = await this.releaseYtDlp({
+            cancelled: ytdlpReleaseStartedCancelled,
+            reason: error,
+            signal: abortSignal,
+          });
+        } catch (caught) {
+          cleanupError = cleanupError || caught;
+        }
       }
       refreshAttemptState();
       let ytdlpCancellationApplied = ytdlpReleaseStartedCancelled;
       const terminateReleasedYtDlpIfNeeded = async () => {
-        if (ytdlpCancellationApplied || !attemptCancelled()) return;
+        if (!ytdlpLease || ytdlpCancellationApplied || !attemptCancelled()) return;
         ytdlpCancellationApplied = true;
         try {
           await this.releaseYtDlp({ cancelled: true, reason: error, signal: abortSignal });

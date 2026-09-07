@@ -1,11 +1,135 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 import pg from "pg";
+import { Innertube } from "youtubei.js";
 import { upsertFullVideoContent } from "../src/fullVideoContentStore.js";
+import { closeYoutubeJs, fetchYoutubeJsVideoDetail } from "../src/youtubeJs.js";
+import { youtubeCommentFirstPageSchemaBlock } from "../src/youtubeCommentPageSchema.js";
 
 const { Pool } = pg;
 const integrationUrl = process.env.VIDEO_POSTGRES_TEST_URL;
+
+test("strict YouTubeJS full details retain engagement evidence and first-page comments in PostgreSQL", {
+  skip: !integrationUrl,
+}, async () => {
+  const pool = new Pool({ connectionString: integrationUrl, max: 1 });
+  const client = await pool.connect();
+  const channelId = `UCengagement${randomUUID().replaceAll("-", "")}`;
+  const previousMode = process.env.YOUTUBEJS_EXTRACTOR_MODE;
+  const originalCreate = Innertube.create;
+  const access = { access_status: "public", access_status_source: "youtubejs_player", is_members_only: false };
+  let scenario;
+  let commentRequests;
+  process.env.YOUTUBEJS_EXTRACTOR_MODE = "full";
+  Innertube.create = async () => ({
+    getInfo: async (id) => ({
+      page: [{ microformat: { publish_date: "2026-09-01T00:00:00Z", view_count: 100 } },
+        { contents_memo: { getType: () => scenario === "disabled" ? [{ text: "Comments are turned off." }] : [] } }],
+      basic_info: {
+        id, title: "Engagement evidence", short_description: "Description",
+        duration: scenario === "duration-zero" ? 0 : scenario === "duration-missing" ? null
+          : scenario === "duration-invalid" ? Number.NaN : 60,
+        view_count: 100,
+        like_count: ["exact", "newest"].includes(scenario) ? 7 : scenario === "zero" ? 0 : Number.NaN,
+        is_live: scenario.startsWith("duration-"), is_upcoming: false,
+      },
+      primary_info: scenario === "policy" ? { menu: { top_level_buttons: [{
+        type: "SegmentedLikeDislikeButtonView",
+        like_button: { toggle_button: { default_button: { title: "Like", accessibility_text: "Like" } } },
+      }] } } : null,
+      comments_entry_point_header: ["exact", "newest"].includes(scenario) ? { comment_count: "1 comment" } : null,
+      playability_status: { status: "OK" },
+    }),
+    actions: { execute: async () => {
+      if (scenario === "newest" && ++commentRequests === 1) return { success: true, data: {
+        onResponseReceivedEndpoints: [{ reloadContinuationItemsCommand: { continuationItems: [{
+          commentsHeaderRenderer: { countText: { simpleText: "1 comment" }, sortMenu: {
+            sortFilterSubMenuRenderer: { subMenuItems: [{ selected: true }, { serviceEndpoint: {
+              continuationCommand: { token: "newest-token", request: "CONTINUATION_REQUEST_TYPE_WATCH_NEXT" },
+            } }] },
+          } },
+        }] } }],
+      } };
+      return { success: true, data: ["exact", "newest"].includes(scenario) ? {
+      onResponseReceivedEndpoints: [{ appendContinuationItemsAction: { continuationItems: [{
+        commentThreadRenderer: { commentViewModel: { commentViewModel: {
+          commentId: "first-comment", commentKey: "entity-first",
+        } } },
+      }] } }],
+      frameworkUpdates: { entityBatchUpdate: { mutations: [{ payload: { commentEntityPayload: {
+        key: "entity-first",
+        properties: { commentId: "first-comment", replyLevel: 0, content: { content: "Hello" } },
+        author: { displayName: "Viewer", channelId: "UCviewer" },
+        toolbar: { likeCountNotliked: "0", replyCount: "0" },
+      } } }] } },
+    } : { responseContext: {}, trackingParams: "bare-response" } };
+    } },
+  });
+  try {
+    assert.match((await client.query("SELECT current_database() AS name")).rows[0].name, /_test$/);
+    await client.query("BEGIN");
+    await client.query(youtubeCommentFirstPageSchemaBlock(await readFile(new URL("../src/schema.sql", import.meta.url), "utf8")));
+    await client.query("INSERT INTO crawler.channels(channel_id,channel_url,title,status) VALUES ($1,$2,'Evidence','active')",
+      [channelId, `https://www.youtube.com/channel/${channelId}`]);
+    for (const [name, count, status, source] of [
+      ["exact", "7", "exact", "youtubejs_next"],
+      ["newest", "7", "exact", "youtubejs_next"],
+      ["zero", "0", "exact", "youtubejs_next"],
+      ["policy", "0", "zero_from_empty", "youtubejs_like_count_not_public"],
+      ["missing", null, "unresolved", null],
+      ["disabled", null, "unresolved", null],
+      ["duration-zero", null, "unresolved", null],
+      ["duration-missing", null, "unresolved", null],
+      ["duration-invalid", null, "unresolved", null],
+    ]) {
+      scenario = name;
+      commentRequests = 0;
+      const detail = await fetchYoutubeJsVideoDetail(`evidence-${name}`, { strictRequiredSurfaces: true, optionalComments: true, detailMode: "full" });
+      const contentKey = await upsertFullVideoContent(client, {
+        candidate: { channel_id: channelId, run_id: null, content_type: "video", type_source: "youtube_watch_canonical",
+          type_authoritative: true, source_content_id: detail.id, position: 1, title: detail.title },
+        state: { detail, access }, access, locale: "en",
+      });
+      const row = (await client.query("SELECT duration_seconds,duration_status,duration_source,like_count,like_count_status,like_count_source,comment_count,comment_count_status,comments_disabled,comments_first_page FROM crawler.contents WHERE content_key=$1", [contentKey])).rows[0];
+      const unresolvedDuration = name.startsWith("duration-");
+      assert.equal(row.duration_seconds == null ? null : Number(row.duration_seconds), unresolvedDuration ? null : 60, name);
+      assert.equal(row.duration_status, unresolvedDuration ? "unresolved" : "exact", name);
+      assert.equal(row.duration_source, unresolvedDuration ? null : "youtubejs_player", name);
+      assert.equal(row.like_count, count, name);
+      assert.equal(row.like_count_status, status, name);
+      assert.equal(row.like_count_source, source, name);
+      if (["exact", "newest"].includes(name)) {
+        assert.equal(row.comment_count, "1");
+        assert.equal(row.comments_first_page.returned_count, 1);
+        assert.equal(row.comments_first_page.comments[0].text, "Hello");
+        assert.equal(row.comments_first_page.sort, name === "newest" ? "NEWEST_FIRST" : "TOP_COMMENTS");
+        if (name === "newest") assert.equal(commentRequests, 2);
+      } else if (name === "disabled") {
+        assert.equal(row.comment_count, "0");
+        assert.equal(row.comment_count_status, "disabled");
+        assert.equal(row.comments_disabled, true);
+      } else if (unresolvedDuration) {
+        assert.equal(row.comment_count, "0");
+        assert.equal(row.comment_count_status, "zero_from_empty");
+        assert.equal(row.comments_disabled, null);
+      } else {
+        assert.equal(row.comment_count, null);
+        assert.equal(row.comment_count_status, "unresolved");
+        assert.equal(row.comments_disabled, null);
+      }
+    }
+  } finally {
+    await closeYoutubeJs();
+    Innertube.create = originalCreate;
+    if (previousMode === undefined) delete process.env.YOUTUBEJS_EXTRACTOR_MODE;
+    else process.env.YOUTUBEJS_EXTRACTOR_MODE = previousMode;
+    await client.query("ROLLBACK").catch(() => {});
+    client.release();
+    await pool.end();
+  }
+});
 
 test("Full Crawl persists numeric Video Current and retains trusted facts on weaker retries", {
   skip: !integrationUrl,

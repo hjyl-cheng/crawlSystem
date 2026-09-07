@@ -4,6 +4,12 @@ import { publicationGapRepairJobIntent } from "./publicationGapRepairExecution.j
 import { queuesByRole } from "./queues.js";
 import { materializeCheckpointRepairRun } from "./checkpointRepair.js";
 import { MigrationRetryIntentConflictError } from "./migrationRetryIntent.js";
+import {
+  assertSameFullCrawlFetchContract,
+  newFullCrawlFetchContractForJob,
+  normalizeFullCrawlFetchContract,
+  readFullCrawlFetchContractFromIntent,
+} from "./fullCrawlFetchContract.js";
 
 const LEGACY_INCREMENTAL_RUNTIME_KEYS = Object.freeze([
   "run_id",
@@ -117,6 +123,19 @@ async function cachePolicyOnJob(job, fields) {
   job.data = data;
 }
 
+async function cacheFetchContractOnJob(job, fetchContract) {
+  const contract = normalizeFullCrawlFetchContract(fetchContract, { missingAsLegacy: false });
+  const hasCached = Object.prototype.hasOwnProperty.call(job.data ?? {}, "fetch_contract");
+  if (hasCached) assertSameFullCrawlFetchContract(contract, job.data.fetch_contract);
+  const data = { ...(job.data ?? {}), fetch_contract: contract };
+  if (typeof job.updateData === "function"
+      && (!hasCached || job.data.fetch_contract?.contract_hash !== contract.contract_hash)) {
+    await job.updateData(data);
+  }
+  job.data = data;
+  return contract;
+}
+
 function ready({ businessRunId, workloadKind, fields, resumed = false, job, extra = {} }) {
   return {
     kind: "ready",
@@ -215,6 +234,7 @@ export class ProxyBusinessRunPreparer {
     incrementalRunStore,
     resolvedPolicy,
     bindingStore = new BusinessRunBindingStore({ withTransaction }),
+    fetchContractEnvironment = process.env,
   } = {}) {
     if (typeof queryFn !== "function") throw new TypeError("queryFn is required");
     this.query = queryFn;
@@ -222,6 +242,7 @@ export class ProxyBusinessRunPreparer {
     this.resolvedPolicy = resolvedPolicy;
     this.bindingStore = bindingStore;
     this.withTransaction = withTransaction;
+    this.fetchContractEnvironment = fetchContractEnvironment;
   }
 
   async prepareChannel(job) {
@@ -366,7 +387,8 @@ export class ProxyBusinessRunPreparer {
       ? await this.query(
           `SELECT run.run_id,binding.business_run_key,binding.business_run_id,
                   binding.status AS binding_status,binding.identity_policy_id,
-                  binding.identity_policy_version,binding.identity_policy_hash
+                  binding.identity_policy_version,binding.identity_policy_hash,
+                  binding.intent_json
            FROM crawler.channel_runs run
            LEFT JOIN crawler.business_run_bindings binding
              ON binding.business_run_id=run.run_id
@@ -391,6 +413,7 @@ export class ProxyBusinessRunPreparer {
         );
       }
       this.#assertRowPolicy(attached, fields);
+      const fetchContract = readFullCrawlFetchContractFromIntent(attached.intent_json).contract;
       const binding = {
         business_run_key: attached.business_run_key,
         business_run_id: attached.business_run_id,
@@ -408,6 +431,7 @@ export class ProxyBusinessRunPreparer {
           : checkpointRepair ? { checkpoint_target_run_id: checkpointTargetRunId } : {},
       );
       await cachePolicyOnJob(job, fields);
+      await cacheFetchContractOnJob(job, fetchContract);
       return ready({
         businessRunId: binding.business_run_id,
         workloadKind: "channel_full",
@@ -417,6 +441,7 @@ export class ProxyBusinessRunPreparer {
         extra: {
           binding,
           businessRunKey: binding.business_run_key,
+          fetchContract,
           ...(checkpointRepair ? { checkpointTargetRunId } : {}),
         },
       });
@@ -425,6 +450,22 @@ export class ProxyBusinessRunPreparer {
       throw new TypeError(
         `cached Business Run identity conflicts: ${cachedBusinessRunKey} != ${identity.businessRunKey}`,
       );
+    }
+    const existingBindingRows = await this.query(
+      `SELECT business_run_key,business_run_id,status,intent_json
+       FROM crawler.business_run_bindings
+       WHERE business_run_key=$1
+       LIMIT 1`,
+      [identity.businessRunKey],
+    );
+    const existingBinding = existingBindingRows.rows[0]?.business_run_key === identity.businessRunKey
+      ? existingBindingRows.rows[0]
+      : null;
+    const fetchContract = existingBinding
+      ? readFullCrawlFetchContractFromIntent(existingBinding.intent_json).contract
+      : newFullCrawlFetchContractForJob(job, this.fetchContractEnvironment);
+    if (Object.prototype.hasOwnProperty.call(job.data ?? {}, "fetch_contract")) {
+      assertSameFullCrawlFetchContract(fetchContract, job.data.fetch_contract);
     }
     const resolved = await this.bindingStore.resolve({
       businessRunKey: identity.businessRunKey,
@@ -445,6 +486,7 @@ export class ProxyBusinessRunPreparer {
         publication_gap_domains: publicationGapIntent?.domains ?? null,
         publication_gap_root_run_id: publicationGapIntent?.rootRunId ?? null,
         publication_gap_scope: publicationGapIntent?.scope ?? null,
+        fetch_contract: fetchContract,
         ...(checkpointRepair ? { checkpoint_target_run_id: checkpointTargetRunId } : {}),
       },
     });
@@ -471,6 +513,7 @@ export class ProxyBusinessRunPreparer {
       checkpointRepair ? { checkpoint_target_run_id: checkpointTargetRunId } : {},
     );
     await cachePolicyOnJob(job, fields);
+    await cacheFetchContractOnJob(job, fetchContract);
     return ready({
       businessRunId: resolved.binding.business_run_id,
       workloadKind: "channel_full",
@@ -480,6 +523,7 @@ export class ProxyBusinessRunPreparer {
       extra: {
         binding: resolved.binding,
         businessRunKey: identity.businessRunKey,
+        fetchContract,
         ...(checkpointRepair ? { checkpointTargetRunId } : {}),
       },
     });

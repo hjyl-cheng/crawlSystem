@@ -1,6 +1,7 @@
 import { Queue, QueueEvents } from "bullmq";
 import IORedis from "ioredis";
 import { createHash } from "node:crypto";
+import { FullCrawlRoutingQueue } from "./fullCrawlCanary.js";
 
 export const queueNames = [
   "youtube-query-quality",
@@ -105,7 +106,7 @@ export function createQueues() {
   return Object.fromEntries(
     queueNames.map((name) => [
       name,
-      new Queue(name, {
+      new (name === queuesByRole.channelCrawl ? FullCrawlRoutingQueue : Queue)(name, {
         connection: redisOptions,
         defaultJobOptions,
         ...(bullmqPrefix ? { prefix: bullmqPrefix } : {}),

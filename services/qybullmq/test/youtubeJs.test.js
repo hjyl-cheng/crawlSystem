@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   collectYoutubeJsUploadBundle,
+  fetchYoutubeJsVideoInfoWithTerminalFallback,
   isYoutubeJsBotChallenge,
   normalizeYoutubeJsFeedItem,
   normalizeYoutubeJsVideoInfo,
@@ -13,7 +14,9 @@ import {
   youtubeJsChannelVerification,
   youtubeJsDetailEnabled,
 } from "../src/youtubeJs.js";
+import { decideYoutubeFailure } from "../src/youtubeFailurePolicy.js";
 import { isParserContractError } from "../src/localizedParsing.js";
+import { retryableRotaFailure } from "../src/managedWorkerExecution.js";
 
 function infoFixture(values = {}) {
   return {
@@ -47,6 +50,36 @@ function infoFixture(values = {}) {
       : { comment_count: "87 comments" },
   };
 }
+
+test("video detail preserves exact likes and distinguishes non-public likes from missing data", () => {
+  for (const value of [7, 0]) {
+    const detail = normalizeYoutubeJsVideoInfo(infoFixture({ basic_info: { like_count: value } }));
+    assert.equal(detail.like_count, value);
+    assert.equal(detail.like_count_status, "exact");
+    assert.equal(detail.like_count_source, "youtubejs_next");
+  }
+  for (const [label, value, status, source] of [
+    ["0", 0, "exact", "youtubejs_next_button"],
+    ["17", 17, "exact", "youtubejs_next_button"],
+    ["Like", 0, "zero_from_empty", "youtubejs_like_count_not_public"],
+  ]) {
+    const info = infoFixture({ basic_info: { like_count: Number.NaN } });
+    info.primary_info = { menu: { top_level_buttons: [{
+      type: "SegmentedLikeDislikeButtonView",
+      like_count: Number.NaN,
+      short_like_count: label,
+      like_button: { toggle_button: { default_button: { title: label, accessibility_text: "Like" } } },
+    }] } };
+    const detail = normalizeYoutubeJsVideoInfo(info);
+    assert.equal(detail.like_count, value);
+    assert.equal(detail.like_count_status, status);
+    assert.equal(detail.like_count_source, source);
+  }
+  const missing = normalizeYoutubeJsVideoInfo(infoFixture({ basic_info: { like_count: Number.NaN } }));
+  assert.equal(missing.like_count, null);
+  assert.equal(missing.like_count_status, "unresolved");
+  assert.equal(missing.like_count_source, null);
+});
 
 test("video details default to yt-dlp while YouTube.js remains available for channels", () => {
   const previous = process.env.YOUTUBEJS_EXTRACTOR_MODE;
@@ -689,7 +722,9 @@ test("normalizeYoutubeJsVideoInfo preserves second timestamps and exact engageme
   assert.equal(detail.published_at_precision, "second");
   assert.equal(detail.duration_seconds, 2111);
   assert.equal(detail.duration_source, "youtubejs_player");
+  assert.equal(detail.view_count, 12383);
   assert.equal(detail.view_count_text, "12383");
+  assert.equal(detail.view_count_status, "exact");
   assert.equal(detail.like_count, 1487);
   assert.equal(detail.comment_count, 87);
   assert.equal(detail.comments_disabled, false);
@@ -758,7 +793,7 @@ test("normalizeYoutubeJsVideoInfo keeps a stored first comment page", () => {
   assert.equal(detail.comments_first_page, page);
 });
 
-test("a header count without first-page comments stays unresolved instead of becoming zero", () => {
+test("a header count remains exact independently of missing first-page comments", () => {
   const detail = normalizeYoutubeJsVideoInfo(infoFixture({
     comments_entry_point_header: null,
   }), {
@@ -770,7 +805,7 @@ test("a header count without first-page comments stays unresolved instead of bec
     comments: [],
   });
   assert.equal(detail.comment_count, 12);
-  assert.equal(detail.comment_count_status, "unresolved");
+  assert.equal(detail.comment_count_status, "exact");
   assert.equal(detail.comments_disabled, false);
 });
 
@@ -874,6 +909,44 @@ test("normalizeYoutubeJsVideoInfo retains genuine date-only precision", () => {
   assert.equal(detail.published_at_precision, "date_only");
 });
 
+test("normalizeYoutubeJsVideoInfo accepts a localized absolute Next publication date", () => {
+  const info = infoFixture();
+  delete info.page[0].microformat.publish_date;
+  delete info.page[0].microformat.upload_date;
+  info.primary_info = { published: "18 de ago. de 2026" };
+
+  const detail = normalizeYoutubeJsVideoInfo(info, null, { locale: "pt-BR" });
+
+  assert.equal(detail.published_at, "2026-08-18T00:00:00.000Z");
+  assert.equal(detail.published_text, "18 de ago. de 2026");
+  assert.equal(detail.published_at_status, "exact");
+  assert.equal(detail.published_at_precision, "date_only");
+  assert.equal(detail.published_at_source, "youtubejs_next_date_text");
+});
+
+test("normalizeYoutubeJsVideoInfo keeps Player seconds over a Next date", () => {
+  const info = infoFixture();
+  info.primary_info = { published: "18 de ago. de 2026" };
+
+  const detail = normalizeYoutubeJsVideoInfo(info, null, { locale: "pt-BR" });
+
+  assert.equal(detail.published_at, "2026-07-10T00:00:09.000Z");
+  assert.equal(detail.published_at_precision, "second");
+  assert.equal(detail.published_at_source, "youtubejs_player_microformat");
+});
+
+test("normalizeYoutubeJsVideoInfo uses an exact Next view count when Player omits it", () => {
+  const info = infoFixture({ basic_info: { view_count: null } });
+  delete info.page[0].microformat.view_count;
+  info.primary_info = { view_count: "43 views" };
+
+  const detail = normalizeYoutubeJsVideoInfo(info, null, { locale: "en" });
+
+  assert.equal(detail.view_count, 43);
+  assert.equal(detail.view_count_status, "exact");
+  assert.equal(detail.view_count_source, "youtubejs_next");
+});
+
 test("generic WEB playability errors do not override a complete public metadata surface", () => {
   const detail = normalizeYoutubeJsVideoInfo(infoFixture({
     playability_status: { status: "UNPLAYABLE", reason: "Video unavailable" },
@@ -919,6 +992,372 @@ test("an unknown LOGIN_REQUIRED reason cannot override a complete public metadat
   assert.equal(detail.access_status, "public");
   assert.equal(detail.playability_kind, "inconclusive");
   assert.equal(detail.playability_reason_code, "unsupported_login_required_reason");
+});
+
+test("Video Detail recovers an uploader-removed terminal reason hidden by WEB", async () => {
+  const calls = [];
+  const webError = Object.assign(new Error("This video is unavailable"), {
+    info: { status: "ERROR", reason: "Video unavailable" },
+  });
+  const androidError = Object.assign(new Error("This video is unavailable"), {
+    info: { status: "ERROR", reason: "This video has been removed by the uploader" },
+  });
+  const client = {
+    async getInfo(videoId, options) {
+      calls.push(["getInfo", videoId, options.client]);
+      throw webError;
+    },
+    async getBasicInfo(videoId, options) {
+      calls.push(["getBasicInfo", videoId, options.client]);
+      throw androidError;
+    },
+  };
+
+  const result = await fetchYoutubeJsVideoInfoWithTerminalFallback(client, "Ue6kayghUeQ");
+
+  assert.deepEqual(calls, [
+    ["getInfo", "Ue6kayghUeQ", "WEB"],
+    ["getInfo", "Ue6kayghUeQ", "IOS"],
+    ["getInfo", "Ue6kayghUeQ", "ANDROID"],
+    ["getBasicInfo", "Ue6kayghUeQ", "ANDROID"],
+  ]);
+  assert.equal(result.kind, "terminal");
+  assert.equal(result.detail.id, "Ue6kayghUeQ");
+  assert.equal(result.detail.access_status, "unavailable");
+  assert.equal(result.detail.playability_reason_code, "uploader_removed");
+  assert.equal(result.detail.youtubejs_client, "ANDROID");
+});
+
+test("Video Detail recovers a private terminal reason hidden by WEB", async () => {
+  const primary = infoFixture({
+    basic_info: { view_count: null },
+    playability_status: { status: "LOGIN_REQUIRED", reason: "Please sign in" },
+  });
+  delete primary.page[0].microformat.publish_date;
+  delete primary.page[0].microformat.upload_date;
+  delete primary.page[0].microformat.view_count;
+  const privateInfo = infoFixture({
+    basic_info: { id: null, view_count: null },
+    playability_status: { status: "LOGIN_REQUIRED", reason: "This video is private" },
+  });
+  delete privateInfo.page[0].microformat.publish_date;
+  delete privateInfo.page[0].microformat.upload_date;
+  delete privateInfo.page[0].microformat.view_count;
+  const client = {
+    getInfo: async () => primary,
+    getBasicInfo: async () => privateInfo,
+  };
+
+  const result = await fetchYoutubeJsVideoInfoWithTerminalFallback(client, "YagFmyEQdVc");
+
+  assert.equal(result.kind, "terminal");
+  assert.equal(result.detail.id, "YagFmyEQdVc");
+  assert.equal(result.detail.access_status, "private");
+  assert.equal(result.detail.playability_reason_code, "private");
+  assert.equal(result.detail.youtubejs_client, "ANDROID");
+});
+
+test("Video Detail accepts a complete IOS response after an inconclusive WEB response", async () => {
+  const calls = [];
+  const primary = infoFixture({
+    basic_info: { view_count: null },
+    playability_status: { status: "LOGIN_REQUIRED", reason: "Please sign in" },
+  });
+  delete primary.page[0].microformat.publish_date;
+  delete primary.page[0].microformat.upload_date;
+  delete primary.page[0].microformat.view_count;
+  const publicInfo = infoFixture({
+    playability_status: { status: "OK", reason: null },
+  });
+  const client = {
+    async getInfo(videoId, options) {
+      calls.push(["getInfo", videoId, options.client]);
+      return options.client === "IOS" ? publicInfo : primary;
+    },
+    async getBasicInfo() {
+      throw new Error("basic probe must not run after IOS succeeds");
+    },
+  };
+
+  const result = await fetchYoutubeJsVideoInfoWithTerminalFallback(client, "r4zSQjKMVno");
+
+  assert.deepEqual(calls, [
+    ["getInfo", "r4zSQjKMVno", "WEB"],
+    ["getInfo", "r4zSQjKMVno", "IOS"],
+  ]);
+  assert.equal(result.kind, "info");
+  assert.equal(result.info, publicInfo);
+  assert.equal(result.client, "IOS");
+});
+
+test("Video Detail falls through IOS and accepts a complete ANDROID response", async () => {
+  const calls = [];
+  const inconclusive = infoFixture({
+    basic_info: { view_count: null },
+    playability_status: { status: "LOGIN_REQUIRED", reason: "Please sign in" },
+  });
+  delete inconclusive.page[0].microformat.publish_date;
+  delete inconclusive.page[0].microformat.upload_date;
+  delete inconclusive.page[0].microformat.view_count;
+  const publicInfo = infoFixture({
+    playability_status: { status: "OK", reason: null },
+  });
+  const client = {
+    async getInfo(videoId, options) {
+      calls.push(["getInfo", videoId, options.client]);
+      return options.client === "ANDROID" ? publicInfo : inconclusive;
+    },
+    async getBasicInfo() {
+      throw new Error("basic probe must not run after ANDROID succeeds");
+    },
+  };
+
+  const result = await fetchYoutubeJsVideoInfoWithTerminalFallback(client, "69tt-8JAqO4");
+
+  assert.deepEqual(calls, [
+    ["getInfo", "69tt-8JAqO4", "WEB"],
+    ["getInfo", "69tt-8JAqO4", "IOS"],
+    ["getInfo", "69tt-8JAqO4", "ANDROID"],
+  ]);
+  assert.equal(result.kind, "info");
+  assert.equal(result.info, publicInfo);
+  assert.equal(result.client, "ANDROID");
+});
+
+test("Video Detail requests a new Route after every supported client stays inconclusive", async () => {
+  const calls = [];
+  const inconclusive = infoFixture({
+    basic_info: { view_count: null },
+    playability_status: { status: "LOGIN_REQUIRED", reason: "Please sign in" },
+  });
+  delete inconclusive.page[0].microformat.publish_date;
+  delete inconclusive.page[0].microformat.upload_date;
+  delete inconclusive.page[0].microformat.view_count;
+  const client = {
+    async getInfo(videoId, options) {
+      calls.push(["getInfo", videoId, options.client]);
+      return inconclusive;
+    },
+    async getBasicInfo(videoId, options) {
+      calls.push(["getBasicInfo", videoId, options.client]);
+      return inconclusive;
+    },
+  };
+
+  await assert.rejects(
+    fetchYoutubeJsVideoInfoWithTerminalFallback(client, "gQtq0Dyjo0A"),
+    (error) => {
+      assert.equal(isParserContractError(error), false);
+      assert.equal(error.youtube_collection_failure, true);
+      assert.equal(error.video_id, "gQtq0Dyjo0A");
+      const decision = decideYoutubeFailure({ error });
+      assert.equal(decision.kind, "youtube_challenge");
+      assert.equal(decision.retry_mode, "new_identity");
+      assert.notEqual(decision.proxy_action, "none");
+      assert.deepEqual(retryableRotaFailure(error), {
+        observation: "youtube_challenge",
+        source: "youtubejs_player",
+      });
+      return true;
+    },
+  );
+  assert.deepEqual(calls, [
+    ["getInfo", "gQtq0Dyjo0A", "WEB"],
+    ["getInfo", "gQtq0Dyjo0A", "IOS"],
+    ["getInfo", "gQtq0Dyjo0A", "ANDROID"],
+    ["getBasicInfo", "gQtq0Dyjo0A", "ANDROID"],
+  ]);
+});
+
+test("Video Detail requests a new Route when playable clients lack the required public surface", async () => {
+  const calls = [];
+  const loginRequired = infoFixture({
+    basic_info: { view_count: null },
+    playability_status: { status: "LOGIN_REQUIRED", reason: "Please sign in" },
+  });
+  delete loginRequired.page[0].microformat.publish_date;
+  delete loginRequired.page[0].microformat.upload_date;
+  delete loginRequired.page[0].microformat.view_count;
+  const incompletePublic = infoFixture({
+    playability_status: { status: "OK", reason: null },
+  });
+  delete incompletePublic.page[0].microformat.publish_date;
+  delete incompletePublic.page[0].microformat.upload_date;
+  const client = {
+    async getInfo(videoId, options) {
+      calls.push(["getInfo", videoId, options.client]);
+      return options.client === "WEB" ? loginRequired : incompletePublic;
+    },
+    async getBasicInfo(videoId, options) {
+      calls.push(["getBasicInfo", videoId, options.client]);
+      return incompletePublic;
+    },
+  };
+
+  await assert.rejects(
+    fetchYoutubeJsVideoInfoWithTerminalFallback(client, "incomplete-public-video"),
+    (error) => {
+      assert.equal(decideYoutubeFailure({ error }).kind, "youtube_challenge");
+      assert.equal(error.youtube_client_attempts.at(-1)?.playability_status, "OK");
+      return true;
+    },
+  );
+  assert.deepEqual(calls, [
+    ["getInfo", "incomplete-public-video", "WEB"],
+    ["getInfo", "incomplete-public-video", "IOS"],
+    ["getInfo", "incomplete-public-video", "ANDROID"],
+    ["getBasicInfo", "incomplete-public-video", "ANDROID"],
+  ]);
+});
+
+test("Video Detail accepts a mobile Player when Next supplies a localized absolute date", async () => {
+  const calls = [];
+  const web = infoFixture({ playability_status: { status: "OK", reason: null } });
+  delete web.page[0].microformat.publish_date;
+  delete web.page[0].microformat.upload_date;
+  const mobile = infoFixture({ playability_status: { status: "OK", reason: null } });
+  delete mobile.page[0].microformat.publish_date;
+  delete mobile.page[0].microformat.upload_date;
+  mobile.primary_info = { published: "18 de ago. de 2026" };
+  const client = {
+    async getInfo(videoId, options) {
+      calls.push([videoId, options.client]);
+      return options.client === "WEB" ? web : mobile;
+    },
+  };
+
+  const result = await fetchYoutubeJsVideoInfoWithTerminalFallback(client, "localized-date", {
+    locale: "pt-BR",
+  });
+
+  assert.equal(result.kind, "info");
+  assert.equal(result.client, "IOS");
+  assert.deepEqual(calls, [
+    ["localized-date", "WEB"],
+    ["localized-date", "IOS"],
+  ]);
+});
+
+test("Video metrics mode does not require fresh publication or duration", async () => {
+  const calls = [];
+  const metrics = infoFixture({
+    basic_info: { duration: null, view_count: 43 },
+    playability_status: { status: "OK", reason: null },
+  });
+  delete metrics.page[0].microformat.publish_date;
+  delete metrics.page[0].microformat.upload_date;
+  delete metrics.page[0].microformat.length_seconds;
+  const client = {
+    async getInfo(videoId, options) {
+      calls.push([videoId, options.client]);
+      return metrics;
+    },
+  };
+
+  const result = await fetchYoutubeJsVideoInfoWithTerminalFallback(client, "metrics-only", {
+    detailMode: "metrics",
+  });
+
+  assert.equal(result.kind, "info");
+  assert.equal(result.client, "WEB");
+  assert.deepEqual(calls, [["metrics-only", "WEB"]]);
+});
+
+test("Video metrics mode still rejects an inconclusive sign-in response with only a view count", async () => {
+  const metrics = infoFixture({
+    basic_info: { duration: null, view_count: 43 },
+    playability_status: { status: "LOGIN_REQUIRED", reason: "Please sign in" },
+  });
+  delete metrics.page[0].microformat.publish_date;
+  delete metrics.page[0].microformat.upload_date;
+  delete metrics.page[0].microformat.length_seconds;
+  const calls = [];
+  const client = {
+    async getInfo(_videoId, options) {
+      calls.push(options.client);
+      return metrics;
+    },
+    async getBasicInfo(_videoId, options) {
+      calls.push(`basic:${options.client}`);
+      return metrics;
+    },
+  };
+
+  await assert.rejects(
+    fetchYoutubeJsVideoInfoWithTerminalFallback(client, "sign-in-metrics", {
+      detailMode: "metrics",
+    }),
+    (error) => decideYoutubeFailure({ error }).kind === "youtube_challenge",
+  );
+  assert.deepEqual(calls, ["WEB", "IOS", "ANDROID", "basic:ANDROID"]);
+});
+
+test("Video Detail does not run a terminal probe for an unrelated request failure", async () => {
+  const original = new Error("socket connection reset by peer");
+  let probeCalls = 0;
+  const client = {
+    async getInfo() {
+      throw original;
+    },
+    async getBasicInfo() {
+      probeCalls += 1;
+      return infoFixture();
+    },
+  };
+
+  await assert.rejects(
+    fetchYoutubeJsVideoInfoWithTerminalFallback(client, "network-failure"),
+    (error) => error === original,
+  );
+  assert.equal(probeCalls, 0);
+});
+
+test("Video Detail does not hide a route failure from the terminal probe", async () => {
+  const primary = Object.assign(new Error("This video is unavailable"), {
+    info: { status: "ERROR", reason: "Video unavailable" },
+  });
+  const routeFailure = new Error("YouTube.js request failed HTTP 429");
+  const client = {
+    async getInfo() {
+      throw primary;
+    },
+    async getBasicInfo() {
+      throw routeFailure;
+    },
+  };
+
+  await assert.rejects(
+    fetchYoutubeJsVideoInfoWithTerminalFallback(client, "rate-limited-probe"),
+    (error) => error === routeFailure,
+  );
+});
+
+test("Video Detail surfaces a bot challenge returned by the terminal probe", async () => {
+  const primary = Object.assign(new Error("This video is unavailable"), {
+    info: { status: "ERROR", reason: "Video unavailable" },
+  });
+  const client = {
+    async getInfo() {
+      throw primary;
+    },
+    async getBasicInfo() {
+      return {
+        playability_status: {
+          status: "LOGIN_REQUIRED",
+          reason: "Sign in to confirm you're not a bot",
+        },
+      };
+    },
+  };
+
+  await assert.rejects(
+    fetchYoutubeJsVideoInfoWithTerminalFallback(client, "challenged-probe"),
+    (error) => {
+      assert.match(error.message, /bot challenge/i);
+      assert.equal(error.youtube_failure_evidence?.client, "ANDROID");
+      return true;
+    },
+  );
 });
 
 test("bot challenge detection distinguishes IP blocks from ordinary sign-in restrictions", () => {
