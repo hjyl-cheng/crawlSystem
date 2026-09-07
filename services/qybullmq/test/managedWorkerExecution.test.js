@@ -7,6 +7,21 @@ import {
   validateWorkerQueueConfiguration,
 } from "../src/managedWorkerExecution.js";
 
+test("stale detail ownership overrides earlier network diagnostics and never switches Route", async () => {
+  const error = Object.assign(new Error("Full Crawl Detail execution was superseded"), {
+    code: "CONTENT_DETAIL_EXECUTION_FENCE_STALE",
+    channel_execution_attempt: { failure_decisions: [{ kind: "proxy_transport" }] },
+  });
+  assert.equal(retryableRotaFailure(error), null);
+  let checkpoints = 0;
+  await assert.rejects(executeManagedWorkerAttempt({
+    job: { queueName: "youtube-channel-crawl" },
+    execute: async () => { throw error; },
+    persistRetryableCheckpoint: async () => { checkpoints += 1; return true; },
+  }), value => value === error);
+  assert.equal(checkpoints, 0);
+});
+
 test("managed Worker queue configuration is Role-exclusive", () => {
   assert.deepEqual(
     validateWorkerQueueConfiguration({

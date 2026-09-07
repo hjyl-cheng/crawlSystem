@@ -9,6 +9,7 @@ import {
   recordChannelCandidateSystemFailure,
   resolveMigrationSystemRetryItems,
   retryableSystemFailureDecision,
+  isStaleExecutionFailure,
   settleChannelCandidateJobFailure,
 } from "./managedWorkerJob.js";
 import { decideYoutubeFailure } from "./youtubeFailurePolicy.js";
@@ -135,12 +136,14 @@ export async function runChannelCandidateWorkerJobWithDurableSettlement({
       settlement = await recordChannelCandidateSystemFailure(query, attemptJob, {
         message: failure.message,
         error,
-        systemFailureTerminal: attemptJob.attemptsMade >= maxAttempts,
+        systemFailureTerminal: isStaleExecutionFailure(error) || attemptJob.attemptsMade >= maxAttempts,
       });
     } catch (persistenceError) {
       throw durabilityError(error, persistenceError);
     }
     if (!settlement.recorded) {
+      // A newer owner must remain untouched, including by failure settlement.
+      if (isStaleExecutionFailure(error)) throw error;
       throw durabilityError(
         error,
         new Error(`Candidate attempt fence rejected failed Job: ${job?.id}`),
@@ -214,7 +217,8 @@ export async function failChannelCandidateWorkerJob({
         disposition,
         message: failure.message,
         error,
-        systemFailureTerminal: failure.systemFailure != null && attemptsMade >= maxAttempts,
+        systemFailureTerminal: failure.systemFailure != null
+          && (isStaleExecutionFailure(error) || attemptsMade >= maxAttempts),
         snapshotPatch: {},
       });
     }

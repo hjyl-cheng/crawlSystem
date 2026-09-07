@@ -1,5 +1,6 @@
 import { queuesByRole } from "./queues.js";
 import { selectYoutubeFailure } from "./youtubeFailurePolicy.js";
+import { isStaleExecutionFailure } from "./managedWorkerJob.js";
 
 const RETRYABLE_ROUTE_FAILURES = new Set([
   "proxy_transport",
@@ -92,6 +93,7 @@ export function validateWorkerQueueConfiguration({
 }
 
 export function retryableRotaFailure(error) {
+  if (isStaleExecutionFailure(error)) return null;
   const selected = failureSelections(error)
     .filter((selection) => RETRYABLE_ROUTE_FAILURES.has(selection?.decision?.kind))
     .sort((left, right) => (

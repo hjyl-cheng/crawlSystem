@@ -53,6 +53,7 @@ import {
   signalReadyDiscoveryPageQualifications,
 } from "./pipelineV2.js";
 import { closeFullCrawlYoutubeJsQueues, executeFullCrawlYoutubeJs } from "./fullCrawlYoutubeJs.js";
+import { assertFullCrawlSnapshotRecoveryOwner } from "./finalRepairJobRecovery.js";
 import { defaultFullCrawlFetchContract, isYoutubeJsFullCrawlFetchContract } from "./fullCrawlFetchContract.js";
 import { channelExtractorCapabilities, incrementalVideoExecutorMode as resolveIncrementalVideoExecutorMode } from "./channelExtractorCapabilities.js";
 import { assertFullCrawlWorkerLane, fullCrawlWorkerPrefix } from "./fullCrawlCanary.js";
@@ -76,6 +77,7 @@ import {
   markChannelCandidateJobAttemptActive,
   processManagedWorkerJob,
   retryableSystemFailureDecision,
+  isStaleExecutionFailure,
 } from "./managedWorkerJob.js";
 import {
   enterMigrationRetryIntentWorkerJob,
@@ -1534,7 +1536,18 @@ async function persistManagedRetryCheckpoint({ job, prepared, error, failure }) 
 }
 
 async function processJob(job, token) {
+  try {
+    return await processJobWithOwnership(job, token);
+  } catch (error) {
+    // Entry/settlement fences can fail outside processJobInner as well.
+    if (isStaleExecutionFailure(error)) job.discard();
+    throw error;
+  }
+}
+
+async function processJobWithOwnership(job, token) {
   assertFullCrawlWorkerLane(job, process.env.FULL_CRAWL_CANARY_WORKER === "true");
+  await assertFullCrawlSnapshotRecoveryOwner(query, job);
   if (job?.data?.retry_intent_id) {
     const entry = await enterMigrationRetryIntentWorkerJob(query, job);
     if (entry.action === "finished_replay") {

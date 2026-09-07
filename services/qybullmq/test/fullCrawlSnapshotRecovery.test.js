@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { retryFullCrawlSnapshotJob } from "../src/finalRepairJobRecovery.js";
+import { retryFullCrawlSnapshotJob, assertFullCrawlSnapshotRecoveryOwner } from "../src/finalRepairJobRecovery.js";
 import { YOUTUBEJS_FULL_CRAWL_FETCH_CONTRACT } from "../src/fullCrawlFetchContract.js";
 
 function fixture() {
@@ -20,6 +20,23 @@ function fixture() {
     candidate: { snapshot_dispatch_generation: 2, snapshot_active_job_id: null,
       snapshot_active_job_attempt: null, status: "accepted" } };
 }
+
+test("unfinished Full snapshot rejects legacy repair before candidate activation or Rota Task allocation", async () => {
+  const f = fixture();
+  const query = async () => ({ rows: [f.run] });
+  f.job.queueName = "youtube-channel-crawl";
+  await assertFullCrawlSnapshotRecoveryOwner(query, f.job);
+  await assert.rejects(assertFullCrawlSnapshotRecoveryOwner(query, {
+    ...f.job, id: "legacy-repair", name: "channel-crawl-repair",
+  }), { code: "CONTENT_DETAIL_EXECUTION_FENCE_STALE" });
+  await assert.rejects(assertFullCrawlSnapshotRecoveryOwner(query, {
+    ...f.job, id: "different-snapshot",
+  }), { code: "CONTENT_DETAIL_EXECUTION_FENCE_STALE" });
+  f.run.result_json.full_crawl = { fetch: { status: "complete" } };
+  await assertFullCrawlSnapshotRecoveryOwner(query, {
+    ...f.job, id: "publication-repair", name: "channel-crawl-repair",
+  });
+});
 
 test("Full recovery retains original g2 Job identity and monotonic started attempts across repair rounds", async () => {
   for (const round of [1, 2, 3]) {

@@ -19,6 +19,7 @@ const SYSTEM_FAILURE_CODES = new Map([
   ["POLICY_UNAVAILABLE", "route"],
   ["MANAGED_POLICY_UNAVAILABLE", "route"],
   ["CANDIDATE_ATTEMPT_FENCE_STALE", "fence"],
+  ["CONTENT_DETAIL_EXECUTION_FENCE_STALE", "fence"],
   ["MIGRATION_RETRY_INTENT_FENCE_STALE", "fence"],
   ["BUSINESS_RUN_BUDGET_RECOVERY_FAILED", "fence"],
   ["TASK_FENCE_CONFLICT", "fence"],
@@ -106,13 +107,21 @@ export function retryableSystemFailureDecision(error) {
   if (!evidence) return null;
   return Object.freeze({
     kind: "retryable_system_failure",
-    retry_mode: "system_retry",
+    retry_mode: isStaleExecutionFailure(error) ? "none" : "system_retry",
     proxy_action: "none",
     client_action: "none",
     terminal: false,
     status: evidence.status,
     evidence,
   });
+}
+
+export function isStaleExecutionFailure(error) {
+  return systemFailureNodes(error).some(node => (
+    ["CANDIDATE_ATTEMPT_FENCE_STALE", "CONTENT_DETAIL_EXECUTION_FENCE_STALE",
+      "MIGRATION_RETRY_INTENT_FENCE_STALE"].includes(node?.code)
+    || node?.name === "StaleChannelCandidateAttemptError"
+  ));
 }
 
 export function channelCandidateFailureDisposition({

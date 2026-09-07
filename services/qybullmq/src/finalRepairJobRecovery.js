@@ -1,6 +1,20 @@
 import { normalizePublicationGapDomains } from "./publicationGapRepairExecution.js";
 import { isYoutubeJsFullCrawlFetchContract, assertSameFullCrawlFetchContract } from "./fullCrawlFetchContract.js";
 
+export async function assertFullCrawlSnapshotRecoveryOwner(query, job) {
+  if (job?.queueName !== "youtube-channel-crawl" || !job.data?.run_id) return;
+  const run = (await query(
+    `SELECT run_id,result_json FROM crawler.channel_runs WHERE run_id=$1`,
+    [job.data.run_id],
+  )).rows[0];
+  if (!run || !isYoutubeJsFullCrawlFetchContract(run.result_json?.fetch_contract)
+      || run.result_json?.full_crawl?.fetch?.status === "complete") return;
+  if (job.name === "channel-snapshot" && job.id === run.result_json.job_id) return;
+  const error = new Error(`Unfinished YouTubeJS snapshot must resume its original Job: ${run.run_id}`);
+  error.code = "CONTENT_DETAIL_EXECUTION_FENCE_STALE";
+  throw error;
+}
+
 export async function retryFullCrawlSnapshotJob(queue, { run, candidate } = {}) {
   const jobId = run?.result_json?.job_id;
   const job = jobId ? await queue.getJob(jobId) : null;

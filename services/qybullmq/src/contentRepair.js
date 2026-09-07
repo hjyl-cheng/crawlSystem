@@ -40,6 +40,7 @@ const targetSql = `
      AND current_candidate.run_id=c.run_id
     CROSS JOIN crawl_settings settings
     WHERE NOT (current_run.result_json ? 'parser_contract_error')
+      AND COALESCE(current_run.result_json#>>'{fetch_contract,executor_id}','')<>'youtubejs_full'
       AND NOT (current_candidate.result_json ? 'parser_contract_error')
       AND COALESCE(current_candidate.result_json->'scope'->>'status','')<>'excluded'
       AND c.access_status<>'unlisted'
@@ -87,6 +88,7 @@ const targetSql = `
      AND candidate_content.run_id=cc.run_id
     CROSS JOIN crawl_settings settings
     WHERE NOT (current_run.result_json ? 'parser_contract_error')
+      AND COALESCE(current_run.result_json#>>'{fetch_contract,executor_id}','')<>'youtubejs_full'
       AND NOT (cc.result_json ? 'parser_contract_error')
       AND COALESCE(cc.result_json->'scope'->>'status','')<>'excluded'
       AND COALESCE(
@@ -161,6 +163,7 @@ export async function loadContentRepairTargets(dbQuery, {
     FROM crawler.channel_runs cr
     JOIN crawler.channels ch ON ch.channel_id=cr.channel_id AND ch.latest_run_id=cr.run_id
     WHERE ch.status='active'
+      AND COALESCE(cr.result_json#>>'{fetch_contract,executor_id}','')<>'youtubejs_full'
       AND cr.status='running'
       AND cr.detail_status='pending'
       AND cr.expected_content_count=0
@@ -177,6 +180,7 @@ export async function loadContentRepairTargets(dbQuery, {
     FROM crawler.channel_runs cr
     JOIN crawler.channels ch ON ch.channel_id=cr.channel_id AND ch.latest_run_id=cr.run_id
     WHERE ch.status='active'
+      AND COALESCE(cr.result_json#>>'{fetch_contract,executor_id}','')<>'youtubejs_full'
       AND cr.detail_status='api_pending'
       AND ($2::text IS NULL OR cr.result_json->>'pipeline_cycle_id'=$2::text)
       AND NOT (cr.result_json ? 'parser_contract_error')
@@ -225,6 +229,7 @@ export async function hasPendingContentRepairs(
        AND cc.run_id=c.run_id
       CROSS JOIN crawl_settings settings
       WHERE NOT (current_run.result_json ? 'parser_contract_error')
+        AND COALESCE(current_run.result_json#>>'{fetch_contract,executor_id}','')<>'youtubejs_full'
         AND NOT (cc.result_json ? 'parser_contract_error')
         AND COALESCE(cc.result_json->'scope'->>'status','')<>'excluded'
         AND c.access_status<>'unlisted'
@@ -269,6 +274,7 @@ export async function hasPendingContentRepairs(
        AND candidate_content.run_id=cc.run_id
       CROSS JOIN crawl_settings settings
       WHERE NOT (current_run.result_json ? 'parser_contract_error')
+        AND COALESCE(current_run.result_json#>>'{fetch_contract,executor_id}','')<>'youtubejs_full'
         AND NOT (cc.result_json ? 'parser_contract_error')
         AND COALESCE(cc.result_json->'scope'->>'status','')<>'excluded'
         AND COALESCE(

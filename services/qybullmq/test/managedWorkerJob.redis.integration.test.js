@@ -7,9 +7,45 @@ import {
   clearChannelCandidateJobAttempt,
   markChannelCandidateJobAttemptActive,
   recordChannelCandidateJobFailure,
+  retryableSystemFailureDecision,
 } from "../src/managedWorkerJob.js";
+import { applyFailureRetryDecision } from "../src/queues.js";
 
 const redisUrl = String(process.env.MANAGED_JOB_TEST_REDIS_URL ?? "").trim();
+
+test("a real BullMQ worker runs a stale detail Job once despite three configured attempts", { skip: !redisUrl }, async () => {
+  const connection = redisConnection(redisUrl);
+  const prefix = `stale-fence-test-${randomUUID()}`;
+  const name = "channel";
+  const queue = new Queue(name, { connection, prefix });
+  const events = new QueueEvents(name, { connection, prefix });
+  let executions = 0;
+  const worker = new Worker(name, async job => {
+    executions += 1;
+    const error = Object.assign(new Error("superseded detail owner"), {
+      code: "CONTENT_DETAIL_EXECUTION_FENCE_STALE",
+    });
+    applyFailureRetryDecision(job, retryableSystemFailureDecision(error));
+    throw error;
+  }, { connection, prefix });
+  try {
+    await events.waitUntilReady();
+    const job = await queue.add("channel-snapshot", {}, { attempts: 3 });
+    await assert.rejects(job.waitUntilFinished(events, 10000), /superseded detail owner/);
+    const stored = await queue.getJob(job.id);
+    assert.equal(await stored.getState(), "failed");
+    assert.equal(stored.attemptsMade, 1);
+    assert.equal(stored.attemptsStarted, 1);
+    assert.equal(executions, 1);
+    assert.equal(await queue.getWaitingCount(), 0);
+    assert.equal(await queue.getDelayedCount(), 0);
+  } finally {
+    await worker.close();
+    await queue.obliterate({ force: true });
+    await events.close();
+    await queue.close();
+  }
+});
 
 function deferred() {
   let resolve;
