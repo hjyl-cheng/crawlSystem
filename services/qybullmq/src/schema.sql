@@ -3233,6 +3233,133 @@ CREATE INDEX IF NOT EXISTS idx_crawler_baseline_export_events_sequence
 ON crawler.baseline_export_events (export_id,channel_id,observation_kind,kind_sequence);
 -- v16-rule-clock-schema:end
 
+-- incremental-youtubejs-video-checkpoint-schema:start
+CREATE TABLE IF NOT EXISTS crawler.incremental_youtubejs_video_batches (
+  run_id TEXT NOT NULL
+    REFERENCES crawler.channel_runs(run_id) ON DELETE RESTRICT,
+  cycle_key TEXT NOT NULL,
+  plan_id UUID NOT NULL,
+  channel_id TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'fetching'
+    CHECK (status IN ('fetching', 'ready', 'finalized')),
+  cycle_observed_at TIMESTAMPTZ NOT NULL,
+  started_at TIMESTAMPTZ NOT NULL,
+  scan_json JSONB NOT NULL,
+  anchors_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+  discovery_entries_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+  pending_deferred_video_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+  sampling_plan_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  sampling_config_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  target_hash TEXT NOT NULL,
+  first_seen_checkpoint_status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (first_seen_checkpoint_status IN ('pending', 'complete', 'not_applicable')),
+  first_seen_checkpoints_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+  final_observation_id UUID
+    REFERENCES crawler.crawl_observations(observation_id) ON DELETE RESTRICT,
+  final_result_json JSONB,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  finalized_at TIMESTAMPTZ,
+  PRIMARY KEY (run_id, cycle_key),
+  CHECK (btrim(cycle_key) <> ''),
+  CHECK (jsonb_typeof(scan_json)='object'),
+  CHECK (jsonb_typeof(anchors_json)='array'),
+  CHECK (jsonb_typeof(discovery_entries_json)='array'),
+  CHECK (jsonb_typeof(pending_deferred_video_ids)='array'),
+  CHECK (jsonb_typeof(sampling_plan_json)='object'),
+  CHECK (jsonb_typeof(sampling_config_json)='object'),
+  CHECK (jsonb_typeof(first_seen_checkpoints_json)='array'),
+  CHECK (final_result_json IS NULL OR jsonb_typeof(final_result_json)='object'),
+  CHECK (
+    final_result_json IS NULL
+    OR (
+      final_result_json ? 'observation_id'
+      AND (final_result_json->>'observation_id')
+        IS NOT DISTINCT FROM final_observation_id::text
+    )
+  ),
+  CHECK (
+    (status='finalized'
+      AND final_observation_id IS NOT NULL
+      AND final_result_json IS NOT NULL
+      AND finalized_at IS NOT NULL)
+    OR
+    (status<>'finalized'
+      AND final_observation_id IS NULL
+      AND final_result_json IS NULL
+      AND finalized_at IS NULL)
+  )
+);
+
+CREATE INDEX IF NOT EXISTS idx_crawler_incremental_youtubejs_video_batches_channel
+ON crawler.incremental_youtubejs_video_batches (channel_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS crawler.incremental_youtubejs_video_items (
+  run_id TEXT NOT NULL,
+  cycle_key TEXT NOT NULL,
+  phase TEXT NOT NULL CHECK (phase IN ('first_seen', 'recent')),
+  ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+  video_id TEXT NOT NULL CHECK (btrim(video_id) <> ''),
+  target_json JSONB NOT NULL CHECK (jsonb_typeof(target_json)='object'),
+  status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending', 'claimed', 'captured', 'settled_error')),
+  claim_token UUID,
+  claim_expires_at TIMESTAMPTZ,
+  detail_json JSONB,
+  field_status_json JSONB,
+  error_json JSONB,
+  attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+  captured_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (run_id, cycle_key, phase, video_id),
+  UNIQUE (run_id, cycle_key, phase, ordinal),
+  UNIQUE (run_id, cycle_key, video_id),
+  FOREIGN KEY (run_id, cycle_key)
+    REFERENCES crawler.incremental_youtubejs_video_batches(run_id, cycle_key)
+    ON DELETE RESTRICT,
+  CHECK (detail_json IS NULL OR jsonb_typeof(detail_json)='object'),
+  CHECK (field_status_json IS NULL OR jsonb_typeof(field_status_json)='object'),
+  CHECK (error_json IS NULL OR jsonb_typeof(error_json)='object'),
+  CHECK (
+    (status='pending'
+      AND claim_token IS NULL
+      AND claim_expires_at IS NULL
+      AND detail_json IS NULL
+      AND field_status_json IS NULL
+      AND error_json IS NULL
+      AND captured_at IS NULL)
+    OR
+    (status='claimed'
+      AND claim_token IS NOT NULL
+      AND claim_expires_at IS NOT NULL
+      AND detail_json IS NULL
+      AND field_status_json IS NULL
+      AND error_json IS NULL
+      AND captured_at IS NULL)
+    OR
+    (status='captured'
+      AND claim_token IS NULL
+      AND claim_expires_at IS NULL
+      AND detail_json IS NOT NULL
+      AND field_status_json IS NOT NULL
+      AND error_json IS NULL
+      AND captured_at IS NOT NULL)
+    OR
+    (status='settled_error'
+      AND claim_token IS NULL
+      AND claim_expires_at IS NULL
+      AND field_status_json IS NOT NULL
+      AND error_json IS NOT NULL
+      AND captured_at IS NOT NULL)
+  )
+);
+
+CREATE INDEX IF NOT EXISTS idx_crawler_incremental_youtubejs_video_items_claim
+ON crawler.incremental_youtubejs_video_items (run_id, cycle_key, phase, ordinal)
+WHERE status IN ('pending', 'claimed');
+-- incremental-youtubejs-video-checkpoint-schema:end
+
 -- publication-current-schema:start
 CREATE SCHEMA IF NOT EXISTS publication;
 

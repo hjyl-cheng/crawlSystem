@@ -32,8 +32,10 @@ import {
 } from "./contentEnrichExecution.js";
 import {
   applyIncrementalVideoDetail,
+  executeIncrementalVideo,
   fetchIncrementalVideoDetail,
 } from "./incrementalVideo.js";
+import { executeIncrementalYoutubeJsVideo } from "./incrementalYoutubeJsVideo.js";
 import { dynamicRotaProxyConfig, fixedRotaProxyConfig } from "./fixedProxyConfig.js";
 import { resolveWorkerIdentityPolicy } from "./identityPolicyCatalog.js";
 import { IncrementalAgentBacklog } from "./incrementalAgentBacklog.js";
@@ -92,7 +94,7 @@ import { settleContentDetailRecoveryTerminalFailure } from "./migrationSystemRet
 import { closeStorage, putRawObject } from "./storage.js";
 import { RotaSlotAdapter } from "./rotaSlotAdapter.js";
 import { warmPersistentYtDlp } from "./ytdlpSession.js";
-import { closeYoutubeJs, warmYoutubeJs } from "./youtubeJs.js";
+import { closeYoutubeJs, warmYoutubeJs, youtubeJsDetailEnabled } from "./youtubeJs.js";
 import { annotateYoutubeFailure, decideYoutubeFailure } from "./youtubeFailurePolicy.js";
 import { refreshVideoPublicationItemHashes } from "./videoPublicationItemStore.js";
 import {
@@ -107,6 +109,20 @@ import { resolveYoutubeLocale } from "./youtubeLocale.js";
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const queues = createQueues();
+const incrementalVideoExecutorMode = String(
+  process.env.INCREMENTAL_VIDEO_EXECUTOR || "legacy",
+).trim();
+if (!["legacy", "youtubejs_checkpoint_v1"].includes(incrementalVideoExecutorMode)) {
+  throw new Error(`unsupported INCREMENTAL_VIDEO_EXECUTOR: ${incrementalVideoExecutorMode}`);
+}
+if (incrementalVideoExecutorMode === "youtubejs_checkpoint_v1" && !youtubeJsDetailEnabled()) {
+  throw new Error(
+    "INCREMENTAL_VIDEO_EXECUTOR=youtubejs_checkpoint_v1 requires YOUTUBEJS_EXTRACTOR_MODE=full",
+  );
+}
+const incrementalVideoExecutor = incrementalVideoExecutorMode === "youtubejs_checkpoint_v1"
+  ? executeIncrementalYoutubeJsVideo
+  : executeIncrementalVideo;
 const incrementalRunStore = new IncrementalRunStore({ withTransaction });
 const incrementalAgentBacklog = new IncrementalAgentBacklog({ withTransaction });
 const incrementalChannelRunner = new IncrementalChannelRunner({
@@ -114,6 +130,7 @@ const incrementalChannelRunner = new IncrementalChannelRunner({
   agentBacklog: incrementalAgentBacklog,
   query,
   withTransaction,
+  video: incrementalVideoExecutor,
 });
 const contentEnrichExecutor = new ContentEnrichExecutor({
   repository: new PostgresContentEnrichExecutionRepository({

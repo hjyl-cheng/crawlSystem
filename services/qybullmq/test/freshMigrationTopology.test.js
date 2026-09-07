@@ -87,6 +87,10 @@ test("fresh Migration overlay isolates state, reuses only Rota, and disables aut
   for (const service of ["rota-db", "rota-core", "rota-dashboard"]) {
     assert.match(serviceBlock(overlay, service), /profiles: \[bundled-rota-disabled\]/);
   }
+  const incremental = serviceBlock(overlay, "worker-incremental");
+  assert.match(incremental, /depends_on: !override/);
+  assert.doesNotMatch(incremental, /rota-core/);
+  assert.match(incremental, /networks: !override \[internal, qy_rota\]/);
   const contentEnrich = serviceBlock(overlay, "worker-content-enrich");
   assert.match(contentEnrich, /profiles: \[content-enrich-canary\]/);
   assert.match(contentEnrich, /depends_on: !override/);

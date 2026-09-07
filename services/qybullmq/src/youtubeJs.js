@@ -1382,9 +1382,15 @@ function youtubeJsLikeCount(info, locale) {
   const segmented = Array.from(info?.primary_info?.menu?.top_level_buttons ?? [])
     .find((button) => button?.like_button || /LikeDislike/i.test(String(button?.type ?? "")));
   const likeButton = segmented?.like_button?.toggle_button?.default_button;
-  for (const candidate of [segmented?.like_count, segmented?.short_like_count, likeButton?.title]) {
+  for (const candidate of [
+    segmented?.like_count,
+    segmented?.short_like_count,
+    likeButton?.title,
+  ]) {
     const count = parseYoutubeJsCount(candidate, locale);
-    if (count != null && count >= 0) return { value: count, source: "youtubejs_next_button" };
+    if (count != null && count >= 0) {
+      return { value: count, source: "youtubejs_next_button" };
+    }
   }
   if (renderedText(likeButton?.title) === "Like"
       && renderedText(likeButton?.accessibility_text) === "Like") {
@@ -1494,9 +1500,10 @@ export function normalizeYoutubeJsVideoInfo(info, comments = null, {
       : inconclusivePublicSurface || (!playabilityStatus && publicMetadataComplete)
         ? "public"
         : "unknown";
-  // An absent live comment surface is policy zero, not an exact count or disabled comments.
+  // Live chat is not a comment count. An absent live comment surface uses a
+  // policy zero, never an exact count or evidence that comments are disabled.
   if (commentCount == null && !commentsError && commentsPage?.surface === "absent"
-      && ["public", "unlisted"].includes(accessStatus) && (isUpcoming || isLive)) {
+    && ["public", "unlisted"].includes(accessStatus) && (isUpcoming || isLive)) {
     commentCount = 0;
     commentStatus = isUpcoming ? "zero_from_upcoming" : "zero_from_empty";
     commentsSource = isUpcoming

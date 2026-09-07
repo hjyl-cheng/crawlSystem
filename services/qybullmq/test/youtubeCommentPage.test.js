@@ -11,6 +11,7 @@ import {
   emptyYoutubeCommentPage,
   isYoutubeJsCommentsResult,
   normalizeYoutubeCommentPage,
+  youtubeCommentContinuationIsBare,
   youtubeCommentPageFromGetComments,
   youtubeCommentsDisabled,
 } from "../src/youtubeCommentPage.js";
@@ -222,6 +223,23 @@ test("youtubeCommentsDisabled recognizes an explicit disabled surface", () => {
   }), true);
   assert.equal(youtubeCommentsDisabled(commentPageFixture()), false);
   assert.equal(commentPageHasFirstPage(emptyYoutubeCommentPage({ totalCount: 0 })), true);
+});
+
+test("a successful bare continuation response needs video access context", () => {
+  const raw = {
+    responseContext: {
+      mainAppWebResponseContext: { loggedOut: true },
+    },
+    trackingParams: "tracking",
+  };
+
+  assert.equal(youtubeCommentContinuationIsBare(raw), true);
+  assert.equal(youtubeCommentsDisabled(raw), false);
+  const page = normalizeYoutubeCommentPage(raw);
+  assert.equal(page.comments_disabled, false);
+  assert.equal(page.total_count, null);
+  assert.equal(page.returned_count, 0);
+  assert.equal(classifyYoutubeCommentPage(page).comment_count_status, "unresolved");
 });
 
 test("an inactive comment composer disabledText is not a disabled comment surface", () => {

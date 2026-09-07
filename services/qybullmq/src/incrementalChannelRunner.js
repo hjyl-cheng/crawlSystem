@@ -11,7 +11,18 @@ function completed(state) {
   return ["complete", "partial", "queued"].includes(state);
 }
 
-function domainResult(result) {
+function normalizeLifecycleStatus(value) {
+  const status = String(value ?? "").trim();
+  return ["active", "dormant"].includes(status) ? status : null;
+}
+
+function storedDomainResult(run, domain) {
+  const raw = run?.result_json;
+  const result = typeof raw === "string" ? JSON.parse(raw) : raw;
+  return result?.domains?.[domain] ?? null;
+}
+
+function domainResult(result, domain) {
   return {
     outcome: result?.outcome ?? (result?.queued ? "queued" : "complete"),
     observation_id: result?.observation_id ?? null,
@@ -21,7 +32,39 @@ function domainResult(result) {
     ...(result?.reservation_cleanup_deferred === true
       ? { reservation_cleanup_deferred: true }
       : {}),
+    ...(domain === "video"
+      ? {
+          lifecycle_status: normalizeLifecycleStatus(result?.lifecycle_status),
+          dormant_recheck_day: result?.dormant_recheck_day ?? null,
+        }
+      : {}),
   };
+}
+
+async function observationLifecycleStatus(query, {
+  runId,
+  observationId = null,
+  allowUnavailable = false,
+}) {
+  if (typeof query !== "function") {
+    if (allowUnavailable) return null;
+    throw new TypeError("query is required to restore incremental Video lifecycle status");
+  }
+  const result = await query(
+    `SELECT result_summary_json #>> '{activity,lifecycle_status}' AS lifecycle_status
+     FROM crawler.crawl_observations
+     WHERE run_id=$1
+       AND observation_kind='video'
+       AND ($2::uuid IS NULL OR observation_id=$2::uuid)
+     ORDER BY kind_sequence DESC
+     LIMIT 1`,
+    [runId, observationId],
+  );
+  const lifecycleStatus = normalizeLifecycleStatus(result?.rows?.[0]?.lifecycle_status);
+  if (lifecycleStatus == null && !allowUnavailable) {
+    throw new Error(`incremental Video lifecycle status is unavailable for ${runId}`);
+  }
+  return lifecycleStatus;
 }
 
 export class IncrementalChannelRunner {
@@ -81,7 +124,8 @@ export class IncrementalChannelRunner {
       agentBacklog: this.agentBacklog,
     };
     let activeDomain = null;
-    let lifecycleStatus = null;
+    const storedVideoResult = storedDomainResult(run, "video") ?? {};
+    let lifecycleStatus = normalizeLifecycleStatus(storedVideoResult.lifecycle_status);
     const results = {};
     try {
       for (const domain of SESSION_DOMAINS) {
@@ -98,12 +142,27 @@ export class IncrementalChannelRunner {
         }
         const outcome = result?.outcome === "partial" ? "partial" : "complete";
         results[domain] = result;
-        if (domain === "video") lifecycleStatus = result?.lifecycle_status ?? null;
-        await this.runStore.markDomain(runId, domain, outcome, domainResult(result));
+        if (domain === "video") {
+          lifecycleStatus = normalizeLifecycleStatus(result?.lifecycle_status);
+        }
+        await this.runStore.markDomain(runId, domain, outcome, domainResult(result, domain));
       }
 
       if (plan.task_mask.agent && !completed(incrementalDomainState(run, "agent"))) {
         activeDomain = "agent";
+        if (plan.task_mask.video && lifecycleStatus == null) {
+          const videoOutcome = results.video?.outcome
+            ?? storedVideoResult.outcome
+            ?? storedVideoResult.status
+            ?? null;
+          lifecycleStatus = await observationLifecycleStatus(this.query, {
+            runId,
+            observationId: results.video?.observation_id
+              ?? storedVideoResult.observation_id
+              ?? null,
+            allowUnavailable: videoOutcome === "partial",
+          });
+        }
         const result = lifecycleStatus === "dormant"
           ? { queued: false, outcome: "skipped", reason: "channel_dormant" }
           : await this.executors.agent(context);
@@ -112,7 +171,7 @@ export class IncrementalChannelRunner {
           runId,
           "agent",
           result?.queued === false ? "skipped" : "queued",
-          domainResult(result),
+          domainResult(result, "agent"),
         );
       }
       const waitingForAgent = plan.task_mask.agent && results.agent?.queued !== false;

@@ -5,6 +5,7 @@ const JOB_PREFIXES = Object.freeze({
   youtubejs_canary: "youtubejs-canary",
   comment_backfill: "comment-backfill",
   comment_probe: "comment-probe",
+  incremental_video_probe: "incremental-video-probe",
 });
 
 function requiredText(value, field) {

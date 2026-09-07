@@ -8,6 +8,7 @@ const managedScripts = [
   ["youtubejs-canary.mjs", "youtubejs_canary"],
   ["backfillCommentFirstPages.mjs", "comment_backfill"],
   ["probeYoutubeComments.mjs", "comment_probe"],
+  ["probeIncrementalYoutubeJsVideo.mjs", "incremental_video_probe"],
 ];
 
 test("the diagnostic Job Builder fixes queue, attempt and generation while keeping IDs unique", () => {
@@ -15,6 +16,7 @@ test("the diagnostic Job Builder fixes queue, attempt and generation while keepi
     "11111111-1111-4111-8111-111111111111",
     "22222222-2222-4222-8222-222222222222",
     "33333333-3333-4333-8333-333333333333",
+    "44444444-4444-4444-8444-444444444444",
   ];
   const randomUUID = () => ids.shift();
   const jobs = managedScripts.map(([, kind]) => buildManagedDiagnosticJob({
@@ -24,11 +26,12 @@ test("the diagnostic Job Builder fixes queue, attempt and generation while keepi
     randomUUID,
   }));
 
-  assert.equal(new Set(jobs.map((job) => job.id)).size, 3);
+  assert.equal(new Set(jobs.map((job) => job.id)).size, 4);
   assert.deepEqual(jobs.map((job) => job.id.split(":")[0]), [
     "youtubejs-canary",
     "comment-backfill",
     "comment-probe",
+    "incremental-video-probe",
   ]);
   for (const job of jobs) {
     assert.equal(job.queueName, "youtube-channel-crawl");
