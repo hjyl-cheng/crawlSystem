@@ -47,6 +47,7 @@ test("a concurrent terminal write and newer dispatch generation reject a late fa
       {
         id: jobId,
         attemptsMade: 0,
+        attemptsStarted: 1,
         data: { candidate_id: candidateId, dispatch_generation: 5 },
       },
     ), true);
@@ -63,6 +64,7 @@ test("a concurrent terminal write and newer dispatch generation reject a late fa
       {
         id: jobId,
         attemptsMade: 1,
+        attemptsStarted: 1,
         data: { candidate_id: candidateId, dispatch_generation: 5 },
       },
       { disposition: "queued", message: "late BullMQ failed event" },
@@ -90,6 +92,7 @@ test("a concurrent terminal write and newer dispatch generation reject a late fa
       {
         id: jobId,
         attemptsMade: 0,
+        attemptsStarted: 1,
         data: { candidate_id: candidateId, dispatch_generation: 6 },
       },
     ), true);
@@ -98,6 +101,7 @@ test("a concurrent terminal write and newer dispatch generation reject a late fa
       {
         id: jobId,
         attemptsMade: 1,
+        attemptsStarted: 1,
         data: { candidate_id: candidateId, dispatch_generation: 5 },
       },
       { disposition: "failed", message: "stale generation" },
@@ -123,6 +127,7 @@ test("a concurrent terminal write and newer dispatch generation reject a late fa
       {
         id: jobId,
         attemptsMade: 1,
+        attemptsStarted: 2,
         data: { candidate_id: candidateId, dispatch_generation: 7 },
       },
     ), true);
@@ -132,6 +137,7 @@ test("a concurrent terminal write and newer dispatch generation reject a late fa
         id: jobId,
         queueName: "youtube-channel-crawl",
         attemptsMade: 1,
+        attemptsStarted: 1,
         data: { candidate_id: candidateId, dispatch_generation: 7 },
       },
       { disposition: "queued", message: "late attempt one failure" },
@@ -193,6 +199,7 @@ test("an accepted Candidate can resume its Job without becoming mutable by faile
     const retryJob = {
       id: jobId,
       attemptsMade: 1,
+      attemptsStarted: 2,
       data: { candidate_id: candidateId, dispatch_generation: 3 },
     };
 
@@ -267,6 +274,7 @@ test("replaying one accepted Candidate system failure keeps exactly one pending 
     const job = {
       id: jobId,
       attemptsMade: 3,
+      attemptsStarted: 3,
       data: {
         candidate_id: candidateId,
         dispatch_generation: 1,
