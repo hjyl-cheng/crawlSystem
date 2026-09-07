@@ -84,6 +84,9 @@ export class ProxyControlClient {
   capacity() {
     return this.#command("capacity", null, { method: "GET" });
   }
+  businessRunBudget(businessRunId) {
+    return this.#command(`business-runs/${encodeURIComponent(businessRunId)}/budget`, null, { method: "GET" });
+  }
 
   async close() {}
 

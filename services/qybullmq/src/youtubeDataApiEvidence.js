@@ -82,6 +82,7 @@ export function youtubeApiTaskResultEvidence({
   }
   return {
     ...(apiDetail && typeof apiDetail === "object" ? apiDetail : {}),
+    ...(commentApiResult?.detail ?? {}),
     api_verification: apiVerification,
   };
 }

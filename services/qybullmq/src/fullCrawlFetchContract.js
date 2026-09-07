@@ -4,6 +4,7 @@ import { assertFullCrawlCanaryJob, isFullCrawlCanaryPayload } from "./fullCrawlC
 export const LEGACY_FULL_CRAWL_FETCH_CONTRACT_ID = "legacy_full_v2";
 export const YOUTUBEJS_FULL_CRAWL_V1_FETCH_CONTRACT_ID = "youtubejs_full_v1";
 export const YOUTUBEJS_FULL_CRAWL_FETCH_CONTRACT_ID = "youtubejs_full_v2";
+export const YOUTUBEJS_API_FULL_CRAWL_FETCH_CONTRACT_ID = "youtubejs_full_v3";
 export const FULL_CRAWL_FETCH_CONTRACT_DEFAULT_ENV = "FULL_CRAWL_FETCH_CONTRACT_DEFAULT";
 
 function canonicalValue(value) {
@@ -60,6 +61,12 @@ export const YOUTUBEJS_FULL_CRAWL_FETCH_MANIFEST = Object.freeze({
 export const LEGACY_FULL_CRAWL_FETCH_CONTRACT = contract(
   LEGACY_FULL_CRAWL_FETCH_MANIFEST,
 );
+export const YOUTUBEJS_API_FULL_CRAWL_FETCH_MANIFEST = Object.freeze({
+  ...YOUTUBEJS_FULL_CRAWL_FETCH_MANIFEST,
+  executor_version: 3,
+  fallback: "shared_video_data_api_batch_after_youtubejs_exhaustion",
+});
+export const YOUTUBEJS_API_FULL_CRAWL_FETCH_CONTRACT = contract(YOUTUBEJS_API_FULL_CRAWL_FETCH_MANIFEST);
 export const YOUTUBEJS_FULL_CRAWL_FETCH_CONTRACT = contract(
   YOUTUBEJS_FULL_CRAWL_FETCH_MANIFEST,
 );
@@ -68,6 +75,7 @@ export const YOUTUBEJS_FULL_CRAWL_V1_FETCH_CONTRACT = contract(
 );
 
 const CONTRACTS = new Map([
+  [YOUTUBEJS_API_FULL_CRAWL_FETCH_CONTRACT_ID, YOUTUBEJS_API_FULL_CRAWL_FETCH_CONTRACT],
   [LEGACY_FULL_CRAWL_FETCH_CONTRACT_ID, LEGACY_FULL_CRAWL_FETCH_CONTRACT],
   [YOUTUBEJS_FULL_CRAWL_FETCH_CONTRACT_ID, YOUTUBEJS_FULL_CRAWL_FETCH_CONTRACT],
   [YOUTUBEJS_FULL_CRAWL_V1_FETCH_CONTRACT_ID, YOUTUBEJS_FULL_CRAWL_V1_FETCH_CONTRACT],
@@ -141,7 +149,7 @@ export function readFullCrawlFetchContractFromIntent(value) {
 
 export function defaultFullCrawlFetchContract(environment = process.env) {
   const requested = String(environment?.[FULL_CRAWL_FETCH_CONTRACT_DEFAULT_ENV] ?? "").trim()
-    || YOUTUBEJS_FULL_CRAWL_FETCH_CONTRACT_ID;
+    || YOUTUBEJS_API_FULL_CRAWL_FETCH_CONTRACT_ID;
   return normalizeFullCrawlFetchContract(requested, { missingAsLegacy: false });
 }
 
@@ -170,6 +178,6 @@ export function assertSameFullCrawlFetchContract(expectedValue, actualValue) {
 }
 
 export function isYoutubeJsFullCrawlFetchContract(value) {
-  return [YOUTUBEJS_FULL_CRAWL_FETCH_CONTRACT_ID, YOUTUBEJS_FULL_CRAWL_V1_FETCH_CONTRACT_ID]
+  return [YOUTUBEJS_API_FULL_CRAWL_FETCH_CONTRACT_ID, YOUTUBEJS_FULL_CRAWL_FETCH_CONTRACT_ID, YOUTUBEJS_FULL_CRAWL_V1_FETCH_CONTRACT_ID]
     .includes(fullCrawlFetchContractId(value));
 }

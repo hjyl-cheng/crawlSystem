@@ -2008,6 +2008,13 @@ export async function fetchYoutubeJsVideoDetail(videoId, {
       );
       throwIfYoutubeJsOperationAborted();
       contentTypeSignals = current.playerTypeSurfaces.get(cleanVideoId) ?? null;
+    } catch (error) {
+      const observedSignals = current.playerTypeSurfaces.get(cleanVideoId);
+      if (observedSignals && error && typeof error === "object") {
+        error.partial_detail = { ...(error.partial_detail ?? {}), id: cleanVideoId,
+          content_type_signals: observedSignals };
+      }
+      throw error;
     } finally {
       current.playerTypeSurfaces.delete(cleanVideoId);
     }

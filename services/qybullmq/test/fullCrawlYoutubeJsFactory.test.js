@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createFullCrawlYoutubeJsExecutor } from "../src/fullCrawlYoutubeJsFactory.js";
+import { YOUTUBEJS_API_FULL_CRAWL_FETCH_CONTRACT } from "../src/fullCrawlFetchContract.js";
 import { YOUTUBEJS_FULL_CRAWL_FETCH_CONTRACT, YOUTUBEJS_FULL_CRAWL_V1_FETCH_CONTRACT } from "../src/fullCrawlFetchContract.js";
 
 const OBSERVED_AT = "2026-09-04T00:00:00.000Z";
@@ -229,10 +230,37 @@ function executor(fixture) {
     store: fixture.store,
     youtube: fixture.youtube,
     handoff: fixture.handoff,
+    videoApiFallback: fixture.videoApiFallback,
     clock: () => OBSERVED_AT,
     locale: "en",
   });
 }
+
+test("v3 video fallback returns through the original Detail checkpoint and handoff", async () => {
+  const fixture = scriptedFixture();
+  let fallbackCalls = 0;
+  fixture.youtube.fetchDetail = async () => { throw new Error("exhausted"); };
+  fixture.videoApiFallback = async request => {
+    fallbackCalls += 1;
+    assert.equal(request.consumer, "full");
+    assert.equal(request.runId, "run-full-1");
+    assert.equal(request.optionalComments, true);
+    return request.validate(publicDetail(request.videoId));
+  };
+  const input = job();
+  input.data.fetch_contract = YOUTUBEJS_API_FULL_CRAWL_FETCH_CONTRACT;
+  const result = await executor(fixture)(input);
+  assert.equal(result.ok, true);
+  assert.equal(fallbackCalls, 2);
+  assert.ok(fixture.calls.includes("store:commit-detail:video-1"));
+  assert.ok(fixture.calls.includes("handoff:fetch"));
+});
+
+test("frozen v2 runs never enter the v3 API fallback", async () => {
+  const fixture = scriptedFixture();
+  fixture.videoApiFallback = async () => assert.fail("v2 fallback is forbidden");
+  assert.equal((await executor(fixture)(job())).ok, true);
+});
 
 test("initial execution commits every phase and serial Detail observations", async () => {
   const fixture = scriptedFixture();

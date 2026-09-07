@@ -1,4 +1,5 @@
 import { nanoid } from "nanoid";
+import { completeVideoApiRequests } from "./videoApiBatchRequests.js";
 import {
   combinedAboutObservationMetrics,
   normalizeAboutMetrics,
@@ -236,6 +237,9 @@ const ACCESS_DETAIL_FIELDS = [
   "is_unlisted",
 ];
 const queues = createQueues();
+export async function closePipelineV2Queues() {
+  await Promise.all(Object.values(queues).map(queue => queue.close()));
+}
 const incrementalAgentResultStore = new IncrementalAgentResultStore({
   withTransaction,
   maxAttempts: intValue(process.env.INCREMENTAL_AGENT_MAX_ATTEMPTS, 8, 1, 50),
@@ -846,6 +850,8 @@ async function cancelResolvedYoutubeApiTasks(runId, client = null) {
               ),
          error_message=NULL,next_retry_at=NULL,finished_at=now(),updated_at=now()
      WHERE t.status IN ('pending','failed')
+       AND NOT EXISTS (SELECT 1 FROM crawler.youtube_api_detail_requests r
+         WHERE r.task_id=t.task_id AND r.status='pending')
        AND EXISTS (
          SELECT 1 FROM crawler.content_candidates current_run
          WHERE current_run.run_id=$1
@@ -3345,7 +3351,7 @@ async function reserveYoutubeApiRequestTransaction(
 
 async function deferYoutubeApiBatchForDailyLimit(
   client,
-  { batchId, taskIds, candidateIds, dailyRequestLimit },
+  { batchId, taskIds, candidateIds, dailyRequestLimit, requestAttempts = 0 },
 ) {
   const nextRetrySql = "date_trunc('day', now()) + interval '1 day 5 minutes'";
   await client.query(
@@ -3358,9 +3364,10 @@ async function deferYoutubeApiBatchForDailyLimit(
   );
   await client.query(
     `UPDATE crawler.youtube_api_tasks
-     SET status='pending',error_message=NULL,next_retry_at=${nextRetrySql},updated_at=now()
+     SET status='pending',error_message=NULL,next_retry_at=${nextRetrySql},updated_at=now(),
+         attempts=GREATEST(0,attempts-CASE WHEN $2::boolean THEN 1 ELSE 0 END)
      WHERE task_id=ANY($1::bigint[])`,
-    [taskIds],
+    [taskIds, requestAttempts === 0],
   );
   await client.query(
     `UPDATE crawler.content_candidates
@@ -3475,8 +3482,9 @@ async function deferYoutubeApiTaskForDailyLimit(
 async function failYoutubeApiCommentTask(client, task, candidateIds, error) {
   const message = String(error?.message ?? error ?? "commentThreads.list failed");
   const updated = await client.query(
-    `UPDATE crawler.youtube_api_tasks
-     SET error_message=$2,next_retry_at=now()+interval '5 minutes',
+    `UPDATE crawler.youtube_api_tasks t
+     SET error_message=$2,next_retry_at=now()+CASE WHEN EXISTS (SELECT 1 FROM crawler.youtube_api_detail_requests r
+       WHERE r.task_id=t.task_id AND r.status='pending') THEN interval '5 seconds' ELSE interval '5 minutes' END,
          result_json=COALESCE(result_json,'{}'::jsonb)
            || jsonb_build_object(
                 'api_verification',
@@ -3665,7 +3673,7 @@ async function releaseDataApiTasks(client, releases) {
   }
 }
 
-export async function processDataApiBatchV2(job) {
+export async function processDataApiBatchV2(job, { fetchDetails = fetchVideoDataApiDetails } = {}) {
   const requestedTaskIds = normalizedCandidateIds(job.data?.task_ids ?? []);
   if (requestedTaskIds.length === 0) {
     return { ok: true, skipped: true, reason: "no tasks" };
@@ -3697,9 +3705,12 @@ export async function processDataApiBatchV2(job) {
           [batchId, message],
         );
         await client.query(
-          `UPDATE crawler.youtube_api_tasks
+          `UPDATE crawler.youtube_api_tasks t
            SET status='failed',error_message=$2,
-               next_retry_at=now()+interval '5 minutes',updated_at=now()
+               attempts=attempts+CASE WHEN status='running' THEN 0 ELSE 1 END,
+               next_retry_at=now()+CASE WHEN EXISTS (SELECT 1 FROM crawler.youtube_api_detail_requests r
+                 WHERE r.task_id=t.task_id AND r.status='pending')
+                 THEN interval '5 seconds' ELSE interval '5 minutes' END,updated_at=now()
            WHERE task_id=ANY($1::bigint[])`,
           [executionFence.taskIds, message],
         );
@@ -3776,6 +3787,7 @@ export async function processDataApiBatchV2(job) {
             taskIds: executionFence.taskIds,
             candidateIds: dataApiCandidateIds(scope, tasks),
             dailyRequestLimit: settings.dailyRequestLimit,
+            requestAttempts,
           }),
         );
         if (deferred.stale) return dataApiExecutionFenceStaleResult();
@@ -3788,7 +3800,7 @@ export async function processDataApiBatchV2(job) {
       }
       requestAttempts += 1;
       try {
-        apiResult = await fetchVideoDataApiDetails(videoIds, settings.apiKeys[index], { timeoutMs: settings.timeoutMs });
+        apiResult = await fetchDetails(videoIds, settings.apiKeys[index], { timeoutMs: settings.timeoutMs });
         keyIndex = index;
         break;
       } catch (error) {
@@ -3817,7 +3829,13 @@ export async function processDataApiBatchV2(job) {
   for (const task of tasks) {
     const apiDetail = apiResult.detailsById.get(task.source_content_id) ?? {};
     let commentApiResult = null;
-    if (youtubeApiTaskNeedsCommentThreads(task) && !unfinishedLiveReason(apiDetail)) {
+    const subscriberComments = !storedReplay && (await query(
+      `SELECT 1 FROM crawler.youtube_api_detail_requests
+       WHERE task_id=$1 AND status='pending' AND require_comments LIMIT 1`, [task.task_id],
+    )).rows.length > 0;
+    if ((youtubeApiTaskNeedsCommentThreads(task) || subscriberComments)
+        && apiResult.detailsById.has(task.source_content_id)
+        && apiDetail.comments_disabled !== true && !unfinishedLiveReason(apiDetail)) {
       const commentFetch = await fetchCommentThreadsForApiTask(task, settings, {
         preferredKeyIndex: keyIndex,
         totalCount: integer(apiDetail.comment_count),
@@ -4138,6 +4156,10 @@ export async function processDataApiBatchV2(job) {
           missingFields: [...taskMissing],
           resultJson: taskResultJson,
         });
+        if (!storedReplay) {
+          await completeVideoApiRequests(client, task.task_id, taskResultJson,
+            apiResult.detailsById.has(task.source_content_id));
+        }
         return {
           ...finished,
           runs: [...taskRuns.entries()],

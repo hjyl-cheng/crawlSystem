@@ -1,4 +1,5 @@
 import { Queue } from "bullmq";
+import { createVideoDetailApiFallback } from "./videoDetailApiFallback.js";
 import { lockChannelCandidateAttempt } from "./channelCandidateAttemptMutations.js";
 import { query, withTransaction } from "./db.js";
 import { publishReadyDiscoveryPages } from "./discoveryPageWakeup.js";
@@ -86,6 +87,8 @@ async function fetchCompleted({ channelId, runId, reason, candidateAttemptFence 
 }
 
 const executor = createFullCrawlYoutubeJsExecutor({
+  videoApiFallback: createVideoDetailApiFallback({ query, withTransaction,
+    loadSettings: async () => (await import("./pipelineV2.js")).getYoutubeApiSettingsV2() }),
   store: new FullCrawlYoutubeJsStore({ query, withTransaction }),
   youtube: {
     fetchChannel: openYoutubeJsChannel,

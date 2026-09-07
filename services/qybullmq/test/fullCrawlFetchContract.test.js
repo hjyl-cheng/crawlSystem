@@ -13,6 +13,9 @@ import {
   YOUTUBEJS_FULL_CRAWL_FETCH_CONTRACT_ID,
   YOUTUBEJS_FULL_CRAWL_V1_FETCH_CONTRACT,
   isYoutubeJsFullCrawlFetchContract,
+  YOUTUBEJS_API_FULL_CRAWL_FETCH_CONTRACT,
+  YOUTUBEJS_API_FULL_CRAWL_FETCH_CONTRACT_ID,
+  YOUTUBEJS_API_FULL_CRAWL_FETCH_MANIFEST,
 } from "../src/fullCrawlFetchContract.js";
 
 test("optional comments use v2 without changing the deployed v1 hash or accepting a version switch", () => {
@@ -37,13 +40,22 @@ test("historical intent without a fetch contract remains legacy", () => {
 });
 
 test("new ordinary Full Crawl uses the configured default", () => {
-  assert.equal(fullCrawlFetchContractId(defaultFullCrawlFetchContract({})), YOUTUBEJS_FULL_CRAWL_FETCH_CONTRACT_ID);
+  assert.equal(fullCrawlFetchContractId(defaultFullCrawlFetchContract({})), YOUTUBEJS_API_FULL_CRAWL_FETCH_CONTRACT_ID);
   const resolved = newFullCrawlFetchContractForJob(
     { name: "channel-snapshot" },
     { FULL_CRAWL_FETCH_CONTRACT_DEFAULT: YOUTUBEJS_FULL_CRAWL_FETCH_CONTRACT_ID },
   );
 
   assert.equal(fullCrawlFetchContractId(resolved), YOUTUBEJS_FULL_CRAWL_FETCH_CONTRACT_ID);
+});
+
+test("v3 enables shared video batch fallback and keeps channel/uploads on YouTubeJS", () => {
+  assert.equal(YOUTUBEJS_API_FULL_CRAWL_FETCH_MANIFEST.channel_source, "youtubejs");
+  assert.equal(YOUTUBEJS_API_FULL_CRAWL_FETCH_MANIFEST.uploads_source, "youtubejs");
+  assert.equal(isYoutubeJsFullCrawlFetchContract(YOUTUBEJS_API_FULL_CRAWL_FETCH_CONTRACT), true);
+  assert.notEqual(YOUTUBEJS_API_FULL_CRAWL_FETCH_CONTRACT.contract_hash, YOUTUBEJS_FULL_CRAWL_FETCH_CONTRACT.contract_hash);
+  assert.throws(() => assertSameFullCrawlFetchContract(YOUTUBEJS_FULL_CRAWL_FETCH_CONTRACT,
+    YOUTUBEJS_API_FULL_CRAWL_FETCH_CONTRACT), FullCrawlFetchContractError);
 });
 
 test("repairs and controlled recovery stay legacy despite the configured default", () => {

@@ -342,6 +342,7 @@ export class RotaSlotAdapter {
           resumeMode,
           abortSignal: controller.signal,
           routeGeneration: frozen.route_generation,
+          getBudget: () => this.client.businessRunBudget(prepared.businessRunId),
         });
         try {
           const invoke = () => executeAttempt(prepared, attemptContext);

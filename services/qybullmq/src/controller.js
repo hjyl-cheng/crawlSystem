@@ -1,4 +1,5 @@
 import { nanoid } from "nanoid";
+import { dispatchVideoApiRequests } from "./videoApiBatchRequests.js";
 import { isFullCrawlCanaryBatch } from "./fullCrawlCanary.js";
 import { createHash } from "node:crypto";
 import { ensureDefaultAgentConfig, listEnabledAgentConfigs } from "./agentConfig.js";
@@ -3009,6 +3010,16 @@ async function tick() {
       : queuesByRole.contentDetail,
     detailExecutionRole: channelInlineDetails ? "channel" : "detail",
   });
+  const videoApiDemand = Number((await query(`SELECT count(*)::int AS count
+    FROM crawler.youtube_api_detail_requests WHERE status='pending'`)).rows[0].count);
+  // Subscriber demand is already bounded by per-video retries and the shared API quota.
+  if (videoApiDemand > 0 && crawlSettings.youtubeApiFallbackMode === "emergency") {
+    const dispatched = await dispatchVideoApiRequests({
+      query, withTransaction, queue: queues[queuesByRole.dataApiBatch],
+      batchSize: crawlSettings.youtubeApiBatchSize,
+    });
+    actions.push({ action: "dispatch-video-api-fallback", ...dispatched });
+  }
 
   const agentConfigs = automaticLocalAgentConfigs(await listEnabledAgentConfigs());
   const agentCapacity = await syncAgentGlobalConcurrency(actions, agentConfigs);
@@ -3142,6 +3153,7 @@ async function tick() {
   const pipelineHalted = ["paused", "stopped"].includes(queryScheduler.status);
   const recoveryConsumerRequired = (queueName) => (
     automaticCompletedRecovery && migrationSystemRecoveryQueueDemand.has(queueName)
+    || queueName === queuesByRole.dataApiBatch && videoApiDemand > 0
   );
   const noChannelProxy = Number.isFinite(channelProxyReady)
     ? channelProxyReady === 0

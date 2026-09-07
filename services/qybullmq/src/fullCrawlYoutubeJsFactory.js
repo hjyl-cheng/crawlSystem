@@ -13,6 +13,7 @@ import {
   fullCrawlFetchContractId,
   isYoutubeJsFullCrawlFetchContract,
   YOUTUBEJS_FULL_CRAWL_FETCH_CONTRACT_ID,
+  YOUTUBEJS_API_FULL_CRAWL_FETCH_CONTRACT_ID,
 } from "./fullCrawlFetchContract.js";
 import {
   classifyFullCrawlTargetBeforeDetail,
@@ -197,6 +198,7 @@ function completedResult({ state, closeResult, executedPhases, phaseTimingsMs, s
 export function createFullCrawlYoutubeJsExecutor({
   store,
   youtube,
+  videoApiFallback = null,
   handoff = {},
   clock = () => new Date(),
   locale = "en",
@@ -213,7 +215,7 @@ export function createFullCrawlYoutubeJsExecutor({
       throw new TypeError("Full Crawl YouTubeJS executor requires a supported YouTubeJS contract");
     }
     const fetchContractId = fullCrawlFetchContractId(job.data.fetch_contract);
-    const optionalComments = fetchContractId === YOUTUBEJS_FULL_CRAWL_FETCH_CONTRACT_ID;
+    const optionalComments = [YOUTUBEJS_FULL_CRAWL_FETCH_CONTRACT_ID, YOUTUBEJS_API_FULL_CRAWL_FETCH_CONTRACT_ID].includes(fetchContractId);
     const startedAtMs = Date.now();
     const startedAt = nowIso(clock);
     const phaseTimingsMs = {};
@@ -386,14 +388,21 @@ export function createFullCrawlYoutubeJsExecutor({
             }),
           };
         } else {
-          const detail = await youtube.fetchDetail(candidate.target.video_id, {
+          const fetch = () => youtube.fetchDetail(candidate.target.video_id, {
             signal: currentChannelExecutionAbortSignal(),
             strictRequiredSurfaces: true,
             optionalComments,
             detailMode: "full",
             requireContentType: true,
           });
-          observation = validateFullCrawlYoutubeJsDetail(candidate.target.video_id, detail, { optionalComments });
+          const validate = detail => validateFullCrawlYoutubeJsDetail(candidate.target.video_id, detail, { optionalComments });
+          observation = videoApiFallback && fetchContractId === YOUTUBEJS_API_FULL_CRAWL_FETCH_CONTRACT_ID
+            ? await videoApiFallback({ videoId: candidate.target.video_id,
+              runId: state.identity.runId,
+              requestId: JSON.stringify(["full", state.identity.runId, candidate.target.video_id]),
+              consumer: "full", attempt: candidate.attempts, optionalComments,
+              signal: currentChannelExecutionAbortSignal(), fetch, validate })
+            : validate(await fetch());
           const terminal = detailTerminalReason(
             observation.detail,
             frozen.contentMaxAgeDays,

@@ -2079,6 +2079,25 @@ CREATE TABLE IF NOT EXISTS crawler.youtube_api_tasks (
 CREATE INDEX IF NOT EXISTS idx_crawler_youtube_api_tasks_claim
 ON crawler.youtube_api_tasks (status, next_retry_at, created_at ASC);
 
+-- qy-video-api-detail-requests:start
+CREATE TABLE IF NOT EXISTS crawler.youtube_api_detail_requests (
+  request_id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL REFERENCES crawler.channel_runs(run_id) ON DELETE CASCADE,
+  source_content_id TEXT NOT NULL,
+  consumer TEXT NOT NULL CHECK (consumer IN ('full','incremental')),
+  task_id BIGINT NOT NULL REFERENCES crawler.youtube_api_tasks(task_id),
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','done','unavailable','failed')),
+  detail_json JSONB,
+  partial_detail JSONB NOT NULL DEFAULT '{}'::jsonb,
+  require_comments BOOLEAN NOT NULL DEFAULT false,
+  error_message TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  finished_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_youtube_api_detail_requests_pending
+ON crawler.youtube_api_detail_requests(task_id) WHERE status='pending';
+-- qy-video-api-detail-requests:end
+
 CREATE TABLE IF NOT EXISTS crawler.youtube_api_batches (
   batch_id TEXT PRIMARY KEY,
   status TEXT NOT NULL DEFAULT 'queued'

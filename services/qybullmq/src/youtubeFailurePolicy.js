@@ -396,6 +396,11 @@ function failureNodes(error) {
 }
 
 export function selectYoutubeFailure(input = {}) {
+  if (input.error?.code === "VIDEO_API_FALLBACK_UNRESOLVED") {
+    return Object.freeze({ node: input.error,
+      decision: decision("parser_runtime", { retryMode: "none", terminal: true }),
+      evidence: youtubeFailureNodeEvidence(input.error, input) });
+  }
   const nodes = failureNodes(input.error);
   const candidates = [];
   if (nodes.length === 0) {

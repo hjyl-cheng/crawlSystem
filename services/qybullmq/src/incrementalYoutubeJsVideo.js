@@ -1,4 +1,5 @@
 import { upsertDiscoveredVideoContent, refreshVideoContent } from "./videoContentStore.js";
+import { createVideoDetailApiFallback } from "./videoDetailApiFallback.js";
 import { createHash, randomUUID } from "node:crypto";
 import { projectVideoDetail, normalizeVideoViewCount, videoDetailFieldStatus as incrementalYoutubeJsVideoFieldStatus } from "./videoDetailEvidence.js";
 export { incrementalYoutubeJsVideoFieldStatus };
@@ -301,20 +302,32 @@ export async function fetchIncrementalYoutubeJsVideoDetail(videoId, {
   signal = null,
   phase = "first_seen",
   target = null,
+  videoApiFallback = null,
+  checkpoint = null,
 } = {}) {
   const effectiveSignal = combineAbortSignals(signal, currentChannelExecutionAbortSignal());
   const assertNotAborted = () => throwIfAborted(effectiveSignal);
   const requiresFullSurface = phase !== "recent" || target?.enrich_pending === true;
   const detailMode = requiresFullSurface ? "full" : "metrics";
   assertNotAborted();
-  const detail = await fetchYoutubeJs(videoId, {
+  const fetch = () => fetchYoutubeJs(videoId, {
     signal: effectiveSignal,
     strictRequiredSurfaces: true,
     detailMode,
     requireContentType: requiresFullSurface,
   });
+  const validate = detail => {
+    assertNotAborted();
+    return validateYoutubeJsVideoDetail(videoId, detail, { detailMode }).detail;
+  };
+  const detail = videoApiFallback && checkpoint
+    ? await videoApiFallback({ videoId, runId: checkpoint.run_id,
+      requestId: JSON.stringify(["incremental", checkpoint.run_id, checkpoint.cycle_key, phase, videoId]),
+      consumer: "incremental", attempt: checkpoint.attempt_count,
+      signal: effectiveSignal, detailMode, fetch, validate })
+    : validate(await fetch());
   assertNotAborted();
-  return validateYoutubeJsVideoDetail(videoId, detail, { detailMode }).detail;
+  return detail;
 }
 
 function probability(value) {
@@ -2372,6 +2385,7 @@ async function fetchCheckpointItemDetail({ item, fetchDetail, withTransaction, h
       signal: liveClaim.signal,
       phase: item.phase,
       target: item.target_json,
+      checkpoint: item,
     });
     throwIfAborted(liveClaim.signal);
   } catch (error) {
@@ -3615,7 +3629,12 @@ export async function executeIncrementalYoutubeJsVideo({
   const observedAt = observedAtValue.toISOString();
   const startedAtValue = new Date(startedAt);
   if (Number.isNaN(startedAtValue.getTime())) throw new TypeError("startedAt must be valid");
-  const detailFetcher = fetchDetail ?? fetchIncrementalYoutubeJsVideoDetail;
+  const fallback = process.env.YOUTUBEJS_VIDEO_API_BATCH_FALLBACK === "true"
+    ? createVideoDetailApiFallback({ query, withTransaction,
+      loadSettings: async () => (await import("./pipelineV2.js")).getYoutubeApiSettingsV2() }) : null;
+  const detailFetcher = fetchDetail ?? ((videoId, options) => fetchIncrementalYoutubeJsVideoDetail(
+    videoId, { ...options, videoApiFallback: fallback },
+  ));
   const signal = currentChannelExecutionAbortSignal();
   const assertNotAborted = () => throwIfAborted(signal);
   const storedVideoPlayerBudget = Math.floor(plan.capacity.player_cap * plan.capacity.factor);

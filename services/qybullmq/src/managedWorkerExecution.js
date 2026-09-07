@@ -1,4 +1,5 @@
 import { queuesByRole } from "./queues.js";
+import { withVideoFallbackExecution } from "./videoDetailApiFallback.js";
 import { selectYoutubeFailure } from "./youtubeFailurePolicy.js";
 import { isStaleExecutionFailure } from "./managedWorkerJob.js";
 
@@ -93,6 +94,7 @@ export function validateWorkerQueueConfiguration({
 }
 
 export function retryableRotaFailure(error) {
+  if (error?.code === "VIDEO_API_FALLBACK_UNRESOLVED") return null;
   if (isStaleExecutionFailure(error)) return null;
   const selected = failureSelections(error)
     .filter((selection) => RETRYABLE_ROUTE_FAILURES.has(selection?.decision?.kind))
@@ -138,10 +140,13 @@ export async function executeManagedWorkerAttempt({
     throw new TypeError("persistRetryableCheckpoint is required");
   }
   try {
-    const result = await execute({
+    const result = await withVideoFallbackExecution({
+      getBudget: attempt?.getBudget,
+      lastJobAttempt: Number(job?.attemptsMade ?? 0) + 1 >= Number(job?.opts?.attempts ?? 3),
+    }, () => execute({
       resumeMode: attempt?.resumeMode ?? prepared?.initialResumeMode ?? "initial",
       prepared,
-    });
+    }));
     return {
       kind: "managed_work_complete",
       businessState: managedBusinessState(job, result),
