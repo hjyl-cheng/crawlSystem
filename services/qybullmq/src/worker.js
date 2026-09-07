@@ -53,7 +53,8 @@ import {
   signalReadyDiscoveryPageQualifications,
 } from "./pipelineV2.js";
 import { closeFullCrawlYoutubeJsQueues, executeFullCrawlYoutubeJs } from "./fullCrawlYoutubeJs.js";
-import { isYoutubeJsFullCrawlFetchContract } from "./fullCrawlFetchContract.js";
+import { defaultFullCrawlFetchContract, isYoutubeJsFullCrawlFetchContract } from "./fullCrawlFetchContract.js";
+import { channelExtractorCapabilities, incrementalVideoExecutorMode as resolveIncrementalVideoExecutorMode } from "./channelExtractorCapabilities.js";
 import { assertFullCrawlWorkerLane, fullCrawlWorkerPrefix } from "./fullCrawlCanary.js";
 import { getQueryScheduler } from "./queryScheduler.js";
 import { scoreQueryBatch } from "./queryQuality.js";
@@ -109,17 +110,7 @@ import { resolveYoutubeLocale } from "./youtubeLocale.js";
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const queues = createQueues();
-const incrementalVideoExecutorMode = String(
-  process.env.INCREMENTAL_VIDEO_EXECUTOR || "legacy",
-).trim();
-if (!["legacy", "youtubejs_checkpoint_v1"].includes(incrementalVideoExecutorMode)) {
-  throw new Error(`unsupported INCREMENTAL_VIDEO_EXECUTOR: ${incrementalVideoExecutorMode}`);
-}
-if (incrementalVideoExecutorMode === "youtubejs_checkpoint_v1" && !youtubeJsDetailEnabled()) {
-  throw new Error(
-    "INCREMENTAL_VIDEO_EXECUTOR=youtubejs_checkpoint_v1 requires YOUTUBEJS_EXTRACTOR_MODE=full",
-  );
-}
+const incrementalVideoExecutorMode = resolveIncrementalVideoExecutorMode();
 const incrementalVideoExecutor = incrementalVideoExecutorMode === "youtubejs_checkpoint_v1"
   ? executeIncrementalYoutubeJsVideo
   : executeIncrementalVideo;
@@ -182,7 +173,10 @@ let shuttingDown = false;
 
 function identityRuntimeForRole() {
   if (proxySlotRole === "channel") {
-    return new ChannelExecutionRuntimeAdapter({ workerId: proxyWorkerId });
+    return new ChannelExecutionRuntimeAdapter({
+      workerId: proxyWorkerId,
+      incrementalExecutor: incrementalVideoExecutorMode,
+    });
   }
   if (proxySlotRole === "discover") return new DiscoverExecutionRuntimeAdapter();
   if (proxySlotRole === "query_quality") return new QueryQualityExecutionRuntimeAdapter();
@@ -1611,6 +1605,20 @@ const enabledQueues = String(process.env.WORKER_QUEUES || queueNames.join(","))
   .split(",")
   .map((item) => item.trim())
   .filter(Boolean);
+const channelWorkloads = [
+  ...(enabledQueues.includes(queuesByRole.channelCrawl)
+    ? [{ workloadKind: "channel_full", fetchContract: defaultFullCrawlFetchContract() }] : []),
+  ...(enabledQueues.includes(queuesByRole.channelIncremental)
+    ? [{ workloadKind: "channel_incremental" }] : []),
+  ...(enabledQueues.includes(queuesByRole.contentEnrich)
+    ? [{ workloadKind: "content_enrich" }] : []),
+];
+const channelCapabilities = channelWorkloads.map(
+  (workload) => channelExtractorCapabilities(workload, incrementalVideoExecutorMode),
+);
+if (channelCapabilities.some((capabilities) => !capabilities.ytdlp) && !youtubeJsDetailEnabled()) {
+  throw new Error("YouTubeJS Full Crawl and Incremental require YOUTUBEJS_EXTRACTOR_MODE=full");
+}
 const intakePrefix = fullCrawlWorkerPrefix({
   prefix: bullmqPrefix,
   enabledQueues,
@@ -1683,8 +1691,10 @@ async function startWorkerRuntime() {
   if (shuttingDown) return;
 
   if (channelExecutionEnabled() && !configuredForProxySlot()) {
-    const warmResult = await warmPersistentYtDlp();
-    console.log(JSON.stringify({ event: "ytdlp_pool_warm", ...warmResult }));
+    if (channelCapabilities.some((capabilities) => capabilities.ytdlp)) {
+      const warmResult = await warmPersistentYtDlp();
+      console.log(JSON.stringify({ event: "ytdlp_pool_warm", ...warmResult }));
+    }
     const youtubeJsWarmResult = await warmYoutubeJs();
     console.log(JSON.stringify({ event: "youtubejs_pool_warm", ...youtubeJsWarmResult }));
   }

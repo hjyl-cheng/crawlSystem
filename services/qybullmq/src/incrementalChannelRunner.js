@@ -1,7 +1,7 @@
 import { executeIncrementalAbout } from "./incrementalAbout.js";
 import { enqueueIncrementalAgent } from "./incrementalAgent.js";
 import { incrementalDomainState } from "./incrementalRunStore.js";
-import { executeIncrementalVideo } from "./incrementalVideo.js";
+import { executeIncrementalYoutubeJsVideo } from "./incrementalYoutubeJsVideo.js";
 import { validateIncrementalJob } from "./incrementalPlan.js";
 import { openYoutubeJsChannel } from "./youtubeJs.js";
 
@@ -74,7 +74,7 @@ export class IncrementalChannelRunner {
     withTransaction,
     query,
     about = executeIncrementalAbout,
-    video = executeIncrementalVideo,
+    video = executeIncrementalYoutubeJsVideo,
     agent = enqueueIncrementalAgent,
     openChannel = openYoutubeJsChannel,
   }) {

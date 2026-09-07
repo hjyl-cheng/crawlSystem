@@ -98,7 +98,10 @@ test("channel runtime binds both client profiles and checkpoints cookies without
   assert.equal(runtime.activeAttemptId, null);
 });
 
-test("YouTubeJS Full Crawl acquires only YouTubeJS and checkpoints no yt-dlp state", async () => {
+for (const workload of [
+  { workloadKind: "channel_full", fetchContract: YOUTUBEJS_FULL_CRAWL_FETCH_CONTRACT },
+  { workloadKind: "channel_incremental" },
+]) test(`YouTubeJS ${workload.workloadKind} acquires only YouTubeJS and checkpoints no yt-dlp state`, async () => {
   const currentProxy = { value: { ...proxy } };
   const leases = [];
   const releases = [];
@@ -124,10 +127,7 @@ test("YouTubeJS Full Crawl acquires only YouTubeJS and checkpoints no yt-dlp sta
   });
   const output = await runtime.run({
     ...context(currentProxy),
-    prepared: {
-      workloadKind: "channel_full",
-      fetchContract: YOUTUBEJS_FULL_CRAWL_FETCH_CONTRACT,
-    },
+    prepared: workload,
   }, async () => ({ ok: true }));
 
   assert.deepEqual(leases, ["youtubejs"]);

@@ -4,6 +4,10 @@ import test from "node:test";
 import pg from "pg";
 import { executeIncrementalYoutubeJsVideo } from "../src/incrementalYoutubeJsVideo.js";
 import { PUBLICATION_WRITER_VERSION } from "../src/publicationWriterVersion.js";
+import { BusinessRunBindingStore } from "../src/businessRunBindingStore.js";
+import { YOUTUBEJS_FULL_CRAWL_FETCH_CONTRACT } from "../src/fullCrawlFetchContract.js";
+import { createFullCrawlYoutubeJsExecutor } from "../src/fullCrawlYoutubeJsFactory.js";
+import { FullCrawlYoutubeJsStore } from "../src/fullCrawlYoutubeJsStore.js";
 
 const { Pool } = pg;
 const integrationUrl = process.env.INCREMENTAL_POSTGRES_TEST_URL;
@@ -76,6 +80,55 @@ function publicDetail(videoId) {
   };
 }
 
+async function initializeThroughFullCrawl(pool, withTransaction, channelId, videoId, suffix) {
+  const batchId = `shared-full-${suffix}`;
+  const runId = `full:${suffix}`;
+  const jobId = `channel-snapshot__${batchId}__${channelId}__g1`;
+  const businessRunKey = `shared-full:${suffix}`;
+  await pool.query(`INSERT INTO crawler.query_dispatch_batches
+    (dispatch_batch_id,pipeline_cycle_id,status,discovery_closed_at)
+    VALUES ($1,$1,'validation_closed',now())`, [batchId]);
+  const candidateId = Number((await pool.query(`INSERT INTO crawler.channel_candidates
+    (dispatch_batch_id,pipeline_cycle_id,channel_id,channel_url,status,
+     snapshot_dispatch_generation,snapshot_active_job_id,snapshot_active_job_attempt)
+    VALUES ($1,$1,$2,$3,'queued',1,$4,1) RETURNING candidate_id`,
+  [batchId, channelId, `https://www.youtube.com/channel/${channelId}`, jobId])).rows[0].candidate_id);
+  await new BusinessRunBindingStore({ withTransaction }).resolve({
+    businessRunKey, explicitBusinessRunId: runId, requestedStatus: "reserved", runKind: "full",
+    channelId, candidateId, policy: { id: "shared-test", version: 1, hash: "sha256:shared-test" },
+    intent: { job_name: "channel-snapshot", crawl_mode: "full", fetch_contract: YOUTUBEJS_FULL_CRAWL_FETCH_CONTRACT },
+  });
+  const detail = { ...publicDetail(videoId), title: "Stored recent Video",
+    thumbnail_url: "https://i.ytimg.com/vi/stored/default.jpg", description: "Stored description",
+    keywords: ["stored"], published_at: "2026-09-01T00:00:00Z",
+    published_at_precision: "date_only", duration_seconds: 45 };
+  const execute = createFullCrawlYoutubeJsExecutor({
+    store: new FullCrawlYoutubeJsStore({ query: pool.query.bind(pool), withTransaction }),
+    clock: () => new Date("2026-09-02T00:00:00Z"),
+    youtube: {
+      fetchChannel: async () => ({ about_requested: true, about_observed: true,
+        metadata: { channel_id: channelId, channel_url: `https://www.youtube.com/channel/${channelId}`,
+          handle: "@shared-test", title: "Full to Incremental", country: "Brazil",
+          subscriber_count: 10000, subscriber_count_text: "10,000", subscriber_count_source: "youtube_about" },
+        raw: { engine: "youtubei.js@test" } }),
+      fetchUploads: async () => ({ playlist_id: `UU${channelId.slice(2)}`,
+        entries: [{ video_id: videoId, position: 1, title: detail.title,
+          url: `https://www.youtube.com/watch?v=${videoId}`, published_at: detail.published_at,
+          published_at_status: "exact", published_at_precision: "date_only", published_at_source: "youtubejs_player" }],
+        activity_evidence_complete: true,
+        scan: { complete: true, stop_reason: "list_end", terminal_reason: "list_end",
+          pages: 1, inspected_count: 1, parse_gap_count: 0 } }),
+      fetchDetail: async () => detail,
+    },
+  });
+  const result = await execute({ id: jobId, name: "channel-snapshot", attemptsStarted: 1,
+    queueName: "youtube-channel-crawl", data: { channel_id: channelId, candidate_id: candidateId,
+      run_id: runId, business_run_key: businessRunKey, dispatch_batch_id: batchId,
+      dispatch_generation: 1, fetch_contract: YOUTUBEJS_FULL_CRAWL_FETCH_CONTRACT } });
+  assert.equal(result.ok, true);
+  assert.equal(result.detail_processed, 1);
+}
+
 async function checkpointReplayScenario(enrichPending) {
   const pool = new Pool({
     connectionString: integrationUrl,
@@ -105,11 +158,7 @@ async function checkpointReplayScenario(enrichPending) {
   let scans = 0;
 
   try {
-    await pool.query(
-      `INSERT INTO crawler.channels (channel_id,channel_url,title,status)
-       VALUES ($1,$2,'YouTubeJS checkpoint integration','active')`,
-      [channelId, `https://www.youtube.com/channel/${channelId}`],
-    );
+    await initializeThroughFullCrawl(pool, withTransaction, channelId, recentVideoId, suffix);
     await pool.query(
       `INSERT INTO crawler.channel_runs (
          run_id,channel_id,status,crawl_mode,content_limit,detail_status,
@@ -122,27 +171,6 @@ async function checkpointReplayScenario(enrichPending) {
          'capacity-1','test','2026-09-03T00:00:00Z',jsonb_build_object('job_id',$5::text)
        )`,
       [runId, channelId, planId, JSON.stringify(plan.task_mask), jobId],
-    );
-    await pool.query(
-      `INSERT INTO crawler.contents (
-         content_key,channel_id,run_id,content_type,content_type_source,
-         source_content_id,title,url,thumbnail_url,description,description_status,description_source,keywords,
-         published_at,published_at_status,published_at_precision,published_at_source,
-         duration_seconds,duration_status,duration_source,access_status,access_status_source,
-         first_seen_at,last_seen_at
-       ) VALUES (
-         $1,$2,$3,'video','youtube_watch_canonical',$4,'Stored recent Video',$5,
-         'https://i.ytimg.com/vi/stored/default.jpg','Stored description','exact','youtubejs_player',ARRAY['stored'],
-         '2026-09-01T00:00:00Z','exact','date_only','youtubejs_player',45,'exact','youtubejs_player',
-         'public','youtubejs_player',now(),now()
-       )`,
-      [
-        recentContentKey,
-        channelId,
-        runId,
-        recentVideoId,
-        `https://www.youtube.com/watch?v=${recentVideoId}`,
-      ],
     );
     if (enrichPending) {
       await pool.query(
@@ -375,7 +403,7 @@ async function checkpointReplayScenario(enrichPending) {
 }
 
 for (const enrichPending of [false, true]) {
-  test(`YouTubeJS checkpoint finalizes and replays ${enrichPending ? "pending repair" : "ordinary metrics"} without network`, {
+  test(`Full Crawl feeds Incremental ${enrichPending ? "pending repair" : "ordinary metrics"} and checkpoint replay without network`, {
     skip: integrationUrl ? false : "INCREMENTAL_POSTGRES_TEST_URL is not configured",
   }, () => checkpointReplayScenario(enrichPending));
 }

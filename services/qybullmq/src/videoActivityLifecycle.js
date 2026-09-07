@@ -1,3 +1,4 @@
+import { createVideoActivityAccumulator } from "./videoActivityEvidence.js";
 import {
   activeVideoActivity,
   buildDormantLifecycle,
@@ -7,7 +8,6 @@ import {
   evaluateVideoActivity,
 } from "./channelDormancy.js";
 import {
-  classifyPublicationWindow,
   normalizePublicationEvidence,
   PUBLICATION_TIME_CLASSIFIER_VERSION,
 } from "./publicationTimeEvidence.js";
@@ -289,22 +289,10 @@ export function classifyStoredVideoActivity(rows, {
   observedAt,
   maxAgeDays = DORMANT_WINDOW_DAYS,
 } = {}) {
-  const relationCounts = {
-    inside: 0,
-    outside: 0,
-    after_as_of: 0,
-    cutoff_overlap: 0,
-    unresolved: 0,
-  };
-  const unresolvedByStatusCounts = {
-    relative: 0,
-    estimated: 0,
-    unavailable: 0,
-    unresolved: 0,
-  };
+  const accumulator = createVideoActivityAccumulator({
+    observedAt, maxAgeDays,
+  });
   const seen = new Set();
-  let recent = 0;
-  let uncertain = 0;
   for (const row of Array.isArray(rows) ? rows : []) {
     const identity = String(row?.source_content_id ?? "").trim();
     if (identity && seen.has(identity)) continue;
@@ -315,30 +303,14 @@ export function classifyStoredVideoActivity(rows, {
       && row?.live_ended_at == null
       && row?.duration_seconds == null;
     if (unfinishedLive) {
-      uncertain += 1;
-      relationCounts.unresolved += 1;
-      unresolvedByStatusCounts.unresolved += 1;
+      accumulator.addUnresolved();
       continue;
     }
     const publication = normalizePublicationEvidence(row);
-    const window = classifyPublicationWindow(publication, {
-      asOf: observedAt,
-      maxAgeDays,
-    });
-    relationCounts[window.relation] += 1;
-    if (window.relation === "inside") recent += 1;
-    else if (["after_as_of", "cutoff_overlap", "unresolved"].includes(window.relation)) {
-      uncertain += 1;
-      if (window.relation === "unresolved") {
-        unresolvedByStatusCounts[publication.published_at_status] += 1;
-      }
-    }
+    accumulator.add(publication);
   }
   return {
-    recentPublishedContentCount: recent,
-    uncertainContentCount: uncertain,
-    relationCounts,
-    unresolvedByStatusCounts,
+    ...accumulator.evidence,
     classifierVersion: PUBLICATION_TIME_CLASSIFIER_VERSION,
     policyVersion: INCREMENTAL_VIDEO_ACTIVITY_POLICY_VERSION,
   };

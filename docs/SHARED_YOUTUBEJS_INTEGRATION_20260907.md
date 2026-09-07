@@ -21,6 +21,13 @@ Both branches' tests are retained, with equivalent tests consolidated.
 | Comment parsing, sorting, total-count evidence | `youtubeCommentPage.js` |
 | Locale-aware dates and failure classification | `localizedTime.js`, `youtubeFailurePolicy.js` |
 | Video observation validation, access and content classification | `youtubeJsVideoDetailContract.js` |
+| Detail values, statuses, sources and checkpoint field evidence | `videoDetailEvidence.js` |
+| Full snapshot, first-seen insert, recent refresh/repair and access writes | `videoContentStore.js` |
+| Description, keyword/hashtag and comment-page retention | `videoContentMutationPolicy.js` |
+| Content action and disposition assembly | `collectedVideoOutcome.js` |
+| About observation assembly with explicit locale and execution context | `aboutObservation.js` |
+| Publication-window evidence counters | `videoActivityEvidence.js` |
+| Executor selection and runtime extractor requirements | `channelExtractorCapabilities.js` |
 
 Full Crawl's `validateFullCrawlYoutubeJsDetail` and Incremental's
 `fetchIncrementalYoutubeJsVideoDetail` use the same validation implementation.
@@ -42,17 +49,49 @@ handoff remain in its executor and store. Incremental anchors, sampling,
 first-seen processing, Batch/Item claims, cursors and Clock observations remain
 in its executor. Their persisted state and recovery protocols are different.
 
+The shared content store uses the caller's transaction. Candidate settlement,
+first-seen ledgers, observation/cursor commits and publication reconciliation
+remain at their original transactional points. Metrics refresh retains populated
+static fields; explicit repair may update them. Type corrections preserve the
+existing content key. Older recent observations cannot overwrite newer ones.
+The old `fullVideoContentStore.js` exports remain as compatibility entry points.
+
+Both writers now preserve estimated view counts and explicit unresolved comment
+evidence. A numeric count from a failed optional comment surface remains
+unresolved and cannot become a published exact count. Zero, policy zero,
+disabled, missing and parser failure remain distinct.
+
+Feed traversal shares normalization, deduplication, continuation requests and
+parse-gap accounting. Full Crawl keeps a selected-item limit and dense positions;
+Incremental keeps raw source positions, ordered anchors and separate first-page
+and catch-up counters. Full pagination failures throw; Incremental returns
+partial evidence. Parse gaps prevent completeness. No continuation is requested
+after the page budget, fixing the old Full loop's unused extra request at that
+boundary. The historical Full duplicate-page/terminal-page stop is retained;
+Incremental still inspects that terminal page. Persisted document shapes and
+contract hashes are unchanged.
+
 ## Verification
 
-- QYBullMQ regression run: 1,561 passed, zero failures; 169 optional tests
+- QYBullMQ regression run: 1,567 passed, zero failures; 171 optional tests
   skipped without their external environment variables.
+- Final targeted run after the field-status projection and page-budget tests:
+  113 passed, zero failures, no skips (including the two database chain tests).
 - Eight cross-pipeline tests cover required metadata, zero evidence, optional
   comments, metrics-only refresh, pending repair, live exclusions, restricted
   access and cancellation.
 - Isolated PostgreSQL/Redis: 18 Full Crawl tests passed, including process-kill
   recovery, duplicate delivery, checkpoint atomicity and publication evidence.
 - Isolated PostgreSQL: one Incremental checkpoint schema/claim test and two
-  finalization/replay scenarios passed.
+  finalization/replay scenarios passed. Both scenarios now create the Channel
+  and initial content through the real Full Crawl executor/store before running
+  Incremental. They cover ordinary metrics and pending repair, publication
+  hashes, observation/outbox identity, cursor advancement and network-free replay.
+- Isolated PostgreSQL: two existing Full content-store scenarios and one shared
+  writer scenario passed. The latter covers Full snapshot, Incremental refresh,
+  stale observation, repair and first-seen type correction on the same content.
+- In total, 24 distinct PostgreSQL/Redis integration scenarios were enabled and
+  passed. YouTube responses and Agent results are fixtures, not live canaries.
 - `scripts/verify.sh` and `git diff --check` passed.
 
 The original Incremental PostgreSQL replay test also failed on the unchanged
@@ -67,8 +106,17 @@ schemas. All database tests ran against disposable local infrastructure.
 
 ## Deployment Still Required
 
-This integration does not switch running workers or update `main`.
-Both legacy defaults remain until the runtime cutover is performed.
-Deployment needs explicit Full Crawl contract and Incremental executor settings,
-the matching schema checks, a single immutable release image, queue draining,
-and a combined live canary through publication before scaling out.
+Source and Compose defaults now select `FULL_CRAWL_FETCH_CONTRACT_DEFAULT=youtubejs_full_v2`,
+`INCREMENTAL_VIDEO_EXECUTOR=youtubejs_checkpoint_v1` and
+`YOUTUBEJS_EXTRACTOR_MODE=full`. New Full Crawl and Incremental executions acquire
+only YouTubeJS and have no yt-dlp fallback. Dedicated new-chain workers do not
+warm yt-dlp. Frozen legacy Full contracts, an explicitly selected legacy
+Incremental executor, and the separate legacy Content Enrich consumer retain
+their resource requirements. Content Enrich remains Clock-owned by default.
+
+This integration does not switch running workers or update `main`. Existing
+runtime environment overrides must be checked before release. Deployment still
+requires the matching schemas, one immutable image, legacy queue draining and
+a combined live canary through publication before scaling out. See
+`DEPLOYMENT.md` section 9.1. No business database, running worker or remote
+repository was modified by this integration.

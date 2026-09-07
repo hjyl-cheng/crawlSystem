@@ -1,4 +1,7 @@
+import { upsertDiscoveredVideoContent, refreshVideoContent } from "./videoContentStore.js";
 import { createHash, randomUUID } from "node:crypto";
+import { projectVideoDetail, normalizeVideoViewCount, videoDetailFieldStatus as incrementalYoutubeJsVideoFieldStatus } from "./videoDetailEvidence.js";
+export { incrementalYoutubeJsVideoFieldStatus };
 import { setTimeout as delay } from "node:timers/promises";
 import { currentChannelExecutionAbortSignal } from "./channelExecutionContext.js";
 import { combineAbortSignals, throwIfAborted } from "./abortSignal.js";
@@ -25,6 +28,7 @@ import { fetchYoutubeJsVideoDetail } from "./youtubeJs.js";
 import { validateYoutubeJsVideoDetail } from "./youtubeJsVideoDetailContract.js";
 import { resolveYoutubeContentType } from "./youtubeContentType.js";
 import { fullVideoStorageAction } from "./fullVideoContentStore.js";
+import { resolveCollectedVideoOutcome } from "./collectedVideoOutcome.js";
 import {
   normalizePublicationEvidence,
   publicationEvidenceFromFields,
@@ -34,7 +38,6 @@ import {
   selectPublicationEvidence,
 } from "./publicationTimeEvidence.js";
 import {
-  resolveVideoDisposition,
   videoAccessRecheckAt,
   videoDispositionSummary,
 } from "./videoDisposition.js";
@@ -61,17 +64,8 @@ const PROBE_ROUTE_FAILURE_KINDS = new Set([
   "youtube_rate_limited",
   "youtube_challenge",
 ]);
-const CHECKPOINT_FIELD_STATUS_VERSION = 1;
 const CHECKPOINT_ACTIVE_CLAIM_POLL_MAX_MS = 5_000;
 const CHECKPOINT_ACTIVE_CLAIM_POLL_MIN_MS = 50;
-const CONTENT_UPSERT_PUBLICATION_WINS = publicationEvidenceCandidateWinsSql(
-  "crawler.contents",
-  "EXCLUDED",
-);
-const CONTENT_UPSERT_PUBLICATION_CONFLICT = publicationEvidenceConflictPatchSql(
-  "crawler.contents",
-  "EXCLUDED",
-);
 const SCAN_PUBLICATION_WINS = publicationEvidenceCandidateWinsSql("content", "input");
 const SCAN_PUBLICATION_CONFLICT = publicationEvidenceConflictPatchSql("content", "input");
 
@@ -148,92 +142,6 @@ export function incrementalYoutubeJsVideoTargetHash(items) {
   return sha256Json(targets);
 }
 
-function explicitFieldStatus(detail, field) {
-  const has = Object.prototype.hasOwnProperty.call(detail, field);
-  if (!has || detail[field] === undefined) return "unobserved";
-  const value = detail[field];
-  if (value === null) return "unobserved";
-  if (Array.isArray(value) && value.length === 0) return "empty";
-  if (typeof value === "string" && value === "") return "empty";
-  return "exact";
-}
-
-export function incrementalYoutubeJsVideoFieldStatus(detailValue, errorValue = null) {
-  const detail = objectValue(detailValue) ?? {};
-  const commentFailure = errorValue?.required_surface === "comments";
-  const playerFailure = errorValue?.required_surface === "player";
-  const descriptionObserved = detail.description_observed === true
-    || ["exact", "empty"].includes(detail.description_status);
-  const descriptionStatus = detail.description_status === "unavailable"
-    ? "unavailable"
-    : descriptionObserved
-      ? (detail.description === "" ? "empty" : "exact")
-      : "unobserved";
-  const hashtagsStatus = detail.hashtags_observed === true
-    ? (Array.isArray(detail.hashtags) && detail.hashtags.length === 0 ? "empty" : "exact")
-    : "unobserved";
-  const keywordsStatus = detail.keywords_observed === true
-    ? (Array.isArray(detail.keywords) && detail.keywords.length === 0 ? "empty" : "exact")
-    : "unobserved";
-  const commentsDisabled = detail.comments_disabled === true
-    || detail.comment_count_status === "disabled";
-  const commentStatus = commentFailure
-    ? "parser_gap"
-    : commentsDisabled
-      ? "disabled"
-      : detail.comment_count === 0 && ["zero_from_empty", "zero_from_surface", "zero_from_upcoming"].includes(detail.comment_count_status)
-        ? detail.comment_count_status : explicitFieldStatus(detail, "comment_count");
-  const pageStatus = commentFailure
-    ? "parser_gap"
-    : commentsDisabled
-      ? "disabled"
-      : explicitFieldStatus(detail, "comments_first_page");
-  const accessStatus = !detail.access_status || detail.access_status === "unknown"
-    ? "unobserved"
-    : detail.access_status === "public" || detail.access_status === "unlisted"
-      ? "exact"
-      : "unavailable";
-  const output = {
-    version: CHECKPOINT_FIELD_STATUS_VERSION,
-    id: explicitFieldStatus(detail, "id"),
-    title: explicitFieldStatus(detail, "title"),
-    thumbnail_url: explicitFieldStatus(detail, "thumbnail_url"),
-    published_at: detail.published_at_status === "unresolved"
-      ? "unobserved"
-      : explicitFieldStatus(detail, "published_at"),
-    content_type_signals: explicitFieldStatus(detail, "content_type_signals"),
-    duration_seconds: explicitFieldStatus(detail, "duration_seconds"),
-    view_count: explicitFieldStatus(detail, "view_count"),
-    like_count: detail.like_count_status === "zero_from_empty" && detail.like_count === 0
-      ? "zero_from_empty" : explicitFieldStatus(detail, "like_count"),
-    comment_count: commentStatus,
-    comments_disabled: commentFailure
-      ? "parser_gap"
-      : commentsDisabled ? "disabled" : explicitFieldStatus(detail, "comments_disabled"),
-    comments_first_page: pageStatus,
-    description: descriptionStatus,
-    hashtags: hashtagsStatus,
-    keywords: keywordsStatus,
-    access_status: accessStatus,
-    live_scheduled_at: explicitFieldStatus(detail, "live_scheduled_at"),
-    live_started_at: explicitFieldStatus(detail, "live_started_at"),
-    live_ended_at: explicitFieldStatus(detail, "live_ended_at"),
-    extractor_version: explicitFieldStatus(detail, "extractor_version"),
-    source: explicitFieldStatus(detail, "source"),
-  };
-  if (playerFailure) {
-    for (const field of [
-      "title",
-      "published_at",
-      "content_type_signals",
-      "duration_seconds",
-      "view_count",
-    ]) {
-      if (["unobserved", "empty"].includes(output[field])) output[field] = "parser_gap";
-    }
-  }
-  return output;
-}
 
 function serializedCheckpointError(error) {
   const selected = selectYoutubeFailure({ error });
@@ -291,10 +199,6 @@ function text(value) {
 function stringList(value) {
   if (!Array.isArray(value)) return [];
   return [...new Set(value.map(text).filter(Boolean))];
-}
-
-function extractorPublicationEvidence(detail, fallbackSource = null) {
-  return publicationEvidenceFromFields(detail, { fallbackSource });
 }
 
 function mergedDiscoveryAnchorIds(entries, anchors, limit = 20) {
@@ -366,18 +270,11 @@ function classifyVideoType(entry, detail = null) {
 }
 
 function detailViewCount(detail) {
-  return integer(detail?.view_count ?? detail?.view_count_text);
+  return normalizeVideoViewCount(detail).value;
 }
 
 function detailAccess(detail) {
   return videoAccessStatus(detail);
-}
-
-function publishedAt(detail) {
-  const value = text(detail?.published_at);
-  if (!value) return null;
-  const parsed = new Date(value);
-  return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();
 }
 
 function uploadsPublishedFacts(entry) {
@@ -396,89 +293,7 @@ function detailSource(detail) {
 }
 
 function detailFacts(detail) {
-  if (!detail) return null;
-  const source = detailSource(detail);
-  const publication = extractorPublicationEvidence(detail, source);
-  const commentsDisabled = detail.comments_disabled === true;
-  return {
-    title: text(detail.title),
-    thumbnail_url: text(detail.thumbnail_url),
-    ...publication,
-    view_count: detailViewCount(detail),
-    view_count_source: text(detail.view_count_source) ?? source,
-    like_count: integer(detail.like_count),
-    like_count_status: detail.like_count_status === "zero_from_empty" && integer(detail.like_count) === 0
-      ? "zero_from_empty" : "exact",
-    like_count_source: text(detail.like_count_source) ?? source,
-    comment_count: commentsDisabled ? 0 : integer(detail.comment_count),
-    comment_count_status: commentsDisabled ? "disabled"
-      : integer(detail.comment_count) === 0 && ["zero_from_empty", "zero_from_surface", "zero_from_upcoming"].includes(detail.comment_count_status)
-        ? detail.comment_count_status : "exact",
-    comment_count_source: text(detail.comment_count_source ?? detail.comments_status_source) ?? source,
-    comments_disabled: detail.comments_disabled == null
-      ? null
-      : commentsDisabled,
-    comments_first_page: detail.comments_first_page ?? null,
-    duration_seconds: positiveInteger(detail.duration_seconds),
-    duration_source: text(detail.duration_source) ?? source,
-    description: typeof detail.description === "string" ? detail.description : null,
-    description_source: text(detail.description_source) ?? source,
-    description_observed: typeof detail.description === "string",
-    hashtags: stringList(detail.hashtags),
-    hashtags_observed: detail.hashtags_observed === true || Array.isArray(detail.hashtags),
-    keywords: stringList(detail.keywords),
-    keywords_observed: detail.keywords_observed === true || Array.isArray(detail.keywords),
-    access_status: detailAccess(detail),
-    access_status_source: text(detail.access_status_source) ?? source,
-    live_scheduled_at: publishedAt({ published_at: detail.live_scheduled_at }),
-    live_started_at: publishedAt({ published_at: detail.live_started_at }),
-    live_ended_at: publishedAt({ published_at: detail.live_ended_at }),
-    extractor_version: text(detail.extractor_version),
-  };
-}
-
-function missingStoredText(value) {
-  return text(value) == null;
-}
-
-function recentStorageFacts(row, facts, { allowStaticRepair = false } = {}) {
-  if (allowStaticRepair) {
-    return {
-      title: facts.title,
-      thumbnail_url: facts.thumbnail_url,
-      description: facts.description,
-      description_source: facts.description_source,
-      description_observed: facts.description_observed,
-      hashtags: facts.hashtags,
-      hashtags_observed: facts.hashtags_observed,
-      keywords: facts.keywords,
-      keywords_observed: facts.keywords_observed,
-      duration_seconds: facts.duration_seconds,
-      duration_source: facts.duration_source,
-      live_scheduled_at: facts.live_scheduled_at,
-      live_started_at: facts.live_started_at,
-      live_ended_at: facts.live_ended_at,
-    };
-  }
-  const descriptionResolved = ["exact", "empty"].includes(text(row.description_status));
-  const descriptionMissing = missingStoredText(row.description) && !descriptionResolved;
-  const durationMissing = positiveInteger(row.duration_seconds) == null;
-  return {
-    title: missingStoredText(row.title) ? facts.title : null,
-    thumbnail_url: missingStoredText(row.thumbnail_url) ? facts.thumbnail_url : null,
-    description: descriptionMissing ? facts.description : null,
-    description_source: descriptionMissing ? facts.description_source : null,
-    description_observed: descriptionMissing && facts.description_observed,
-    hashtags: [],
-    hashtags_observed: false,
-    keywords: [],
-    keywords_observed: false,
-    duration_seconds: durationMissing ? facts.duration_seconds : null,
-    duration_source: durationMissing ? facts.duration_source : null,
-    live_scheduled_at: row.live_scheduled_at == null ? facts.live_scheduled_at : null,
-    live_started_at: row.live_started_at == null ? facts.live_started_at : null,
-    live_ended_at: row.live_ended_at == null ? facts.live_ended_at : null,
-  };
+  return projectVideoDetail(detail, { fallbackSource: "youtubejs_player" });
 }
 
 export async function fetchIncrementalYoutubeJsVideoDetail(videoId, {
@@ -1210,18 +1025,12 @@ function resolveFirstSeenContent({ entry, capture, observedAt, discoveryDeferred
   const facts = detailFacts(detail);
   const uploadFacts = uploadsPublishedFacts(entry);
   const classification = classifyVideoType(entry, detail);
-  const storageAction = fullVideoStorageAction({
-    candidate: {},
-    classification,
-    access: { access_status: facts?.access_status ?? "unknown" },
-  });
   const terminalReason = unfinishedLiveReason({
     ...detail,
     is_upcoming: entry.is_upcoming === true || detail?.is_upcoming === true,
     is_live: entry.is_live === true || detail?.is_live === true,
   });
-  const disposition = resolveVideoDisposition({
-    storageAction,
+  const { disposition } = resolveCollectedVideoOutcome({
     classification,
     access: {
       access_status: facts?.access_status ?? "unknown",
@@ -1351,217 +1160,10 @@ async function upsertFirstSeenContent(client, {
   const detailComplete = preparedEnrich.skipped === false
     && preparedEnrich.outcome?.detail != null;
   const candidateDetailComplete = hasCompletePublicVideoSurface(detail);
-  const url = contentType === "short"
-    ? `https://www.youtube.com/shorts/${encodeURIComponent(entry.id)}`
-    : `https://www.youtube.com/watch?v=${encodeURIComponent(entry.id)}`;
-  const descriptionStatus = facts?.description == null
-    ? "unresolved"
-    : facts.description === "" ? "empty" : "exact";
-  const published = publication.published_at;
-  const publishedPrecision = publication.published_at_precision;
-  const publishedSource = publication.published_at_source;
-  const isRecent = published == null
-    ? true
-    : new Date(published).getTime() >= new Date(observedAt).getTime() - (30 * 86400000);
-  const stored = await client.query(
-    `INSERT INTO crawler.contents (
-       content_key,channel_id,run_id,content_type,content_type_source,
-       source_content_id,position,title,url,thumbnail_url,
-       description,description_status,description_source,hashtags,keywords,
-       published_at,published_at_status,published_at_source,published_at_precision,
-       is_recent,duration_seconds,duration_status,duration_source,
-       view_count,view_count_text,view_count_status,view_count_source,
-       like_count,like_count_status,like_count_source,
-       comment_count,comment_count_status,comments_disabled,comment_count_source,
-       comments_first_page,
-       is_members_only,access_status,access_status_source,extractor_version,
-       raw_json,first_seen_at,last_seen_at,last_enriched_at,
-       playlist_last_seen_at,player_last_observed_at,next_last_observed_at,last_observation_id
-     ) VALUES (
-       $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,
-       $11,$12,$13,$14::text[],$15::text[],$16,$17,$18,$19,
-       $20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$44::jsonb,
-       $35,$36,$37,$38,$39::jsonb,$40::timestamptz,$40::timestamptz,
-       CASE WHEN $41::boolean THEN $40::timestamptz ELSE NULL END,
-       $40::timestamptz,CASE WHEN $41::boolean THEN $40::timestamptz ELSE NULL END,
-       CASE WHEN $41::boolean THEN $40::timestamptz ELSE NULL END,$42
-     )
-     ON CONFLICT (channel_id,source_content_id) DO UPDATE
-     SET run_id=EXCLUDED.run_id,position=EXCLUDED.position,
-         content_type=CASE
-           WHEN $43::boolean THEN EXCLUDED.content_type
-           ELSE crawler.contents.content_type
-         END,
-         content_type_source=CASE
-           WHEN $43::boolean THEN EXCLUDED.content_type_source
-           ELSE crawler.contents.content_type_source
-         END,
-         url=CASE
-           WHEN $43::boolean THEN EXCLUDED.url
-           ELSE COALESCE(crawler.contents.url,EXCLUDED.url)
-         END,
-         title=COALESCE(EXCLUDED.title,crawler.contents.title),
-         thumbnail_url=COALESCE(EXCLUDED.thumbnail_url,crawler.contents.thumbnail_url),
-         description=CASE
-           WHEN NOT $41::boolean THEN crawler.contents.description
-           WHEN EXCLUDED.description_status='exact' THEN EXCLUDED.description
-           WHEN EXCLUDED.description_status='empty'
-             AND NULLIF(btrim(COALESCE(crawler.contents.description,'')),'') IS NULL
-             THEN EXCLUDED.description
-           ELSE crawler.contents.description END,
-         description_status=CASE
-           WHEN NOT $41::boolean THEN crawler.contents.description_status
-           WHEN EXCLUDED.description_status='exact' THEN 'exact'
-           WHEN EXCLUDED.description_status='empty'
-             AND NULLIF(btrim(COALESCE(crawler.contents.description,'')),'') IS NULL
-             THEN 'empty'
-           ELSE crawler.contents.description_status END,
-         description_source=CASE
-           WHEN NOT $41::boolean THEN crawler.contents.description_source
-           WHEN EXCLUDED.description_status='exact' THEN EXCLUDED.description_source
-           WHEN EXCLUDED.description_status='empty'
-             AND NULLIF(btrim(COALESCE(crawler.contents.description,'')),'') IS NULL
-             THEN EXCLUDED.description_source
-           ELSE crawler.contents.description_source END,
-         hashtags=CASE
-           WHEN $41::boolean AND (
-             COALESCE(cardinality(EXCLUDED.hashtags),0)>0
-             OR COALESCE(cardinality(crawler.contents.hashtags),0)=0
-           ) THEN EXCLUDED.hashtags ELSE crawler.contents.hashtags END,
-         keywords=CASE
-           WHEN $41::boolean AND (
-             COALESCE(cardinality(EXCLUDED.keywords),0)>0
-             OR COALESCE(cardinality(crawler.contents.keywords),0)=0
-           ) THEN EXCLUDED.keywords ELSE crawler.contents.keywords END,
-         published_at=CASE WHEN ${CONTENT_UPSERT_PUBLICATION_WINS}
-           THEN EXCLUDED.published_at ELSE crawler.contents.published_at END,
-         published_at_status=CASE WHEN ${CONTENT_UPSERT_PUBLICATION_WINS}
-           THEN EXCLUDED.published_at_status ELSE crawler.contents.published_at_status END,
-         published_at_source=CASE WHEN ${CONTENT_UPSERT_PUBLICATION_WINS}
-           THEN EXCLUDED.published_at_source ELSE crawler.contents.published_at_source END,
-         published_at_precision=CASE WHEN ${CONTENT_UPSERT_PUBLICATION_WINS}
-           THEN EXCLUDED.published_at_precision ELSE crawler.contents.published_at_precision END,
-         duration_seconds=COALESCE(EXCLUDED.duration_seconds,crawler.contents.duration_seconds),
-         duration_status=CASE WHEN EXCLUDED.duration_seconds IS NOT NULL THEN 'exact' ELSE crawler.contents.duration_status END,
-         duration_source=COALESCE(EXCLUDED.duration_source,crawler.contents.duration_source),
-         view_count=COALESCE(EXCLUDED.view_count,crawler.contents.view_count),
-         view_count_text=COALESCE(EXCLUDED.view_count_text,crawler.contents.view_count_text),
-         view_count_status=CASE WHEN EXCLUDED.view_count IS NOT NULL THEN 'exact' ELSE crawler.contents.view_count_status END,
-         view_count_source=COALESCE(EXCLUDED.view_count_source,crawler.contents.view_count_source),
-         like_count=COALESCE(EXCLUDED.like_count,crawler.contents.like_count),
-         like_count_status=CASE WHEN EXCLUDED.like_count IS NOT NULL THEN EXCLUDED.like_count_status ELSE crawler.contents.like_count_status END,
-         like_count_source=COALESCE(EXCLUDED.like_count_source,crawler.contents.like_count_source),
-         comment_count=CASE
-           WHEN EXCLUDED.comments_disabled THEN 0
-           ELSE COALESCE(EXCLUDED.comment_count,crawler.contents.comment_count) END,
-         comment_count_status=CASE
-           WHEN EXCLUDED.comments_disabled OR EXCLUDED.comment_count IS NOT NULL
-             THEN EXCLUDED.comment_count_status
-           WHEN crawler.contents.comments_disabled OR crawler.contents.comment_count IS NOT NULL
-             THEN crawler.contents.comment_count_status
-           ELSE EXCLUDED.comment_count_status END,
-         comments_disabled=CASE
-           WHEN EXCLUDED.comments_disabled OR EXCLUDED.comment_count IS NOT NULL
-             THEN EXCLUDED.comments_disabled
-           WHEN crawler.contents.comments_disabled OR crawler.contents.comment_count IS NOT NULL
-             THEN crawler.contents.comments_disabled
-           ELSE EXCLUDED.comments_disabled END,
-         comment_count_source=CASE
-           WHEN EXCLUDED.comments_disabled OR EXCLUDED.comment_count IS NOT NULL
-             THEN EXCLUDED.comment_count_source
-           WHEN crawler.contents.comments_disabled OR crawler.contents.comment_count IS NOT NULL
-             THEN crawler.contents.comment_count_source
-           ELSE EXCLUDED.comment_count_source END,
-         comments_first_page=CASE
-           WHEN COALESCE((crawler.contents.comments_first_page->>'returned_count')::integer,0)>0
-             THEN crawler.contents.comments_first_page
-           WHEN COALESCE((EXCLUDED.comments_first_page->>'returned_count')::integer,0)>0
-             THEN EXCLUDED.comments_first_page
-           ELSE COALESCE(crawler.contents.comments_first_page,EXCLUDED.comments_first_page)
-         END,
-         is_members_only=CASE
-           WHEN NOT $41::boolean THEN crawler.contents.is_members_only
-           WHEN EXCLUDED.access_status='unknown'
-             AND COALESCE(crawler.contents.access_status,'unknown')<>'unknown'
-             THEN crawler.contents.is_members_only
-           ELSE EXCLUDED.is_members_only END,
-         access_status=CASE
-           WHEN NOT $41::boolean THEN crawler.contents.access_status
-           WHEN EXCLUDED.access_status='unknown'
-             AND COALESCE(crawler.contents.access_status,'unknown')<>'unknown'
-             THEN crawler.contents.access_status
-           ELSE EXCLUDED.access_status END,
-         access_status_source=CASE
-           WHEN NOT $41::boolean THEN crawler.contents.access_status_source
-           WHEN EXCLUDED.access_status='unknown'
-             AND COALESCE(crawler.contents.access_status,'unknown')<>'unknown'
-             THEN crawler.contents.access_status_source
-           ELSE EXCLUDED.access_status_source END,
-         extractor_version=COALESCE(EXCLUDED.extractor_version,crawler.contents.extractor_version),
-         raw_json=crawler.contents.raw_json || EXCLUDED.raw_json
-           || ${CONTENT_UPSERT_PUBLICATION_CONFLICT},
-         last_seen_at=GREATEST(crawler.contents.last_seen_at,EXCLUDED.last_seen_at),
-         last_enriched_at=CASE WHEN $41::boolean THEN $40::timestamptz ELSE crawler.contents.last_enriched_at END,
-         playlist_last_seen_at=$40::timestamptz,
-         player_last_observed_at=CASE WHEN $41::boolean THEN $40::timestamptz ELSE crawler.contents.player_last_observed_at END,
-         next_last_observed_at=CASE WHEN $41::boolean THEN $40::timestamptz ELSE crawler.contents.next_last_observed_at END,
-         last_observation_id=$42
-     RETURNING content_key`,
-    [
-      contentKey,
-      channelId,
-      runId,
-      contentType,
-      classification.source,
-      entry.id,
-      entry.position,
-      detail?.title ?? entry.title ?? null,
-      url,
-      detail?.thumbnail_url ?? entry.thumbnail_url ?? null,
-      facts?.description ?? null,
-      descriptionStatus,
-      facts?.description == null ? null : detailSource(detail),
-      facts?.hashtags ?? [],
-      facts?.keywords ?? [],
-      published,
-      publication.published_at_status,
-      publishedSource,
-      publishedPrecision,
-      isRecent,
-      facts?.duration_seconds ?? null,
-      facts?.duration_seconds == null ? "unresolved" : "exact",
-      facts?.duration_seconds == null ? null : facts.duration_source,
-      facts?.view_count ?? null,
-      facts?.view_count == null ? null : String(facts.view_count),
-      facts?.view_count == null ? "unresolved" : "exact",
-      facts?.view_count == null ? null : facts.view_count_source,
-      facts?.like_count ?? null,
-      facts?.like_count == null ? "unresolved" : facts.like_count_status,
-      facts?.like_count == null ? null : facts.like_count_source,
-      facts?.comments_disabled ? 0 : facts?.comment_count ?? null,
-      facts?.comments_disabled ? "disabled" : facts?.comment_count == null ? "unresolved" : facts.comment_count_status,
-      facts?.comments_disabled ?? null,
-      facts?.comments_disabled || facts?.comment_count != null ? facts.comment_count_source : null,
-      facts?.access_status === "members_only",
-      facts?.access_status ?? "unknown",
-      facts ? facts.access_status_source : null,
-      facts?.extractor_version ?? null,
-      JSON.stringify({
-        incremental: {
-          observation_id: observationId,
-          playlist_position: entry.position,
-          detail_collected: facts != null,
-        },
-        ...(publicationConflict ? { publication_evidence_conflict: publicationConflict } : {}),
-      }),
-      observedAt,
-      detailComplete,
-      observationId,
-      classification.authoritative === true && facts?.access_status === "public",
-      facts?.comments_first_page == null ? null : JSON.stringify(facts.comments_first_page),
-    ],
-  );
-  const storedContentKey = text(stored.rows?.[0]?.content_key) ?? contentKey;
+  const storedContentKey = await upsertDiscoveredVideoContent(client, {
+    channelId, runId, observationId, observedAt, entry, detail, facts,
+    classification, publication, publicationConflict, detailComplete,
+  });
   const candidateId = await persistIncrementalCandidate(client, {
     runId,
     channelId,
@@ -1619,10 +1221,10 @@ async function upsertFirstSeenContent(client, {
     classification,
     facts,
     enrichOutcomeKind: preparedEnrich.skipped ? null : preparedEnrich.outcome?.kind ?? null,
-    publishedAt: published,
+    publishedAt: publication.published_at,
     publishedAtStatus: publication.published_at_status,
-    publishedAtPrecision: publishedPrecision,
-    publishedAtSource: publishedSource,
+    publishedAtPrecision: publication.published_at_precision,
+    publishedAtSource: publication.published_at_source,
   };
 }
 
@@ -2085,167 +1687,12 @@ export async function applyIncrementalVideoDetail(client, {
     || (previousComment != null && facts.comment_count != null
       && previousComment !== facts.comment_count);
   const changeProbability = nextVideoChangeProbability(row, facts, changeAlpha);
-  const commentsObserved = facts.comments_disabled === true || facts.comment_count != null;
-  const storageFacts = recentStorageFacts(row, facts, { allowStaticRepair });
-  const storedPublication = normalizePublicationEvidence(row.stored_publication ?? row);
-  const publicationSelection = allowStaticRepair || storedPublication.published_at == null
-    ? selectPublicationEvidence(storedPublication, facts)
-    : {
-        evidence: storedPublication,
-        selected: "current",
-        reason_code: "immutable_publication_retained",
-      };
-  const publication = publicationSelection.evidence;
-  const publicationConflict = publicationEvidenceConflictRecord(publicationSelection);
-  const isRecent = publication.published_at == null
-    ? null
-    : new Date(publication.published_at).getTime() >= new Date(observedAt).getTime() - (30 * 86400000);
-  await client.query(
-    `UPDATE crawler.contents
-     SET content_type=CASE WHEN $36::text IS NULL THEN content_type ELSE $36 END,
-         content_type_source=CASE WHEN $36::text IS NULL THEN content_type_source ELSE $37 END,
-         url=CASE
-           WHEN $43::boolean THEN COALESCE($38,url)
-           WHEN NULLIF(btrim(COALESCE(url,'')),'') IS NULL THEN COALESCE($38,url)
-           ELSE url END,
-         title=COALESCE($10,title),
-         thumbnail_url=COALESCE($11,thumbnail_url),
-         description=CASE
-           WHEN $13::boolean AND (
-             NULLIF(btrim(COALESCE($12::text,'')),'') IS NOT NULL
-             OR NULLIF(btrim(COALESCE(description,'')),'') IS NULL
-           ) THEN $12 ELSE description END,
-         description_status=CASE
-           WHEN NOT $13::boolean THEN description_status
-           WHEN NULLIF(btrim(COALESCE($12::text,'')),'') IS NOT NULL THEN 'exact'
-           WHEN NULLIF(btrim(COALESCE(description,'')),'') IS NULL THEN 'empty'
-           ELSE description_status END,
-         description_source=CASE
-           WHEN $13::boolean AND (
-             NULLIF(btrim(COALESCE($12::text,'')),'') IS NOT NULL
-             OR NULLIF(btrim(COALESCE(description,'')),'') IS NULL
-           ) THEN $14 ELSE description_source END,
-         hashtags=CASE
-           WHEN $16::boolean AND (
-             COALESCE(cardinality($15::text[]),0)>0 OR COALESCE(cardinality(hashtags),0)=0
-           ) THEN $15::text[] ELSE hashtags END,
-         keywords=CASE
-           WHEN $18::boolean AND (
-             COALESCE(cardinality($17::text[]),0)>0 OR COALESCE(cardinality(keywords),0)=0
-           ) THEN $17::text[] ELSE keywords END,
-         published_at=CASE
-           WHEN $43::boolean THEN $19::timestamptz
-           ELSE COALESCE(published_at,$19::timestamptz) END,
-         published_at_status=CASE
-           WHEN $43::boolean THEN $41::text
-           WHEN published_at IS NULL AND $19::timestamptz IS NOT NULL THEN $41
-           ELSE published_at_status END,
-         published_at_source=CASE
-           WHEN $43::boolean THEN $20::text
-           WHEN published_at IS NULL AND $19::timestamptz IS NOT NULL THEN $20
-           ELSE published_at_source END,
-         published_at_precision=CASE
-           WHEN $43::boolean THEN $21::text
-           WHEN published_at IS NULL AND $19::timestamptz IS NOT NULL THEN $21
-           ELSE published_at_precision END,
-         is_recent=COALESCE($22::boolean,is_recent),
-         duration_seconds=COALESCE($23::integer,duration_seconds),
-         duration_status=CASE WHEN $23::integer IS NULL THEN duration_status ELSE 'exact' END,
-         duration_source=CASE WHEN $23::integer IS NULL THEN duration_source ELSE $24 END,
-         view_count=COALESCE($3,view_count),
-         view_count_text=CASE WHEN $3::bigint IS NULL THEN view_count_text ELSE $3::text END,
-         view_count_status=CASE WHEN $3::bigint IS NULL THEN view_count_status ELSE 'exact' END,
-         view_count_source=CASE WHEN $3::bigint IS NULL THEN view_count_source ELSE $25 END,
-         like_count=COALESCE($4,like_count),
-         like_count_status=CASE WHEN $4::bigint IS NULL THEN like_count_status ELSE $44 END,
-         like_count_source=CASE WHEN $4::bigint IS NULL THEN like_count_source ELSE $26 END,
-         comment_count=CASE
-           WHEN $35::boolean AND $6::boolean THEN 0
-           WHEN $5::bigint IS NOT NULL THEN $5 ELSE comment_count END,
-         comment_count_status=CASE
-           WHEN $35::boolean AND $6::boolean THEN 'disabled'
-           WHEN $5::bigint IS NULL THEN comment_count_status ELSE $45 END,
-         comments_disabled=CASE WHEN $35::boolean THEN $6 ELSE comments_disabled END,
-         comment_count_source=CASE
-           WHEN $35::boolean THEN $27
-           ELSE comment_count_source END,
-         comments_first_page=CASE
-           WHEN COALESCE((comments_first_page->>'returned_count')::integer,0)>0
-             THEN comments_first_page
-           WHEN COALESCE(($39::jsonb->>'returned_count')::integer,0)>0
-             THEN $39::jsonb
-           ELSE COALESCE(comments_first_page,$39::jsonb)
-         END,
-         is_members_only=CASE
-           WHEN $28 IN ('unknown','login_required') THEN is_members_only ELSE $28='members_only' END,
-         access_status=CASE WHEN $28 IN ('unknown','login_required') THEN access_status ELSE $28 END,
-         access_status_source=CASE WHEN $28 IN ('unknown','login_required') THEN access_status_source ELSE $29 END,
-         live_scheduled_at=COALESCE($31::timestamptz,live_scheduled_at),
-         live_started_at=COALESCE($32::timestamptz,live_started_at),
-         live_ended_at=COALESCE($33::timestamptz,live_ended_at),
-         extractor_version=COALESCE($30,extractor_version),
-         raw_json=raw_json || jsonb_build_object(
-           $40::text,jsonb_strip_nulls(jsonb_build_object(
-             'observation_id',$8::uuid::text,
-             'detail_collected',true,
-             'source',$34::text,
-             'publication_evidence_conflict',$42::jsonb
-           ))
-         ),
-         player_last_observed_at=$2,
-         next_last_observed_at=CASE WHEN $7::boolean THEN $2 ELSE next_last_observed_at END,
-         last_observation_id=COALESCE($8::uuid,last_observation_id),last_enriched_at=$2,
-         video_change_probability=COALESCE($9::double precision,video_change_probability)
-     WHERE content_key=$1
-       AND (player_last_observed_at IS NULL OR player_last_observed_at<=$2::timestamptz)`,
-    [
-      row.content_key,
-      observedAt,
-      facts.view_count,
-      facts.like_count,
-      facts.comment_count,
-      facts.comments_disabled,
-      collectNext,
-      observationId,
-      changeProbability,
-      storageFacts.title,
-      storageFacts.thumbnail_url,
-      storageFacts.description,
-      storageFacts.description_observed,
-      storageFacts.description_source,
-      storageFacts.hashtags,
-      storageFacts.hashtags_observed,
-      storageFacts.keywords,
-      storageFacts.keywords_observed,
-      publication.published_at,
-      publication.published_at_source,
-      publication.published_at_precision,
-      isRecent,
-      storageFacts.duration_seconds,
-      storageFacts.duration_source,
-      facts.view_count_source,
-      facts.like_count_source,
-      facts.comment_count_source,
-      facts.access_status,
-      facts.access_status_source,
-      facts.extractor_version,
-      storageFacts.live_scheduled_at,
-      storageFacts.live_started_at,
-      storageFacts.live_ended_at,
-      detailSource(detail),
-      commentsObserved,
-      allowStaticRepair && storageAction.kind === "upsert" ? storageAction.content_type : null,
-      allowStaticRepair && storageAction.kind === "upsert" ? storageAction.type_source : null,
-      storageAction.kind === "upsert" ? classification.canonical_url : null,
-      facts.comments_first_page == null ? null : JSON.stringify(facts.comments_first_page),
-      detailMetadataKey,
-      publication.published_at_status,
-      publicationConflict == null ? null : JSON.stringify(publicationConflict),
-      allowStaticRepair,
-      facts.like_count_status,
-      facts.comment_count_status,
-    ],
-  );
+  const publication = await refreshVideoContent(client, {
+    row, facts, classification, storageAction, observedAt, observationId,
+    collectNext, changeProbability, detailMetadataKey,
+    intent: allowStaticRepair ? "detail_repair" : "metrics_refresh",
+    source: detailSource(detail),
+  });
   return {
     success: true,
     viewDelta,

@@ -37,6 +37,7 @@ test("historical intent without a fetch contract remains legacy", () => {
 });
 
 test("new ordinary Full Crawl uses the configured default", () => {
+  assert.equal(fullCrawlFetchContractId(defaultFullCrawlFetchContract({})), YOUTUBEJS_FULL_CRAWL_FETCH_CONTRACT_ID);
   const resolved = newFullCrawlFetchContractForJob(
     { name: "channel-snapshot" },
     { FULL_CRAWL_FETCH_CONTRACT_DEFAULT: YOUTUBEJS_FULL_CRAWL_FETCH_CONTRACT_ID },

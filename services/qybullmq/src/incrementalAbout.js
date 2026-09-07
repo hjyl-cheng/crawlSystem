@@ -1,12 +1,5 @@
-import {
-  combinedAboutObservationMetrics,
-  normalizeAboutMetrics,
-} from "./aboutMetrics.js";
-import {
-  aboutObservationIdempotencyKey,
-  recordAboutObservation,
-} from "./aboutObservationStore.js";
-import { normalizeAboutObservationCurrent } from "./aboutCurrent.js";
+import { recordAboutObservation } from "./aboutObservationStore.js";
+import { buildAboutObservation } from "./aboutObservation.js";
 import { currentChannelExecution } from "./channelExecutionContext.js";
 
 export async function executeIncrementalAbout({
@@ -17,23 +10,18 @@ export async function executeIncrementalAbout({
   startedAt,
   crawlerVersion = String(process.env.CRAWLER_VERSION || "qy-v16"),
   recordAbout = recordAboutObservation,
+  locale = process.env.YOUTUBE_CONTROL_LANGUAGE || process.env.YOUTUBE_LANGUAGE || "en",
 }) {
   const snapshot = await getChannelSnapshot();
   if (snapshot.about_requested !== true) {
     throw new Error("incremental About requires a Channel snapshot with getAbout enabled");
   }
   const observedAt = new Date().toISOString();
-  const about = combinedAboutObservationMetrics(normalizeAboutMetrics({
-    metadata: snapshot.metadata,
-    aboutObserved: snapshot.about_observed === true,
-  }));
-  const current = normalizeAboutObservationCurrent(snapshot.metadata, {
-    aboutObserved: snapshot.about_observed === true,
-  });
   const executionAttemptId = currentChannelExecution()?.attempt_id
     ?? `job-attempt:${plan.job_id}`;
-  return withTransaction((client) => recordAbout(client, {
-    idempotencyKey: aboutObservationIdempotencyKey({ runId, executionAttemptId }),
+  const observation = buildAboutObservation(snapshot, {
+    locale,
+    executionAttemptId,
     channelId: plan.channel_id,
     runId,
     observedAt,
@@ -42,14 +30,7 @@ export async function executeIncrementalAbout({
     triggerReason: "clock_due",
     scheduledAt: plan.scheduled_at,
     startedAt,
-    finishedAt: observedAt,
     crawlerVersion,
-    extractorVersions: { youtubejs: snapshot.raw?.engine ?? null },
-    errorClass: snapshot.about_error?.name ?? null,
-    errorMessage: snapshot.about_error
-      ? String(snapshot.about_error?.message || snapshot.about_error)
-      : null,
-    about,
-    current,
-  }));
+  });
+  return withTransaction((client) => recordAbout(client, observation));
 }

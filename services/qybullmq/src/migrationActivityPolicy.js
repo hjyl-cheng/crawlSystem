@@ -1,5 +1,5 @@
+import { createVideoActivityAccumulator } from "./videoActivityEvidence.js";
 import {
-  classifyPublicationWindow,
   normalizePublicationEvidence,
   PUBLICATION_TIME_CLASSIFIER_VERSION,
 } from "./publicationTimeEvidence.js";
@@ -34,23 +34,11 @@ export function evaluateMigrationUploadsActivity({
     ? null
     : observed.toISOString().slice(0, 10);
   const sourceEntries = Array.isArray(entries) ? entries : [];
-  let recent = 0;
-  let uncertain = 0;
   let excludedUpcoming = 0;
   let newestPublishedDay = null;
-  const relationCounts = {
-    inside: 0,
-    outside: 0,
-    after_as_of: 0,
-    cutoff_overlap: 0,
-    unresolved: 0,
-  };
-  const unresolvedByStatusCounts = {
-    relative: 0,
-    estimated: 0,
-    unavailable: 0,
-    unresolved: 0,
-  };
+  const accumulator = createVideoActivityAccumulator({
+    observedAt: observed, maxAgeDays: windowDays,
+  });
 
   if (required && referenceDay != null) {
     for (const entry of sourceEntries) {
@@ -59,9 +47,7 @@ export function evaluateMigrationUploadsActivity({
         continue;
       }
       if (isUnfinishedLive(entry)) {
-        uncertain += 1;
-        relationCounts.unresolved += 1;
-        unresolvedByStatusCounts.unresolved += 1;
+        accumulator.addUnresolved();
         continue;
       }
       const publication = normalizePublicationEvidence({
@@ -74,24 +60,12 @@ export function evaluateMigrationUploadsActivity({
       if (newestPublishedDay == null || publishedDay > newestPublishedDay) {
         newestPublishedDay = publishedDay;
       }
-      const window = classifyPublicationWindow(publication, {
-        asOf: observed,
-        maxAgeDays: windowDays,
-      });
-      relationCounts[window.relation] += 1;
-      if (window.relation === "inside") recent += 1;
-      else if (["after_as_of", "cutoff_overlap", "unresolved"].includes(window.relation)) {
-        uncertain += 1;
-        if (window.relation === "unresolved") {
-          unresolvedByStatusCounts[publication.published_at_status] += 1;
-        }
-      }
+      accumulator.add(publication);
     }
   }
 
   const common = {
-    recentPublishedContentCount: recent,
-    uncertainContentCount: uncertain,
+    ...accumulator.evidence,
     inspectedContentCount: sourceEntries.length,
     excludedUpcomingCount: excludedUpcoming,
     newestPublishedDay,
@@ -101,15 +75,13 @@ export function evaluateMigrationUploadsActivity({
     evidenceComplete: evidenceComplete === true,
     classifierVersion: PUBLICATION_TIME_CLASSIFIER_VERSION,
     policyVersion: MIGRATION_ACTIVITY_POLICY_VERSION,
-    relationCounts,
-    unresolvedByStatusCounts,
   };
   if (!required) return { ...common, decision: "not_required", dormant: false, reason: null };
   if (!evidenceComplete || referenceDay == null) {
     return { ...common, decision: "pending", dormant: false, reason: null };
   }
-  if (recent > 0) return { ...common, decision: "continue", dormant: false, reason: null };
-  if (uncertain > 0) return { ...common, decision: "inconclusive", dormant: false, reason: null };
+  if (common.recentPublishedContentCount > 0) return { ...common, decision: "continue", dormant: false, reason: null };
+  if (common.uncertainContentCount > 0) return { ...common, decision: "inconclusive", dormant: false, reason: null };
   return {
     ...common,
     decision: "dormant",

@@ -234,17 +234,19 @@ test("field status distinguishes observed empty, disabled, unavailable, and pars
   assert.equal(unavailable.title, "unobserved");
 });
 
-test("field status records a normalized YouTubeJS numeric view count as exact", () => {
+test("field status projects numeric and textual view evidence consistently", () => {
   const observed = detail();
   delete observed.view_count;
   observed.view_count_text = "375";
   const beforeNormalization = incrementalYoutubeJsVideoFieldStatus(observed);
-  assert.equal(beforeNormalization.view_count, "unobserved");
+  assert.equal(beforeNormalization.view_count, "exact");
 
   observed.view_count = 375;
   observed.view_count_status = "exact";
   const normalized = incrementalYoutubeJsVideoFieldStatus(observed);
   assert.equal(normalized.view_count, "exact");
+  observed.view_count_status = "estimated";
+  assert.equal(incrementalYoutubeJsVideoFieldStatus(observed).view_count, "estimated");
 });
 
 test("incremental detail fetch uses one strict YouTubeJS request and never falls back", async () => {
@@ -366,9 +368,10 @@ test("recent storage updates metrics while guarding populated static fields", as
   assert.equal(update.params[20], "second");
   assert.equal(update.params[22], null);
   assert.equal(update.params[42], false);
-  assert.equal(update.params.length, 45);
+  assert.equal(update.params.length, 46);
   assert.equal(update.params[43], "exact");
   assert.equal(update.params[44], "exact");
+  assert.equal(update.params[45], "exact");
 });
 
 test("recent storage preserves policy-zero engagement statuses", async () => {
@@ -503,10 +506,10 @@ test("Worker refuses the checkpoint executor when YouTubeJS Detail is disabled",
   assert.match(source, /youtubeJsDetailEnabled/);
   assert.match(
     source,
-    /incrementalVideoExecutorMode === "youtubejs_checkpoint_v1" && !youtubeJsDetailEnabled\(\)/,
+    /channelCapabilities.some\(\(capabilities\) => !capabilities.ytdlp\) && !youtubeJsDetailEnabled\(\)/,
   );
   assert.match(
     source,
-    /INCREMENTAL_VIDEO_EXECUTOR=youtubejs_checkpoint_v1 requires YOUTUBEJS_EXTRACTOR_MODE=full/,
+    /YouTubeJS Full Crawl and Incremental require YOUTUBEJS_EXTRACTOR_MODE=full/,
   );
 });

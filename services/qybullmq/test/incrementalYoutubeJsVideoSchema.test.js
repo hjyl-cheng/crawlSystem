@@ -78,14 +78,15 @@ test("checkpoint schema apply requires explicit database and Run-count confirmat
   );
 });
 
-test("Incremental Worker keeps legacy defaults and exposes one controlled new executor option", async () => {
-  const [source, compose, environment] = await Promise.all([
+test("Incremental Worker defaults to the YouTubeJS checkpoint executor", async () => {
+  const [source, compose, environment, capabilities] = await Promise.all([
     readFile(new URL("../src/worker.js", import.meta.url), "utf8"),
     readFile(new URL("../../../deploy/compose.yml", import.meta.url), "utf8"),
     readFile(new URL("../../../.env.example", import.meta.url), "utf8"),
+    readFile(new URL("../src/channelExtractorCapabilities.js", import.meta.url), "utf8"),
   ]);
-  assert.match(source, /INCREMENTAL_VIDEO_EXECUTOR \|\| "legacy"/);
-  assert.match(source, /\["legacy", "youtubejs_checkpoint_v1"\]/);
+  assert.match(capabilities, /INCREMENTAL_VIDEO_EXECUTOR \|\| "youtubejs_checkpoint_v1"/);
+  assert.match(capabilities, /\["legacy", "youtubejs_checkpoint_v1"\]/);
   assert.match(source, /video: incrementalVideoExecutor/);
 
   const start = compose.indexOf("  worker-incremental:");
@@ -94,12 +95,12 @@ test("Incremental Worker keeps legacy defaults and exposes one controlled new ex
   const incrementalWorker = compose.slice(start, end);
   assert.match(
     incrementalWorker,
-    /INCREMENTAL_VIDEO_EXECUTOR: \$\{INCREMENTAL_VIDEO_EXECUTOR:-legacy\}/,
+    /INCREMENTAL_VIDEO_EXECUTOR: \$\{INCREMENTAL_VIDEO_EXECUTOR:-youtubejs_checkpoint_v1\}/,
   );
   assert.match(
     incrementalWorker,
-    /YOUTUBEJS_EXTRACTOR_MODE: \$\{YOUTUBEJS_EXTRACTOR_MODE:-channel\}/,
+    /YOUTUBEJS_EXTRACTOR_MODE: \$\{YOUTUBEJS_EXTRACTOR_MODE:-full\}/,
   );
-  assert.match(environment, /^INCREMENTAL_VIDEO_EXECUTOR=legacy$/m);
-  assert.match(environment, /^YOUTUBEJS_EXTRACTOR_MODE=channel$/m);
+  assert.match(environment, /^INCREMENTAL_VIDEO_EXECUTOR=youtubejs_checkpoint_v1$/m);
+  assert.match(environment, /^YOUTUBEJS_EXTRACTOR_MODE=full$/m);
 });

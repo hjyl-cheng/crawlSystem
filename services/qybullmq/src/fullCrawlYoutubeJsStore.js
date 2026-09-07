@@ -30,14 +30,13 @@ import {
   normalizeFullCrawlTargets,
 } from "./fullCrawlYoutubeJsModel.js";
 import {
-  fullVideoStorageAction,
   updateExistingFullVideoAccess,
   upsertFullVideoContent,
 } from "./fullVideoContentStore.js";
 import { reconcileFullCrawlAgentState } from "./fullCrawlAgentState.js";
 import { reconcileRunDetailStatus } from "./runDetailStatus.js";
 import { resolveYoutubeContentType } from "./youtubeContentType.js";
-import { resolveVideoDisposition } from "./videoDisposition.js";
+import { resolveCollectedVideoOutcome } from "./collectedVideoOutcome.js";
 
 function text(value) {
   const output = String(value ?? "").trim();
@@ -817,9 +816,12 @@ export class FullCrawlYoutubeJsStore {
         type_source: authoritative ? classification.source : null,
         type_authoritative: authoritative,
       };
-      const storageAction = terminalReason
-        ? { kind: "unresolved" }
-        : fullVideoStorageAction({ candidate: storageCandidate, classification, access });
+      const { storageAction, disposition } = resolveCollectedVideoOutcome({
+        candidate: storageCandidate,
+        classification, access, detail, terminalReason,
+        priorDisposition: objectValue(locked.result_json).disposition,
+        observedAt,
+      });
       const state = { detail, access, classification };
       let contentKey = null;
       if (storageAction.kind === "update_access") {
@@ -836,15 +838,6 @@ export class FullCrawlYoutubeJsStore {
           locale,
         });
       }
-      const disposition = resolveVideoDisposition({
-        storageAction,
-        classification,
-        access,
-        detail,
-        terminalReason,
-        priorDisposition: objectValue(locked.result_json).disposition,
-        observedAt,
-      });
       const excluded = disposition.kind === "terminal_excluded";
       const scope = excluded
         ? {

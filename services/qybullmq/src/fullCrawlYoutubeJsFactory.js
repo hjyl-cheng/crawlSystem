@@ -1,9 +1,4 @@
-import {
-  combinedAboutObservationMetrics,
-  normalizeAboutMetrics,
-} from "./aboutMetrics.js";
-import { normalizeAboutObservationCurrent } from "./aboutCurrent.js";
-import { aboutObservationIdempotencyKey } from "./aboutObservationStore.js";
+import { buildAboutObservation } from "./aboutObservation.js";
 import { parseYoutubeAboutCountry } from "./agentCountryPolicy.js";
 import { currentChannelExecution, currentChannelExecutionAbortSignal } from "./channelExecutionContext.js";
 import { evaluateChannelQualification } from "./channelQualification.js";
@@ -109,16 +104,9 @@ function normalizeAdmission(snapshot, job, settings, { locale, observedAt, start
   });
   const executionAttemptId = currentChannelExecution()?.attempt_id
     ?? `job-attempt:${Number(job.attemptsStarted ?? 1)}`;
-  const about = combinedAboutObservationMetrics(normalizeAboutMetrics({
-    metadata,
-    aboutObserved: true,
+  const aboutObservation = buildAboutObservation({ ...snapshot, metadata }, {
+    executionAttemptId,
     locale,
-  }));
-  const aboutObservation = {
-    idempotencyKey: aboutObservationIdempotencyKey({
-      runId: job.data.run_id,
-      executionAttemptId,
-    }),
     channelId,
     runId: job.data.run_id,
     observedAt,
@@ -127,17 +115,8 @@ function normalizeAdmission(snapshot, job, settings, { locale, observedAt, start
     triggerReason: "initial_full",
     scheduledAt: job.data?.scheduled_at ?? null,
     startedAt,
-    finishedAt: observedAt,
     crawlerVersion: text(process.env.CRAWLER_VERSION) ?? "qy-v16",
-    extractorVersions: { youtubejs: snapshot.raw?.engine ?? null },
-    errorClass: null,
-    errorMessage: null,
-    about,
-    current: normalizeAboutObservationCurrent(metadata, {
-      aboutObserved: true,
-      locale,
-    }),
-  };
+  });
   const sourceJson = {
     channel_header: metadata,
     country_observation: country,

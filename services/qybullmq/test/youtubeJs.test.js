@@ -81,11 +81,11 @@ test("video detail preserves exact likes and distinguishes non-public likes from
   assert.equal(missing.like_count_source, null);
 });
 
-test("video details default to yt-dlp while YouTube.js remains available for channels", () => {
+test("video details default to YouTubeJS", () => {
   const previous = process.env.YOUTUBEJS_EXTRACTOR_MODE;
   delete process.env.YOUTUBEJS_EXTRACTOR_MODE;
   try {
-    assert.equal(youtubeJsDetailEnabled(), false);
+    assert.equal(youtubeJsDetailEnabled(), true);
   } finally {
     if (previous === undefined) delete process.env.YOUTUBEJS_EXTRACTOR_MODE;
     else process.env.YOUTUBEJS_EXTRACTOR_MODE = previous;
@@ -329,6 +329,83 @@ test("Uploads records an explicit item-cap boundary when continuation remains", 
   assert.equal(bundle.entries.length, 2);
   assert.equal(bundle.uploads.stop_reason, "max_items");
   assert.equal(bundle.uploads.complete, false);
+});
+
+test("shared traversal preserves selected positions versus raw positions and anchor stopping", async () => {
+  let continuations = 0;
+  const first = {
+    items: [uploadFixture("a", "/watch?v=a"), { title: "parse gap" }, uploadFixture("a", "/watch?v=a")],
+    has_continuation: true,
+    async getContinuation() {
+      continuations += 1;
+      return {
+        items: [uploadFixture("b", "/watch?v=b"), uploadFixture("c", "/watch?v=c")],
+        has_continuation: true,
+        getContinuation() { throw new Error("must stop before another continuation"); },
+      };
+    },
+  };
+  const full = await collectYoutubeJsUploadBundle({ getPlaylist: async () => first }, "UCshared", 2);
+  assert.deepEqual(full.entries.map((entry) => [entry.video_id, entry.position]), [["a", 1], ["b", 2]]);
+  assert.equal(full.uploads.terminal_reason, "max_items");
+  assert.equal(full.uploads.stop_reason, "parse_gap");
+  assert.equal(full.uploads.complete, false);
+  const incremental = await scanYoutubeJsFeed(first, { anchors: [{ id: "b" }] });
+  assert.deepEqual(incremental.entries.map((entry) => [entry.id, entry.position]), [["a", 1], ["b", 4]]);
+  assert.equal(incremental.terminal_reason, "anchor_matched");
+  assert.equal(incremental.stop_reason, "parse_gap");
+  assert.equal(incremental.complete, false);
+  assert.equal(continuations, 2);
+});
+
+test("shared traversal propagates Full Crawl pagination errors but returns Incremental partial evidence", async () => {
+  const error = new Error("continuation failed");
+  const first = {
+    items: [uploadFixture("a", "/watch?v=a")], has_continuation: true,
+    async getContinuation() { throw error; },
+  };
+  await assert.rejects(collectYoutubeJsUploadBundle({ getPlaylist: async () => first }, "UCshared"),
+    (actual) => actual === error);
+  const scan = await scanYoutubeJsFeed(first);
+  assert.equal(scan.error, error);
+  assert.equal(scan.stop_reason, "pagination_error");
+  assert.equal(scan.complete, false);
+  assert.equal(scan.item_count, 1);
+});
+
+test("Full Crawl stops at its page budget without fetching an uninspected continuation", async () => {
+  let requests = 0;
+  const feed = {
+    items: [uploadFixture("a", "/watch?v=a")], has_continuation: true,
+    async getContinuation() { requests += 1; return feed; },
+  };
+  const bundle = await collectYoutubeJsUploadBundle({ getPlaylist: async () => feed }, "UCpages");
+  const pageLimit = Math.ceil(Math.max(1, Number(process.env.YOUTUBEJS_MAX_TAB_PAGES || 20)));
+  assert.equal(bundle.uploads.pages, pageLimit);
+  assert.equal(requests, pageLimit - 1);
+  assert.equal(bundle.uploads.stop_reason, "max_pages");
+  assert.equal(bundle.uploads.complete, false);
+});
+
+test("Full Crawl retains its frozen duplicate-page stop while Incremental inspects the terminal page", async () => {
+  const first = {
+    items: [uploadFixture("a", "/watch?v=a")], has_continuation: true,
+    async getContinuation() {
+      return {
+        items: [uploadFixture("a", "/watch?v=a")], has_continuation: true,
+        async getContinuation() {
+          return { items: [uploadFixture("b", "/watch?v=b")], has_continuation: false };
+        },
+      };
+    },
+  };
+  const full = await collectYoutubeJsUploadBundle({ getPlaylist: async () => first }, "UCshared");
+  assert.deepEqual(full.entries.map((entry) => entry.video_id), ["a"]);
+  assert.equal(full.uploads.pages, 2);
+  const scan = await scanYoutubeJsFeed(first);
+  assert.deepEqual(scan.entries.map((entry) => entry.id), ["a", "b"]);
+  assert.equal(scan.pages, 3);
+  assert.equal(scan.complete, true);
 });
 
 test("Uploads recognizes a reel endpoint as a Shorts URL fallback", () => {

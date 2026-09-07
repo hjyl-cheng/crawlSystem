@@ -20,10 +20,11 @@ function assertAssignment(assignment, policy) {
 
 export class ChannelExecutionRuntimeAdapter {
   constructor({
-    runtime = new ChannelExecutionRuntime(),
+    runtime = null,
     workerId,
+    incrementalExecutor,
   } = {}) {
-    this.runtime = runtime;
+    this.runtime = runtime ?? new ChannelExecutionRuntime({ incrementalExecutor });
     this.workerId = required(workerId, "workerId");
   }
 

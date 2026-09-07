@@ -141,7 +141,7 @@ export function readFullCrawlFetchContractFromIntent(value) {
 
 export function defaultFullCrawlFetchContract(environment = process.env) {
   const requested = String(environment?.[FULL_CRAWL_FETCH_CONTRACT_DEFAULT_ENV] ?? "").trim()
-    || LEGACY_FULL_CRAWL_FETCH_CONTRACT_ID;
+    || YOUTUBEJS_FULL_CRAWL_FETCH_CONTRACT_ID;
   return normalizeFullCrawlFetchContract(requested, { missingAsLegacy: false });
 }
 

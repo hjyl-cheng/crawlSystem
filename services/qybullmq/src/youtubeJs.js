@@ -64,7 +64,7 @@ function throwIfYoutubeJsOperationAborted() {
 Log.setLevel(Log.Level.ERROR);
 
 function extractorMode() {
-  const mode = String(process.env.YOUTUBEJS_EXTRACTOR_MODE || "channel").trim().toLowerCase();
+  const mode = String(process.env.YOUTUBEJS_EXTRACTOR_MODE || "full").trim().toLowerCase();
   return ["disabled", "channel", "full"].includes(mode) ? mode : "full";
 }
 
@@ -398,16 +398,22 @@ export function normalizeYoutubeJsFeedItem(item) {
   };
 }
 
-async function collectFeed(feed, limit) {
-  const entries = [];
+async function traverseYoutubeJsFeed(feed, {
+  visit,
+  continueAfterPage,
+  continueAfterLoad = () => true,
+  paginationFailure = null,
+}) {
   const seen = new Set();
   let page = feed;
   let pages = 0;
   let inspectedCount = 0;
   let parseGapCount = 0;
-  while (page && entries.length < limit && pages < MAX_TAB_PAGES) {
+  while (page) {
+    throwIfYoutubeJsOperationAborted();
     pages += 1;
-    const before = entries.length;
+    const before = seen.size;
+    let stopped = false;
     for (const node of Array.from(page.videos || page.items || [])) {
       inspectedCount += 1;
       const entry = normalizeYoutubeJsFeedItem(node);
@@ -417,13 +423,47 @@ async function collectFeed(feed, limit) {
       }
       if (seen.has(entry.id)) continue;
       seen.add(entry.id);
-      entries.push(entry);
-      if (entries.length >= limit) break;
+      if (visit(entry, { pages, position: inspectedCount })) {
+        stopped = true;
+        break;
+      }
     }
-    if (!page.has_continuation || entries.length >= limit) break;
-    page = await page.getContinuation();
-    if (entries.length === before && !page?.has_continuation) break;
+    if (stopped || !continueAfterPage({ page, pages })) break;
+    try {
+      page = await page.getContinuation();
+      throwIfYoutubeJsOperationAborted();
+    } catch (error) {
+      throwIfYoutubeJsOperationAborted();
+      if (!paginationFailure) throw error;
+      paginationFailure(error);
+      break;
+    }
+    if (!continueAfterLoad({ page, added: seen.size - before })) break;
   }
+  return { page, pages, inspectedCount, parseGapCount };
+}
+
+function uploadPublication(entry, { locale, now }) {
+  const publishedDay = localizedPublishedUtcDay(entry.published_text, { locale, now });
+  return {
+    published_at: publishedDay,
+    published_at_status: publishedDay ? "relative" : "unresolved",
+    published_at_precision: publishedDay ? "date_only" : "unknown",
+    published_at_source: publishedDay ? "youtube_uploads_relative_time" : null,
+  };
+}
+
+async function collectFeed(feed, limit) {
+  const entries = [];
+  const { page, pages, inspectedCount, parseGapCount } = await traverseYoutubeJsFeed(feed, {
+    visit(entry) {
+      entries.push(entry);
+      return entries.length >= limit;
+    },
+    continueAfterPage: ({ page, pages }) => page.has_continuation
+      && entries.length < limit && pages < MAX_TAB_PAGES,
+    continueAfterLoad: ({ page, added }) => added > 0 || page?.has_continuation,
+  });
   const terminalReason = !page?.has_continuation
     ? "list_end"
     : entries.length >= limit
@@ -470,46 +510,28 @@ export async function scanYoutubeJsFeed(feed, {
     Number.parseInt(String(catchUpMaxItems), 10) || 50,
   );
   const entries = [];
-  const seen = new Set();
-  let page = feed;
-  let pages = 0;
   let firstPageItemCount = 0;
   let catchUpItemCount = 0;
-  let sourcePosition = 0;
-  let parseGapCount = 0;
   let matchedAnchorId = null;
   let activeAnchorIndex = 0;
   const crossedAnchorIds = [];
   let stopReason = null;
   let paginationError = null;
 
-  while (page && !stopReason) {
-    pages += 1;
-    const nodes = Array.from(page.videos || page.items || []);
-    for (const node of nodes) {
-      sourcePosition += 1;
-      const entry = normalizeYoutubeJsFeedItem(node);
-      if (!entry) {
-        parseGapCount += 1;
-        continue;
-      }
-      if (seen.has(entry.id)) continue;
+  const { pages, parseGapCount } = await traverseYoutubeJsFeed(feed, {
+    visit(entry, { pages, position }) {
       if (pages > 1 && catchUpItemCount >= catchUpItemLimit) {
         stopReason = "catchup_limit";
-        break;
+        return true;
       }
-      seen.add(entry.id);
       if (pages === 1) firstPageItemCount += 1;
       else catchUpItemCount += 1;
-      const publishedDay = localizedPublishedUtcDay(entry.published_text, { locale, now });
+      const publication = uploadPublication(entry, { locale, now });
       entries.push({
         ...entry,
-        position: sourcePosition,
-        published_day: publishedDay,
-        published_at: publishedDay,
-        published_at_status: publishedDay ? "relative" : "unresolved",
-        published_at_precision: publishedDay ? "date_only" : "unknown",
-        published_at_source: publishedDay ? "youtube_uploads_relative_time" : null,
+        position,
+        published_day: publication.published_at,
+        ...publication,
       });
       const matchedAnchorIndex = anchorIndexes.get(entry.id);
       if (matchedAnchorIndex != null) {
@@ -520,29 +542,19 @@ export async function scanYoutubeJsFeed(feed, {
         matchedAnchorId = entry.id;
         stopReason = "anchor_matched";
       }
-      if (stopReason) break;
-    }
-    if (stopReason) break;
-    if (!page.has_continuation) {
-      stopReason = "list_end";
-      break;
-    }
-    if (pages >= pageLimit) {
-      stopReason = "max_pages";
-      break;
-    }
-    if (pages > 1 && catchUpItemCount >= catchUpItemLimit) {
-      stopReason = "catchup_limit";
-      break;
-    }
-    try {
-      page = await page.getContinuation();
-    } catch (error) {
-      throwIfYoutubeJsOperationAborted();
+      return stopReason !== null;
+    },
+    continueAfterPage({ page, pages }) {
+      if (!page.has_continuation) stopReason = "list_end";
+      else if (pages >= pageLimit) stopReason = "max_pages";
+      else if (pages > 1 && catchUpItemCount >= catchUpItemLimit) stopReason = "catchup_limit";
+      return stopReason === null;
+    },
+    paginationFailure(error) {
       paginationError = error;
       stopReason = "pagination_error";
-    }
-  }
+    },
+  });
   if (!stopReason) stopReason = "list_end";
   const terminalCoverage = ["anchor_matched", "list_end"].includes(stopReason);
   const complete = terminalCoverage && parseGapCount === 0;
@@ -581,7 +593,6 @@ export async function collectYoutubeJsUploadBundle(client, channelId, limit = 30
     throw new Error(`YouTube.js uploads playlist ${playlistId} was empty while the channel exposes content tabs`);
   }
   const entries = uploads.entries.map((upload, index) => {
-    const publishedDay = localizedPublishedUtcDay(upload.published_text, { locale, now });
     return {
       video_id: upload.id,
       title: upload.title,
@@ -591,10 +602,7 @@ export async function collectYoutubeJsUploadBundle(client, channelId, limit = 30
       duration_seconds: upload.duration,
       view_count_text: upload.view_count != null ? String(upload.view_count) : null,
       published_text: upload.published_text,
-      published_at: publishedDay,
-      published_at_status: publishedDay ? "relative" : "unresolved",
-      published_at_precision: publishedDay ? "date_only" : "unknown",
-      published_at_source: publishedDay ? "youtube_uploads_relative_time" : null,
+      ...uploadPublication(upload, { locale, now }),
       position: index + 1,
       content_type: upload.content_type,
       type_source: upload.type_source,

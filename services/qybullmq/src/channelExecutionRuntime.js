@@ -21,7 +21,7 @@ import {
   youtubeJsState,
 } from "./youtubeJs.js";
 import { selectYoutubeFailure } from "./youtubeFailurePolicy.js";
-import { isYoutubeJsFullCrawlFetchContract } from "./fullCrawlFetchContract.js";
+import { channelExtractorCapabilities, incrementalVideoExecutorMode } from "./channelExtractorCapabilities.js";
 
 function zeroBasedBullmqAttempt(job) {
   const attemptsStarted = Number(job?.attemptsStarted);
@@ -54,11 +54,6 @@ function executionSummary({ attemptId, proxy, profileGroup }) {
     youtubejs_profile_id: profileGroup.clients.youtubejs_chrome?.profile_id ?? null,
     ytdlp_profile_id: profileGroup.clients.ytdlp_safari?.profile_id ?? null,
   };
-}
-
-function requiresYtDlp(prepared) {
-  return prepared?.workloadKind !== "channel_full"
-    || !isYoutubeJsFullCrawlFetchContract(prepared.fetchContract);
 }
 
 function errorFromEvidence(evidence) {
@@ -131,6 +126,7 @@ export class ChannelExecutionRuntime {
     releaseYtDlp = releasePersistentYtDlp,
     acquireYoutube = acquireYoutubeJs,
     releaseYoutube = releaseYoutubeJs,
+    incrementalExecutor = incrementalVideoExecutorMode(),
   } = {}) {
     this.profileStore = profileStore;
     this.gateway = gateway;
@@ -138,6 +134,7 @@ export class ChannelExecutionRuntime {
     this.releaseYtDlp = releaseYtDlp;
     this.acquireYoutube = acquireYoutube;
     this.releaseYoutube = releaseYoutube;
+    this.incrementalExecutor = incrementalExecutor;
     this.activeAttemptId = null;
   }
 
@@ -166,7 +163,7 @@ export class ChannelExecutionRuntime {
     managedRequestTracker = null,
   }, callback) {
     if (this.activeAttemptId) throw new Error(`channel execution runtime is already active: ${this.activeAttemptId}`);
-    const shouldAcquireYtDlp = requiresYtDlp(prepared);
+    const shouldAcquireYtDlp = channelExtractorCapabilities(prepared, this.incrementalExecutor).ytdlp;
     this.activeAttemptId = `preparing:${workerId}:${job?.id ?? "unknown"}`;
     let attemptId = null;
     let store = null;

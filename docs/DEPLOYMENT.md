@@ -141,10 +141,13 @@ old and new consumers together against the shared Redis queues. Never run old
 and new Scheduler or Dispatch processes together against the same Feature
 Clock tables.
 
-### 9.1 Incremental YouTubeJS Video Cutover
+### 9.1 Shared YouTubeJS Full Crawl and Incremental Cutover
 
-The Incremental Worker defaults to the legacy Video executor. Publish the two
-checkpoint tables before changing that default. Set the expected minimum to a
+The release defaults to `youtubejs_full_v2` for new Full Crawl Runs and
+`youtubejs_checkpoint_v1` for Incremental, with `YOUTUBEJS_EXTRACTOR_MODE=full`.
+Both new executors use only YouTubeJS, including runtime acquisition and warmup.
+Historical Full Crawl Runs keep their frozen contracts. Publish the two
+Incremental checkpoint tables before starting the new Worker. Set the expected minimum to a
 recently verified count of `crawler.channel_runs` rows whose `crawl_mode` is
 `incremental`, then run the guarded publisher from the immutable QYBullMQ
 image:
@@ -157,15 +160,16 @@ image:
   node scripts/applyIncrementalYoutubeJsVideoCheckpointSchema.mjs --apply
 ```
 
-Keep `INCREMENTAL_VIDEO_EXECUTOR=legacy` and
-`YOUTUBEJS_EXTRACTOR_MODE=channel` while publishing the Schema. Before the
-cutover, pause new Incremental intake, wait for every active legacy Incremental
+While publishing the Schema, keep the existing deployment's executor selection
+unchanged and the new Workers stopped. Before the cutover, pause new Incremental
+intake, wait for every active legacy Incremental
 Job to drain, and stop every `worker-incremental` replica. Never let legacy and
 checkpoint executors consume `youtube-channel-incremental` together.
 
 For the single-Worker canary, change the ignored runtime environment to:
 
 ```text
+FULL_CRAWL_FETCH_CONTRACT_DEFAULT=youtubejs_full_v2
 INCREMENTAL_VIDEO_EXECUTOR=youtubejs_checkpoint_v1
 YOUTUBEJS_EXTRACTOR_MODE=full
 QY_INCREMENTAL_WORKER_REPLICAS=1
@@ -185,6 +189,14 @@ WHERE status <> 'finalized';
 
 An unfinished Batch must be drained or repaired by the checkpoint executor; it
 must never be handed to the legacy executor.
+
+Use the same immutable image for the Full Crawl Worker, Incremental Worker,
+Controller and API that creates new Runs. Check their runtime environment
+overrides: old explicit `legacy` or `channel` values override release defaults.
+Validate a Full Crawl followed by Incremental on the same Channel through
+publication before scaling either group. Legacy repair contracts and the
+separate Content Enrich queue consumer still have legacy dependencies; this
+release does not remove those compatibility paths.
 
 ### 9.2 Content Enrich Drain Cutover
 
