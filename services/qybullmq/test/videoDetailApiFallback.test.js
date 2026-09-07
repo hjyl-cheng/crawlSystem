@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createVideoDetailApiFallback, withVideoFallbackExecution } from "../src/videoDetailApiFallback.js";
+import { createVideoDetailApiFallback, withVideoFallbackExecution, mergeVideoApiEvidence } from "../src/videoDetailApiFallback.js";
+import { projectVideoDetail } from "../src/videoDetailEvidence.js";
 import { validateYoutubeJsVideoDetail } from "../src/youtubeJsVideoDetailContract.js";
 import { retryableRotaFailure } from "../src/managedWorkerExecution.js";
 import { selectYoutubeFailure } from "../src/youtubeFailurePolicy.js";
@@ -14,6 +15,14 @@ const parserError = () => Object.assign(new Error("required player surface incom
   name: "YoutubeJsRequiredSurfaceError", partial_detail: partial,
 });
 const networkError = () => Object.assign(new Error("connect ECONNRESET"), { code: "ECONNRESET" });
+test("exact API counts replace unresolved or estimated scraper count statuses", () => {
+  const facts = projectVideoDetail(mergeVideoApiEvidence("video1", {
+    view_count_status: "estimated", like_count_status: "unresolved", like_count: null,
+  }, { ...api, like_count: 17 }));
+  assert.equal(facts.view_count_status, "exact");
+  assert.equal(facts.like_count_status, "exact");
+  assert.equal(facts.like_count, 17);
+});
 function harness({ existing = null, settings = {}, result = api } = {}) {
   const requests = [];
   const fallback = createVideoDetailApiFallback({

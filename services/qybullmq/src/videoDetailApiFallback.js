@@ -26,7 +26,11 @@ export function mergeVideoApiEvidence(videoId, partial, api) {
     delete detail.playability_retry_mode;
     delete detail.playability_reason_code;
   }
-  if (api.view_count_text != null) detail.view_count = Number(api.view_count_text);
+  if (api.view_count_text != null) {
+    detail.view_count = Number(api.view_count_text);
+    detail.view_count_status = "exact";
+  }
+  if (api.like_count != null) detail.like_count_status = "exact";
   if (api.comments_first_page || api.comments_disabled === true) detail.youtubejs_comments_error = null;
   detail.video_detail_fallback = { source: "youtube_data_api_batch", youtubejs_exhausted: true };
   return detail;
@@ -74,7 +78,8 @@ export function createVideoDetailApiFallback({ query, withTransaction, loadSetti
           }
           await request(withTransaction, { requestId, runId, videoId, consumer, partialDetail: partial,
             requireComments: detailMode === "full" && !optionalComments
-              && !partial.comments_first_page && partial.comments_disabled !== true });
+              && (Boolean(partial.youtubejs_comments_error) || !partial.comments_first_page)
+              && partial.comments_disabled !== true });
           console.log(JSON.stringify({ event: "video_api_fallback_requested", run_id: runId,
             video_id: videoId, consumer, detail_attempt: detailAttempt, failure_kind: failure.kind }));
           break;
