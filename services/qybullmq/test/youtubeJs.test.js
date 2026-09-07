@@ -709,6 +709,56 @@ test("normalizeYoutubeJsVideoInfo preserves second timestamps and exact engageme
   assert.match(detail.thumbnail_url, /maxresdefault/);
 });
 
+test("normalizeYoutubeJsVideoInfo reads an explicit zero from the rendered like button", () => {
+  const info = infoFixture({ basic_info: { like_count: Number.NaN } });
+  info.primary_info = {
+    menu: {
+      top_level_buttons: [{
+        type: "SegmentedLikeDislikeButtonView",
+        like_count: Number.NaN,
+        short_like_count: "0",
+        like_button: {
+          toggle_button: {
+            default_button: {
+              title: "0",
+              accessibility_text: "like this video",
+            },
+          },
+        },
+      }],
+    },
+  };
+
+  const detail = normalizeYoutubeJsVideoInfo(info);
+  assert.equal(detail.like_count, 0);
+  assert.equal(detail.like_count_source, "youtubejs_next_button");
+});
+
+test("normalizeYoutubeJsVideoInfo does not invent zero for a like button without a count", () => {
+  const info = infoFixture({ basic_info: { like_count: Number.NaN } });
+  info.primary_info = {
+    menu: {
+      top_level_buttons: [{
+        type: "SegmentedLikeDislikeButtonView",
+        like_count: Number.NaN,
+        short_like_count: "Like",
+        like_button: {
+          toggle_button: {
+            default_button: {
+              title: "Like",
+              accessibility_text: "Like",
+            },
+          },
+        },
+      }],
+    },
+  };
+
+  const detail = normalizeYoutubeJsVideoInfo(info);
+  assert.equal(detail.like_count, null);
+  assert.equal(detail.like_count_source, null);
+});
+
 test("normalizeYoutubeJsVideoInfo treats an empty Short description as resolved", () => {
   const detail = normalizeYoutubeJsVideoInfo(infoFixture({ basic_info: {
     title: "Short #RobloxShorts",
@@ -740,6 +790,31 @@ test("normalizeYoutubeJsVideoInfo keeps missing comments unresolved", () => {
   assert.equal(disabled.comments_disabled, true);
   assert.equal(disabled.comment_count_status, "disabled");
   assert.equal(disabled.comment_count, 0);
+});
+
+test("normalizeYoutubeJsVideoInfo treats a bare comment continuation as disabled only for public video", () => {
+  const bare = {
+    responseContext: { mainAppWebResponseContext: { loggedOut: true } },
+    trackingParams: "tracking",
+  };
+  const publicDetail = normalizeYoutubeJsVideoInfo(infoFixture({
+    comments_entry_point_header: null,
+  }), bare);
+  assert.equal(publicDetail.comments_disabled, true);
+  assert.equal(publicDetail.comment_count, 0);
+  assert.equal(publicDetail.comment_count_status, "disabled");
+
+  const membersDetail = normalizeYoutubeJsVideoInfo(infoFixture({
+    comments_entry_point_header: null,
+    playability_status: {
+      status: "LOGIN_REQUIRED",
+      reason: "Join this channel to get access to members-only content",
+    },
+  }), bare);
+  assert.equal(membersDetail.access_status, "members_only");
+  assert.equal(membersDetail.comments_disabled, null);
+  assert.equal(membersDetail.comment_count, null);
+  assert.equal(membersDetail.comment_count_status, "unresolved");
 });
 
 test("normalizeYoutubeJsVideoInfo keeps a stored first comment page", () => {

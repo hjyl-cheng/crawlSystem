@@ -30,6 +30,7 @@ import {
   emptyYoutubeCommentPage,
   isYoutubeJsCommentsResult,
   normalizeYoutubeCommentPage,
+  youtubeCommentContinuationIsBare,
   youtubeCommentPageFromGetComments,
   youtubeCommentsDisabled,
 } from "./youtubeCommentPage.js";
@@ -1335,6 +1336,41 @@ function isEmptyAgeGateCommentsResponse(info, commentsError) {
     && /comments page did not have any content/i.test(youtubeErrorText(commentsError));
 }
 
+function youtubeJsLikeCount(info, locale) {
+  const basicCount = finiteInteger(info?.basic_info?.like_count);
+  if (basicCount != null && basicCount >= 0) {
+    return { value: basicCount, source: "youtubejs_next" };
+  }
+  const segmented = Array.from(info?.primary_info?.menu?.top_level_buttons ?? [])
+    .find((button) => button?.like_button || /LikeDislike/i.test(String(button?.type ?? "")));
+  const likeButton = segmented?.like_button?.toggle_button?.default_button;
+  for (const candidate of [
+    segmented?.like_count,
+    segmented?.short_like_count,
+    likeButton?.title,
+  ]) {
+    const count = parseYoutubeJsCount(candidate, locale);
+    if (count != null && count >= 0) {
+      return { value: count, source: "youtubejs_next_button" };
+    }
+  }
+  return { value: null, source: null };
+}
+
+function youtubeJsHasPublicCommentSurface(info, published, locale) {
+  if (info?.basic_info?.is_upcoming === true) return false;
+  const playability = resolveYoutubePlayability({
+    status: info?.playability_status?.status,
+    reason: info?.playability_status?.reason,
+  });
+  if (playability.kind === "content" && playability.access_status !== "public") return false;
+  if (String(info?.playability_status?.status ?? "").toUpperCase() === "OK") return true;
+  const microformat = info?.page?.[0]?.microformat ?? {};
+  const viewCount = finiteInteger(info?.basic_info?.view_count ?? microformat.view_count)
+    ?? parseYoutubeJsCount(info?.primary_info?.view_count, locale);
+  return Boolean(published?.value && viewCount != null);
+}
+
 export function normalizeYoutubeJsVideoInfo(info, comments = null, {
   commentsError = null,
   contentTypeSignals = null,
@@ -1368,7 +1404,12 @@ export function normalizeYoutubeJsVideoInfo(info, comments = null, {
         })
         : null;
   const classified = classifyYoutubeCommentPage(commentsPage, {
-    disabled: youtubeCommentsDisabled(comments) || commentsPage?.comments_disabled === true,
+    disabled: youtubeCommentsDisabled(comments)
+      || commentsPage?.comments_disabled === true
+      || (
+        youtubeCommentContinuationIsBare(comments)
+        && youtubeJsHasPublicCommentSurface(info, published, locale)
+      ),
     commentsError,
   });
   let commentCount = classified.comments_disabled === true
@@ -1409,7 +1450,7 @@ export function normalizeYoutubeJsVideoInfo(info, comments = null, {
   const viewCountSource = playerViewCount != null
     ? "youtubejs_player"
     : nextViewCount != null ? "youtubejs_next" : null;
-  const likeCount = finiteInteger(basic.like_count);
+  const likeCount = youtubeJsLikeCount(info, locale);
   const isUnlisted = microformat.is_unlisted === true || basic.is_unlisted === true;
   const publicMetadataComplete = Boolean(published.value && viewCount != null);
   const playability = resolveYoutubePlayability({
@@ -1484,8 +1525,8 @@ export function normalizeYoutubeJsVideoInfo(info, comments = null, {
     view_count_text: viewCount == null ? null : String(viewCount),
     view_count_status: viewCount == null ? "unresolved" : "exact",
     view_count_source: viewCountSource,
-    like_count: likeCount,
-    like_count_source: likeCount == null ? null : "youtubejs_next",
+    like_count: likeCount.value,
+    like_count_source: likeCount.source,
     comment_count: commentCount,
     comment_count_status: commentStatus,
     comments_disabled: commentsDisabled,

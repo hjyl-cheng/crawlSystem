@@ -115,6 +115,14 @@ function hasReturnedCommentEvidence(raw) {
     || allNodes(raw, "commentEntityPayload").length > 0;
 }
 
+export function youtubeCommentContinuationIsBare(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return false;
+  if (!raw.responseContext || typeof raw.responseContext !== "object") return false;
+  if (typeof raw.trackingParams !== "string" || !raw.trackingParams.trim()) return false;
+  return ![raw.onResponseReceivedEndpoints, raw.onResponseReceivedActions]
+    .some((actions) => Array.isArray(actions) && actions.length > 0);
+}
+
 export function youtubeCommentSurface(raw) {
   const section = commentSection(raw);
   const continuation = firstNode(section, "continuationItemRenderer")
