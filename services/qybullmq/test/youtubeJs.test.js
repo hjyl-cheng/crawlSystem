@@ -734,7 +734,7 @@ test("normalizeYoutubeJsVideoInfo reads an explicit zero from the rendered like 
   assert.equal(detail.like_count_source, "youtubejs_next_button");
 });
 
-test("normalizeYoutubeJsVideoInfo does not invent zero for a like button without a count", () => {
+test("normalizeYoutubeJsVideoInfo records non-public likes as a policy zero", () => {
   const info = infoFixture({ basic_info: { like_count: Number.NaN } });
   info.primary_info = {
     menu: {
@@ -755,8 +755,9 @@ test("normalizeYoutubeJsVideoInfo does not invent zero for a like button without
   };
 
   const detail = normalizeYoutubeJsVideoInfo(info);
-  assert.equal(detail.like_count, null);
-  assert.equal(detail.like_count_source, null);
+  assert.equal(detail.like_count, 0);
+  assert.equal(detail.like_count_status, "zero_from_empty");
+  assert.equal(detail.like_count_source, "youtubejs_like_count_not_public");
 });
 
 test("normalizeYoutubeJsVideoInfo treats an empty Short description as resolved", () => {
@@ -792,7 +793,7 @@ test("normalizeYoutubeJsVideoInfo keeps missing comments unresolved", () => {
   assert.equal(disabled.comment_count, 0);
 });
 
-test("normalizeYoutubeJsVideoInfo treats a bare comment continuation as disabled only for public video", () => {
+test("normalizeYoutubeJsVideoInfo cannot infer disabled comments from a bare response", () => {
   const bare = {
     responseContext: { mainAppWebResponseContext: { loggedOut: true } },
     trackingParams: "tracking",
@@ -800,9 +801,9 @@ test("normalizeYoutubeJsVideoInfo treats a bare comment continuation as disabled
   const publicDetail = normalizeYoutubeJsVideoInfo(infoFixture({
     comments_entry_point_header: null,
   }), bare);
-  assert.equal(publicDetail.comments_disabled, true);
-  assert.equal(publicDetail.comment_count, 0);
-  assert.equal(publicDetail.comment_count_status, "disabled");
+  assert.equal(publicDetail.comments_disabled, null);
+  assert.equal(publicDetail.comment_count, null);
+  assert.equal(publicDetail.comment_count_status, "unresolved");
 
   const membersDetail = normalizeYoutubeJsVideoInfo(infoFixture({
     comments_entry_point_header: null,
@@ -815,6 +816,23 @@ test("normalizeYoutubeJsVideoInfo treats a bare comment continuation as disabled
   assert.equal(membersDetail.comments_disabled, null);
   assert.equal(membersDetail.comment_count, null);
   assert.equal(membersDetail.comment_count_status, "unresolved");
+});
+
+test("normalizeYoutubeJsVideoInfo distinguishes absent live comments from disabled comments", () => {
+  for (const upcoming of [true, false]) {
+    const info = infoFixture({
+      basic_info: { is_upcoming: upcoming, is_live: !upcoming },
+      comments_entry_point_header: null,
+    });
+    const absent = { version: 1, surface: "absent", total_count: null, returned_count: 0, comments: [] };
+    const detail = normalizeYoutubeJsVideoInfo(info, absent);
+    assert.equal(detail.comment_count, 0);
+    assert.equal(detail.comment_count_status, upcoming ? "zero_from_upcoming" : "zero_from_empty");
+    assert.equal(detail.comments_disabled, null);
+    const failed = normalizeYoutubeJsVideoInfo(info, absent, { commentsError: new Error("network failed") });
+    assert.equal(failed.comment_count, null);
+    assert.equal(failed.comment_count_status, "unresolved");
+  }
 });
 
 test("normalizeYoutubeJsVideoInfo keeps a stored first comment page", () => {

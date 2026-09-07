@@ -30,7 +30,6 @@ import {
   emptyYoutubeCommentPage,
   isYoutubeJsCommentsResult,
   normalizeYoutubeCommentPage,
-  youtubeCommentContinuationIsBare,
   youtubeCommentPageFromGetComments,
   youtubeCommentsDisabled,
 } from "./youtubeCommentPage.js";
@@ -1354,21 +1353,11 @@ function youtubeJsLikeCount(info, locale) {
       return { value: count, source: "youtubejs_next_button" };
     }
   }
+  if (renderedText(likeButton?.title) === "Like"
+      && renderedText(likeButton?.accessibility_text) === "Like") {
+    return { value: 0, source: "youtubejs_like_count_not_public", status: "zero_from_empty" };
+  }
   return { value: null, source: null };
-}
-
-function youtubeJsHasPublicCommentSurface(info, published, locale) {
-  if (info?.basic_info?.is_upcoming === true) return false;
-  const playability = resolveYoutubePlayability({
-    status: info?.playability_status?.status,
-    reason: info?.playability_status?.reason,
-  });
-  if (playability.kind === "content" && playability.access_status !== "public") return false;
-  if (String(info?.playability_status?.status ?? "").toUpperCase() === "OK") return true;
-  const microformat = info?.page?.[0]?.microformat ?? {};
-  const viewCount = finiteInteger(info?.basic_info?.view_count ?? microformat.view_count)
-    ?? parseYoutubeJsCount(info?.primary_info?.view_count, locale);
-  return Boolean(published?.value && viewCount != null);
 }
 
 export function normalizeYoutubeJsVideoInfo(info, comments = null, {
@@ -1406,10 +1395,9 @@ export function normalizeYoutubeJsVideoInfo(info, comments = null, {
   const classified = classifyYoutubeCommentPage(commentsPage, {
     disabled: youtubeCommentsDisabled(comments)
       || commentsPage?.comments_disabled === true
-      || (
-        youtubeCommentContinuationIsBare(comments)
-        && youtubeJsHasPublicCommentSurface(info, published, locale)
-      ),
+      || youtubeCommentsDisabled({ messages: Array.from(
+        info?.page?.[1]?.contents_memo?.getType?.(YTNodes.Message) ?? [],
+      ).map((message) => renderedText(message.text)) }),
     commentsError,
   });
   let commentCount = classified.comments_disabled === true
@@ -1473,6 +1461,15 @@ export function normalizeYoutubeJsVideoInfo(info, comments = null, {
       : inconclusivePublicSurface || (!playabilityStatus && publicMetadataComplete)
         ? "public"
         : "unknown";
+  // Live chat is not a comment count. An absent live comment surface uses a
+  // policy zero, never an exact count or evidence that comments are disabled.
+  if (commentCount == null && !commentsError && commentsPage?.surface === "absent"
+    && ["public", "unlisted"].includes(accessStatus) && (isUpcoming || isLive)) {
+    commentCount = 0;
+    commentStatus = isUpcoming ? "zero_from_upcoming" : "zero_from_empty";
+    commentsSource = isUpcoming
+      ? "youtubejs_upcoming_comments_not_public" : "youtubejs_live_comments_not_public";
+  }
   if (
     playability.kind === "inconclusive"
     && playabilityStatus
@@ -1526,6 +1523,7 @@ export function normalizeYoutubeJsVideoInfo(info, comments = null, {
     view_count_status: viewCount == null ? "unresolved" : "exact",
     view_count_source: viewCountSource,
     like_count: likeCount.value,
+    like_count_status: likeCount.status ?? (likeCount.value == null ? "unresolved" : "exact"),
     like_count_source: likeCount.source,
     comment_count: commentCount,
     comment_count_status: commentStatus,

@@ -210,6 +210,15 @@ test("field status distinguishes observed empty, disabled, unavailable, and pars
   assert.equal(disabled.comment_count, "disabled");
   assert.equal(disabled.comments_first_page, "disabled");
 
+  for (const status of ["zero_from_empty", "zero_from_surface", "zero_from_upcoming"]) {
+    const policy = incrementalYoutubeJsVideoFieldStatus({
+      ...detail(), like_count: 0, like_count_status: "zero_from_empty",
+      comment_count: 0, comment_count_status: status,
+    });
+    assert.equal(policy.like_count, "zero_from_empty");
+    assert.equal(policy.comment_count, status);
+  }
+
   const parserError = new Error("comments parser changed");
   parserError.required_surface = "comments";
   const partial = incrementalYoutubeJsVideoFieldStatus(detail(), parserError);
@@ -357,7 +366,29 @@ test("recent storage updates metrics while guarding populated static fields", as
   assert.equal(update.params[20], "second");
   assert.equal(update.params[22], null);
   assert.equal(update.params[42], false);
-  assert.equal(update.params.length, 43);
+  assert.equal(update.params.length, 45);
+  assert.equal(update.params[43], "exact");
+  assert.equal(update.params[44], "exact");
+});
+
+test("recent storage preserves policy-zero engagement statuses", async () => {
+  let update;
+  await applyIncrementalVideoDetail({ async query(sql, params) {
+    update = { sql, params };
+    return { rowCount: 1, rows: [] };
+  } }, {
+    row: { content_key: "UCstored:video:stored-video", channel_id: "UCstored",
+      source_content_id: "stored-video", content_type: "video", video_change_probability: 0.5 },
+    detail: { ...detail("stored-video"), like_count: 0, like_count_status: "zero_from_empty",
+      comment_count: 0, comment_count_status: "zero_from_upcoming", comments_disabled: null },
+    observedAt: "2026-09-07T05:00:00.000Z", allowStaticRepair: false,
+  });
+  assert.equal(update.params[3], 0);
+  assert.equal(update.params[4], 0);
+  assert.equal(update.params[43], "zero_from_empty");
+  assert.equal(update.params[44], "zero_from_upcoming");
+  assert.match(update.sql, /like_count_status=CASE.*ELSE \$44 END/);
+  assert.match(update.sql, /WHEN \$5::bigint IS NULL THEN comment_count_status ELSE \$45 END/);
 });
 
 test("recent storage repairs missing static fields without replacing populated values", async () => {

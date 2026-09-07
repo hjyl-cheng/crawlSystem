@@ -71,3 +71,30 @@ test("strict detail preserves the main response and original comments failure as
     else process.env.YOUTUBE_PROXY_URL = previousProxy;
   }
 });
+
+test("the real detail path preserves a Next disabled message across comment normalization", async () => {
+  const previousMode = process.env.YOUTUBEJS_EXTRACTOR_MODE;
+  const originalCreate = Innertube.create;
+  process.env.YOUTUBEJS_EXTRACTOR_MODE = "full";
+  Innertube.create = async () => ({
+    getInfo: async (id) => {
+      const info = publicVideoInfo(id);
+      info.page.push({ contents_memo: { getType: () => [{ text: "Comments are turned off." }] } });
+      return info;
+    },
+    actions: { execute: async () => ({ success: true, data: {
+      responseContext: {}, trackingParams: "tracking",
+    } }) },
+  });
+  try {
+    const detail = await fetchYoutubeJsVideoDetail("disabled-comments", { strictRequiredSurfaces: true });
+    assert.equal(detail.comment_count, 0);
+    assert.equal(detail.comments_disabled, true);
+    assert.equal(detail.comment_count_status, "disabled");
+  } finally {
+    await closeYoutubeJs();
+    Innertube.create = originalCreate;
+    if (previousMode === undefined) delete process.env.YOUTUBEJS_EXTRACTOR_MODE;
+    else process.env.YOUTUBEJS_EXTRACTOR_MODE = previousMode;
+  }
+});

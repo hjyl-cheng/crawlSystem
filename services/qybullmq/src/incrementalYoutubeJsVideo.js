@@ -182,7 +182,8 @@ export function incrementalYoutubeJsVideoFieldStatus(detailValue, errorValue = n
     ? "parser_gap"
     : commentsDisabled
       ? "disabled"
-      : explicitFieldStatus(detail, "comment_count");
+      : detail.comment_count === 0 && ["zero_from_empty", "zero_from_surface", "zero_from_upcoming"].includes(detail.comment_count_status)
+        ? detail.comment_count_status : explicitFieldStatus(detail, "comment_count");
   const pageStatus = commentFailure
     ? "parser_gap"
     : commentsDisabled
@@ -204,7 +205,8 @@ export function incrementalYoutubeJsVideoFieldStatus(detailValue, errorValue = n
     content_type_signals: explicitFieldStatus(detail, "content_type_signals"),
     duration_seconds: explicitFieldStatus(detail, "duration_seconds"),
     view_count: explicitFieldStatus(detail, "view_count"),
-    like_count: explicitFieldStatus(detail, "like_count"),
+    like_count: detail.like_count_status === "zero_from_empty" && detail.like_count === 0
+      ? "zero_from_empty" : explicitFieldStatus(detail, "like_count"),
     comment_count: commentStatus,
     comments_disabled: commentFailure
       ? "parser_gap"
@@ -406,8 +408,13 @@ function detailFacts(detail) {
     view_count: detailViewCount(detail),
     view_count_source: text(detail.view_count_source) ?? source,
     like_count: integer(detail.like_count),
+    like_count_status: detail.like_count_status === "zero_from_empty" && integer(detail.like_count) === 0
+      ? "zero_from_empty" : "exact",
     like_count_source: text(detail.like_count_source) ?? source,
     comment_count: commentsDisabled ? 0 : integer(detail.comment_count),
+    comment_count_status: commentsDisabled ? "disabled"
+      : integer(detail.comment_count) === 0 && ["zero_from_empty", "zero_from_surface", "zero_from_upcoming"].includes(detail.comment_count_status)
+        ? detail.comment_count_status : "exact",
     comment_count_source: text(detail.comment_count_source ?? detail.comments_status_source) ?? source,
     comments_disabled: detail.comments_disabled == null
       ? null
@@ -1485,7 +1492,7 @@ async function upsertFirstSeenContent(client, {
          view_count_status=CASE WHEN EXCLUDED.view_count IS NOT NULL THEN 'exact' ELSE crawler.contents.view_count_status END,
          view_count_source=COALESCE(EXCLUDED.view_count_source,crawler.contents.view_count_source),
          like_count=COALESCE(EXCLUDED.like_count,crawler.contents.like_count),
-         like_count_status=CASE WHEN EXCLUDED.like_count IS NOT NULL THEN 'exact' ELSE crawler.contents.like_count_status END,
+         like_count_status=CASE WHEN EXCLUDED.like_count IS NOT NULL THEN EXCLUDED.like_count_status ELSE crawler.contents.like_count_status END,
          like_count_source=COALESCE(EXCLUDED.like_count_source,crawler.contents.like_count_source),
          comment_count=CASE
            WHEN EXCLUDED.comments_disabled THEN 0
@@ -1572,10 +1579,10 @@ async function upsertFirstSeenContent(client, {
       facts?.view_count == null ? "unresolved" : "exact",
       facts?.view_count == null ? null : facts.view_count_source,
       facts?.like_count ?? null,
-      facts?.like_count == null ? "unresolved" : "exact",
+      facts?.like_count == null ? "unresolved" : facts.like_count_status,
       facts?.like_count == null ? null : facts.like_count_source,
       facts?.comments_disabled ? 0 : facts?.comment_count ?? null,
-      facts?.comments_disabled ? "disabled" : facts?.comment_count == null ? "unresolved" : "exact",
+      facts?.comments_disabled ? "disabled" : facts?.comment_count == null ? "unresolved" : facts.comment_count_status,
       facts?.comments_disabled ?? null,
       facts?.comments_disabled || facts?.comment_count != null ? facts.comment_count_source : null,
       facts?.access_status === "members_only",
@@ -2193,14 +2200,14 @@ export async function applyIncrementalVideoDetail(client, {
          view_count_status=CASE WHEN $3::bigint IS NULL THEN view_count_status ELSE 'exact' END,
          view_count_source=CASE WHEN $3::bigint IS NULL THEN view_count_source ELSE $25 END,
          like_count=COALESCE($4,like_count),
-         like_count_status=CASE WHEN $4::bigint IS NULL THEN like_count_status ELSE 'exact' END,
+         like_count_status=CASE WHEN $4::bigint IS NULL THEN like_count_status ELSE $44 END,
          like_count_source=CASE WHEN $4::bigint IS NULL THEN like_count_source ELSE $26 END,
          comment_count=CASE
            WHEN $35::boolean AND $6::boolean THEN 0
            WHEN $5::bigint IS NOT NULL THEN $5 ELSE comment_count END,
          comment_count_status=CASE
            WHEN $35::boolean AND $6::boolean THEN 'disabled'
-           WHEN $5::bigint IS NULL THEN comment_count_status ELSE 'exact' END,
+           WHEN $5::bigint IS NULL THEN comment_count_status ELSE $45 END,
          comments_disabled=CASE WHEN $35::boolean THEN $6 ELSE comments_disabled END,
          comment_count_source=CASE
            WHEN $35::boolean THEN $27
@@ -2278,6 +2285,8 @@ export async function applyIncrementalVideoDetail(client, {
       publication.published_at_status,
       publicationConflict == null ? null : JSON.stringify(publicationConflict),
       allowStaticRepair,
+      facts.like_count_status,
+      facts.comment_count_status,
     ],
   );
   return {
