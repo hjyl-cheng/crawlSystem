@@ -1372,14 +1372,21 @@ export async function openYoutubeJsChannel(channelId, { includeAbout = true } = 
   };
 }
 
-function isEmptyAgeGateCommentsResponse(info, commentsError) {
-  if (!commentsError) return false;
+function isEmptyAgeGateCommentsResponse(info, commentsPage, commentsError) {
+  // Raw continuation responses represent the same absent surface that the
+  // parsed Comments API reported as "did not have any content".
+  const emptyResponse = commentsError
+    ? /comments page did not have any content/i.test(youtubeErrorText(commentsError))
+    : commentPageHasFirstPage(commentsPage)
+      && commentsPage.surface === "absent"
+      && commentsPage.returned_count === 0
+      && commentsPage.total_count == null;
+  if (!emptyResponse) return false;
   const status = String(info?.playability_status?.status || "").toUpperCase();
   const reason = renderedText(info?.playability_status?.reason);
   return status === "LOGIN_REQUIRED"
     && info?.basic_info?.is_family_safe === false
-    && /confirm your age|age[- ]restricted|verify your age/i.test(reason || "")
-    && /comments page did not have any content/i.test(youtubeErrorText(commentsError));
+    && /confirm your age|age[- ]restricted|verify your age/i.test(reason || "");
 }
 
 function youtubeJsLikeCount(info, locale) {
@@ -1459,7 +1466,7 @@ export function normalizeYoutubeJsVideoInfo(info, comments = null, {
   let commentsSource = classified.comments_disabled === true || classified.comment_count != null
     ? classified.comment_count_source
     : commentHint != null ? "youtubejs_next" : null;
-  if (commentsDisabled == null && isEmptyAgeGateCommentsResponse(info, commentsError)) {
+  if (commentsDisabled == null && isEmptyAgeGateCommentsResponse(info, commentsPage, commentsError)) {
     commentsDisabled = true;
     commentCount = 0;
     commentStatus = "disabled";

@@ -27,6 +27,54 @@ function publicVideoInfo(videoId) {
   };
 }
 
+test("age-gated empty raw comments retain the disabled semantics in both detail consumers", async () => {
+  const previousMode = process.env.YOUTUBEJS_EXTRACTOR_MODE;
+  const originalCreate = Innertube.create;
+  process.env.YOUTUBEJS_EXTRACTOR_MODE = "full";
+  let ageRestricted = true;
+  let failComments = false;
+  Innertube.create = async () => ({
+    getInfo: async (videoId) => {
+      const info = publicVideoInfo(videoId);
+      info.basic_info.is_family_safe = !ageRestricted;
+      if (ageRestricted) info.playability_status = {
+        status: "LOGIN_REQUIRED", reason: "Sign in to confirm your age",
+      };
+      return info;
+    },
+    actions: { execute: async () => {
+      if (failComments) throw new Error("comments network failed");
+      return { success: true, data: { responseContext: {}, trackingParams: "bare-response" } };
+    } },
+  });
+  try {
+    for (const optionalComments of [true, false]) {
+      const detail = await fetchYoutubeJsVideoDetail("NGOT1hCseGU", {
+        strictRequiredSurfaces: true, optionalComments,
+      });
+      assert.equal(detail.comments_disabled, true);
+      assert.equal(detail.comment_count, 0);
+      assert.equal(detail.comment_count_status, "disabled");
+      assert.equal(detail.comment_count_source, "youtubejs_comments_age_gate_empty");
+    }
+    failComments = true;
+    const failed = await fetchYoutubeJsVideoDetail("failed-age-gate-comments", { optionalComments: true });
+    assert.equal(failed.comments_disabled, null);
+    assert.equal(failed.comment_count, null);
+    assert.equal(failed.comment_count_status, "unresolved");
+    failComments = false;
+    ageRestricted = false;
+    const ordinary = await fetchYoutubeJsVideoDetail("ordinary-empty-comments", { optionalComments: true });
+    assert.equal(ordinary.comments_disabled, null);
+    assert.equal(ordinary.comment_count_status, "unresolved");
+  } finally {
+    await closeYoutubeJs();
+    Innertube.create = originalCreate;
+    if (previousMode === undefined) delete process.env.YOUTUBEJS_EXTRACTOR_MODE;
+    else process.env.YOUTUBEJS_EXTRACTOR_MODE = previousMode;
+  }
+});
+
 test("strict detail preserves the main response and original comments failure as its cause", async () => {
   const previousMode = process.env.YOUTUBEJS_EXTRACTOR_MODE;
   const previousProxy = process.env.YOUTUBE_PROXY_URL;
