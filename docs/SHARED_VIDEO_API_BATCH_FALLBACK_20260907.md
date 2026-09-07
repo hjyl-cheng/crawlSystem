@@ -70,3 +70,37 @@ Rota identities. Do not replay the 100 already-settled migration channels.
 - Pre-rollout baseline: 2,954 completed Runs, 1,093 finalized Incremental
   checkpoints, 5,636 delivered publication outbox rows; no active Full or
   Incremental Jobs.
+
+## Production verification
+
+Deployed application `f576c05`, image
+`qy-allpachong/qybullmq:pachongsys-f576c05-video-api-batch`. The additive table
+was applied to `newcrawler_crawler` before rollout. All 44 services were updated:
+20 Full, 20 Incremental, API Batch, Finalize, controller and API server. Previous
+containers are retained with `-before-f576c05` for rollback.
+
+Controlled validation used the already repaired video `1xobqeOzsFE`. The scraper
+failure was injected; the downstream controller, queue, API worker and Google
+API request were real. Three bounded failures entered fallback. Full and
+Incremental subscribers shared Task 62, and the controller dispatched it while
+the query scheduler was stopped. One `videos.list` request fetched one video.
+Both subscribers received complete metadata with authoritative retained Shorts
+evidence. No stored content was updated or republished by this probe.
+
+The real Incremental `first_seen` and `recent` adapters also consumed the same
+evidence successfully. API playback/like counts have exact statuses, including
+when the injected partial evidence was estimated/unresolved. The API reported
+comments disabled; this probe therefore did not require a live commentThreads
+call. These checks reused cached evidence and added no API requests. Request
+identifiers explicitly carry `deployment-proof` to distinguish probes from
+ordinary checkpoint consumers.
+
+Post-rollout verification retained the same 2,954 completed Runs, 1,093 finalized
+checkpoints and 5,636 delivered outbox rows. The original 100-channel batch remains
+71 ready-auto, 28 dormant ready-partial, one rejected channel, and 1,278 contents
+with no missing core values, negatives or out-of-window contents. TropaTaspio
+has 30 and Maite kids six contents in both business and search projections.
+
+Final-image Node 20 checks passed: 40 integration-point unit tests before the
+count-status follow-up, and 24 targeted tests after it. Temporary PostgreSQL,
+Redis and schema-application containers were removed.
