@@ -22,7 +22,7 @@ import { publicationLinkTarget } from "./publicationLinks.js";
 import { normalizeVideoKeywords, normalizeVideoTextMetadata } from "./videoMetadata.js";
 import { annotateYoutubeFailure } from "./youtubeFailurePolicy.js";
 import { observeYoutubeBusinessEmail } from "./youtubeBusinessEmailAvailability.js";
-import { extractYoutubePlayerContentTypeSignals } from "./youtubeContentType.js";
+import { extractYoutubePlayerContentTypeSignals, resolveYoutubeContentType } from "./youtubeContentType.js";
 import { currentManagedAbortSignal } from "./proxyIdentity.js";
 import {
   classifyYoutubeCommentPage,
@@ -1733,6 +1733,11 @@ function youtubeJsInfoResolution(videoId, info, clientName, source = "youtubejs_
   const detail = youtubeJsExplicitTerminalDetail(videoId, info, { clientName, source });
   if (detail) return { kind: "terminal", detail };
   if (youtubeJsInfoNeedsAlternateClient(info, options)) return null;
+  if (options.detailMode !== "metrics" && options.contentTypeSignals
+      && info?.basic_info?.is_upcoming !== true
+      && resolveYoutubeContentType({ videoId, detail: {
+        content_type_signals: options.contentTypeSignals(),
+      } })?.authoritative !== true) return null;
   return { kind: "info", info, client: clientName };
 }
 
@@ -1828,6 +1833,7 @@ function throwYoutubeJsAlternateClientsExhausted(videoId, attempts) {
 export async function fetchYoutubeJsVideoInfoWithTerminalFallback(client, videoId, {
   detailMode = "full",
   locale = DEFAULT_LANGUAGE,
+  contentTypeSignals = null,
 } = {}) {
   if (!client || typeof client.getInfo !== "function") {
     throw new TypeError("YouTube.js client with getInfo() is required");
@@ -1836,7 +1842,11 @@ export async function fetchYoutubeJsVideoInfoWithTerminalFallback(client, videoI
   if (!cleanVideoId) throw new Error("video_id is required");
   const mode = normalizedVideoDetailMode(detailMode);
   const attempts = [];
-  for (const clientName of VIDEO_DETAIL_CLIENTS) {
+  // Mobile responses can contain all metrics but omit Shorts/type evidence.
+  // A final bounded WEB pass can recover the authoritative microformat.
+  const clients = contentTypeSignals && mode === "full"
+    ? [...VIDEO_DETAIL_CLIENTS, "WEB"] : VIDEO_DETAIL_CLIENTS;
+  for (const clientName of clients) {
     let info;
     try {
       info = await client.getInfo(cleanVideoId, { client: clientName });
@@ -1864,6 +1874,7 @@ export async function fetchYoutubeJsVideoInfoWithTerminalFallback(client, videoI
     const resolution = youtubeJsInfoResolution(cleanVideoId, info, clientName, "youtubejs_get_info", {
       detailMode: mode,
       locale,
+      contentTypeSignals,
     });
     if (resolution) return resolution;
     attempts.push(youtubeJsClientAttempt(clientName, info));
@@ -1872,7 +1883,7 @@ export async function fetchYoutubeJsVideoInfoWithTerminalFallback(client, videoI
     client,
     cleanVideoId,
     TERMINAL_DETAIL_PROBE_CLIENT,
-    { detailMode: mode, locale },
+    { detailMode: mode, locale, contentTypeSignals },
   );
   if (basic.resolution) return basic.resolution;
   attempts.push(basic.attempt);
@@ -1972,6 +1983,7 @@ export async function fetchYoutubeJsVideoDetail(videoId, {
   strictRequiredSurfaces = false,
   optionalComments = false,
   detailMode = "full",
+  requireContentType = false,
 } = {}) {
   if (!youtubeJsDetailEnabled()) throw new Error("YouTube.js detail extraction is disabled");
   const cleanVideoId = String(videoId ?? "").trim();
@@ -1990,7 +2002,9 @@ export async function fetchYoutubeJsVideoDetail(videoId, {
       resolution = await fetchYoutubeJsVideoInfoWithTerminalFallback(
         current.client,
         cleanVideoId,
-        { detailMode: mode, locale: DEFAULT_LANGUAGE },
+        { detailMode: mode, locale: DEFAULT_LANGUAGE,
+          contentTypeSignals: requireContentType
+            ? () => current.playerTypeSurfaces.get(cleanVideoId) ?? null : null },
       );
       throwIfYoutubeJsOperationAborted();
       contentTypeSignals = current.playerTypeSurfaces.get(cleanVideoId) ?? null;

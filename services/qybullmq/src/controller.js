@@ -54,7 +54,8 @@ import {
   finalRepairCandidateSql,
   preparedFinalDetailRepairSql,
 } from "./finalRepairCandidatePolicy.js";
-import { ensureFinalRepairJob } from "./finalRepairJobRecovery.js";
+import { ensureFinalRepairJob, retryFullCrawlSnapshotJob } from "./finalRepairJobRecovery.js";
+import { isYoutubeJsFullCrawlFetchContract } from "./fullCrawlFetchContract.js";
 import { maybeStartMetadataDiscoveryCycle } from "./metadataDiscoveryLoop.js";
 import {
   ManagedJobOutboxDispatcher,
@@ -2653,6 +2654,30 @@ async function maybeRepairFailedChannelRuns(actions, stats, queryScheduler, prox
       finalRepairRound: round,
       checkpointRepairRound,
     } = roundDecision;
+    if (!publicationGap && !businessRunBudgetExhausted && row.detail_status !== "done"
+        && isYoutubeJsFullCrawlFetchContract(row.result_json?.fetch_contract)) {
+      const candidate = (await query(
+        `SELECT status,snapshot_dispatch_generation,snapshot_active_job_id,snapshot_active_job_attempt
+         FROM crawler.channel_candidates WHERE candidate_id=$1`, [row.candidate_id],
+      )).rows[0];
+      try {
+        const recovered = await retryFullCrawlSnapshotJob(queues[queuesByRole.channelCrawl], { run: row, candidate });
+        if (recovered.action === "retried_snapshot") {
+          await query(
+            `UPDATE crawler.channel_runs SET result_json=jsonb_set(result_json,'{final_repair}',
+               jsonb_build_object('rounds',$2::int,'queued_at',now(),'job_id',$3::text,
+                 'mode','youtubejs_snapshot_resume'),true),updated_at=now() WHERE run_id=$1`,
+            [row.run_id, round, recovered.job.id],
+          );
+        }
+        actions.push({ action: "resume-youtubejs-full-snapshot", run_id: row.run_id,
+          repair_round: round, job_action: recovered.action, job_id: recovered.job.id });
+      } catch (error) {
+        actions.push({ action: "hold-youtubejs-full-snapshot-recovery", run_id: row.run_id,
+          reason: error.message });
+      }
+      continue;
+    }
     const dispatch = finalRepairDispatchDecision({
       publicationGap,
       businessRunBudgetExhausted,

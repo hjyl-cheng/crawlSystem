@@ -18,6 +18,35 @@ import { decideYoutubeFailure } from "../src/youtubeFailurePolicy.js";
 import { isParserContractError } from "../src/localizedParsing.js";
 import { retryableRotaFailure } from "../src/managedWorkerExecution.js";
 
+test("full detail continues past complete IOS metadata without authoritative content type", async () => {
+  const calls = [];
+  let signals = null;
+  const client = {
+    getInfo: async (_id, { client }) => {
+      calls.push(client);
+      signals = client === "WEB" && calls.length > 1
+        ? { source: "youtubei_player", canonical_url: "https://www.youtube.com/shorts/1xobqeOzsFE", is_shorts_eligible: true }
+        : { source: "youtubei_player", canonical_url: null, is_shorts_eligible: null, is_live_content: false };
+      return infoFixture();
+    },
+    getBasicInfo: async () => { throw new Error("unexpected basic probe"); },
+  };
+  const result = await fetchYoutubeJsVideoInfoWithTerminalFallback(client, "1xobqeOzsFE", {
+    contentTypeSignals: () => signals,
+  });
+  assert.deepEqual(calls, ["WEB", "IOS", "ANDROID", "WEB"]);
+  assert.equal(result.client, "WEB");
+});
+
+test("metrics refresh does not require a content type probe", async () => {
+  let calls = 0;
+  const result = await fetchYoutubeJsVideoInfoWithTerminalFallback({
+    getInfo: async () => { calls++; return infoFixture(); },
+  }, "1xobqeOzsFE", { detailMode: "metrics", contentTypeSignals: () => null });
+  assert.equal(calls, 1);
+  assert.equal(result.client, "WEB");
+});
+
 function infoFixture(values = {}) {
   return {
     page: [{

@@ -15,6 +15,9 @@ import {
   migrationSystemRetryFinalizeJobFence,
 } from "../src/migrationSystemRetryRecovery.js";
 import { crawlerRuntimeSchema } from "../src/publicationCurrentSchema.js";
+import { retryFullCrawlSnapshotJob } from "../src/finalRepairJobRecovery.js";
+import { markChannelCandidateJobAttemptActive } from "../src/managedWorkerJob.js";
+import { YOUTUBEJS_FULL_CRAWL_FETCH_CONTRACT } from "../src/fullCrawlFetchContract.js";
 
 const { Client } = pg;
 const databaseUrl = String(process.env.MANAGED_JOB_TEST_DATABASE_URL ?? "").trim();
@@ -695,4 +698,27 @@ test("inline Content Detail uses the parent Channel Candidate attemptsStarted Fe
     [systemRetryId],
   );
   assert.ok(await transaction(client, (tx) => lockContentDetailExecution(tx, second)));
+
+  await client.query("UPDATE crawler.migration_system_retry_items SET status='resolved' WHERE system_retry_id=$1", [systemRetryId]);
+  await client.query(`UPDATE crawler.channel_candidates SET snapshot_active_job_id=NULL,
+    snapshot_active_job_attempt=NULL WHERE candidate_id=$1`, [candidateId]);
+  const original = { ...parentJob(2), attemptsMade: 3,
+    data: { ...parentJob(2).data, fetch_contract: YOUTUBEJS_FULL_CRAWL_FETCH_CONTRACT },
+    getState: async () => "failed", retry: async (_state, options) => {
+      assert.deepEqual(options, { resetAttemptsMade: true });
+      original.attemptsMade = 0;
+    } };
+  await retryFullCrawlSnapshotJob({ getJob: async () => original }, {
+    run: { run_id: runId, channel_id: channelId, candidate_id: candidateId,
+      result_json: { job_id: original.id, pipeline_cycle_id: batchId,
+        fetch_contract: YOUTUBEJS_FULL_CRAWL_FETCH_CONTRACT } },
+    candidate: { status: "accepted", snapshot_dispatch_generation: 1 }, round: 3,
+  });
+  original.attemptsStarted++;
+  assert.equal(await markChannelCandidateJobAttemptActive(client.query.bind(client), original), true);
+  const resumed = inlineFence(original.attemptsStarted);
+  assert.ok(await transaction(client, tx => claimContentDetailExecution(tx, resumed)),
+    "replaying the original Snapshot Job takes over the persisted detail checkpoint");
+  assert.equal(await transaction(client, tx => lockContentDetailExecution(tx, second)), null,
+    "the old Snapshot attempt still cannot write after recovery");
 });

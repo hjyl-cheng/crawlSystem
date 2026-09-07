@@ -1,4 +1,34 @@
 import { normalizePublicationGapDomains } from "./publicationGapRepairExecution.js";
+import { isYoutubeJsFullCrawlFetchContract, assertSameFullCrawlFetchContract } from "./fullCrawlFetchContract.js";
+
+export async function retryFullCrawlSnapshotJob(queue, { run, candidate } = {}) {
+  const jobId = run?.result_json?.job_id;
+  const job = jobId ? await queue.getJob(jobId) : null;
+  if (!job || job.name !== "channel-snapshot"
+      || !isYoutubeJsFullCrawlFetchContract(run?.result_json?.fetch_contract)
+      || !isYoutubeJsFullCrawlFetchContract(job.data?.fetch_contract)
+      || job.data.run_id !== run.run_id || job.data.channel_id !== run.channel_id
+      || Number(job.data.candidate_id) !== Number(run.candidate_id)
+      || Number(job.data.dispatch_generation) !== Number(candidate?.snapshot_dispatch_generation)
+      || (job.data.dispatch_batch_id ?? job.data.pipeline_cycle_id)
+        !== (run.result_json.dispatch_batch_id ?? run.result_json.pipeline_cycle_id)) {
+    throw new Error(`Snapshot recovery identity conflicts with ${run?.run_id}`);
+  }
+  assertSameFullCrawlFetchContract(run.result_json.fetch_contract, job.data.fetch_contract);
+  const state = await job.getState();
+  if (["waiting", "active", "delayed", "prioritized", "waiting-children"].includes(state)) {
+    return { action: "already_represented", job };
+  }
+  if (!["failed", "completed"].includes(state)
+      || candidate?.status !== "accepted"
+      || candidate.snapshot_active_job_id != null
+      || candidate.snapshot_active_job_attempt != null) {
+    throw new Error(`Snapshot recovery cannot claim ${run.run_id}`);
+  }
+  // Keep attemptsStarted monotonic: the same Job can supersede its old detail fence.
+  await job.retry(state, { resetAttemptsMade: true });
+  return { action: "retried_snapshot", job };
+}
 
 const REPRESENTED_STATES = new Set([
   "waiting",

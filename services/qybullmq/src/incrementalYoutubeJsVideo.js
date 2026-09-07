@@ -311,6 +311,7 @@ export async function fetchIncrementalYoutubeJsVideoDetail(videoId, {
     signal: effectiveSignal,
     strictRequiredSurfaces: true,
     detailMode,
+    requireContentType: requiresFullSurface,
   });
   assertNotAborted();
   return validateYoutubeJsVideoDetail(videoId, detail, { detailMode }).detail;

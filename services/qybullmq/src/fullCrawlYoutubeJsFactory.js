@@ -391,6 +391,7 @@ export function createFullCrawlYoutubeJsExecutor({
             strictRequiredSurfaces: true,
             optionalComments,
             detailMode: "full",
+            requireContentType: true,
           });
           observation = validateFullCrawlYoutubeJsDetail(candidate.target.video_id, detail, { optionalComments });
           const terminal = detailTerminalReason(
