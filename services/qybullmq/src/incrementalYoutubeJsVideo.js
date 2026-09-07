@@ -13,7 +13,6 @@ import {
 import { recordCrawlerObservation } from "./crawlObservationStore.js";
 import {
   hasCompletePublicVideoSurface,
-  isUpcomingLiveDetail,
   unfinishedLiveReason,
   videoAccessStatus,
 } from "./detailPolicy.js";
@@ -23,6 +22,7 @@ import {
   planRecentVideoSampling,
 } from "./incrementalVideoPlanner.js";
 import { fetchYoutubeJsVideoDetail } from "./youtubeJs.js";
+import { validateYoutubeJsVideoDetail } from "./youtubeJsVideoDetailContract.js";
 import { resolveYoutubeContentType } from "./youtubeContentType.js";
 import { fullVideoStorageAction } from "./fullVideoContentStore.js";
 import {
@@ -38,7 +38,6 @@ import {
   videoAccessRecheckAt,
   videoDispositionSummary,
 } from "./videoDisposition.js";
-import { assertYoutubeContentObservation } from "./youtubePlayability.js";
 import {
   selectYoutubeFailure,
   shouldReportProxyFailure,
@@ -491,57 +490,15 @@ export async function fetchIncrementalYoutubeJsVideoDetail(videoId, {
   const effectiveSignal = combineAbortSignals(signal, currentChannelExecutionAbortSignal());
   const assertNotAborted = () => throwIfAborted(effectiveSignal);
   const requiresFullSurface = phase !== "recent" || target?.enrich_pending === true;
+  const detailMode = requiresFullSurface ? "full" : "metrics";
   assertNotAborted();
-  const detail = assertYoutubeContentObservation(await fetchYoutubeJs(videoId, {
+  const detail = await fetchYoutubeJs(videoId, {
     signal: effectiveSignal,
     strictRequiredSurfaces: true,
-    detailMode: requiresFullSurface ? "full" : "metrics",
-  }), {
-    videoId,
-    source: "youtubejs_player",
+    detailMode,
   });
   assertNotAborted();
-  if (!objectValue(detail)) {
-    throw new TypeError(`YouTube.js detail is missing for ${videoId}`);
-  }
-  const commentsRequired = !["members_only", "private", "unavailable"]
-    .includes(detail.access_status)
-    && detail.is_upcoming !== true
-    && detail.comments_disabled !== true;
-  if (commentsRequired && text(detail.youtubejs_comments_error)) {
-    const error = new Error(
-      `YouTube.js required comments surface failed for ${videoId}: ${detail.youtubejs_comments_error}`,
-    );
-    error.name = "YoutubeJsRequiredSurfaceError";
-    error.required_surface = "comments";
-    error.partial_detail = detail;
-    throw error;
-  }
-  const classification = resolveYoutubeContentType({ videoId, detail });
-  const terminalAccess = ["members_only", "private", "unavailable"]
-    .includes(detailAccess(detail));
-  if (!requiresFullSurface && !terminalAccess && detailViewCount(detail) == null) {
-    const error = new Error(
-      `YouTube.js parser gap: required Video metrics surface is incomplete for ${videoId}`,
-    );
-    error.name = "YoutubeJsRequiredSurfaceError";
-    error.required_surface = "player";
-    error.partial_detail = detail;
-    throw error;
-  }
-  if (!terminalAccess
-      && requiresFullSurface
-      && !isUpcomingLiveDetail(detail)
-      && (classification?.authoritative !== true || !hasCompletePublicVideoSurface(detail))) {
-    const error = new Error(
-      `YouTube.js parser gap: required public Video surface is incomplete for ${videoId}`,
-    );
-    error.name = "YoutubeJsRequiredSurfaceError";
-    error.required_surface = "player";
-    error.partial_detail = detail;
-    throw error;
-  }
-  return detail;
+  return validateYoutubeJsVideoDetail(videoId, detail, { detailMode }).detail;
 }
 
 function probability(value) {

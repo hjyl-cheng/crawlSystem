@@ -1,13 +1,11 @@
 import { createHash } from "node:crypto";
 import {
-  hasCompletePublicVideoSurface,
   isLiveInProgress,
   isUpcomingLiveDetail,
-  videoAccessStatus,
 } from "./detailPolicy.js";
 import { classifyContentWindow } from "./contentWindow.js";
-import { resolveYoutubeContentType } from "./youtubeContentType.js";
-import { assertYoutubeContentObservation } from "./youtubePlayability.js";
+import { validateYoutubeJsVideoDetail } from "./youtubeJsVideoDetailContract.js";
+export { youtubeJsVideoAccess as fullCrawlDetailAccess } from "./youtubeJsVideoDetailContract.js";
 
 function canonicalValue(value) {
   if (Array.isArray(value)) return value.map(canonicalValue);
@@ -124,59 +122,11 @@ export function fullCrawlUploadsHash(documentOrUploads) {
   return fullCrawlCanonicalHash(document);
 }
 
-export function fullCrawlDetailAccess(detail) {
-  const status = videoAccessStatus(detail);
-  return Object.freeze({
-    access_status: status,
-    access_status_source: text(detail?.access_status_source)
-      ?? text(detail?.source)
-      ?? "youtubejs_playability",
-    availability: text(detail?.availability),
-    is_members_only: status === "members_only",
-  });
-}
-
-function requiredSurfaceError(videoId, message, detail, surface = "player") {
-  const error = new Error(message);
-  error.name = "YoutubeJsRequiredSurfaceError";
-  error.required_surface = surface;
-  error.partial_detail = detail;
-  error.video_id = videoId;
-  return error;
-}
-
 export function validateFullCrawlYoutubeJsDetail(videoIdValue, detailValue, { optionalComments = false } = {}) {
-  const videoId = text(videoIdValue);
-  if (!videoId) throw new TypeError("videoId is required");
-  const detail = assertYoutubeContentObservation(detailValue, {
-    videoId,
-    source: "youtubejs_player",
+  return validateYoutubeJsVideoDetail(videoIdValue, detailValue, {
+    optionalComments,
+    allowIncompleteLive: true,
   });
-  if (!detail || typeof detail !== "object" || Array.isArray(detail)) {
-    throw new TypeError(`YouTube.js detail is missing for ${videoId}`);
-  }
-  const access = fullCrawlDetailAccess(detail);
-  if (!optionalComments && !["members_only", "private", "unavailable"].includes(access.access_status)
-      && !isUpcomingLiveDetail(detail) && detail.comments_disabled !== true
-      && text(detail.youtubejs_comments_error)) {
-    throw requiredSurfaceError(videoId,
-      `YouTube.js required comments surface failed for ${videoId}: ${detail.youtubejs_comments_error}`,
-      detail, "comments");
-  }
-  const classification = resolveYoutubeContentType({ videoId, detail });
-  const terminalAccess = ["members_only", "private", "unavailable"]
-    .includes(access.access_status);
-  if (!terminalAccess
-      && !isUpcomingLiveDetail(detail)
-      && !isLiveInProgress(detail)
-      && (classification?.authoritative !== true || !hasCompletePublicVideoSurface(detail))) {
-    throw requiredSurfaceError(
-      videoId,
-      `YouTube.js parser gap: required public Video surface is incomplete for ${videoId}`,
-      detail,
-    );
-  }
-  return Object.freeze({ detail, access, classification });
 }
 
 export function fullCrawlTargetDetail(targetValue) {

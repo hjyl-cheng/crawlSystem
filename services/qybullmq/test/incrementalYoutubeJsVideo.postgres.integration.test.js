@@ -76,9 +76,7 @@ function publicDetail(videoId) {
   };
 }
 
-test("YouTubeJS checkpoint executor finalizes once and replays without network", {
-  skip: integrationUrl ? false : "INCREMENTAL_POSTGRES_TEST_URL is not configured",
-}, async () => {
+async function checkpointReplayScenario(enrichPending) {
   const pool = new Pool({
     connectionString: integrationUrl,
     max: 4,
@@ -128,14 +126,14 @@ test("YouTubeJS checkpoint executor finalizes once and replays without network",
     await pool.query(
       `INSERT INTO crawler.contents (
          content_key,channel_id,run_id,content_type,content_type_source,
-         source_content_id,title,url,thumbnail_url,description,description_status,keywords,
-         published_at,published_at_status,published_at_precision,
-         duration_seconds,duration_status,access_status,access_status_source,
+         source_content_id,title,url,thumbnail_url,description,description_status,description_source,keywords,
+         published_at,published_at_status,published_at_precision,published_at_source,
+         duration_seconds,duration_status,duration_source,access_status,access_status_source,
          first_seen_at,last_seen_at
        ) VALUES (
          $1,$2,$3,'video','youtube_watch_canonical',$4,'Stored recent Video',$5,
-         'https://i.ytimg.com/vi/stored/default.jpg','Stored description','exact',ARRAY['stored'],
-         '2026-09-01T00:00:00Z','exact','date_only',45,'exact',
+         'https://i.ytimg.com/vi/stored/default.jpg','Stored description','exact','youtubejs_player',ARRAY['stored'],
+         '2026-09-01T00:00:00Z','exact','date_only','youtubejs_player',45,'exact','youtubejs_player',
          'public','youtubejs_player',now(),now()
        )`,
       [
@@ -146,12 +144,14 @@ test("YouTubeJS checkpoint executor finalizes once and replays without network",
         `https://www.youtube.com/watch?v=${recentVideoId}`,
       ],
     );
-    await pool.query(
-      `INSERT INTO crawler.content_enrich_tasks (
-         task_id,content_key,channel_id,job_type,status,priority,next_retry_at
-       ) VALUES ($1,$2,$3,'player-refresh','queued',10,now())`,
-      [`player-refresh:${suffix}`, recentContentKey, channelId],
-    );
+    if (enrichPending) {
+      await pool.query(
+        `INSERT INTO crawler.content_enrich_tasks (
+           task_id,content_key,channel_id,job_type,status,priority,next_retry_at
+         ) VALUES ($1,$2,$3,'player-refresh','queued',10,now())`,
+        [`player-refresh:${suffix}`, recentContentKey, channelId],
+      );
+    }
 
     const result = await executeIncrementalYoutubeJsVideo({
       plan,
@@ -223,7 +223,7 @@ test("YouTubeJS checkpoint executor finalizes once and replays without network",
     assert.deepEqual(batch.final_result_json, result);
 
     const items = (await pool.query(
-      `SELECT phase,video_id,status,attempt_count,detail_json,field_status_json,error_json
+      `SELECT phase,video_id,status,attempt_count,detail_json,field_status_json,error_json,target_json
        FROM crawler.incremental_youtubejs_video_items
        WHERE run_id=$1
        ORDER BY CASE phase WHEN 'first_seen' THEN 0 ELSE 1 END,ordinal`,
@@ -243,6 +243,7 @@ test("YouTubeJS checkpoint executor finalizes once and replays without network",
     assert.equal(items[1].status, "captured");
     assert.equal(Number(items[1].attempt_count), 1);
     assert.equal(items[1].detail_json.id, recentVideoId);
+    assert.equal(items[1].target_json.enrich_pending, enrichPending);
 
     const content = (await pool.query(
       `SELECT title,description,view_count,comment_count,publication_item_hash
@@ -263,17 +264,18 @@ test("YouTubeJS checkpoint executor finalizes once and replays without network",
        WHERE content_key=$1`,
       [recentContentKey],
     )).rows[0];
-    assert.equal(recentContent.title, "Stored recent Video");
-    assert.equal(recentContent.thumbnail_url, "https://i.ytimg.com/vi/stored/default.jpg");
-    assert.equal(recentContent.description, "Stored description");
-    assert.deepEqual(recentContent.keywords, ["stored"]);
-    assert.equal(recentContent.duration_seconds, 45);
+    assert.equal(recentContent.title, enrichPending ? `YouTubeJS ${recentVideoId}` : "Stored recent Video");
+    assert.equal(recentContent.thumbnail_url, enrichPending
+      ? "https://i.ytimg.com/vi/checkpoint/default.jpg" : "https://i.ytimg.com/vi/stored/default.jpg");
+    assert.equal(recentContent.description, enrichPending ? "Captured once" : "Stored description");
+    assert.deepEqual(recentContent.keywords, enrichPending ? ["youtubejs"] : ["stored"]);
+    assert.equal(recentContent.duration_seconds, enrichPending ? 90 : 45);
     assert.equal(recentContent.view_count, "321");
     assert.equal(recentContent.like_count, "12");
     assert.equal(recentContent.comment_count, "0");
     assert.equal(
       new Date(recentContent.published_at).toISOString(),
-      "2026-09-01T00:00:00.000Z",
+      enrichPending ? "2026-09-02T12:00:00.000Z" : "2026-09-01T00:00:00.000Z",
     );
     assert.equal(
       new Date(recentContent.player_last_observed_at).toISOString(),
@@ -286,10 +288,14 @@ test("YouTubeJS checkpoint executor finalizes once and replays without network",
        WHERE content_key=$1 AND job_type='player-refresh'`,
       [recentContentKey],
     )).rows[0];
-    assert.equal(recentTask.status, "done");
-    assert.equal(recentTask.lease_owner, null);
-    assert.equal(recentTask.lease_expires_at, null);
-    assert.equal(recentTask.last_outcome.kind, "done");
+    if (enrichPending) {
+      assert.equal(recentTask.status, "done");
+      assert.equal(recentTask.lease_owner, null);
+      assert.equal(recentTask.lease_expires_at, null);
+      assert.equal(recentTask.last_outcome.kind, "done");
+    } else {
+      assert.equal(recentTask, undefined);
+    }
 
     const observation = (await pool.query(
       `SELECT observation.observation_id,key.idempotency_key,
@@ -366,4 +372,10 @@ test("YouTubeJS checkpoint executor finalizes once and replays without network",
     await pool.query("DELETE FROM crawler.channels WHERE channel_id=$1", [channelId]).catch(() => {});
     await pool.end();
   }
-});
+}
+
+for (const enrichPending of [false, true]) {
+  test(`YouTubeJS checkpoint finalizes and replays ${enrichPending ? "pending repair" : "ordinary metrics"} without network`, {
+    skip: integrationUrl ? false : "INCREMENTAL_POSTGRES_TEST_URL is not configured",
+  }, () => checkpointReplayScenario(enrichPending));
+}
