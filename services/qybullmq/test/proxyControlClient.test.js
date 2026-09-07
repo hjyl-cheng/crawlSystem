@@ -29,6 +29,12 @@ function fixture(handler = async () => response({ ok: true }), overrides = {}) {
   return { client, calls };
 }
 
+test("budget lookup preserves the colon in the actual Rota Run identity", async () => {
+  const { client, calls } = fixture();
+  await client.businessRunBudget("run:abc-123");
+  assert.equal(calls[0].url, "http://rota/api/v1/proxy-control/business-runs/run:abc-123/budget");
+});
+
 test("worker v2 commands use the exact authenticated Rota endpoints", async () => {
   const { client, calls } = fixture(async (url) => response(
     url.endsWith("/capacity") ? { ok: true, active: 8 } : { ok: true },

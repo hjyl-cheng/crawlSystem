@@ -53,7 +53,7 @@ test("successful YouTubeJS details never request API", async () => {
 for (const attempt of [1, 2, 3]) test(`network checkpoint attempt ${attempt} respects the route retry cap`, async () => {
   const { fallback, options, requests } = harness();
   const error = networkError();
-  const invoke = () => fallback({ ...options, attempt, fetch: async () => { throw error; }, validate: x => x });
+  const invoke = () => fallback({ ...options, detailMode: "metrics", attempt, fetch: async () => { throw error; }, validate: x => x });
   if (attempt < 3) await assert.rejects(invoke, candidate => candidate === error);
   else assert.equal((await invoke()).title, "API title");
   assert.equal(requests.length, attempt === 3 ? 1 : 0);
@@ -61,8 +61,22 @@ for (const attempt of [1, 2, 3]) test(`network checkpoint attempt ${attempt} res
 test("authoritative final business budget permits fallback before another route is rejected", async () => {
   const { fallback, options } = harness();
   const detail = await withVideoFallbackExecution({ getBudget: async () => ({ business_tasks_used: 8, business_tasks_limit: 8 }) },
-    () => fallback({ ...options, fetch: async () => { throw networkError(); }, validate: x => x }));
+    () => fallback({ ...options, detailMode: "metrics", fetch: async () => { throw networkError(); }, validate: x => x }));
   assert.equal(detail.title, "API title");
+});
+test("control-plane retries and final Bull attempt cannot exhaust the network budget", async () => {
+  const { fallback, options, requests } = harness();
+  const error = networkError();
+  await assert.rejects(withVideoFallbackExecution({ lastJobAttempt: true,
+    getBudget: async () => ({ business_tasks_used: 4, business_tasks_limit: 9 }) },
+  () => fallback({ ...options, attempt: 5, detailMode: "metrics", fetch: async () => { throw error; } })), x => x === error);
+  assert.equal(requests.length, 0);
+});
+test("full detail with no type evidence keeps the network failure and never spends API quota", async () => {
+  const { fallback, options, requests } = harness();
+  const error = networkError();
+  await assert.rejects(fallback({ ...options, attempt: 9, fetch: async () => { throw error; } }), x => x === error);
+  assert.equal(requests.length, 0);
 });
 for (const code of ["CONTENT_DETAIL_EXECUTION_FENCE_STALE", "CANDIDATE_ATTEMPT_FENCE_STALE", "23505"]) {
   test(`internal failure ${code} never enters API fallback`, async () => {
@@ -75,7 +89,7 @@ for (const code of ["CONTENT_DETAIL_EXECUTION_FENCE_STALE", "CANDIDATE_ATTEMPT_F
 test("API metadata cannot invent video type", async () => {
   const { fallback, options } = harness();
   await assert.rejects(fallback({ ...options, fetch: async () => { const error = parserError(); error.partial_detail = {}; throw error; } }),
-    { code: "VIDEO_API_FALLBACK_UNRESOLVED" });
+    { name: "YoutubeJsRequiredSurfaceError" });
 });
 test("resuming a durable request never fetches YouTubeJS again", async () => {
   const { fallback, options, requests } = harness({ existing: { run_id: "run1", source_content_id: "video1", consumer: "full", partial_detail: partial } });

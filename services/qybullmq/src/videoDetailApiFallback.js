@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { isStaleExecutionFailure, classifyRetryableSystemFailure } from "./managedWorkerJob.js";
 import { selectYoutubeFailure } from "./youtubeFailurePolicy.js";
+import { resolveYoutubeContentType } from "./youtubeContentType.js";
 import { requestVideoApiDetail, waitForVideoApiDetail, videoApiResultError } from "./videoApiBatchRequests.js";
 
 const execution = new AsyncLocalStorage();
@@ -46,7 +47,8 @@ export function createVideoDetailApiFallback({ query, withTransaction, loadSetti
     let partial = existing?.partial_detail ?? {};
     if (existing && (existing.run_id !== runId || existing.source_content_id !== videoId
         || existing.consumer !== consumer)) throw new Error("Video API consumer identity conflicts");
-    if (!existing) {
+    const needsType = detailMode === "full" && resolveYoutubeContentType({ videoId, detail: partial })?.authoritative !== true;
+    if (!existing || needsType) {
       for (let detailAttempt = Math.max(1, Number(attempt) || 1); ; detailAttempt += 1) {
         try {
           const observed = await fetch();
@@ -62,8 +64,8 @@ export function createVideoDetailApiFallback({ query, withTransaction, loadSetti
             .filter(([, value]) => value != null)) };
           if (parserFailure && !NETWORK_KINDS.has(failure.kind) && detailAttempt < 3) continue;
           const context = execution.getStore();
-          let routeExhausted = detailAttempt >= 3 || context?.lastJobAttempt === true;
-          if (!routeExhausted && NETWORK_KINDS.has(failure.kind) && context?.getBudget) {
+          let routeExhausted = detailAttempt >= 3;
+          if (NETWORK_KINDS.has(failure.kind) && context?.getBudget) {
             const budget = await context.getBudget();
             const value = budget?.budget ?? budget;
             routeExhausted = Number(value?.business_tasks_limit) > 0
@@ -71,6 +73,9 @@ export function createVideoDetailApiFallback({ query, withTransaction, loadSetti
           }
           if (!(parserFailure && !NETWORK_KINDS.has(failure.kind))
               && !(NETWORK_KINDS.has(failure.kind) && routeExhausted)) throw error;
+          if (detailMode === "full" && resolveYoutubeContentType({ videoId, detail: partial })?.authoritative !== true) {
+            throw error;
+          }
           const settings = await loadSettings();
           if (settings.fallbackMode === "disabled") throw error;
           if (!settings.apiKeys?.length || settings.dailyRequestLimit <= 0) {

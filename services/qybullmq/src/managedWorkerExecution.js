@@ -142,7 +142,6 @@ export async function executeManagedWorkerAttempt({
   try {
     const result = await withVideoFallbackExecution({
       getBudget: attempt?.getBudget,
-      lastJobAttempt: Number(job?.attemptsMade ?? 0) + 1 >= Number(job?.opts?.attempts ?? 3),
     }, () => execute({
       resumeMode: attempt?.resumeMode ?? prepared?.initialResumeMode ?? "initial",
       prepared,
