@@ -1,7 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { isStaleExecutionFailure, classifyRetryableSystemFailure } from "./managedWorkerJob.js";
 import { selectYoutubeFailure } from "./youtubeFailurePolicy.js";
-import { resolveYoutubeContentType } from "./youtubeContentType.js";
 import { requestVideoApiDetail, waitForVideoApiDetail, videoApiResultError } from "./videoApiBatchRequests.js";
 
 const execution = new AsyncLocalStorage();
@@ -47,8 +46,7 @@ export function createVideoDetailApiFallback({ query, withTransaction, loadSetti
     let partial = existing?.partial_detail ?? {};
     if (existing && (existing.run_id !== runId || existing.source_content_id !== videoId
         || existing.consumer !== consumer)) throw new Error("Video API consumer identity conflicts");
-    const needsType = detailMode === "full" && resolveYoutubeContentType({ videoId, detail: partial })?.authoritative !== true;
-    if (!existing || needsType) {
+    if (!existing) {
       for (let detailAttempt = Math.max(1, Number(attempt) || 1); ; detailAttempt += 1) {
         try {
           const observed = await fetch();
@@ -73,9 +71,6 @@ export function createVideoDetailApiFallback({ query, withTransaction, loadSetti
           }
           if (!(parserFailure && !NETWORK_KINDS.has(failure.kind))
               && !(NETWORK_KINDS.has(failure.kind) && routeExhausted)) throw error;
-          if (detailMode === "full" && resolveYoutubeContentType({ videoId, detail: partial })?.authoritative !== true) {
-            throw error;
-          }
           const settings = await loadSettings();
           if (settings.fallbackMode === "disabled") throw error;
           if (!settings.apiKeys?.length || settings.dailyRequestLimit <= 0) {
@@ -84,7 +79,7 @@ export function createVideoDetailApiFallback({ query, withTransaction, loadSetti
           await request(withTransaction, { requestId, runId, videoId, consumer, partialDetail: partial,
             requireComments: partial.comments_disabled !== true
               && (Boolean(partial.youtubejs_comments_error)
-                || (detailMode === "full" && !optionalComments && !partial.comments_first_page)) });
+                || (detailMode === "full" && !partial.comments_first_page)) });
           console.log(JSON.stringify({ event: "video_api_fallback_requested", run_id: runId,
             video_id: videoId, consumer, detail_attempt: detailAttempt, failure_kind: failure.kind }));
           break;

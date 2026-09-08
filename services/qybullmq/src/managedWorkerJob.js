@@ -181,13 +181,11 @@ export async function recordChannelCandidateSystemFailure(query, job, {
              ELSE validation_finished_at
            END,
            snapshot_active_job_id=CASE
-             WHEN status='accepted' AND $7::boolean
-               AND NOT EXISTS (SELECT 1 FROM matching_intent) THEN NULL
+             WHEN status='accepted' AND $7::boolean THEN NULL
              ELSE snapshot_active_job_id
            END,
            snapshot_active_job_attempt=CASE
-             WHEN status='accepted' AND $7::boolean
-               AND NOT EXISTS (SELECT 1 FROM matching_intent) THEN NULL
+             WHEN status='accepted' AND $7::boolean THEN NULL
              ELSE snapshot_active_job_attempt
            END,
            updated_at=now()
@@ -204,7 +202,7 @@ export async function recordChannelCandidateSystemFailure(query, job, {
        WHERE intent.migration_intent_id=matching_intent.migration_intent_id
        RETURNING intent.migration_intent_id,candidate.candidate_id,
                  candidate.snapshot_dispatch_generation,
-                 candidate.snapshot_active_job_id,candidate.snapshot_active_job_attempt
+                 $5::text AS snapshot_active_job_id,$6::integer AS snapshot_active_job_attempt
      ), closed_previous AS (
        UPDATE crawler.migration_system_retry_items retry
        SET status='resolved',resolution='superseded_by_newer_system_failure',

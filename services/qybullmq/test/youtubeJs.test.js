@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   collectYoutubeJsUploadBundle,
+  capturePlayerTypeSurface,
   fetchYoutubeJsVideoInfoWithTerminalFallback,
   isYoutubeJsBotChallenge,
   normalizeYoutubeJsFeedItem,
@@ -18,24 +19,13 @@ import { decideYoutubeFailure } from "../src/youtubeFailurePolicy.js";
 import { isParserContractError } from "../src/localizedParsing.js";
 import { retryableRotaFailure } from "../src/managedWorkerExecution.js";
 
-test("full detail continues past complete IOS metadata without authoritative content type", async () => {
+test("full detail stops after WEB and IOS when type evidence is still absent", async () => {
   const calls = [];
-  let signals = null;
-  const client = {
-    getInfo: async (_id, { client }) => {
-      calls.push(client);
-      signals = client === "WEB" && calls.length > 1
-        ? { source: "youtubei_player", canonical_url: "https://www.youtube.com/shorts/1xobqeOzsFE", is_shorts_eligible: true }
-        : { source: "youtubei_player", canonical_url: null, is_shorts_eligible: null, is_live_content: false };
-      return infoFixture();
-    },
-    getBasicInfo: async () => { throw new Error("unexpected basic probe"); },
-  };
-  const result = await fetchYoutubeJsVideoInfoWithTerminalFallback(client, "1xobqeOzsFE", {
-    contentTypeSignals: () => signals,
-  });
-  assert.deepEqual(calls, ["WEB", "IOS", "ANDROID", "WEB"]);
-  assert.equal(result.client, "WEB");
+  await assert.rejects(fetchYoutubeJsVideoInfoWithTerminalFallback({
+    getInfo: async (_id, { client }) => { calls.push(client); return infoFixture(); },
+    getBasicInfo: async () => assert.fail("must not add a basic player retry"),
+  }, "1xobqeOzsFE", { contentTypeSignals: () => null }), /alternate clients exhausted/);
+  assert.deepEqual(calls, ["WEB", "IOS"]);
 });
 
 test("metrics refresh does not require a content type probe", async () => {
@@ -1204,7 +1194,7 @@ test("Video Detail recovers an uploader-removed terminal reason hidden by WEB", 
   const client = {
     async getInfo(videoId, options) {
       calls.push(["getInfo", videoId, options.client]);
-      throw webError;
+      throw options.client === "IOS" ? androidError : webError;
     },
     async getBasicInfo(videoId, options) {
       calls.push(["getBasicInfo", videoId, options.client]);
@@ -1217,14 +1207,12 @@ test("Video Detail recovers an uploader-removed terminal reason hidden by WEB", 
   assert.deepEqual(calls, [
     ["getInfo", "Ue6kayghUeQ", "WEB"],
     ["getInfo", "Ue6kayghUeQ", "IOS"],
-    ["getInfo", "Ue6kayghUeQ", "ANDROID"],
-    ["getBasicInfo", "Ue6kayghUeQ", "ANDROID"],
   ]);
   assert.equal(result.kind, "terminal");
   assert.equal(result.detail.id, "Ue6kayghUeQ");
   assert.equal(result.detail.access_status, "unavailable");
   assert.equal(result.detail.playability_reason_code, "uploader_removed");
-  assert.equal(result.detail.youtubejs_client, "ANDROID");
+  assert.equal(result.detail.youtubejs_client, "IOS");
 });
 
 test("Video Detail recovers a private terminal reason hidden by WEB", async () => {
@@ -1243,8 +1231,8 @@ test("Video Detail recovers a private terminal reason hidden by WEB", async () =
   delete privateInfo.page[0].microformat.upload_date;
   delete privateInfo.page[0].microformat.view_count;
   const client = {
-    getInfo: async () => primary,
-    getBasicInfo: async () => privateInfo,
+    getInfo: async (_id, { client }) => client === "IOS" ? privateInfo : primary,
+    getBasicInfo: async () => assert.fail("no basic probe"),
   };
 
   const result = await fetchYoutubeJsVideoInfoWithTerminalFallback(client, "YagFmyEQdVc");
@@ -1253,7 +1241,7 @@ test("Video Detail recovers a private terminal reason hidden by WEB", async () =
   assert.equal(result.detail.id, "YagFmyEQdVc");
   assert.equal(result.detail.access_status, "private");
   assert.equal(result.detail.playability_reason_code, "private");
-  assert.equal(result.detail.youtubejs_client, "ANDROID");
+  assert.equal(result.detail.youtubejs_client, "IOS");
 });
 
 test("Video Detail accepts a complete IOS response after an inconclusive WEB response", async () => {
@@ -1289,38 +1277,14 @@ test("Video Detail accepts a complete IOS response after an inconclusive WEB res
   assert.equal(result.client, "IOS");
 });
 
-test("Video Detail falls through IOS and accepts a complete ANDROID response", async () => {
+test("Video Detail does not try ANDROID after IOS fails", async () => {
   const calls = [];
-  const inconclusive = infoFixture({
-    basic_info: { view_count: null },
-    playability_status: { status: "LOGIN_REQUIRED", reason: "Please sign in" },
-  });
-  delete inconclusive.page[0].microformat.publish_date;
-  delete inconclusive.page[0].microformat.upload_date;
-  delete inconclusive.page[0].microformat.view_count;
-  const publicInfo = infoFixture({
-    playability_status: { status: "OK", reason: null },
-  });
-  const client = {
-    async getInfo(videoId, options) {
-      calls.push(["getInfo", videoId, options.client]);
-      return options.client === "ANDROID" ? publicInfo : inconclusive;
-    },
-    async getBasicInfo() {
-      throw new Error("basic probe must not run after ANDROID succeeds");
-    },
-  };
-
-  const result = await fetchYoutubeJsVideoInfoWithTerminalFallback(client, "69tt-8JAqO4");
-
-  assert.deepEqual(calls, [
-    ["getInfo", "69tt-8JAqO4", "WEB"],
-    ["getInfo", "69tt-8JAqO4", "IOS"],
-    ["getInfo", "69tt-8JAqO4", "ANDROID"],
-  ]);
-  assert.equal(result.kind, "info");
-  assert.equal(result.info, publicInfo);
-  assert.equal(result.client, "ANDROID");
+  const error = Object.assign(new Error("Please sign in"), { info: { status: "LOGIN_REQUIRED", reason: "Please sign in" } });
+  await assert.rejects(fetchYoutubeJsVideoInfoWithTerminalFallback({
+    getInfo: async (_id, { client }) => { calls.push(client); throw error; },
+    getBasicInfo: async () => assert.fail("unexpected basic probe"),
+  }, "69tt-8JAqO4"), /alternate clients exhausted/);
+  assert.deepEqual(calls, ["WEB", "IOS"]);
 });
 
 test("Video Detail requests a new Route after every supported client stays inconclusive", async () => {
@@ -1363,8 +1327,6 @@ test("Video Detail requests a new Route after every supported client stays incon
   assert.deepEqual(calls, [
     ["getInfo", "gQtq0Dyjo0A", "WEB"],
     ["getInfo", "gQtq0Dyjo0A", "IOS"],
-    ["getInfo", "gQtq0Dyjo0A", "ANDROID"],
-    ["getBasicInfo", "gQtq0Dyjo0A", "ANDROID"],
   ]);
 });
 
@@ -1404,8 +1366,6 @@ test("Video Detail requests a new Route when playable clients lack the required 
   assert.deepEqual(calls, [
     ["getInfo", "incomplete-public-video", "WEB"],
     ["getInfo", "incomplete-public-video", "IOS"],
-    ["getInfo", "incomplete-public-video", "ANDROID"],
-    ["getBasicInfo", "incomplete-public-video", "ANDROID"],
   ]);
 });
 
@@ -1488,7 +1448,7 @@ test("Video metrics mode still rejects an inconclusive sign-in response with onl
     }),
     (error) => decideYoutubeFailure({ error }).kind === "youtube_challenge",
   );
-  assert.deepEqual(calls, ["WEB", "IOS", "ANDROID", "basic:ANDROID"]);
+  assert.deepEqual(calls, ["WEB", "IOS"]);
 });
 
 test("Video Detail does not run a terminal probe for an unrelated request failure", async () => {
@@ -1511,13 +1471,14 @@ test("Video Detail does not run a terminal probe for an unrelated request failur
   assert.equal(probeCalls, 0);
 });
 
-test("Video Detail does not hide a route failure from the terminal probe", async () => {
+test("Video Detail does not hide a route failure from IOS", async () => {
   const primary = Object.assign(new Error("This video is unavailable"), {
     info: { status: "ERROR", reason: "Video unavailable" },
   });
   const routeFailure = new Error("YouTube.js request failed HTTP 429");
   const client = {
-    async getInfo() {
+    async getInfo(_id, { client }) {
+      if (client === "IOS") throw routeFailure;
       throw primary;
     },
     async getBasicInfo() {
@@ -1531,32 +1492,19 @@ test("Video Detail does not hide a route failure from the terminal probe", async
   );
 });
 
-test("Video Detail surfaces a bot challenge returned by the terminal probe", async () => {
-  const primary = Object.assign(new Error("This video is unavailable"), {
-    info: { status: "ERROR", reason: "Video unavailable" },
+test("Video Detail surfaces a bot challenge from IOS without further clients", async () => {
+  const calls = [];
+  await assert.rejects(fetchYoutubeJsVideoInfoWithTerminalFallback({
+    async getInfo(_id, { client }) {
+      calls.push(client);
+      return { playability_status: { status: "LOGIN_REQUIRED", reason: client === "WEB" ? "Please sign in" : "Sign in to confirm you're not a bot" } };
+    },
+  }, "challenged-probe"), error => {
+    assert.match(error.message, /bot challenge/i);
+    assert.equal(error.youtube_failure_evidence?.client, "IOS");
+    return true;
   });
-  const client = {
-    async getInfo() {
-      throw primary;
-    },
-    async getBasicInfo() {
-      return {
-        playability_status: {
-          status: "LOGIN_REQUIRED",
-          reason: "Sign in to confirm you're not a bot",
-        },
-      };
-    },
-  };
-
-  await assert.rejects(
-    fetchYoutubeJsVideoInfoWithTerminalFallback(client, "challenged-probe"),
-    (error) => {
-      assert.match(error.message, /bot challenge/i);
-      assert.equal(error.youtube_failure_evidence?.client, "ANDROID");
-      return true;
-    },
-  );
+  assert.deepEqual(calls, ["WEB", "IOS"]);
 });
 
 test("bot challenge detection distinguishes IP blocks from ordinary sign-in restrictions", () => {
@@ -1574,4 +1522,19 @@ test("bot challenge detection distinguishes IP blocks from ordinary sign-in rest
   );
   assert.equal(isYoutubeJsBotChallenge("LOGIN_REQUIRED", "Sign in to confirm your age"), false);
   assert.equal(isYoutubeJsBotChallenge("OK", "Sign in to confirm you're not a bot"), false);
+});
+
+test("IOS without a microformat cannot erase WEB Shorts evidence", () => {
+  const surfaces = new Map();
+  const url = new URL("https://www.youtube.com/youtubei/v1/player");
+  const body = JSON.stringify({ videoId: "v1" });
+  capturePlayerTypeSurface(url, body, JSON.stringify({ microformat: { playerMicroformatRenderer: {
+    isShortsEligible: true, canonicalUrl: "https://www.youtube.com/shorts/v1",
+  } } }), surfaces);
+  const prior = surfaces.get("v1");
+  assert.equal(prior.is_shorts_eligible, true);
+  capturePlayerTypeSurface(url, body, JSON.stringify({ playabilityStatus: { status: "LOGIN_REQUIRED" } }), surfaces);
+  assert.deepEqual(surfaces.get("v1"), prior);
+  capturePlayerTypeSurface(url, body, "invalid", surfaces);
+  assert.deepEqual(surfaces.get("v1"), prior);
 });

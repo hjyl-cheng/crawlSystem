@@ -590,10 +590,10 @@ test("an accepted non-Migration Candidate releases its Fence after terminal syst
   );
   assert.match(
     statement.sql,
-    /snapshot_active_job_id=CASE[\s\S]*status='accepted'[\s\S]*NOT EXISTS \(SELECT 1 FROM matching_intent\)[\s\S]*THEN NULL/,
+    /snapshot_active_job_id=CASE[\s\S]*status='accepted'[\s\S]*THEN NULL/,
   );
   assert.match(
     statement.sql,
-    /snapshot_active_job_attempt=CASE[\s\S]*status='accepted'[\s\S]*NOT EXISTS \(SELECT 1 FROM matching_intent\)[\s\S]*THEN NULL/,
+    /snapshot_active_job_attempt=CASE[\s\S]*status='accepted'[\s\S]*THEN NULL/,
   );
 });

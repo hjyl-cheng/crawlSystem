@@ -497,3 +497,27 @@ for (const field of ["title", "channel_url", "channel_id"]) {
     assert.ok(!fixture.calls.includes("store:commit-admission"));
   });
 }
+
+test("untyped API evidence is committed unresolved and subsequent video details still run", async () => {
+  const fixture = scriptedFixture();
+  const committed = [];
+  const commit = fixture.store.commitDetail;
+  fixture.store.commitDetail = async (fence, candidate, observation) => {
+    committed.push(observation);
+    return commit(fence, candidate, observation);
+  };
+  fixture.videoApiFallback = async request => {
+    const detail = publicDetail(request.videoId);
+    if (request.videoId === "video-1") {
+      delete detail.content_type_signals;
+      detail.video_detail_fallback = { source: "youtube_data_api_batch", youtubejs_exhausted: true };
+    }
+    return request.validate(detail);
+  };
+  const input = job();
+  input.data.fetch_contract = YOUTUBEJS_API_FULL_CRAWL_FETCH_CONTRACT;
+  assert.equal((await executor(fixture)(input)).ok, true);
+  assert.equal(committed.length, 2);
+  assert.notEqual(committed[0].classification?.authoritative, true);
+  assert.equal(committed[1].classification.authoritative, true);
+});

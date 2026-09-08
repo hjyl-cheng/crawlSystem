@@ -45,8 +45,8 @@ const DEFAULT_LANGUAGE = process.env.YOUTUBE_CONTROL_LANGUAGE || process.env.YOU
 const DEFAULT_COUNTRY = process.env.YOUTUBE_COUNTRY || "BR";
 const DEFAULT_TIMEOUT_MS = Math.max(1000, Number(process.env.YOUTUBEJS_TIMEOUT_MS || 30000));
 const MAX_TAB_PAGES = Math.max(1, Number(process.env.YOUTUBEJS_MAX_TAB_PAGES || 20));
-const TERMINAL_DETAIL_PROBE_CLIENT = "ANDROID";
-const VIDEO_DETAIL_CLIENTS = Object.freeze(["WEB", "IOS", "ANDROID"]);
+const TERMINAL_DETAIL_PROBE_CLIENT = "IOS";
+const VIDEO_DETAIL_CLIENTS = Object.freeze(["WEB", "IOS"]);
 const EXPLICIT_TERMINAL_REASON_CODES = new Set(["private", "uploader_removed"]);
 
 let runtime = null;
@@ -893,17 +893,18 @@ function youtubeJsRequestClient(body) {
   return String(payload?.context?.client?.clientName ?? "WEB").trim().toUpperCase() || "WEB";
 }
 
-function capturePlayerTypeSurface(url, body, responseText, playerTypeSurfaces) {
+export function capturePlayerTypeSurface(url, body, responseText, playerTypeSurfaces) {
   if (url.pathname !== "/youtubei/v1/player" || !responseText) return;
   const videoId = String(jsonRequestBody(body)?.videoId ?? "").trim();
   if (!videoId) return;
   try {
-    playerTypeSurfaces.set(videoId, extractYoutubePlayerContentTypeSignals(
-      JSON.parse(responseText),
-      { source: "youtubei_player" },
-    ));
+    const observed = extractYoutubePlayerContentTypeSignals(JSON.parse(responseText), { source: "youtubei_player" });
+    const prior = playerTypeSurfaces.get(videoId);
+    const authoritative = signals => resolveYoutubeContentType({ videoId,
+      detail: { content_type_signals: signals } })?.authoritative === true;
+    if (!authoritative(prior) || authoritative(observed)) playerTypeSurfaces.set(videoId, observed);
   } catch {
-    playerTypeSurfaces.delete(videoId);
+    // An invalid later client response must not erase earlier WEB evidence.
   }
 }
 
@@ -1762,49 +1763,6 @@ function youtubeJsClientAttempt(clientName, value, error = null) {
   };
 }
 
-async function probeYoutubeJsBasicDetail(client, videoId, clientName, options = {}) {
-  try {
-    const info = await fetchYoutubeJsBasicPlayerInfo(client, videoId, {
-      clientName,
-    });
-    throwIfYoutubeJsOperationAborted();
-    return {
-      resolution: youtubeJsInfoResolution(
-        videoId,
-        info,
-        clientName,
-        "youtubejs_get_basic_info",
-        options,
-      ),
-      attempt: youtubeJsClientAttempt(clientName, info),
-    };
-  } catch (error) {
-    throwIfYoutubeJsOperationAborted();
-    const detail = youtubeJsExplicitTerminalDetail(videoId, error?.info, {
-      clientName,
-      source: "youtubejs_get_basic_info",
-    });
-    if (detail) return {
-      resolution: { kind: "terminal", detail },
-      attempt: youtubeJsClientAttempt(clientName, error?.info, error),
-    };
-    const playabilitySurface = youtubeJsPlayabilitySurface(error?.info);
-    if (isYoutubeJsBotChallenge(playabilitySurface.status, playabilitySurface.reason)) {
-      throwYoutubeJsBotChallenge(
-        videoId,
-        playabilitySurface.status,
-        playabilitySurface.reason,
-        { clientName },
-      );
-    }
-    if (!youtubeJsErrorNeedsTerminalProbe(error)) throw error;
-    return {
-      resolution: null,
-      attempt: youtubeJsClientAttempt(clientName, error?.info, error),
-    };
-  }
-}
-
 function throwYoutubeJsAlternateClientsExhausted(videoId, attempts) {
   const last = attempts.at(-1) ?? { client: TERMINAL_DETAIL_PROBE_CLIENT };
   const reason = last.playability_reason || last.error || "ambiguous playability response";
@@ -1849,10 +1807,7 @@ export async function fetchYoutubeJsVideoInfoWithTerminalFallback(client, videoI
   if (!cleanVideoId) throw new Error("video_id is required");
   const mode = normalizedVideoDetailMode(detailMode);
   const attempts = [];
-  // Mobile responses can contain all metrics but omit Shorts/type evidence.
-  // A final bounded WEB pass can recover the authoritative microformat.
-  const clients = contentTypeSignals && mode === "full"
-    ? [...VIDEO_DETAIL_CLIENTS, "WEB"] : VIDEO_DETAIL_CLIENTS;
+  const clients = VIDEO_DETAIL_CLIENTS;
   for (const clientName of clients) {
     let info;
     try {
@@ -1886,14 +1841,6 @@ export async function fetchYoutubeJsVideoInfoWithTerminalFallback(client, videoI
     if (resolution) return resolution;
     attempts.push(youtubeJsClientAttempt(clientName, info));
   }
-  const basic = await probeYoutubeJsBasicDetail(
-    client,
-    cleanVideoId,
-    TERMINAL_DETAIL_PROBE_CLIENT,
-    { detailMode: mode, locale, contentTypeSignals },
-  );
-  if (basic.resolution) return basic.resolution;
-  attempts.push(basic.attempt);
   return throwYoutubeJsAlternateClientsExhausted(cleanVideoId, attempts);
 }
 

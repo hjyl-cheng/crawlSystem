@@ -294,11 +294,11 @@ test("replaying one accepted Candidate system failure keeps exactly one pending 
     assert.deepEqual(await record(), {
       recorded: true,
       systemRetryRecorded: true,
-      fenceCleared: false,
+      fenceCleared: true,
     });
     assert.deepEqual(await record(), {
-      recorded: true,
-      systemRetryRecorded: true,
+      recorded: false,
+      systemRetryRecorded: false,
       fenceCleared: false,
     });
 
@@ -323,6 +323,11 @@ test("replaying one accepted Candidate system failure keeps exactly one pending 
       retry_count: 1,
       pending_retry_count: 1,
     });
+    await client.query("UPDATE crawler.channel_candidates SET snapshot_dispatch_generation=2,snapshot_active_job_id='new-owner',snapshot_active_job_attempt=1 WHERE candidate_id=$1", [candidateId]);
+    assert.equal((await record()).recorded, false);
+    const owner = (await client.query("SELECT snapshot_active_job_id FROM crawler.channel_candidates WHERE candidate_id=$1", [candidateId])).rows[0];
+    assert.equal(owner.snapshot_active_job_id, "new-owner");
+
   } finally {
     await client.query("ROLLBACK").catch(() => {});
     client.release();

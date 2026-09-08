@@ -67,6 +67,10 @@ export function validateYoutubeJsVideoDetail(videoIdValue, detailValue, {
       detail, "comments");
   }
   const classification = resolveYoutubeContentType({ videoId, detail });
+  // API metadata is useful even when YouTube omitted type evidence. The caller
+  // persists unresolved classification as a deferred item, never a guessed type.
+  const apiTypePending = detail.video_detail_fallback?.source === "youtube_data_api_batch"
+    && detail.video_detail_fallback?.youtubejs_exhausted === true;
   if (!terminalAccess && detailMode === "metrics" && !hasViewCount(detail)) {
     throw requiredSurfaceError(videoId,
       `YouTube.js parser gap: required Video metrics surface is incomplete for ${videoId}`,
@@ -76,7 +80,7 @@ export function validateYoutubeJsVideoDetail(videoIdValue, detailValue, {
   // needs its public metadata before recording the first-seen observation.
   const liveExclusion = allowIncompleteLive && isLiveInProgress(detail);
   if (!terminalAccess && detailMode === "full" && !upcoming && !liveExclusion
-      && (classification?.authoritative !== true || !hasCompletePublicVideoSurface(detail))) {
+      && ((classification?.authoritative !== true && !apiTypePending) || !hasCompletePublicVideoSurface(detail))) {
     throw requiredSurfaceError(videoId,
       `YouTube.js parser gap: required public Video surface is incomplete for ${videoId}`,
       detail);

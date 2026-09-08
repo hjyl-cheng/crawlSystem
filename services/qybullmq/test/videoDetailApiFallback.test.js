@@ -93,12 +93,15 @@ test("control-plane retries and final Bull attempt cannot exhaust the network bu
   () => fallback({ ...options, attempt: 5, detailMode: "metrics", fetch: async () => { throw error; } })), x => x === error);
   assert.equal(requests.length, 0);
 });
-test("full detail with no type evidence keeps the network failure and never spends API quota", async () => {
+test("exhausted full detail requests API even without type evidence and preserves unresolved type", async () => {
   const { fallback, options, requests } = harness();
-  const error = networkError();
-  await assert.rejects(fallback({ ...options, attempt: 9, fetch: async () => { throw error; } }), x => x === error);
-  assert.equal(requests.length, 0);
+  const result = await withVideoFallbackExecution({ getBudget: async () => ({ business_tasks_used: 9, business_tasks_limit: 9 }) },
+    () => fallback({ ...options, fetch: async () => { throw networkError(); } }));
+  assert.equal(requests.length, 1);
+  assert.notEqual(result.classification?.authoritative, true);
+  assert.equal(result.detail.title, "API title");
 });
+
 for (const code of ["CONTENT_DETAIL_EXECUTION_FENCE_STALE", "CANDIDATE_ATTEMPT_FENCE_STALE", "23505"]) {
   test(`internal failure ${code} never enters API fallback`, async () => {
     const { fallback, options, requests } = harness();
@@ -107,11 +110,12 @@ for (const code of ["CONTENT_DETAIL_EXECUTION_FENCE_STALE", "CANDIDATE_ATTEMPT_F
     assert.equal(requests.length, 0);
   });
 }
-test("API metadata cannot invent video type", async () => {
+test("API metadata leaves video type unresolved without inventing one", async () => {
   const { fallback, options } = harness();
-  await assert.rejects(fallback({ ...options, fetch: async () => { const error = parserError(); error.partial_detail = {}; throw error; } }),
-    { name: "YoutubeJsRequiredSurfaceError" });
+  const result = await fallback({ ...options, fetch: async () => { const error = parserError(); error.partial_detail = {}; throw error; } });
+  assert.notEqual(result.classification?.authoritative, true);
 });
+
 test("resuming a durable request never fetches YouTubeJS again", async () => {
   const { fallback, options, requests } = harness({ existing: { run_id: "run1", source_content_id: "video1", consumer: "full", partial_detail: partial } });
   const result = await fallback({ ...options, fetch: async () => assert.fail("must consume durable API result") });
@@ -138,4 +142,11 @@ for (const phase of ["first_seen", "recent"]) test(`incremental ${phase} consume
   assert.equal(result.title, "API title");
   assert.equal(requests[0].consumer, "incremental");
   assert.equal(requests[0].requireComments, phase === "first_seen");
+});
+
+test("resuming an untyped durable API result does not restart network collection", async () => {
+  const { fallback, options, requests } = harness({ existing: { run_id: "run1", source_content_id: "video1", consumer: "full", partial_detail: {} } });
+  const result = await fallback({ ...options, fetch: async () => assert.fail("API result must be reused") });
+  assert.equal(requests.length, 0);
+  assert.notEqual(result.classification?.authoritative, true);
 });
