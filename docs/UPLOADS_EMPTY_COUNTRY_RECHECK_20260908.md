@@ -26,7 +26,7 @@ Full Crawl 与增量使用同一个国家决策模块。国家复核意图和结
 从健康、未分配的备用节点中严格匹配国家，沿用原有凭据轮换和路由激活流程。国家复核不创建代理故障 Observation，不隔离原健康代理。
 省略该字段时，旧请求和原有幂等哈希保持兼容。
 
-## 上线顺序（本次未执行部署）
+## 上线顺序（初次验证阶段未部署；后续授权上线见文末）
 
 1. 在 crawler 数据库执行 `services/qybullmq/sql/uploadsEmptyDormancy.sql`。
 2. 在 feature-clock 数据库执行 `services/feature-engine/sql/uploads_empty_dormancy.sql`。
@@ -58,3 +58,10 @@ SQL 只扩展休眠原因约束，不批量改写频道。不要先部署 worker
 结论：真实非巴西起步的空列表识别与国家复核请求已验证；真实 BR 标记出口取得非空列表已验证。当前仍缺少“新 Rota 正式控制接口 + worker 自动换路 + 视频详情完成”的完整验收。生产旧 Rota 不支持本次新字段，且查询时没有可用未分配 BR 备用；未为测试占用正式 worker 的节点，也未部署更新来绕过此限制。
 
 本次只读补测日志（本机临时文件）：`/tmp/uploads-country-live-us.log`、`/tmp/uploads-country-live-br.log`。不含代理地址和认证信息。
+
+
+## 后续授权上线
+
+用户明确要求所有已提交改动按最新分支上线后，代码版本 `aa939bf` 已部署：Rota、feature-ingest、daily scheduler、API、controller、dashboard、20 个 Full Crawl worker、20 个增量 worker。先应用本文两份约束升级，再更新事件消费者/Rota，最后更新 workers。保留原容器配置和回滚备份。
+
+最终检查：全部 40 个 worker 均为该代码镜像且 Rota 租约有效；相关服务运行、无重启异常；API/Rota/feature-ingest 健康。没有新建生产迁移批次。空列表国家复核的完整真实详情验收限制仍如上述补测记录，部署完成不等于该验收已通过。

@@ -90,3 +90,6 @@ The user's previously requested stop was submitted through the repaired producti
 ## Ended-batch display repair
 
 The main progress panel now renders only an active batch. When no batch is active it clears stale progress and displays “当前无运行批次，可以开始迁移”. Completed/ended records remain in the collapsed recent-batch history; ended rows show the number retained for later migration. No batch records or inventory are deleted.
+
+
+Latest authorized rollout uses code revision `aa939bf` for dashboard, API, controller, Rota, feature-ingest, daily scheduler, and all 20 Full Crawl plus 20 incremental workers. The page was checked in a real browser after deployment: idle message visible, old progress hidden and cleared, start enabled, history retained, no JavaScript errors. Log: `/tmp/migration-ui-production-aa939bf.log`. Final API audit returned active=null, previous batch ended, 397,392 released IDs, and no waiting/active/prioritized/failed crawl jobs. All 40 worker leases were valid. The earlier targeted deployment description above is rollout history; country-recheck code is now also deployed following explicit user authorization.
