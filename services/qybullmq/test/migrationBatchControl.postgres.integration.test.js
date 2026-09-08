@@ -546,7 +546,7 @@ test(
           [runBatch.batch_id],
         );
         const opts = {
-          connection: { host: "127.0.0.1", port: 6379 },
+          connection: { host: "127.0.0.1", port: Number(process.env.MIGRATION_CONTROL_REDIS_TEST_PORT || 6379) },
           prefix: "migration-prefetch-test-" + randomUUID(),
         };
         const realQueue = new Queue("youtube-channel-crawl", opts);
@@ -735,3 +735,53 @@ test(
     }
   },
 );
+
+test("400k All inventory with stale statistics admits only a 100-job window and ends without starting pending channels", {skip: !url}, async () => {
+  assert.equal(new URL(url).pathname, '/migration_control_test');
+  const pool = new pg.Pool({connectionString:url,max:1,options:'-c statement_timeout=120000'});
+  const query=(...a)=>pool.query(...a);
+  const withTransaction=async fn=>{const c=await pool.connect();try{await c.query('BEGIN');const r=await fn(c);await c.query('COMMIT');return r;}catch(e){await c.query('ROLLBACK');throw e;}finally{c.release()}};
+  try {
+    await query('DROP SCHEMA IF EXISTS publication CASCADE; DROP SCHEMA IF EXISTS crawler CASCADE');
+    await query(await readFile(new URL('../src/schema.sql',import.meta.url),'utf8'));
+    await query(await readFile(new URL('../src/migrationInventorySchema.sql',import.meta.url),'utf8'));
+    const source='all-scale',sync=randomUUID();
+    await query(`INSERT INTO crawler.migration_channel_inventory_syncs(source_id,source_database,source_database_oid,status,sync_token,eligible_count) VALUES($1,'legacy_test',42,'ready',$2,400000)`,[source,sync]);
+    await query(`ALTER TABLE crawler.migration_control_items SET (autovacuum_enabled=false)`);
+    await query('ANALYZE crawler.migration_control_items');
+    await query(`INSERT INTO crawler.migration_channel_inventory(source_id,source_candidate_id,channel_id,channel_url,source_candidate_status,sync_token)
+      SELECT $1,n,'UCscale'||n,'https://youtube.com/channel/UCscale'||n,'discovered',$2 FROM generate_series(1,400000) n`,[source,sync]);
+    const b=await createMigrationControlBatch({withTransaction,selection:'all',sourceId:source});
+    await prepareMigrationControlList({withTransaction,batchId:b.batch_id});
+    const jobs=new Map();const queue={add:async(name,data,opts)=>jobs.set(opts.jobId,{name,data})};
+    const sourceLoader=async({channelId,candidateId})=>({channel_id:channelId,source_candidate_id:candidateId,priority:100});
+    await query('SET statement_timeout=15000');
+    const start=Date.now();
+    await reconcileMigrationControl({query,withTransaction,queue,sourceLoader});
+    console.log(JSON.stringify({scale:400000,first_reconcile_ms:Date.now()-start}));
+    assert.ok(Date.now()-start<15000,'All admission must complete within 15 seconds with stale statistics');
+    assert.equal(jobs.size,100);
+    await reconcileMigrationControl({query,withTransaction,queue,sourceLoader});
+    assert.equal(jobs.size,100,'repeated ticks do not accumulate 100 more pending jobs');
+    let progress=await loadMigrationControlProgress(query);
+    assert.equal(progress.active.total_count,400000);assert.equal(progress.active.counts.pending,400000);assert.ok(progress.active.frozen_at);
+    await controlMigrationBatch({withTransaction,batchId:b.batch_id,action:'pause',version:progress.active.version});
+    await reconcileMigrationControl({query,withTransaction,queue,sourceLoader});
+    progress=await loadMigrationControlProgress(query);assert.equal(progress.active.status,'paused');
+    await controlMigrationBatch({withTransaction,batchId:b.batch_id,action:'resume',version:progress.active.version});
+    await reconcileMigrationControl({query,withTransaction,queue,sourceLoader});
+    progress=await loadMigrationControlProgress(query);assert.equal(progress.active.status,'running');assert.equal(jobs.size,100);
+    await controlMigrationBatch({withTransaction,batchId:b.batch_id,action:'stop',version:progress.active.version});
+    await query('SET statement_timeout=60000');
+    const stopped=Date.now();
+    await reconcileMigrationControl({query,withTransaction,queue,sourceLoader});
+    console.log(JSON.stringify({scale:400000,stop_ms:Date.now()-stopped}));
+    progress=await loadMigrationControlProgress(query);assert.equal(progress.active,null);assert.equal(progress.batches[0].status,'ended');assert.equal(progress.batches[0].counts.released,400000);
+    for(const {data} of jobs.values()) assert.equal((await startControlledMigrationChannel({query,withTransaction,batchId:b.batch_id,channelId:data.channel_id})).started,false);
+    assert.equal(Number((await query('SELECT count(*) FROM crawler.channel_candidates')).rows[0].count),0);
+    await query('SET statement_timeout=120000');
+    const next=await createMigrationControlBatch({withTransaction,selection:'all',sourceId:source});
+    await prepareMigrationControlList({withTransaction,batchId:next.batch_id});
+    assert.equal((await loadMigrationControlProgress(query)).active.total_count,400000);
+  }finally{await pool.end()}
+});

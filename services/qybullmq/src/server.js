@@ -1,3 +1,4 @@
+import { controlledMigrationGuard } from './controlledMigrationGuard.js';
 import {createMigrationControlBatch,controlMigrationBatch,loadMigrationControlProgress,migrationBatchControlEnabled} from "./migrationBatchControl.js";
 import express from "express";
 import morgan from "morgan";
@@ -88,20 +89,7 @@ const app = express();
 app.disable("x-powered-by");
 app.use(express.json({ limit: "2mb" }));
 app.use(morgan("combined"));
-app.use((req, res, next) => {
-  const controlled = String(process.env.CONTROLLED_MIGRATION_ONLY || "").toLowerCase() === "true";
-  const readMethod = req.method === "GET" || req.method === "HEAD" || req.method === "OPTIONS";
-  const controlledWrite = req.method === "POST" && (
-    req.path.startsWith("/api/migration/channels")
-    || /^\/api\/migration\/system-retries\/[^/]+\/retry$/.test(req.path)
-  );
-  if (!controlled || readMethod || controlledWrite) return next();
-  return res.status(423).json({
-    ok: false,
-    code: "controlled_migration_only",
-    error: "non-Migration writes are disabled during the controlled canary",
-  });
-});
+app.use(controlledMigrationGuard());
 
 const asyncRoute = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 

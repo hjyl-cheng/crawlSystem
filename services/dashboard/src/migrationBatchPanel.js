@@ -78,12 +78,13 @@ function migrationBatchClient() {
   }
   function render(data) {
     active = data.active;
-    const b = active || data.batches[0];
-    byId("migration-status").textContent = b ? labels[b.status] : "可以开始";
+    const b = active;
+    byId("migration-status").textContent = b ? labels[b.status] : "当前无运行批次，可以开始迁移";
     byId("migration-start").disabled = busy || !!active;
     byId("batch-migration-selection").disabled = busy || !!active;
     const box = byId("migration-batch-progress");
     box.hidden = !b;
+    if (!b) box.replaceChildren();
     if (b) {
       const c = b.counts,
         done = terminal(b),
@@ -142,7 +143,7 @@ function migrationBatchClient() {
       ? data.batches
           .map(
             (h) =>
-              `<div class="migration-history-row"><span>${esc(new Date(h.created_at).toLocaleString())}</span><span>${esc(labels[h.status])} · 已处理 ${fmt(terminal(h))} / ${fmt(h.total_count)}</span></div>`,
+              `<div class="migration-history-row"><span>${esc(new Date(h.created_at).toLocaleString())}</span><span>${esc(labels[h.status])} · 已处理 ${fmt(terminal(h))} / ${fmt(h.total_count)}${h.status === "ended" ? ` · ${fmt(h.counts.released)} 个保留待迁移` : ""}</span></div>`,
           )
           .join("")
       : "暂无批次记录";

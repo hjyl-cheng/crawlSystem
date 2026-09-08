@@ -118,7 +118,7 @@ export async function prepareMigrationControlList({
     if (!b || b.status !== "preparing") return;
     const { limit } = batchSelection(b.selection);
     // Freeze IDs only, inside one snapshot. New inventory rows do not join this batch.
-    await c.query(
+    const inserted = await c.query(
       `INSERT INTO crawler.migration_control_items(batch_id,channel_id,source_candidate_id,ordinal)
     SELECT $1,i.channel_id,i.source_candidate_id,row_number() OVER(ORDER BY i.priority DESC,i.source_candidate_id)
     FROM crawler.migration_channel_inventory i
@@ -129,6 +129,12 @@ export async function prepareMigrationControlList({
     ORDER BY i.priority DESC,i.source_candidate_id LIMIT $3`,
       [batchId, b.source_id, limit],
     );
+    // All can expand a previously tiny table by hundreds of thousands of rows.
+    // Refresh planner statistics before settlement, progress and per-ID hydration;
+    // otherwise the pending-state index can be chosen for each individual ID.
+    if (inserted.rowCount >= 10000) {
+      await c.query("ANALYZE crawler.migration_control_items");
+    }
     await c.query(
       `UPDATE crawler.migration_control_batches SET frozen_at=now(),status='running',
     total_count=(SELECT count(*) FROM crawler.migration_control_items WHERE batch_id=$1),version=version+1,updated_at=now() WHERE batch_id=$1`,
@@ -319,9 +325,14 @@ export async function reconcileMigrationControl({
   await withTransaction(async (c) => {
     const b = await lockBatch(c, id);
     if (!b) return;
+    // Materialize only started work before joining outcomes or the large All target.
+    // Stale statistics after freezing must not turn empty settlement into a huge join.
     // Root ownership and recovery must settle before a channel counts as finished.
     await c.query(
-      `WITH settled AS (
+      `WITH started AS MATERIALIZED (
+      SELECT channel_id,candidate_id,batch_id FROM crawler.migration_control_items
+      WHERE batch_id=$1 AND state='started'
+    ), settled AS MATERIALIZED (
     SELECT i.channel_id,CASE
       WHEN cc.status='rejected' THEN 'rejected'
       WHEN cc.status='existing' THEN 'existing'
@@ -331,7 +342,7 @@ export async function reconcileMigrationControl({
       WHEN cc.status='accepted' AND r.status='done' AND r.publication_finalized_status='ready_auto' THEN 'success'
       WHEN cc.status='accepted' AND r.status='done' AND r.publication_finalized_status='ready_partial' THEN 'dormant'
     END AS outcome
-    FROM crawler.migration_control_items i JOIN crawler.channel_candidates cc ON cc.candidate_id=i.candidate_id
+    FROM started i JOIN crawler.channel_candidates cc ON cc.candidate_id=i.candidate_id
     LEFT JOIN LATERAL(SELECT status,publication_finalized_status,result_json FROM crawler.channel_runs WHERE candidate_id=cc.candidate_id ORDER BY created_at DESC LIMIT 1) r ON true
     LEFT JOIN LATERAL(SELECT EXISTS(
       SELECT 1 FROM crawler.migration_system_retry_items retry WHERE retry.candidate_id=cc.candidate_id
@@ -339,7 +350,7 @@ export async function reconcileMigrationControl({
        AND retry.failed_dispatch_generation=cc.snapshot_dispatch_generation
        AND retry.failed_job_id=cc.snapshot_active_job_id AND retry.failed_job_attempt=cc.snapshot_active_job_attempt
     ) AS pending) manual ON true
-    WHERE i.batch_id=$1 AND i.state='started' AND (cc.snapshot_active_job_id IS NULL OR manual.pending)
+    WHERE (cc.snapshot_active_job_id IS NULL OR manual.pending)
       AND NOT EXISTS(SELECT 1 FROM crawler.migration_system_retry_items retry WHERE retry.candidate_id=cc.candidate_id AND retry.status IN ('retrying','dispatched'))
    ) UPDATE crawler.migration_control_items i SET state='terminal',outcome=s.outcome,finished_at=now()
      FROM settled s WHERE i.batch_id=$1 AND i.channel_id=s.channel_id AND s.outcome IS NOT NULL`,
@@ -402,6 +413,8 @@ export async function reconcileMigrationControl({
   if (b.status !== "running") return;
   // Keep a bounded buffer of real snapshot jobs. Downstream Agent/publication work
   // must not consume crawl capacity; BullMQ already limits actual workers to 20.
+  // Queued-but-not-started IDs remain pending and occupy this same window on
+  // every tick. Deterministic job IDs deduplicate them; do not OFFSET this query.
   const slots = 100;
   const pending = (
     await query(
