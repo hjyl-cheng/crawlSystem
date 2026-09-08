@@ -557,7 +557,7 @@ ADD CONSTRAINT channel_clock_state_dormant_check
 CHECK (
   lifecycle_status<>'dormant'
   OR (
-    dormant_reason='no_published_content_within_90_days'
+    dormant_reason IN ('no_published_content_within_90_days','uploads_empty')
     AND dormant_since IS NOT NULL
     AND dormant_recheck_day IS NOT NULL
     AND dormant_cycle > 0

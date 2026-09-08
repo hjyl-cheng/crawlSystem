@@ -104,6 +104,7 @@ export function fullCrawlUploadsDocument(uploads) {
   return Object.freeze({
     version: 1,
     playlist_id: text(uploads?.playlist_id),
+    ...(scan.empty_uploads ? { empty_uploads: scan.empty_uploads } : {}),
     entries: normalizeFullCrawlTargets(uploads?.entries),
     complete: scan.complete === true,
     stop_reason: text(scan.stop_reason),

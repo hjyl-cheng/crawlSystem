@@ -659,9 +659,16 @@ export class FullCrawlYoutubeJsStore {
         throw checkpointError("Candidates exist before the Uploads checkpoint", identity, "uploads");
       }
 
+      if (!document.empty_uploads) {
+        await client.query(
+          "UPDATE crawler.contents SET is_recent=false WHERE channel_id=$1",
+          [identity.channelId],
+        );
+      }
       await client.query(
-        "UPDATE crawler.contents SET is_recent=false WHERE channel_id=$1",
-        [identity.channelId],
+        `UPDATE crawler.channels SET source_json=COALESCE(source_json,'{}'::jsonb)
+           || jsonb_build_object('uploads_recheck',$2::jsonb) WHERE channel_id=$1`,
+        [identity.channelId, JSON.stringify(document.empty_uploads ?? null)],
       );
       for (const target of normalizedTargets) {
         const discoveryClassification = resolveYoutubeContentType({

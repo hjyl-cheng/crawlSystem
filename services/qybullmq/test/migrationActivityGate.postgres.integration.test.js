@@ -37,6 +37,7 @@ test("migration activity SQL admits zero-content Channels as dormant", {
     { name: "old", publishedAt: "2026-04-22T23:59:00Z", expected: "dormant" },
     { name: "upcoming", excluded: "upcoming_live", expected: "dormant" },
     { name: "empty", expected: "dormant" },
+    { name: "empty-country", expected: "dormant", emptyCountry: true },
     { name: "unknown-date", unknown: true, expected: "inconclusive" },
   ];
   const channelIds = [];
@@ -86,6 +87,11 @@ test("migration activity SQL admits zero-content Channels as dormant", {
         [runId, channelId, candidateId, batchId],
       );
 
+      if (item.emptyCountry) await pool.query(
+        `UPDATE crawler.channel_runs SET result_json=result_json ||
+          '{"full_crawl":{"uploads":{"document":{"empty_uploads":{"version":1,"outcome":"dormant","country":"BR","reason":"no_country_reserve"}}}}}'::jsonb
+         WHERE run_id=$1`, [runId],
+      );
       if (item.publishedAt) {
         const contentKey = `${channelId}:video:${item.name}`;
         await pool.query(
@@ -125,6 +131,7 @@ test("migration activity SQL admits zero-content Channels as dormant", {
 
       const decision = await applyGate(pool, runId);
       assert.equal(decision.decision, item.expected, item.name);
+      if (item.emptyCountry) assert.equal(decision.reason, "uploads_empty");
       const state = await pool.query(
         `SELECT channel.status AS channel_status,channel.ready_for_agent,
                 channel.agent_status,candidate.status AS candidate_status,

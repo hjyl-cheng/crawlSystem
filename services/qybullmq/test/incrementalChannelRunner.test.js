@@ -160,7 +160,7 @@ test("Video executor receives the Crawler query dependency", async () => {
 
   const result = await runner.execute(job(data));
   assert.equal(receivedQuery, crawlerQuery);
-  assert.deepEqual(channelOptions, { includeAbout: false });
+  assert.deepEqual(channelOptions, { includeAbout: false, uploadsCountry: null, uploadsVideoCount: null, dormantUploadsCountry: null });
   assert.equal(result.session_opened, true);
   assert.deepEqual(result.executed_domains, ["video"]);
 });
@@ -444,4 +444,27 @@ test("a resumed Video Partial without lifecycle continues its pending Agent", as
     ["domain", "agent", "queued"],
     ["finish", true],
   ]);
+});
+
+test("dormant probe with no country reserve finishes without even opening a channel session", async () => {
+  const { withUploadsCountryExecution } = await import("../src/youtubeUploadsCountry.js");
+  const data = { ...plan({ video: true }), plan_mode: "dormant_probe" };
+  const runStore = storeFixture(data);
+  const runner = new IncrementalChannelRunner({
+    runStore, agentBacklog: {}, withTransaction: async action => action({}),
+    query: async () => ({ rows: [{ status: "dormant", country_code: "BR", country_source: "youtube_about", uploads_recheck: { country: "BR" } }] }),
+    openChannel: async () => assert.fail("no reserve must not request YouTube"),
+    video: async ({ getChannelSnapshot }) => {
+      const snapshot = await getChannelSnapshot();
+      const scan = await snapshot.scanUploads({ anchors: [{ id: "keep-anchor" }] });
+      assert.equal(scan.empty_uploads.reason, "no_country_reserve");
+      assert.equal(scan.active_anchor_id, "keep-anchor");
+      assert.equal(scan.raw.request_count, 0);
+      return { outcome: "complete", lifecycle_status: "dormant" };
+    },
+  });
+  const result = await withUploadsCountryExecution({ egressCountry: "US", recheck: { country: "BR", status: "unavailable" } }, () => runner.execute(job(data)));
+  assert.equal(result.status, "done");
+  assert.equal(result.session_opened, false);
+  assert.equal(runStore.calls.some(call => call[0] === "fail"), false);
 });

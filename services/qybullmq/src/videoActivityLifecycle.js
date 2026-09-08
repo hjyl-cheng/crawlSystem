@@ -1,3 +1,4 @@
+import { EMPTY_UPLOADS_REASON } from "./youtubeUploadsCountry.js";
 import { createVideoActivityAccumulator } from "./videoActivityEvidence.js";
 import {
   activeVideoActivity,
@@ -451,6 +452,7 @@ export async function applyVideoActivityLifecycle(client, {
   channelId,
   observedAt,
   discoveryComplete,
+  emptyUploads = null,
   runActivityEvidence = [],
   evidenceScanRowLimit = INCREMENTAL_VIDEO_ACTIVITY_EVIDENCE_SCAN_DEFAULTS.rowLimit,
   evidenceScanPageSize = INCREMENTAL_VIDEO_ACTIVITY_EVIDENCE_SCAN_DEFAULTS.pageSize,
@@ -472,19 +474,36 @@ export async function applyVideoActivityLifecycle(client, {
   );
   const channel = channelRows.rows[0];
   if (!channel) throw new Error(`Channel not found while applying Video activity: ${channelId}`);
+  if (discoveryComplete === true) {
+    await client.query(
+      `UPDATE crawler.channels SET source_json=COALESCE(source_json,'{}'::jsonb)
+         || jsonb_build_object('uploads_recheck',$2::jsonb) WHERE channel_id=$1`,
+      [channelId, JSON.stringify(emptyUploads)],
+    );
+  }
   const currentStatus = canonicalStatus(channel);
   if (!["active", "dormant"].includes(currentStatus)) {
     throw new Error(`Channel lifecycle does not permit Video activity: ${channel.status}`);
   }
 
-  const evidenceScan = await loadStoredVideoActivityEvidence(client, {
+  const emptyDormant = emptyUploads?.outcome === "dormant" && discoveryComplete === true;
+  // Empty-list dormancy describes current visibility, not the age of stored
+  // videos. Do not scan or let old sampling limits override this decision.
+  const evidenceScan = emptyDormant ? {
+    rows: [], complete: true,
+    rowLimit: boundedPositiveInteger(evidenceScanRowLimit, 1000, 10000),
+    pageSize: boundedPositiveInteger(evidenceScanPageSize, 200, 1000),
+    timeBudgetMs: boundedPositiveInteger(evidenceScanTimeBudgetMs, 500, 5000),
+    pageCount: 0, elapsedMs: 0, truncatedCount: 0,
+    truncatedCountIsLowerBound: false, stopReason: "complete",
+  } : await loadStoredVideoActivityEvidence(client, {
     channelId,
     rowLimit: evidenceScanRowLimit,
     pageSize: evidenceScanPageSize,
     timeBudgetMs: evidenceScanTimeBudgetMs,
     monotonicNow,
   });
-  const evidence = classifyStoredVideoActivity([
+  const evidence = classifyStoredVideoActivity(emptyDormant ? [] : [
     ...evidenceScan.rows,
     ...(Array.isArray(runActivityEvidence) ? runActivityEvidence : []),
   ], {
@@ -561,6 +580,7 @@ export async function applyVideoActivityLifecycle(client, {
 
   const dormantState = buildDormantLifecycle({
     channelId,
+    reason: emptyDormant ? EMPTY_UPLOADS_REASON : DORMANT_REASON,
     observedAt: observed,
     dormantSince: currentStatus === "dormant" ? channel.dormant_since : null,
     dormantCycle: currentStatus === "dormant" ? channel.dormant_cycle : 0,
@@ -573,7 +593,7 @@ export async function applyVideoActivityLifecycle(client, {
      WHERE channel_id=$1 AND status<>'removed'`,
     [
       channelId,
-      DORMANT_REASON,
+      dormantState.dormant_reason,
       dormantState.dormant_since,
       dormantState.dormant_recheck_day,
       dormantState.dormant_last_probe_at,

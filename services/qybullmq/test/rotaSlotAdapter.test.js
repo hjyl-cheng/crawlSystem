@@ -1470,3 +1470,46 @@ test("a stale Renew response cannot overwrite or fence a newer Assignment", asyn
   assert.equal(adapter.status().assignment.ready, true);
   await adapter.close();
 });
+
+for (const reserve of [true, false]) {
+  test(`country handoff keeps fences and resumes without a failure observation (reserve=${reserve})`, async () => {
+    const fixture = createFixture({ clientOverrides: {
+      claim: async () => assignment(1, { egress_country: "US" }),
+      renew: async () => assignment(reserve ? 2 : 1, { egress_country: reserve ? "BR" : "US", route_changed: reserve }),
+      async completeTask(request) {
+        fixture.calls.push({ command: "complete", request });
+        assert.equal(fixture.runtimeCalls.at(-1).action, "quiesce");
+        const switching = reserve && request.recheck_country;
+        return {
+          ok: true, task_completed: true, completion_request_id: request.completion_request_id,
+          task_id: request.task_id, slot_name: request.slot_name, lease_id: request.lease_id,
+          completed_task_route_generation: request.route_generation,
+          control_state: switching ? "PENDING_NEW_ROUTE" : "READY_KEEP_ROUTE", ready: !switching,
+          ...(switching ? { pending_route_generation: 2, retry_after_ms: 1 } : {}),
+          reason_code: request.recheck_country && !reserve ? "NO_COUNTRY_RESERVE" : "WAITING_FOR_ROUTE_REFRESH",
+        };
+      },
+    } });
+    const currentJob = job({ async updateData(data) { this.data = data; } });
+    await fixture.adapter.start();
+    let attempts = 0;
+    try {
+      const result = await fixture.adapter.executeJob(currentJob, {
+        prepare: async () => prepared(),
+        executeAttempt: async (_prepared, attempt) => {
+          if (++attempts === 1) return { kind: "country_recheck", country: "BR" };
+          assert.equal(attempt.egressCountry, reserve ? "BR" : "US");
+          assert.equal(currentJob.data.uploads_country_recheck.status, reserve ? "checked" : "unavailable");
+          return { kind: "managed_work_complete", businessState: "terminal", result: { dormant: !reserve } };
+        },
+      });
+      assert.equal(result.dormant, !reserve);
+      assert.equal(attempts, 2);
+      assert.equal(fixture.calls.some(call => call.command === "observe"), false);
+      const requests = fixture.calls.filter(call => call.command === "complete").map(call => call.request);
+      assert.equal(requests[0].recheck_country, "BR");
+      assert.equal(requests[0].business_complete, false);
+      assert.equal(requests[1].recheck_country, undefined);
+    } finally { await fixture.adapter.close(); }
+  });
+}

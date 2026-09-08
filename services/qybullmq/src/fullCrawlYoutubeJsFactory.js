@@ -136,7 +136,9 @@ function normalizeAdmission(snapshot, job, settings, { locale, observedAt, start
 
 function hasChannelContent(state) {
   const tabs = state.channel?.source_json?.channel_header?.available_tabs;
-  return Array.isArray(tabs) ? tabs.length > 0 : true;
+  return Number(state.run?.result_json?.pending_initial_about_observation?.about?.total_video_count) > 0
+    || Number(state.channel?.total_video_count) > 0
+    || (Array.isArray(tabs) ? tabs.length > 0 : true);
 }
 
 function uploadsSettings(state, fallback) {
@@ -344,13 +346,16 @@ export function createFullCrawlYoutubeJsExecutor({
         frozen.channelContentLimit,
         {
           hasContent: hasChannelContent(state),
+          country: state.channel?.source_json?.country_observation != null
+            ? state.channel.source_json.country_observation.code
+            : state.channel?.country_source === "youtube_about" ? state.channel.country_code : null,
           locale,
           now: new Date(frozen.observedAt).getTime(),
           signal: currentChannelExecutionAbortSignal(),
         },
       );
       const document = fullCrawlUploadsDocument(uploads);
-      const required = migrationActivityRequired(state, job);
+      const required = migrationActivityRequired(state, job) || document.empty_uploads?.outcome === "dormant";
       const activity = evaluateMigrationUploadsActivity({
         required,
         entries: document.entries,

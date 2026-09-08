@@ -1,3 +1,5 @@
+import { emptyUploadsDecision, prepareDormantUploadsProbe, pendingUploadsDormancy, uploadsResponseEvidence, assertNormalEmptyUploadsResponse } from "./youtubeUploadsCountry.js";
+import { canonicalizeCrawlerCountry } from "./agentCountryPolicy.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
@@ -578,19 +580,25 @@ export async function scanYoutubeJsFeed(feed, {
 
 export async function collectYoutubeJsUploadBundle(client, channelId, limit = 30, {
   hasContent = true,
+  country = null,
   locale = DEFAULT_LANGUAGE,
   now = Date.now(),
 } = {}) {
   const cleanLimit = Math.max(1, Math.min(Number(limit) || 30, 100));
   const playlistId = channelId.startsWith("UC") ? `UU${channelId.slice(2)}` : channelId;
-  const uploads = await (hasContent
+  const pendingDormant = pendingUploadsDormancy(country);
+  const uploads = await (hasContent && !pendingDormant
     ? client.getPlaylist(playlistId).then((feed) => collectFeed(feed, cleanLimit))
     : Promise.resolve({
-        entries: [], pages: 0, inspected_count: 0, parse_gap_count: 0, absent: true, truncated: false,
+        entries: [], pages: 0, inspected_count: 0, parse_gap_count: 0, absent: !hasContent, truncated: false,
         stop_reason: "list_end", terminal_reason: "list_end", complete: true,
       }));
-  if (hasContent && uploads.entries.length === 0) {
-    throw new Error(`YouTube.js uploads playlist ${playlistId} was empty while the channel exposes content tabs`);
+  if (hasContent && uploads.entries.length === 0 && !uploads.complete) {
+    throw new Error(`YouTube.js uploads playlist ${playlistId} has incomplete empty-list evidence (${uploads.stop_reason})`);
+  }
+  if (uploads.entries.length === 0 && uploads.complete) {
+    if (hasContent && !pendingDormant) client.validateEmptyUploads?.();
+    uploads.empty_uploads = emptyUploadsDecision(country);
   }
   const entries = uploads.entries.map((upload, index) => {
     return {
@@ -972,6 +980,11 @@ async function createFetch(proxyUrl, dispatcher, stats, playerTypeSurfaces) {
           throw error;
         }
         if (response.ok) capturePlayerTypeSurface(url, body, sample, playerTypeSurfaces);
+        if (response.ok && url.pathname.endsWith("/browse")) {
+          let json;
+          try { json = JSON.parse(sample); } catch { json = null; }
+          stats.uploads_response_evidence = uploadsResponseEvidence(json);
+        }
       }
       const requestOk = response.ok && response.status !== 403 && response.status !== 429;
       recordChannelExecutionRequest({
@@ -1194,8 +1207,16 @@ export function youtubeJsState() {
   };
 }
 
+async function getValidatedUploadsPlaylist(current, playlistId) {
+  current.stats.uploads_response_evidence = null;
+  const feed = await current.client.getPlaylist(playlistId);
+  assertNormalEmptyUploadsResponse(feed, current.stats.uploads_response_evidence);
+  return feed;
+}
+
 async function collectYoutubeJsChannelUploads(current, channelId, limit, {
   hasContent = true,
+  country = null,
   locale = DEFAULT_LANGUAGE,
   now = Date.now(),
 } = {}) {
@@ -1209,10 +1230,15 @@ async function collectYoutubeJsChannelUploads(current, channelId, limit, {
     contentTypeCounts,
     activityEvidenceComplete,
   } = await collectYoutubeJsUploadBundle(
-    current.client,
+    {
+      getPlaylist: playlistId => getValidatedUploadsPlaylist(current, playlistId),
+      validateEmptyUploads: () => assertNormalEmptyUploadsResponse(
+        { videos: [], has_continuation: false }, current.stats.uploads_response_evidence,
+      ),
+    },
     channelId,
     cleanLimit,
-    { hasContent, locale, now },
+    { hasContent, locale, now, country },
   );
   return {
     channel_id: channelId,
@@ -1224,6 +1250,7 @@ async function collectYoutubeJsChannelUploads(current, channelId, limit, {
     activity_evidence_complete: activityEvidenceComplete,
     activity_parse_gap_count: uploads.parse_gap_count,
     scan: {
+      ...(uploads.empty_uploads ? { empty_uploads: uploads.empty_uploads } : {}),
       pages: uploads.pages,
       inspected_count: uploads.inspected_count,
       parse_gap_count: uploads.parse_gap_count,
@@ -1260,7 +1287,7 @@ export async function fetchYoutubeJsChannelUploads(channelId, limit = 30, option
   return collectYoutubeJsChannelUploads(current, cleanChannelId, limit, options);
 }
 
-export async function openYoutubeJsChannel(channelId, { includeAbout = true } = {}) {
+export async function openYoutubeJsChannel(channelId, { includeAbout = true, uploadsCountry = null, uploadsVideoCount = null, dormantUploadsCountry = null } = {}) {
   if (!youtubeJsChannelEnabled()) throw new Error("YouTube.js channel extraction is disabled");
   const cleanChannelId = String(channelId ?? "").trim();
   if (!cleanChannelId) throw new Error("channel_id is required");
@@ -1289,6 +1316,8 @@ export async function openYoutubeJsChannel(channelId, { includeAbout = true } = 
     strictSubscriberCount: includeAbout,
   });
 
+  const listCountry = includeAbout && !aboutFailure
+    ? canonicalizeCrawlerCountry(metadata.country).code : uploadsCountry;
   return {
     metadata,
     about_requested: includeAbout,
@@ -1312,11 +1341,13 @@ export async function openYoutubeJsChannel(channelId, { includeAbout = true } = 
       metadata,
     },
     async fetchContents(limit = 30, { locale = DEFAULT_LANGUAGE, now = Date.now() } = {}) {
-      const hasContent = Boolean(root.has_videos || root.has_shorts || root.has_live_streams);
+      const hasContent = Boolean(root.has_videos || root.has_shorts || root.has_live_streams)
+        || Number(parseYoutubeJsCount(metadata.video_count_text) ?? uploadsVideoCount) > 0;
       return collectYoutubeJsChannelUploads(current, cleanChannelId, limit, {
         hasContent,
         locale,
         now,
+        country: listCountry,
       });
     },
     async scanUploads({ anchors = [], maxPages = MAX_TAB_PAGES, catchUpMaxItems = 50 } = {}) {
@@ -1325,9 +1356,12 @@ export async function openYoutubeJsChannel(channelId, { includeAbout = true } = 
         : cleanChannelId;
       const scanStartedAt = Date.now();
       const scanRequestStart = current.stats.requests;
-      const hasContent = Boolean(root.has_videos || root.has_shorts || root.has_live_streams);
-      if (!hasContent) {
+      const hasContent = Boolean(root.has_videos || root.has_shorts || root.has_live_streams)
+        || Number(parseYoutubeJsCount(metadata.video_count_text) ?? uploadsVideoCount) > 0;
+      const dormantDecision = prepareDormantUploadsProbe(dormantUploadsCountry);
+      if (!hasContent || dormantDecision) {
         return {
+          empty_uploads: dormantDecision ?? emptyUploadsDecision(listCountry),
           channel_id: cleanChannelId,
           playlist_id: playlistId,
           entries: [],
@@ -1348,7 +1382,7 @@ export async function openYoutubeJsChannel(channelId, { includeAbout = true } = 
           },
         };
       }
-      const feed = await current.client.getPlaylist(playlistId);
+      const feed = await getValidatedUploadsPlaylist(current, playlistId);
       const scan = await scanYoutubeJsFeed(feed, {
         anchors,
         maxPages,
@@ -1356,6 +1390,10 @@ export async function openYoutubeJsChannel(channelId, { includeAbout = true } = 
         now: scanStartedAt,
         locale: DEFAULT_LANGUAGE,
       });
+      if (scan.entries.length === 0 && scan.complete) {
+        assertNormalEmptyUploadsResponse({ videos: [], has_continuation: false }, current.stats.uploads_response_evidence);
+        scan.empty_uploads = emptyUploadsDecision(listCountry);
+      }
       return {
         channel_id: cleanChannelId,
         playlist_id: playlistId,

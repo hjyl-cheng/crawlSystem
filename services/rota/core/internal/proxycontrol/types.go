@@ -155,6 +155,8 @@ type ObservationResult struct {
 }
 
 type CompleteTaskRequest struct {
+	// Optional, strict country selection after the current attempt is quiesced.
+	RecheckCountry        string   `json:"recheck_country,omitempty"`
 	CompletionRequestID   string   `json:"completion_request_id"`
 	SlotName              string   `json:"slot_name"`
 	WorkerID              string   `json:"worker_id"`

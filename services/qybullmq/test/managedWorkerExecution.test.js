@@ -246,3 +246,17 @@ test("Discover search can finish while downstream qualification remains open", a
   assert.equal(result.kind, "managed_work_complete");
   assert.equal(result.businessState, "waiting_downstream");
 });
+
+test("country recheck persists a bounded intent without a network failure checkpoint", async () => {
+  const { emptyUploadsDecision } = await import("../src/youtubeUploadsCountry.js");
+  const job = { data: { channel_id: "UCcountry" }, async updateData(data) { this.data = data; } };
+  const execute = () => emptyUploadsDecision("BR");
+  const result = await executeManagedWorkerAttempt({ job, prepared: {}, attempt: { egressCountry: "US" }, execute,
+    persistRetryableCheckpoint: async () => assert.fail("country restriction is not proxy health failure") });
+  assert.deepEqual(result, { kind: "country_recheck", country: "BR" });
+  assert.deepEqual(job.data.uploads_country_recheck, { country: "BR", status: "requested" });
+  const resumed = await executeManagedWorkerAttempt({ job, prepared: {}, attempt: { egressCountry: "BR" }, execute,
+    persistRetryableCheckpoint: async () => assert.fail("no failure checkpoint") });
+  assert.equal(resumed.kind, "managed_work_complete");
+  assert.equal(resumed.result.reason, "country_checked");
+});

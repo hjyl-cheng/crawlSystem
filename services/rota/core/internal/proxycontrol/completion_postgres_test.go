@@ -3,6 +3,7 @@ package proxycontrol
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -747,5 +748,82 @@ func assertProxyQuarantinedAfterSlotReplacement(
 			status, failureKind, failedSince, cooldownUntil, nextHealthCheckAt,
 			revalidationRequired, eventCount,
 		)
+	}
+}
+
+func TestCountryRecheckSelectsExactReserveWithoutQuarantiningHealthySource(t *testing.T) {
+	for _, reserve := range []bool{false, true} {
+		t.Run(fmt.Sprintf("reserve=%t", reserve), func(t *testing.T) {
+			manager, pool := newProxyControlPostgres(t)
+			ctx := context.Background()
+			source := insertControlProxy(t, pool, "country-source.example:8080", 10)
+			if _, err := pool.Exec(ctx, "UPDATE proxies SET country_code='US' WHERE id=$1", source); err != nil {
+				t.Fatal(err)
+			}
+			manager.SetCacheInvalidator(func(string) {})
+			if err := manager.syncResources(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := manager.reconcile(ctx); err != nil {
+				t.Fatal(err)
+			}
+			claim, err := manager.Claim(ctx, testClaimRequest("country-claim", "country-worker", "country-instance"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Insert reserves after claiming, so they are genuinely unassigned.
+			wrong := insertControlProxy(t, pool, "country-wrong.example:8080", 1)
+			if _, err := pool.Exec(ctx, "UPDATE proxies SET country_code='US' WHERE id=$1", wrong); err != nil {
+				t.Fatal(err)
+			}
+			target := 0
+			if reserve {
+				target = insertControlProxy(t, pool, "country-br.example:8080", 100)
+				if _, err := pool.Exec(ctx, "UPDATE proxies SET country_code='BR' WHERE id=$1", target); err != nil {
+					t.Fatal(err)
+				}
+			}
+			task, err := manager.BeginTask(ctx, BeginTaskRequest{SlotName: claim.SlotName, WorkerID: claim.WorkerID, WorkerInstanceID: claim.WorkerInstanceID, LeaseID: claim.LeaseID, RouteGeneration: claim.AssignmentVersion, AttemptRequestID: "country-attempt", BusinessRunID: "country-business", JobExecutionID: "country-execution", TaskKind: TaskKindChannelFull})
+			if err != nil {
+				t.Fatal(err)
+			}
+			request := CompleteTaskRequest{CompletionRequestID: "country-completion", SlotName: claim.SlotName, WorkerID: claim.WorkerID, WorkerInstanceID: claim.WorkerInstanceID, LeaseID: claim.LeaseID, RouteGeneration: claim.AssignmentVersion, TaskID: task.TaskID, BusinessRunID: task.BusinessRunID, Outcome: TaskOutcomeSuccess, AttemptQuiesced: true, RecheckCountry: "BR"}
+			busy := request
+			busy.ActiveManagedRequests = 1
+			if _, err := manager.CompleteTask(ctx, busy); !errors.Is(err, ErrAttemptNotQuiesced) {
+				t.Fatalf("busy country switch: %v", err)
+			}
+			result, err := manager.CompleteTask(ctx, request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var selected int
+			if err := pool.QueryRow(ctx, "SELECT proxy_id FROM proxy_running_slots WHERE slot_name=$1", claim.SlotName).Scan(&selected); err != nil {
+				t.Fatal(err)
+			}
+			if reserve {
+				if selected != target || result.ControlState != CompletionPendingNewRoute {
+					t.Fatalf("wrong country route: selected=%d result=%+v", selected, result)
+				}
+			} else if selected != source || result.ControlState != CompletionReadyKeepRoute || result.ReasonCode != "NO_COUNTRY_RESERVE" {
+				t.Fatalf("no-reserve must keep healthy source: selected=%d result=%+v", selected, result)
+			}
+			var status string
+			if err := pool.QueryRow(ctx, "SELECT status FROM proxies WHERE id=$1", source).Scan(&status); err != nil {
+				t.Fatal(err)
+			}
+			if status != "active" {
+				t.Fatalf("country switch quarantined source: %s", status)
+			}
+			replay, err := manager.CompleteTask(ctx, request)
+			if err != nil || replay.ControlState != result.ControlState {
+				t.Fatalf("replay: %+v %v", replay, err)
+			}
+			changed := request
+			changed.RecheckCountry = "CA"
+			if _, err := manager.CompleteTask(ctx, changed); !errors.Is(err, ErrIdempotencyConflict) {
+				t.Fatalf("country absent from idempotency hash: %v", err)
+			}
+		})
 	}
 }

@@ -1342,6 +1342,8 @@ async function processJobInner(job, { resumeMode = "initial", prepared = null } 
       ? await execute()
       : await runWithProxyIdentity(proxyStart, execute);
   } catch (error) {
+    // This is a quiesced route-selection handoff, not a failed crawl.
+    if (error?.code === "UPLOADS_COUNTRY_RECHECK") throw error;
     const failureDecision = retryableSystemFailureDecision(error)
       ?? decideYoutubeFailure({ error });
     error.youtube_failure_decision = failureDecision;

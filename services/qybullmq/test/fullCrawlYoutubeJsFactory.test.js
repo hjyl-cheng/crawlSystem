@@ -521,3 +521,25 @@ test("untyped API evidence is committed unresolved and subsequent video details 
   assert.notEqual(committed[0].classification?.authoritative, true);
   assert.equal(committed[1].classification.authoritative, true);
 });
+
+test("pending About video count still requests uploads when all content tabs are hidden", async () => {
+  const state = checkpointState("uploads");
+  state.channel = { country_source: "youtube_about", country_code: "BR", source_json: {
+    channel_header: { available_tabs: [] }, country_observation: { code: null },
+  } };
+  state.run.result_json.pending_initial_about_observation = { about: { total_video_count: 24364 } };
+  const sentinel = new Error("stop after uploads options");
+  const execute = createFullCrawlYoutubeJsExecutor({
+    store: { loadSettings: async () => ({}), restore: async () => state },
+    youtube: {
+      fetchChannel: async () => assert.fail("About already committed"),
+      fetchUploads: async (_id, _limit, options) => {
+        assert.equal(options.hasContent, true);
+        assert.equal(options.country, null, "fresh About without country overrides stale stored country");
+        throw sentinel;
+      },
+      fetchDetail: async () => assert.fail("no details before uploads"),
+    },
+  });
+  await assert.rejects(execute(job()), sentinel);
+});

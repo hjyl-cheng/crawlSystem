@@ -342,6 +342,7 @@ export class RotaSlotAdapter {
           resumeMode,
           abortSignal: controller.signal,
           routeGeneration: frozen.route_generation,
+          egressCountry: frozen.egress_country ?? null,
           getBudget: () => this.client.businessRunBudget(prepared.businessRunId),
         });
         try {
@@ -372,7 +373,8 @@ export class RotaSlotAdapter {
             result: attemptResult,
           }));
         }
-        const outcome = attemptResult.kind === "unexpected_failure"
+        const outcome = attemptResult.kind === "country_recheck" ? "success"
+          : attemptResult.kind === "unexpected_failure"
           ? "failed"
           : completionOutcome(attemptResult);
         const completion = await this.#completeTask({
@@ -381,12 +383,33 @@ export class RotaSlotAdapter {
           task,
           outcome,
           durationMs: Math.max(0, Math.round(this.monotonicNow() - startedAt)),
-          businessComplete: businessComplete(attemptResult),
+          businessComplete: attemptResult.kind === "country_recheck" ? false : businessComplete(attemptResult),
+          recheckCountry: attemptResult.kind === "country_recheck" ? attemptResult.country : null,
           observationIDs,
           activeManagedRequests: Number(quiesced?.active_managed_requests ?? 0),
         });
         this.activeTask = null;
         this.activeAttemptController = null;
+
+        if (attemptResult.kind === "country_recheck") {
+          await this.identityRuntime.retire(runtime, frozen);
+          this.activeRuntime = null;
+          if (completion.control_state === READY_KEEP_ROUTE
+              && !["NO_COUNTRY_RESERVE", "COUNTRY_ALREADY_MATCHED"].includes(completion.reason_code)) {
+            throw new RotaSlotContractError("Rota did not acknowledge country recheck support");
+          }
+          const data = { ...job.data, uploads_country_recheck: {
+            country: attemptResult.country,
+            status: completion.reason_code === "NO_COUNTRY_RESERVE" ? "unavailable" : "checked",
+          } };
+          await job.updateData(data);
+          job.data = data;
+          if (completion.control_state !== READY_KEEP_ROUTE) {
+            await this.#waitForNewRoute(completion, frozen);
+          }
+          resumeMode = "network_attempt_resume";
+          continue;
+        }
 
         if (attemptResult.kind === "managed_work_complete" || attemptResult.kind === "business_terminal") {
           await this.identityRuntime.checkpoint(runtime, attemptResult);
@@ -621,12 +644,14 @@ export class RotaSlotAdapter {
     businessComplete: completed,
     observationIDs,
     activeManagedRequests,
+    recheckCountry = null,
   }) {
     if (activeManagedRequests !== 0) {
       throw new RotaSlotContractError("identity runtime did not quiesce all managed requests");
     }
     const request = Object.freeze({
       completion_request_id: this.randomUUID(),
+      ...(recheckCountry ? { recheck_country: recheckCountry } : {}),
       slot_name: frozen.slot_name,
       worker_id: this.workerId,
       worker_instance_id: this.workerInstanceId,

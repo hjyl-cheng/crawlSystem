@@ -80,7 +80,7 @@ function publicDetail(videoId) {
   };
 }
 
-async function initializeThroughFullCrawl(pool, withTransaction, channelId, videoId, suffix) {
+async function initializeThroughFullCrawl(pool, withTransaction, channelId, videoId, suffix, emptyUploads = false) {
   const batchId = `shared-full-${suffix}`;
   const runId = `full:${suffix}`;
   const jobId = `channel-snapshot__${batchId}__${channelId}__g1`;
@@ -111,7 +111,11 @@ async function initializeThroughFullCrawl(pool, withTransaction, channelId, vide
           handle: "@shared-test", title: "Full to Incremental", country: "Brazil",
           subscriber_count: 10000, subscriber_count_text: "10,000", subscriber_count_source: "youtube_about" },
         raw: { engine: "youtubei.js@test" } }),
-      fetchUploads: async () => ({ playlist_id: `UU${channelId.slice(2)}`,
+      fetchUploads: async () => emptyUploads ? {
+        playlist_id: `UU${channelId.slice(2)}`, entries: [], activity_evidence_complete: true,
+        scan: { complete: true, stop_reason: "list_end", terminal_reason: "list_end", pages: 1, inspected_count: 0, parse_gap_count: 0,
+          empty_uploads: { version: 1, outcome: "dormant", country: "BR", reason: "no_country_reserve" } },
+      } : ({ playlist_id: `UU${channelId.slice(2)}`,
         entries: [{ video_id: videoId, position: 1, title: detail.title,
           url: `https://www.youtube.com/watch?v=${videoId}`, published_at: detail.published_at,
           published_at_status: "exact", published_at_precision: "date_only", published_at_source: "youtubejs_player" }],
@@ -126,10 +130,11 @@ async function initializeThroughFullCrawl(pool, withTransaction, channelId, vide
       run_id: runId, business_run_key: businessRunKey, dispatch_batch_id: batchId,
       dispatch_generation: 1, fetch_contract: YOUTUBEJS_FULL_CRAWL_FETCH_CONTRACT } });
   assert.equal(result.ok, true);
-  assert.equal(result.detail_processed, 1);
+  assert.equal(result.detail_processed, emptyUploads ? 0 : 1);
+  return result;
 }
 
-async function checkpointReplayScenario(enrichPending) {
+async function checkpointReplayScenario(enrichPending, emptyUploads = false) {
   const pool = new Pool({
     connectionString: integrationUrl,
     max: 4,
@@ -181,6 +186,15 @@ async function checkpointReplayScenario(enrichPending) {
       );
     }
 
+    if (emptyUploads) await pool.query(
+      `INSERT INTO crawler.channel_domain_cursors(channel_id,observation_kind,anchor_video_ids,source_cursor)
+       VALUES ($1,'video',$2::text[],'{"terminal_reason":"anchor_matched"}'::jsonb)`,
+      [channelId, [recentVideoId]],
+    );
+    const beforeEmpty = emptyUploads ? {
+      contents: (await pool.query("SELECT * FROM crawler.contents WHERE channel_id=$1", [channelId])).rows,
+      cursors: (await pool.query("SELECT anchor_video_ids,source_cursor FROM crawler.channel_domain_cursors WHERE channel_id=$1 AND observation_kind='video'", [channelId])).rows,
+    } : null;
     const result = await executeIncrementalYoutubeJsVideo({
       plan,
       runId,
@@ -191,6 +205,13 @@ async function checkpointReplayScenario(enrichPending) {
         async scanUploads({ anchors }) {
           scans += 1;
           assert.deepEqual(anchors, [{ id: recentVideoId, published_day: "2026-09-01" }]);
+          if (emptyUploads) return {
+            playlist_id: `UU${channelId.slice(2)}`, entries: [], pages: 1,
+            first_page_item_count: 0, catch_up_item_count: 0, item_count: 0,
+            parse_gap_count: 0, anchor_matched: false, matched_anchor_id: null,
+            crossed_anchor_ids: [], stop_reason: "list_end", terminal_reason: "list_end", complete: true,
+            empty_uploads: { version: 1, outcome: "dormant", country: "BR", reason: "no_country_reserve" },
+          };
           return {
             playlist_id: `UU${channelId.slice(2)}`,
             entries: [
@@ -233,6 +254,17 @@ async function checkpointReplayScenario(enrichPending) {
     });
 
     assert.equal(result.outcome, "complete");
+    if (emptyUploads) {
+      assert.deepEqual(fetched, [], "empty-list dormancy must not fetch stored videos");
+      assert.equal(result.lifecycle_status, "dormant");
+      const channel = (await pool.query("SELECT status,dormant_reason,source_json->'uploads_recheck' AS recheck FROM crawler.channels WHERE channel_id=$1", [channelId])).rows[0];
+      assert.equal(channel.status, "dormant");
+      assert.equal(channel.dormant_reason, "uploads_empty");
+      assert.equal(channel.recheck.country, "BR");
+      assert.deepEqual((await pool.query("SELECT * FROM crawler.contents WHERE channel_id=$1", [channelId])).rows, beforeEmpty.contents);
+      assert.deepEqual((await pool.query("SELECT anchor_video_ids,source_cursor FROM crawler.channel_domain_cursors WHERE channel_id=$1 AND observation_kind='video'", [channelId])).rows, beforeEmpty.cursors);
+      return;
+    }
     assert.equal(result.first_seen_count, 1);
     assert.equal(result.selected_count, 1);
     assert.equal(result.duplicate, false);
@@ -407,3 +439,23 @@ for (const enrichPending of [false, true]) {
     skip: integrationUrl ? false : "INCREMENTAL_POSTGRES_TEST_URL is not configured",
   }, () => checkpointReplayScenario(enrichPending));
 }
+
+ test("empty Incremental uploads preserve recent contents and anchors and become dormant", { skip: !integrationUrl }, () => checkpointReplayScenario(false, true));
+
+ test("Full Crawl empty uploads finish dormant without calling details even without a migration gate", { skip: !integrationUrl }, async () => {
+  const pool = new Pool({ connectionString: integrationUrl, options: `-c publication.writer_version=${PUBLICATION_WRITER_VERSION}` });
+  const suffix = randomUUID().replaceAll("-", "");
+  const channelId = `UCfullempty${suffix}`;
+  try {
+    const result = await initializeThroughFullCrawl(pool, transactionRunner(pool), channelId, "unused", suffix, true);
+    assert.equal(result.skipped, true);
+    assert.equal(result.skip_reason, "uploads_empty");
+    const channel = (await pool.query("SELECT status,dormant_reason,source_json->'uploads_recheck' AS recheck FROM crawler.channels WHERE channel_id=$1", [channelId])).rows[0];
+    assert.equal(channel.status, "dormant");
+    assert.equal(channel.dormant_reason, "uploads_empty");
+    assert.equal(channel.recheck.country, "BR");
+  } finally {
+    await pool.query("DELETE FROM crawler.channels WHERE channel_id=$1", [channelId]).catch(() => {});
+    await pool.end();
+  }
+ });

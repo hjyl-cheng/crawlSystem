@@ -1620,6 +1620,7 @@ async function applyDiscovery({
     detail_success_count: detailSuccessCount,
     detail_failure_count: detailFailureCount,
     ...(scan.gap_abandonment ? { gap_abandonment: scan.gap_abandonment } : {}),
+            ...(scan.empty_uploads ? { empty_uploads: scan.empty_uploads } : {}),
   };
   return {
     outcome: scan.complete
@@ -2130,7 +2131,7 @@ async function createCheckpointBatch({
       next_quota: 0,
       rows: [],
     };
-    if (scan.complete === true) {
+    if (scan.complete === true && !scan.empty_uploads) {
       recoveredFirstSeen = await loadPendingFirstSeenCheckpoints(
         client.query.bind(client),
         { channelId: plan.channel_id },
@@ -3483,6 +3484,7 @@ async function recordVideoCycle({
             channelId: plan.channel_id,
             observedAt,
             discoveryComplete: scan.complete === true,
+            emptyUploads: scan.empty_uploads ?? null,
             runActivityEvidence: currentRunActivityEvidence(
               commandEntries,
               scan.entries,
@@ -3537,10 +3539,10 @@ async function recordVideoCycle({
               activity_evidence: activityEvidence,
               ...(lifecycle.activity ? { activity: lifecycle.activity } : {}),
             },
-            anchorVideoIds: discovery.outcome === "complete"
+            anchorVideoIds: !scan.empty_uploads && discovery.outcome === "complete"
               ? mergedDiscoveryAnchorIds(scan.entries, anchors)
               : null,
-            sourceCursor: discovery.outcome === "complete"
+            sourceCursor: !scan.empty_uploads && discovery.outcome === "complete"
               ? {
                   playlist_id: scan.playlist_id,
                   matched_anchor_id: scan.matched_anchor_id,

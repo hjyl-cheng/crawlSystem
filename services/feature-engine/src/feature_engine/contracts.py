@@ -552,7 +552,7 @@ class _VideoActivityContract(_ContractModel):
     window_days: Literal[90]
     recent_published_content_count: NonNegativeInt
     lifecycle_status: Literal["active", "dormant"]
-    dormant_reason: Literal["no_published_content_within_90_days"] | None
+    dormant_reason: Literal["no_published_content_within_90_days", "uploads_empty"] | None
     dormant_since: TimestampText | None
     dormant_recheck_day: DateText | None
     dormant_cycle: NonNegativeInt

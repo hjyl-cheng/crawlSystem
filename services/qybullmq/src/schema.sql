@@ -409,7 +409,7 @@ ALTER TABLE crawler.channels ADD CONSTRAINT channels_dormant_state_check
 CHECK (
   (
     status='dormant'
-    AND dormant_reason='no_published_content_within_90_days'
+    AND dormant_reason IN ('no_published_content_within_90_days','uploads_empty')
     AND dormant_since IS NOT NULL
     AND dormant_recheck_day IS NOT NULL
     AND dormant_last_probe_at IS NOT NULL
@@ -2386,7 +2386,7 @@ ALTER TABLE crawler.channels ADD CONSTRAINT channels_dormant_state_check
 CHECK (
   (
     status='dormant'
-    AND dormant_reason='no_published_content_within_90_days'
+    AND dormant_reason IN ('no_published_content_within_90_days','uploads_empty')
     AND dormant_since IS NOT NULL
     AND dormant_recheck_day IS NOT NULL
     AND dormant_last_probe_at IS NOT NULL

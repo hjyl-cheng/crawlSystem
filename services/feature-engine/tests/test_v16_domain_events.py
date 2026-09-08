@@ -249,6 +249,20 @@ def extended_agent_payload() -> dict:
 
 
 class V16DomainEventTests(unittest.TestCase):
+    def test_accepts_empty_uploads_dormancy_without_claiming_no_recent_content(self) -> None:
+        payload = video_payload()
+        payload["activity"] = {
+            **activity_payload(),
+            "lifecycle_status": "dormant",
+            "recent_published_content_count": 0,
+            "dormant_reason": "uploads_empty",
+            "dormant_since": "2026-09-08T00:00:00Z",
+            "dormant_recheck_day": "2026-10-08",
+            "dormant_cycle": 1,
+        }
+        parsed = CrawlerObservationRecorded.from_mapping(event("video", payload))
+        self.assertEqual(parsed.payload.activity.dormant_reason, "uploads_empty")
+
     def test_rejects_profile_observation_kind(self) -> None:
         with self.assertRaisesRegex(EventValidationError, "profile"):
             CrawlerObservationRecorded.from_mapping(event("profile", profile_payload()))

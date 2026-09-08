@@ -350,13 +350,16 @@ export class ChannelExecutionRuntime {
       }
       attemptAborted = attemptCancelled();
       metricsSnapshot = metrics.snapshot();
-      decisions = failureDecisions(metricsSnapshot, attemptAborted ? null : error);
+      const countryHandoff = error?.code === "UPLOADS_COUNTRY_RECHECK";
+      decisions = failureDecisions(metricsSnapshot, attemptAborted || countryHandoff ? null : error);
       try {
         await store.finishAttempt(attemptId, {
-          status: attemptAborted ? "aborted" : hasError ? "failed" : "success",
+          status: attemptAborted ? "aborted" : hasError && !countryHandoff ? "failed" : "success",
           identityChanged,
-          error,
+          error: countryHandoff ? null : error,
           result: {
+            ...(countryHandoff ? { uploads_country_recheck: error.country } : {}),
+            ...(error?.uploads_response_evidence ? { uploads_response_evidence: error.uploads_response_evidence } : {}),
             duration_ms: Date.now() - startedAt,
             youtube_requests: metricsSnapshot,
             failure_decisions: decisions,

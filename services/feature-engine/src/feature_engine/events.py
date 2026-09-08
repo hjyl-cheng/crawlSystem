@@ -1325,7 +1325,7 @@ class VideoActivityPayload:
         cycle = _integer(source["dormant_cycle"], "activity.dormant_cycle", minimum=0)
         if status == "dormant":
             if (
-                dormant_reason != "no_published_content_within_90_days"
+                dormant_reason not in ("no_published_content_within_90_days", "uploads_empty")
                 or dormant_since is None
                 or recheck_day is None
                 or cycle == 0

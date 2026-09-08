@@ -1,3 +1,4 @@
+import { EMPTY_UPLOADS_REASON } from "./youtubeUploadsCountry.js";
 import {
   evaluateMigrationActivity,
   evaluateMigrationUploadsActivity,
@@ -135,7 +136,9 @@ export async function applyMigrationActivityGate(client, {
     };
   }
   const configured = run.result_json?.migration_activity_gate ?? {};
-  const required = configured.required === true;
+  const emptyUploads = run.result_json?.full_crawl?.uploads?.document?.empty_uploads;
+  const emptyDormant = emptyUploads?.outcome === "dormant";
+  const required = configured.required === true || emptyDormant;
   const maxAgeDays = boundedInteger(configured.max_age_days, 90, 1, 3650);
   const terminalDecision = ["passed", "inconclusive", "dormant", "rejected"].includes(configured.decision);
   if (terminalDecision) {
@@ -275,6 +278,7 @@ export async function applyMigrationActivityGate(client, {
   const dormantState = decision.dormant
     ? buildDormantLifecycle({
         channelId: run.channel_id,
+        reason: emptyDormant ? EMPTY_UPLOADS_REASON : DORMANT_REASON,
         observedAt: recordedAt,
         dormantSince: run.channel_status === "dormant" ? run.dormant_since : null,
         dormantCycle: run.channel_status === "dormant" ? run.dormant_cycle : 0,
@@ -283,7 +287,8 @@ export async function applyMigrationActivityGate(client, {
   const storedDecision = {
     required: true,
     decision: decision.decision,
-    reason: decision.reason,
+    reason: emptyDormant ? EMPTY_UPLOADS_REASON : decision.reason,
+    ...(emptyDormant ? { empty_uploads: emptyUploads } : {}),
     max_age_days: decision.maxAgeDays,
     reference_day: referenceDay,
     reference_at: referenceAt.toISOString(),
@@ -375,7 +380,7 @@ export async function applyMigrationActivityGate(client, {
        WHERE channel_id=$1 AND status<>'removed'`,
       [
         run.channel_id,
-        DORMANT_REASON,
+        emptyDormant ? EMPTY_UPLOADS_REASON : DORMANT_REASON,
         dormantState.dormant_since,
         dormantState.dormant_recheck_day,
         dormantState.dormant_last_probe_at,
@@ -473,6 +478,7 @@ export async function applyMigrationActivityGate(client, {
   }
   return {
     ...decision,
+    reason: emptyDormant ? EMPTY_UPLOADS_REASON : decision.reason,
     dormantSince: dormantState?.dormant_since ?? null,
     dormantRecheckDay: dormantState?.dormant_recheck_day ?? null,
     dormantCycle: dormantState?.dormant_cycle ?? 0,

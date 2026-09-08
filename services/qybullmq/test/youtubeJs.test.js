@@ -465,16 +465,16 @@ test("feed items retain their Video ID while only explicit Upload signals set a 
   ]);
 });
 
-test("Uploads fails loudly when a channel exposes content but the playlist is empty", async () => {
+test("Uploads with a normal empty playlist and no country returns a dormant decision", async () => {
   const client = {
     async getPlaylist() {
       return { items: [], has_continuation: false };
     },
   };
-  await assert.rejects(
-    collectYoutubeJsUploadBundle(client, "UCempty", 30),
-    /uploads playlist UUempty was empty/,
-  );
+  const result = await collectYoutubeJsUploadBundle(client, "UCempty", 30);
+  assert.deepEqual(result.uploads.empty_uploads, {
+    version: 1, outcome: "dormant", country: null, reason: "no_country",
+  });
 });
 
 test("incremental Upload scan continues until a database Anchor is found", async () => {

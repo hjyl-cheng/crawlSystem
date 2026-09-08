@@ -1,3 +1,4 @@
+import { withUploadsCountryExecution } from "./youtubeUploadsCountry.js";
 import { queuesByRole } from "./queues.js";
 import { withVideoFallbackExecution } from "./videoDetailApiFallback.js";
 import { selectYoutubeFailure } from "./youtubeFailurePolicy.js";
@@ -140,18 +141,27 @@ export async function executeManagedWorkerAttempt({
     throw new TypeError("persistRetryableCheckpoint is required");
   }
   try {
-    const result = await withVideoFallbackExecution({
+    const result = await withUploadsCountryExecution({
+      egressCountry: attempt?.egressCountry,
+      recheck: job.data?.uploads_country_recheck,
+    }, () => withVideoFallbackExecution({
       getBudget: attempt?.getBudget,
     }, () => execute({
       resumeMode: attempt?.resumeMode ?? prepared?.initialResumeMode ?? "initial",
       prepared,
-    }));
+    })));
     return {
       kind: "managed_work_complete",
       businessState: managedBusinessState(job, result),
       result,
     };
   } catch (error) {
+    if (error?.code === "UPLOADS_COUNTRY_RECHECK") {
+      const data = { ...job.data, uploads_country_recheck: { country: error.country, status: "requested" } };
+      await job.updateData(data);
+      job.data = data;
+      return { kind: "country_recheck", country: error.country };
+    }
     const failure = retryableRotaFailure(error);
     if (!failure) throw error;
     const checkpointPersisted = await persistRetryableCheckpoint({

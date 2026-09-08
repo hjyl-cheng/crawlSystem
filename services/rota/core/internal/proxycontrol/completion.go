@@ -88,6 +88,37 @@ func (m *Manager) CompleteTask(ctx context.Context, request CompleteTaskRequest)
 		ControlState: CompletionReadyKeepRoute, Ready: true,
 		CompletedTaskRouteGeneration: request.RouteGeneration,
 	}
+	// A country recheck is not a proxy health failure. If no matching reserve
+	// exists, retain the healthy route so the worker can finish as dormant.
+	countryRecheck := request.RecheckCountry != ""
+	var countryCandidate *candidate
+	if countryRecheck {
+		if state.role != RoleChannel || (state.pendingAction != "" && state.pendingAction != PendingActionNone) {
+			return CompleteTaskResult{}, ErrPolicyRejected
+		}
+		policy, err := m.policyForCompletion(state)
+		if err != nil {
+			return CompleteTaskResult{}, err
+		}
+		policy.RequiredEgressCountry = request.RecheckCountry
+		var country string
+		if state.proxyID != nil {
+			if err := tx.QueryRow(ctx, "SELECT COALESCE(country_code,'') FROM proxies WHERE id=$1", *state.proxyID).Scan(&country); err != nil {
+				return CompleteTaskResult{}, err
+			}
+		}
+		result.ReasonCode = "COUNTRY_ALREADY_MATCHED"
+		if !strings.EqualFold(country, request.RecheckCountry) {
+			countryCandidate, err = selectCompletionWarmStandbyForCountry(ctx, tx, policy, state, true)
+			if err != nil {
+				return CompleteTaskResult{}, err
+			}
+			result.ReasonCode = "NO_COUNTRY_RESERVE"
+			if countryCandidate != nil {
+				state.pendingAction = PendingActionRotateRoute
+			}
+		}
+	}
 	var credentialRotations []credentialRotation
 	var replacementProxyID *int
 	if state.pendingAction != "" && state.pendingAction != PendingActionNone {
@@ -95,7 +126,10 @@ func (m *Manager) CompleteTask(ctx context.Context, request CompleteTaskRequest)
 		if err != nil {
 			return CompleteTaskResult{}, err
 		}
-		selected, err := selectCompletionWarmStandby(ctx, tx, policy, state)
+		selected := countryCandidate
+		if !countryRecheck {
+			selected, err = selectCompletionWarmStandby(ctx, tx, policy, state)
+		}
 		if err != nil {
 			return CompleteTaskResult{}, err
 		}
@@ -155,7 +189,7 @@ func (m *Manager) CompleteTask(ctx context.Context, request CompleteTaskRequest)
 			result.RetryAfterMS = 250
 			result.ReasonCode = "WAITING_FOR_ROUTE_REFRESH"
 		}
-		if state.proxyID != nil {
+		if state.proxyID != nil && !countryRecheck {
 			failureKind, err := completionFailureKind(ctx, tx, state)
 			if err != nil {
 				return CompleteTaskResult{}, err
@@ -381,6 +415,10 @@ func selectCompletionWarmStandby(
 	policy IdentityPolicy,
 	state completionTaskState,
 ) (*candidate, error) {
+	return selectCompletionWarmStandbyForCountry(ctx, tx, policy, state, false)
+}
+
+func selectCompletionWarmStandbyForCountry(ctx context.Context, tx pgx.Tx, policy IdentityPolicy, state completionTaskState, strictCountry bool) (*candidate, error) {
 	candidates, err := loadEligibleCandidates(ctx, tx, policy, state.workloadScope)
 	if err != nil {
 		return nil, err
@@ -396,6 +434,10 @@ func selectCompletionWarmStandby(
 	var exactRole, generic *candidate
 	for index := range candidates {
 		item := &candidates[index]
+		// Preferences 0 and 1 both denote an exact country match.
+		if strictCountry && item.CountryPreference > 1 {
+			continue
+		}
 		if (state.proxyID != nil && item.ID == *state.proxyID) || assigned[item.ID] {
 			continue
 		}
@@ -515,6 +557,7 @@ func normalizeCompleteTaskRequest(request CompleteTaskRequest) CompleteTaskReque
 	request.TaskID = strings.TrimSpace(request.TaskID)
 	request.BusinessRunID = strings.TrimSpace(request.BusinessRunID)
 	request.Outcome = strings.ToLower(strings.TrimSpace(request.Outcome))
+	request.RecheckCountry = strings.ToUpper(strings.TrimSpace(request.RecheckCountry))
 	request.ObservationIDs = append([]string(nil), request.ObservationIDs...)
 	for index := range request.ObservationIDs {
 		request.ObservationIDs[index] = strings.TrimSpace(request.ObservationIDs[index])
@@ -528,6 +571,11 @@ func normalizeCompleteTaskRequest(request CompleteTaskRequest) CompleteTaskReque
 }
 
 func validateCompleteTaskRequest(request CompleteTaskRequest) error {
+	if request.RecheckCountry != "" {
+		if len(request.RecheckCountry) != 2 || request.RecheckCountry[0] < 'A' || request.RecheckCountry[0] > 'Z' || request.RecheckCountry[1] < 'A' || request.RecheckCountry[1] > 'Z' || request.BusinessComplete {
+			return fmt.Errorf("%w: country recheck requires ISO alpha-2 and unfinished business work", ErrInvalidInput)
+		}
+	}
 	for _, value := range []string{
 		request.CompletionRequestID, request.SlotName, request.WorkerID,
 		request.WorkerInstanceID, request.LeaseID, request.TaskID, request.BusinessRunID,
@@ -560,6 +608,7 @@ func validateCompleteTaskRequest(request CompleteTaskRequest) error {
 func completeTaskRequestHash(request CompleteTaskRequest) (string, error) {
 	payload, err := json.Marshal(struct {
 		SchemaVersion         int      `json:"schema_version"`
+		RecheckCountry        string   `json:"recheck_country,omitempty"`
 		SlotName              string   `json:"slot_name"`
 		WorkerID              string   `json:"worker_id"`
 		WorkerInstanceID      string   `json:"worker_instance_id"`
@@ -574,7 +623,8 @@ func completeTaskRequestHash(request CompleteTaskRequest) (string, error) {
 		AttemptQuiesced       bool     `json:"attempt_quiesced"`
 		ActiveManagedRequests int      `json:"active_managed_requests"`
 	}{
-		SchemaVersion: 1, SlotName: request.SlotName, WorkerID: request.WorkerID,
+		RecheckCountry: request.RecheckCountry,
+		SchemaVersion:  1, SlotName: request.SlotName, WorkerID: request.WorkerID,
 		WorkerInstanceID: request.WorkerInstanceID, LeaseID: request.LeaseID,
 		RouteGeneration: request.RouteGeneration, TaskID: request.TaskID,
 		BusinessRunID: request.BusinessRunID, Outcome: request.Outcome,

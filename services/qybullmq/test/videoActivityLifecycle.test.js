@@ -477,3 +477,16 @@ test("current-run recent evidence reactivates a channel when history is truncate
   assert.equal(result.recent_published_content_count, 1);
   assert.equal(result.evidence_scan_stop_reason, "row_limit");
 });
+
+test("normal empty uploads can sleep despite stored recent video evidence without changing contents", async () => {
+  const fixture = lifecycleFixture([{ source_content_id: "recent", content_type: "video", published_at: "2026-07-22T00:00:00Z", published_at_status: "exact", published_at_precision: "second" }]);
+  const result = await applyVideoActivityLifecycle(fixture.client, {
+    channelId: "UCempty", observedAt: "2026-07-23T12:00:00Z", discoveryComplete: true,
+    emptyUploads: { version: 1, outcome: "dormant", country: "BR", reason: "no_country_reserve" },
+  });
+  assert.equal(result.lifecycle_status, "dormant");
+  assert.equal(result.activity.dormant_reason, "uploads_empty");
+  validateVideoActivityEvidence(buildVideoActivityEvidence(result));
+  assert.equal(fixture.queries.some(({sql}) => /(?:UPDATE|DELETE FROM) crawler.contents/.test(sql)), false);
+  assert.ok(fixture.queries.some(({sql,params}) => sql.includes("'uploads_recheck'") && JSON.parse(params[1]).country === "BR"));
+});

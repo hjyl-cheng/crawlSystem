@@ -1,3 +1,4 @@
+import { prepareDormantUploadsProbe, pendingUploadsDormancy, dormantUploadsScan } from "./youtubeUploadsCountry.js";
 import { executeIncrementalAbout } from "./incrementalAbout.js";
 import { enqueueIncrementalAgent } from "./incrementalAgent.js";
 import { incrementalDomainState } from "./incrementalRunStore.js";
@@ -106,11 +107,35 @@ export class IncrementalChannelRunner {
 
     const startedAt = new Date().toISOString();
     let snapshotPromise = null;
+    let sessionOpened = false;
     const getChannelSnapshot = () => {
       if (!snapshotPromise) {
-        snapshotPromise = this.openChannel(plan.channel_id, {
-          includeAbout: plan.task_mask.about,
-        });
+        snapshotPromise = (async () => {
+          const stored = plan.task_mask.video ? await this.query(
+            "SELECT country_code,country_source,total_video_count,status,source_json->'uploads_recheck' AS uploads_recheck FROM crawler.channels WHERE channel_id=$1",
+            [plan.channel_id],
+          ) : { rows: [] };
+          const channel = stored.rows[0] ?? {};
+          const pendingDormant = pendingUploadsDormancy(
+            channel.country_source === "youtube_about" ? channel.country_code : null,
+          );
+          if (plan.task_mask.video && pendingDormant) return {
+            scanUploads: async ({ anchors = [] } = {}) => dormantUploadsScan(plan.channel_id, anchors, pendingDormant),
+          };
+          if (plan.plan_mode === "dormant_probe" && channel.status === "dormant") {
+            const decision = prepareDormantUploadsProbe(channel.uploads_recheck?.country);
+            if (decision) return {
+              scanUploads: async ({ anchors = [] } = {}) => dormantUploadsScan(plan.channel_id, anchors, decision),
+            };
+          }
+          sessionOpened = true;
+          return this.openChannel(plan.channel_id, {
+            includeAbout: plan.task_mask.about,
+            uploadsCountry: channel.country_source === "youtube_about" ? channel.country_code : null,
+            uploadsVideoCount: channel.total_video_count ?? null,
+            dormantUploadsCountry: channel.status === "dormant" ? channel.uploads_recheck?.country : null,
+          });
+        })();
       }
       return snapshotPromise;
     };
@@ -183,9 +208,10 @@ export class IncrementalChannelRunner {
         run_id: runId,
         status: waitingForAgent ? "waiting_agent" : "done",
         executed_domains: Object.keys(results),
-        session_opened: snapshotPromise !== null,
+        session_opened: sessionOpened,
       };
     } catch (error) {
+      if (error?.code === "UPLOADS_COUNTRY_RECHECK") throw error;
       if (activeDomain) {
         await this.runStore.markDomain(runId, activeDomain, "failed", {
           error: String(error?.message || error).slice(0, 1000),

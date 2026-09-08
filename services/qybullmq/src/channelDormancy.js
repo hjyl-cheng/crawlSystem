@@ -41,6 +41,7 @@ export function dormantRecheckDelayDays(channelId, cycle) {
 }
 
 export function buildDormantLifecycle({
+  reason = DORMANT_REASON,
   channelId,
   observedAt,
   dormantSince = null,
@@ -54,7 +55,7 @@ export function buildDormantLifecycle({
   const delayDays = dormantRecheckDelayDays(channelId, cycle);
   return Object.freeze({
     lifecycle_status: "dormant",
-    dormant_reason: DORMANT_REASON,
+    dormant_reason: reason,
     dormant_since: since.toISOString(),
     dormant_recheck_day: addUtcCalendarDays(utcCalendarDay(observed), delayDays),
     dormant_last_probe_at: observed.toISOString(),
