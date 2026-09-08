@@ -1,3 +1,4 @@
+import {reconcileMigrationControl,managedBatchBlocksLegacyCompletion,migrationBatchControlEnabled} from "./migrationBatchControl.js";
 import { nanoid } from "nanoid";
 import { dispatchVideoApiRequests } from "./videoApiBatchRequests.js";
 import { isFullCrawlCanaryBatch } from "./fullCrawlCanary.js";
@@ -2429,6 +2430,10 @@ async function maybeDispatchContentCompletenessRepairs(
 }
 
 async function maybeCompleteAutomaticPipeline(actions, queryScheduler) {
+  if(await managedBatchBlocksLegacyCompletion(query,queryScheduler.pipeline_cycle_id)){
+    await reconcileTerminalFinalizedRunStates(actions,queryScheduler.pipeline_cycle_id);
+    return false;
+  }
   if (!automaticFinalizationActive(queryScheduler)) return false;
   if (!queryScheduler.pipeline_cycle_id) return false;
   const freshStats = await getQueueStats(queues);
@@ -2951,6 +2956,7 @@ async function tick() {
     stats[queuesByRole.contentEnrich].content_enrich_operational = contentEnrichController.operational;
   }
   await reconcileQueryQualityQueue(actions);
+  if(migrationBatchControlEnabled())await reconcileMigrationControl({query,withTransaction,queue:queues[queuesByRole.channelCrawl],maxSnapshotAttempts:channelSnapshotMaxAttempts});
   let queryScheduler = await getQueryScheduler();
   queryScheduler = await resumeLegacyAutomaticFinalization(queryScheduler, actions);
   if (await reconcileAutomaticDiscoveryClosure(query, queryScheduler)) {

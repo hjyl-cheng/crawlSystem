@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import {migrationBatchPanel} from "./migrationBatchPanel.js";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import {
@@ -307,8 +308,10 @@ test("Dashboard source and target SQL stay on separate connection helpers", asyn
   assert.match(server, /BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY/);
   assert.match(server, /assertMigrationSourceIdentity/);
   assert.match(server, /crawler\.migration_channel_intents/);
-  for (const selection of ["100", "200", "500", "1000", "2000"]) {
-    assert.match(server, new RegExp(`\\["${selection}", "${selection}"\\]`));
+  const panel = migrationBatchPanel({pendingCount:401325});
+  for (const selection of ["100", "200", "500", "1000", "2000", "all"]) {
+    assert.ok(panel.includes(`value="${selection}"`));
   }
+  assert.match(server, /migrationBatchPanel\(\{pendingCount:migration.stats\?\.discovered\}\)/);
   assert.doesNotMatch(server, /migrationRead\([\s\S]{0,120}UPDATE\s+crawler\./);
 });

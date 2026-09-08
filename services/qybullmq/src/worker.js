@@ -1,3 +1,4 @@
+import {MIGRATION_START_JOB,startControlledMigrationChannel,migrationBatchControlEnabled} from "./migrationBatchControl.js";
 import { Worker } from "bullmq";
 import { nanoid } from "nanoid";
 import { ensureDefaultAgentConfig } from "./agentConfig.js";
@@ -1536,6 +1537,10 @@ async function persistManagedRetryCheckpoint({ job, prepared, error, failure }) 
 }
 
 async function processJob(job, token) {
+  if(job.queueName===queuesByRole.channelCrawl&&job.name===MIGRATION_START_JOB){
+    if(!migrationBatchControlEnabled())throw new Error("Migration batch control is not enabled on this worker");
+    return startControlledMigrationChannel({query,withTransaction,batchId:job.data.batch_id,channelId:job.data.channel_id});
+  }
   try {
     return await processJobWithOwnership(job, token);
   } catch (error) {

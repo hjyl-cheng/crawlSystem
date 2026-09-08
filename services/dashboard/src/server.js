@@ -1,3 +1,4 @@
+import {migrationBatchPanel} from "./migrationBatchPanel.js";
 import express from "express";
 import morgan from "morgan";
 import { allowDashboardRequestDuringControlledMigration } from "./controlledWritePolicy.js";
@@ -3482,13 +3483,6 @@ function migrationChannelListPage(migration) {
   ];
   const agentOptions = ["", "pending", "queued", "running", "done", "failed", "skipped"];
   const finalOptions = ["", "pending", "pending_detail", "pending_api", "pending_agent", "ready_auto", "ready_partial", "failed"];
-  const batchOptions = [
-    ["100", "100"],
-    ["200", "200"],
-    ["500", "500"],
-    ["1000", "1000"],
-    ["2000", "2000"],
-  ];
 
   const table = migration.available
     ? `
@@ -3535,24 +3529,16 @@ function migrationChannelListPage(migration) {
   <div>
     <div class="eyebrow">Migration Channels</div>
     <h1>未迁移频道列表</h1>
-    <div class="sub">显示尚未开始、正在处理、失败待重试，以及已进入频道注册表但尚未完成 Finalize 的 legacy 迁移任务。</div>
+    <div class="sub">管理待迁移频道，查看当前批次进度，随时暂停、继续或结束本批。</div>
   </div>
   <div class="toolbar">
-    <form class="batch-migration-form" method="post" action="/migration-channels/batch-migrate" onsubmit="return confirm('确认按所选数量启动完整迁移吗？');">
-      <div class="field">
-        <label for="batch-migration-selection">迁移数量</label>
-        <select id="batch-migration-selection" name="selection">
-          ${batchOptions.map(([value, label]) => `<option value="${value}" ${value === "100" ? "selected" : ""}>${label}</option>`).join("")}
-        </select>
-      </div>
-      <button class="btn btn-primary" type="submit">批量迁移</button>
-    </form>
     <a class="btn" href="/migration-channels">刷新</a>
     <a class="btn" href="/channels">频道列表</a>
   </div>
 </div>
 ${migration.notice ? `<div class="alert alert-good">${h(migration.notice)}</div>` : ""}
 ${migration.error ? `<div class="alert alert-bad">${h(migration.error)}</div>` : ""}
+${migrationBatchPanel({pendingCount:migration.stats?.discovered})}
 ${renderMigrationSystemRetries(migration.systemRetries)}
 ${table}`,
   });
@@ -4816,11 +4802,30 @@ app.get("/migration-channels", async (req, res, next) => {
   }
 });
 
+async function migrationControlRequest(path,body){
+  const response=await fetch(`${crawlerApiUrl}${path}`,{method:body?'POST':'GET',headers:body?{'content-type':'application/json'}:{},body:body?JSON.stringify(body):undefined,signal:AbortSignal.timeout(30000)});
+  const payload=await response.json();
+  if(!response.ok)throw Object.assign(new Error(payload.error||'迁移服务请求失败'),{statusCode:response.status});
+  return payload;
+}
+app.get('/migration-channels/batches/progress',async(req,res)=>{
+  try{res.set('Cache-Control','no-store').json(await migrationControlRequest('/api/migration/batches'));}
+  catch(e){res.status(e.statusCode||503).json({ok:false,error:e.message});}
+});
+app.post('/migration-channels/batches/start',async(req,res)=>{
+  try{res.status(202).json(await migrationControlRequest('/api/migration/channels/batch',{selection:req.body?.selection}));}
+  catch(e){res.status(e.statusCode||503).json({ok:false,error:e.message});}
+});
+app.post('/migration-channels/batches/:batchId/:action',async(req,res)=>{
+  try{res.json(await migrationControlRequest(`/api/migration/batches/${encodeURIComponent(req.params.batchId)}/${encodeURIComponent(req.params.action)}`,{version:req.body?.version}));}
+  catch(e){res.status(e.statusCode||503).json({ok:false,error:e.message});}
+});
+
 app.post("/migration-channels/batch-migrate", async (req, res) => {
   try {
     const result = await migrateChannelBatch(req.body?.selection);
     const notice = result.created
-      ? `已启动批量迁移：${fmtInt(result.target_count)} 个频道，后台将持续执行完整流程`
+      ? (result.status === "preparing" ? "正在准备本批频道清单，可在进度区域查看" : `已启动批量迁移：${fmtInt(result.target_count)} 个频道，后台将持续执行完整流程`)
       : "当前没有可迁移的频道";
     return redirectWith(req, res, { notice });
   } catch (error) {
@@ -5651,6 +5656,10 @@ app.post("/queries/scheduler/draft", async (req, res) => {
 });
 
 app.post("/queries/scheduler/:action", async (req, res) => {
+  try{const control=await migrationControlRequest('/api/migration/batches');
+    if(control.active)return redirectWith(req,res,{error:'当前迁移批次请在迁移频道页面暂停、继续或结束，以便频道正常收尾。'});
+  }catch(error){return redirectWith(req,res,{error:`无法确认迁移批次状态：${error.message}`});}
+
   const action = String(req.params.action || "").trim();
   const current = await ensureQueryScheduler();
   const now = new Date().toISOString();

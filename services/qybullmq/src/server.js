@@ -1,3 +1,4 @@
+import {createMigrationControlBatch,controlMigrationBatch,loadMigrationControlProgress,migrationBatchControlEnabled} from "./migrationBatchControl.js";
 import express from "express";
 import morgan from "morgan";
 import { nanoid } from "nanoid";
@@ -318,8 +319,19 @@ app.get("/api/queues", async (_req, res) => {
 });
 
 app.post("/api/migration/channels/batch", asyncRoute(async (req, res) => {
-  const result = await dispatchManualMigrationBatch({ selection: req.body?.selection });
-  res.status(result.created ? 201 : 200).json(result);
+  const result = migrationBatchControlEnabled()
+    ? await createMigrationControlBatch({withTransaction,selection:req.body?.selection})
+    : await dispatchManualMigrationBatch({ selection: req.body?.selection });
+  res.status(result.status === "preparing" ? 202 : result.created ? 201 : 200).json(result);
+}));
+
+app.get("/api/migration/batches", asyncRoute(async (_req,res)=>{
+  res.json(migrationBatchControlEnabled()?await loadMigrationControlProgress(query):{ok:true,batches:[],active:null});
+}));
+app.post("/api/migration/batches/:batchId/:action", asyncRoute(async(req,res)=>{
+  if(!migrationBatchControlEnabled())return res.status(409).json({ok:false,error:"批次控制尚未启用"});
+  const batch=await controlMigrationBatch({withTransaction,batchId:req.params.batchId,action:req.params.action,version:req.body?.version});
+  res.json({ok:true,batch});
 }));
 
 app.get("/api/migration/system-retries", asyncRoute(async (req, res) => {

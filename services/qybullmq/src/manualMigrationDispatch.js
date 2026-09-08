@@ -1136,3 +1136,26 @@ export async function dispatchManualMigrationChannel({
     throw error;
   }
 }
+
+// Used by the batch coordinator under the scheduler and batch admission locks.
+export async function createControlledMigrationScaffold(client, {batchId,sourceId,selection}) {
+  const scheduler=await lockSchedulerForUpdate(client);
+  await assertSchedulerActivationAdmission(client,scheduler,batchId);
+  await ensureBatchScaffold(client,{batchId,sourceId,selection,targetCount:0,minSubscriberCount:Number(process.env.MIN_SUBSCRIBER_COUNT||1000)});
+  await activateScheduler(client,batchId);
+}
+
+export async function materializeControlledMigrationChannel(client,{snapshot,batchId}) {
+  validateMigrationSourceSnapshot(snapshot);
+  await lockMigrationChannel(client,snapshot.channel_id);
+  const existing=await loadIntentForUpdate(client,snapshot);
+  if(existing) return null;
+  const occupied=await client.query('SELECT 1 FROM crawler.channels WHERE channel_id=$1 UNION ALL SELECT 1 FROM crawler.channel_candidates WHERE channel_id=$1 LIMIT 1',[snapshot.channel_id]);
+  if(occupied.rows.length) return null;
+  const intent=await insertIntent(client,snapshot,batchId);
+  if(!intent) return null;
+  const candidate=await createTargetCandidate(client,snapshot,batchId,'discovered');
+  await attachIntentAndSource(client,{intentId:intent.migration_intent_id,candidate,snapshot,batchId});
+  await refreshBatchCounts(client,batchId);
+  return candidate;
+}
