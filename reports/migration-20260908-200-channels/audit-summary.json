@@ -1,0 +1,385 @@
+{
+  "at": "2026-09-08T04:19:20.520Z",
+  "batch": "legacy-results-canary-1788838667002-6035a5ec",
+  "channels": 123,
+  "contents": 2100,
+  "channelFields": {
+    "channel_id": {
+      "present": 123,
+      "missing": 0
+    },
+    "title": {
+      "present": 123,
+      "missing": 0
+    },
+    "channel_url": {
+      "present": 123,
+      "missing": 0
+    },
+    "avatar_url": {
+      "present": 123,
+      "missing": 0
+    },
+    "subscriber_count": {
+      "present": 123,
+      "missing": 0
+    },
+    "total_view_count": {
+      "present": 123,
+      "missing": 0
+    },
+    "total_video_count": {
+      "present": 123,
+      "missing": 0
+    }
+  },
+  "channelStatuses": {
+    "subscriber_count_status": {
+      "estimated": 123
+    },
+    "total_view_count_status": {
+      "exact": 123
+    },
+    "total_video_count_status": {
+      "exact": 123
+    },
+    "description_status": {
+      "exact": 118,
+      "empty": 5
+    },
+    "external_links_status": {
+      "observed": 122,
+      "unresolved": 1
+    }
+  },
+  "channelOptional": {
+    "handle": {
+      "present": 123,
+      "missing": 0
+    },
+    "country": {
+      "present": 122,
+      "missing": 1
+    },
+    "country_code": {
+      "present": 122,
+      "missing": 1
+    },
+    "joined_at": {
+      "present": 123,
+      "missing": 0
+    },
+    "about_description": {
+      "present": 118,
+      "missing": 5
+    },
+    "youtube_business_email_available": {
+      "present": 123,
+      "missing": 0
+    }
+  },
+  "videoFields": {
+    "source_content_id": {
+      "present": 2100,
+      "missing": 0
+    },
+    "content_type": {
+      "present": 2100,
+      "missing": 0
+    },
+    "title": {
+      "present": 2100,
+      "missing": 0
+    },
+    "url": {
+      "present": 2100,
+      "missing": 0
+    },
+    "thumbnail_url": {
+      "present": 2100,
+      "missing": 0
+    },
+    "published_at": {
+      "present": 2100,
+      "missing": 0
+    },
+    "duration_seconds": {
+      "present": 2100,
+      "missing": 0
+    },
+    "view_count_text": {
+      "present": 2100,
+      "missing": 0
+    },
+    "like_count": {
+      "present": 2100,
+      "missing": 0
+    },
+    "comment_count": {
+      "present": 2100,
+      "missing": 0
+    },
+    "access_status": {
+      "present": 2100,
+      "missing": 0
+    },
+    "publication_item_hash": {
+      "present": 2100,
+      "missing": 0
+    }
+  },
+  "videoStatuses": {
+    "content_type": {
+      "short": 1175,
+      "video": 733,
+      "live": 192
+    },
+    "published_at_status": {
+      "exact": 2100
+    },
+    "published_at_precision": {
+      "second": 2100
+    },
+    "duration_status": {
+      "exact": 2100
+    },
+    "view_count_status": {
+      "exact": 2100
+    },
+    "like_count_status": {
+      "exact": 2030,
+      "zero_from_empty": 70
+    },
+    "comment_count_status": {
+      "exact": 1447,
+      "zero_from_surface": 589,
+      "disabled": 64
+    },
+    "description_status": {
+      "exact": 1423,
+      "empty": 677
+    },
+    "access_status": {
+      "public": 2100
+    }
+  },
+  "commentPages": {
+    "with_rows": 1444,
+    "zero_rows": 656,
+    "missing": 0,
+    "positive_total_empty_rows": 3,
+    "shape_mismatch": 0,
+    "rows": 10970
+  },
+  "detailStatuses": [
+    {
+      "detail_status": "done",
+      "count": 3670
+    }
+  ],
+  "problems": [],
+  "batch_status": {
+    "dispatch_batch_id": "legacy-results-canary-1788838667002-6035a5ec",
+    "status": "completed",
+    "created_at": "2026-09-08T03:37:49.444Z",
+    "updated_at": "2026-09-08T03:53:15.938Z"
+  },
+  "candidate_statuses": [
+    {
+      "status": "rejected",
+      "reject_reason": "copyright_termination",
+      "count": 1
+    },
+    {
+      "status": "accepted",
+      "reject_reason": null,
+      "count": 198
+    },
+    {
+      "status": "rejected",
+      "reject_reason": "account_terminated",
+      "count": 1
+    }
+  ],
+  "runs": [
+    {
+      "status": "done",
+      "publication_finalized_status": "ready_partial",
+      "count": 75
+    },
+    {
+      "status": "done",
+      "publication_finalized_status": "ready_auto",
+      "count": 123
+    }
+  ],
+  "historical_errors": [
+    {
+      "channel_id": "UCWDv6q6tnBfHOZreE48CZtA",
+      "job_id": "channel-snapshot__legacy-results-canary-1788838667002-6035a5ec__UCWDv6q6tnBfHOZreE48CZtA__g2",
+      "job_attempt": 0,
+      "status": "failed",
+      "started_at": "2026-09-08T03:39:26.951Z",
+      "finished_at": "2026-09-08T03:39:27.256Z",
+      "error_class": "ParserContractError",
+      "error_message": "[PARSER_CONTRACT_ERROR] {\"code\":\"PARSER_CONTRACT_ERROR\",\"field\":\"handle\",\"locale\":\"en\",\"source\":\"youtubejs_channel_about\",\"reason\":\"required_channel_handle_not_observed\",\"raw_value\":\"\",\"context\":{\"channel_id\":\"UCWDv6q6tnBfHOZreE48CZtA\"}}"
+    }
+  ],
+  "system_retries": [
+    {
+      "candidate_id": "2389",
+      "status": "resolved",
+      "failure_code": "EXECUTION_ROUTE_BUDGET_EXHAUSTED",
+      "resolution": "recovery_finalized"
+    },
+    {
+      "candidate_id": "2380",
+      "status": "resolved",
+      "failure_code": "EXECUTION_ROUTE_BUDGET_EXHAUSTED",
+      "resolution": "recovery_finalized"
+    },
+    {
+      "candidate_id": "2389",
+      "status": "resolved",
+      "failure_code": "EXECUTION_ROUTE_BUDGET_EXHAUSTED",
+      "resolution": "superseded_by_newer_system_failure"
+    }
+  ],
+  "scope_counts": [
+    {
+      "publication_finalized_status": "ready_partial",
+      "status": "excluded",
+      "reason": "upcoming_live",
+      "count": 11,
+      "oldest": "2016-10-12T17:38:24.000Z",
+      "newest": "2026-09-05T20:26:01.000Z"
+    },
+    {
+      "publication_finalized_status": "ready_auto",
+      "status": "excluded",
+      "reason": "upcoming_live",
+      "count": 20,
+      "oldest": "2025-02-21T02:14:45.000Z",
+      "newest": "2026-09-07T22:03:13.000Z"
+    },
+    {
+      "publication_finalized_status": "ready_auto",
+      "status": "excluded",
+      "reason": "live_in_progress",
+      "count": 2,
+      "oldest": "2026-08-13T07:09:56.000Z",
+      "newest": "2026-09-07T21:00:45.000Z"
+    },
+    {
+      "publication_finalized_status": "ready_auto",
+      "status": "excluded",
+      "reason": "outside_content_window",
+      "count": 1548,
+      "oldest": "2017-05-29T11:00:04.000Z",
+      "newest": "2026-06-10T02:55:44.000Z"
+    },
+    {
+      "publication_finalized_status": "ready_auto",
+      "status": "included",
+      "reason": null,
+      "count": 2100,
+      "oldest": "2026-06-10T09:35:35.000Z",
+      "newest": "2026-09-08T03:21:20.000Z"
+    },
+    {
+      "publication_finalized_status": "ready_partial",
+      "status": "excluded",
+      "reason": "outside_content_window",
+      "count": 2066,
+      "oldest": "2014-09-17T22:23:09.000Z",
+      "newest": "2026-06-05T19:36:32.000Z"
+    }
+  ],
+  "api_batch_requests": [],
+  "business_channel_count": 123,
+  "business_content_count": 2100,
+  "search_channel_count": 123,
+  "search_content_count": 2100,
+  "projection": [
+    {
+      "status": "delivered",
+      "count": 123
+    }
+  ],
+  "unresolved_links": [
+    {
+      "channel_id": "UC2ZYROC5sk5QsvUyubIiRHw",
+      "title": "Dra Priscilla Vicente - sem filtro",
+      "status": "unresolved",
+      "raw_targets": [
+        "PRISCILLAVICENTE.DRA",
+        "21.984417357"
+      ]
+    }
+  ],
+  "positive_comments_empty_rows": [
+    {
+      "channel_id": "UCQr2Nif6hbKIVzEZsnCEvTw",
+      "source_content_id": "PNx19-7hlLA",
+      "title": "Essa garota gorda sofria bullying de todo mundo, mas então, um dia... | Resumo dorama completo",
+      "comment_count": "5",
+      "comments_first_page": {
+        "sort": "NEWEST_FIRST",
+        "surface": "absent",
+        "version": 1,
+        "comments": [],
+        "total_count": 5,
+        "collected_at": "2026-09-08T03:40:47.214Z",
+        "returned_count": 0,
+        "comments_disabled": false,
+        "fetch_diagnostics": {
+          "reason": "positive_total_empty_top",
+          "fallback_status": "empty",
+          "top_returned_count": 0
+        }
+      }
+    },
+    {
+      "channel_id": "UCQr2Nif6hbKIVzEZsnCEvTw",
+      "source_content_id": "teEzwbftywA",
+      "title": "ela se apaixona pelo popular da escola, até descobrir que ele tem 2 personalidades...",
+      "comment_count": "7",
+      "comments_first_page": {
+        "sort": "NEWEST_FIRST",
+        "surface": "absent",
+        "version": 1,
+        "comments": [],
+        "total_count": 7,
+        "collected_at": "2026-09-08T03:40:53.138Z",
+        "returned_count": 0,
+        "comments_disabled": false,
+        "fetch_diagnostics": {
+          "reason": "positive_total_empty_top",
+          "fallback_status": "empty",
+          "top_returned_count": 0
+        }
+      }
+    },
+    {
+      "channel_id": "UCQr2Nif6hbKIVzEZsnCEvTw",
+      "source_content_id": "pIH3rBuARus",
+      "title": "🔥 TODAS AS GAROTAS QUEREM ELE, MAS ELE SE APAIXONA PELA GAROTA TÍMIDA  ❤️",
+      "comment_count": "44",
+      "comments_first_page": {
+        "sort": "NEWEST_FIRST",
+        "surface": "absent",
+        "version": 1,
+        "comments": [],
+        "total_count": 44,
+        "collected_at": "2026-09-08T03:41:05.933Z",
+        "returned_count": 0,
+        "comments_disabled": false,
+        "fetch_diagnostics": {
+          "reason": "positive_total_empty_top",
+          "fallback_status": "empty",
+          "top_returned_count": 0
+        }
+      }
+    }
+  ]
+}

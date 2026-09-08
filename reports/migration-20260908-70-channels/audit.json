@@ -1,0 +1,1762 @@
+{
+  "at": "2026-09-08T01:35:30.045Z",
+  "batch": "legacy-results-canary-1788830742722-442706a4",
+  "channels": 70,
+  "contents": 1354,
+  "channelFields": {
+    "channel_id": {
+      "present": 70,
+      "missing": 0
+    },
+    "title": {
+      "present": 70,
+      "missing": 0
+    },
+    "channel_url": {
+      "present": 70,
+      "missing": 0
+    },
+    "avatar_url": {
+      "present": 70,
+      "missing": 0
+    },
+    "subscriber_count": {
+      "present": 70,
+      "missing": 0
+    },
+    "total_view_count": {
+      "present": 70,
+      "missing": 0
+    },
+    "total_video_count": {
+      "present": 70,
+      "missing": 0
+    }
+  },
+  "channelStatuses": {
+    "subscriber_count_status": {
+      "estimated": 70
+    },
+    "total_view_count_status": {
+      "exact": 70
+    },
+    "total_video_count_status": {
+      "exact": 70
+    },
+    "description_status": {
+      "exact": 69,
+      "empty": 1
+    },
+    "external_links_status": {
+      "observed": 70
+    }
+  },
+  "channelOptional": {
+    "handle": {
+      "present": 70,
+      "missing": 0
+    },
+    "country": {
+      "present": 69,
+      "missing": 1
+    },
+    "country_code": {
+      "present": 69,
+      "missing": 1
+    },
+    "joined_at": {
+      "present": 70,
+      "missing": 0
+    },
+    "about_description": {
+      "present": 69,
+      "missing": 1
+    },
+    "youtube_business_email_available": {
+      "present": 70,
+      "missing": 0
+    }
+  },
+  "videoFields": {
+    "source_content_id": {
+      "present": 1354,
+      "missing": 0
+    },
+    "content_type": {
+      "present": 1354,
+      "missing": 0
+    },
+    "title": {
+      "present": 1354,
+      "missing": 0
+    },
+    "url": {
+      "present": 1354,
+      "missing": 0
+    },
+    "thumbnail_url": {
+      "present": 1354,
+      "missing": 0
+    },
+    "published_at": {
+      "present": 1354,
+      "missing": 0
+    },
+    "duration_seconds": {
+      "present": 1354,
+      "missing": 0
+    },
+    "view_count_text": {
+      "present": 1354,
+      "missing": 0
+    },
+    "like_count": {
+      "present": 1354,
+      "missing": 0
+    },
+    "comment_count": {
+      "present": 1354,
+      "missing": 0
+    },
+    "access_status": {
+      "present": 1354,
+      "missing": 0
+    },
+    "publication_item_hash": {
+      "present": 1354,
+      "missing": 0
+    }
+  },
+  "videoStatuses": {
+    "content_type": {
+      "video": 743,
+      "short": 552,
+      "live": 59
+    },
+    "published_at_status": {
+      "exact": 1354
+    },
+    "published_at_precision": {
+      "second": 1354
+    },
+    "duration_status": {
+      "exact": 1354
+    },
+    "view_count_status": {
+      "exact": 1354
+    },
+    "like_count_status": {
+      "exact": 1303,
+      "zero_from_empty": 51
+    },
+    "comment_count_status": {
+      "zero_from_surface": 322,
+      "exact": 1031,
+      "disabled": 1
+    },
+    "description_status": {
+      "empty": 356,
+      "exact": 998
+    },
+    "access_status": {
+      "public": 1354
+    }
+  },
+  "commentPages": {
+    "with_rows": 1031,
+    "zero_rows": 323,
+    "missing": 0,
+    "positive_total_empty_rows": 0,
+    "shape_mismatch": 0,
+    "rows": 9881
+  },
+  "detailStatuses": [
+    {
+      "detail_status": "done",
+      "count": 2100
+    }
+  ],
+  "problems": [],
+  "optionalExceptions": [
+    {
+      "channel_id": "UCCNdDo0Nh-y3PcWeUnDGwtg",
+      "title": "Sala de Trânsito",
+      "country": "Brazil",
+      "country_source": "youtube_about",
+      "description_status": "empty"
+    },
+    {
+      "channel_id": "UCb6TzWWJjwFKywZOCFcExJQ",
+      "title": "Pedaloucos Curitiba",
+      "country": null,
+      "country_source": null,
+      "description_status": "exact"
+    }
+  ],
+  "likesPolicyZero": [
+    {
+      "channel_id": "UC7OeNNuAq23-6L6bDOSm8xQ",
+      "video_id": "-wv2fuNXXrY",
+      "title": "Kelly Rowland ft. David Guetta - Commander (Tradução) [Clipe Oficial]"
+    },
+    {
+      "channel_id": "UC7OeNNuAq23-6L6bDOSm8xQ",
+      "video_id": "0W9dVm9RfTs",
+      "title": "DINO - LIKE IT (Tradução) [Clipe Oficial]"
+    },
+    {
+      "channel_id": "UC7OeNNuAq23-6L6bDOSm8xQ",
+      "video_id": "3ad8PjL67eA",
+      "title": "Madonna & Sabrina Carpenter - Bring Your Love (Tradução) [Clipe Oficial]"
+    },
+    {
+      "channel_id": "UC7OeNNuAq23-6L6bDOSm8xQ",
+      "video_id": "3vI3qmcnwxg",
+      "title": "Stray Kids - After You (Tradução) [Clipe Oficial]"
+    },
+    {
+      "channel_id": "UC7OeNNuAq23-6L6bDOSm8xQ",
+      "video_id": "6944vUTPMPw",
+      "title": "ADÉLA - Ain't In LA (Tradução) [Clipe Oficial]"
+    },
+    {
+      "channel_id": "UC7OeNNuAq23-6L6bDOSm8xQ",
+      "video_id": "Br7sGVmQ8d8",
+      "title": "Rania - Dr. Feel Good (Tradução) [Clipe Oficial]"
+    },
+    {
+      "channel_id": "UC7OeNNuAq23-6L6bDOSm8xQ",
+      "video_id": "CLy7D-13K2A",
+      "title": "ENHYPEN - Two Fools (Tradução/Legendado)"
+    },
+    {
+      "channel_id": "UC7OeNNuAq23-6L6bDOSm8xQ",
+      "video_id": "D4rk5ExCKrc",
+      "title": "ATEEZ - WONDERLAND (Tradução) [Clipe Oficial]"
+    },
+    {
+      "channel_id": "UC7OeNNuAq23-6L6bDOSm8xQ",
+      "video_id": "EaOFBYhvzqI",
+      "title": "Stray Kids - Back Then (SONG by VER.) [Tradução] (Clipe Oficial)"
+    },
+    {
+      "channel_id": "UC7OeNNuAq23-6L6bDOSm8xQ",
+      "video_id": "G7Ei9hjypYM",
+      "title": "Felix - Slow It Down (Tradução) [Clipe Oficial]"
+    },
+    {
+      "channel_id": "UC7OeNNuAq23-6L6bDOSm8xQ",
+      "video_id": "HLVtTCvUinQ",
+      "title": "CORTIS - TNT (Tradução) [Clipe Oficial]"
+    },
+    {
+      "channel_id": "UC7OeNNuAq23-6L6bDOSm8xQ",
+      "video_id": "JI51bqMVo5w",
+      "title": "BTS - NORMAL (Tradução) [Clipe Oficial]"
+    },
+    {
+      "channel_id": "UC7OeNNuAq23-6L6bDOSm8xQ",
+      "video_id": "LS7BuSbrmxc",
+      "title": "TEN - OUTWEST (Tradução) [Clipe Oficial]"
+    },
+    {
+      "channel_id": "UC7OeNNuAq23-6L6bDOSm8xQ",
+      "video_id": "MYS1_FUyyw4",
+      "title": "YEONJUN - Ice Cream [Tradução] (Clipe Oficial)"
+    },
+    {
+      "channel_id": "UC7OeNNuAq23-6L6bDOSm8xQ",
+      "video_id": "MjCMlFMSlN0",
+      "title": "ENHYPEN - Bloody Paradise (Tradução) [Clipe Oficial]"
+    },
+    {
+      "channel_id": "UC7OeNNuAq23-6L6bDOSm8xQ",
+      "video_id": "P2drKvm3hcY",
+      "title": "ENHYPEN - Stuck (Tradução/Legendado)"
+    },
+    {
+      "channel_id": "UC7OeNNuAq23-6L6bDOSm8xQ",
+      "video_id": "R5tvwh5NrY8",
+      "title": "Stray Kids - FARMING (Tradução) [Clipe Oficial]"
+    },
+    {
+      "channel_id": "UC7OeNNuAq23-6L6bDOSm8xQ",
+      "video_id": "TMEqrTJob4A",
+      "title": "MARQUISE - dontneedyouanymore (Tradução) [Clipe Oficial]"
+    },
+    {
+      "channel_id": "UC7OeNNuAq23-6L6bDOSm8xQ",
+      "video_id": "cf0bVQehlS4",
+      "title": "EVAN - Death of Me (Tradução) [Clipe Oficial]"
+    },
+    {
+      "channel_id": "UC7OeNNuAq23-6L6bDOSm8xQ",
+      "video_id": "duVvkxAV-C0",
+      "title": "Slayyyter - brand new chanel$ (Tradução) [Clipe Oficial]"
+    },
+    {
+      "channel_id": "UC7OeNNuAq23-6L6bDOSm8xQ",
+      "video_id": "e9owJMsaihQ",
+      "title": "Stray Kids - I Do (Tradução/Legendado)"
+    },
+    {
+      "channel_id": "UC7OeNNuAq23-6L6bDOSm8xQ",
+      "video_id": "egIe0rwofpI",
+      "title": "NEXZ - SAUCIN' (Tradução) [Clipe Oficial]"
+    },
+    {
+      "channel_id": "UC7OeNNuAq23-6L6bDOSm8xQ",
+      "video_id": "hVoThCepYjE",
+      "title": "Major Lazer & DJ Snake ft. MØ - Lean On (Tradução) [Clipe Oficial]"
+    },
+    {
+      "channel_id": "UC7OeNNuAq23-6L6bDOSm8xQ",
+      "video_id": "hXymUnBvbrQ",
+      "title": "Stray Kids - This & That (Tradução) [Clipe Oficial]"
+    },
+    {
+      "channel_id": "UC7OeNNuAq23-6L6bDOSm8xQ",
+      "video_id": "kP19rSkhXoY",
+      "title": "ITZY - Motto (Tradução) [Clipe Oficial]"
+    },
+    {
+      "channel_id": "UC7OeNNuAq23-6L6bDOSm8xQ",
+      "video_id": "mWQ_MhEtvkY",
+      "title": "Stray Kids - Way Out (Tradução/Legendado)"
+    },
+    {
+      "channel_id": "UC7OeNNuAq23-6L6bDOSm8xQ",
+      "video_id": "nsIu7VAWAAM",
+      "title": "NMIXX - Crescendo (Tradução) [Clipe Oficial]"
+    },
+    {
+      "channel_id": "UC7OeNNuAq23-6L6bDOSm8xQ",
+      "video_id": "pyC64YQiAsc",
+      "title": "TXT - Setsuna Hanabi (Tradução/Legendado) [Clipe Oficial]"
+    },
+    {
+      "channel_id": "UC7OeNNuAq23-6L6bDOSm8xQ",
+      "video_id": "q-fX7VFhToU",
+      "title": "#straykids #felix #tradução #legendado #kpop #shorts"
+    },
+    {
+      "channel_id": "UC7OeNNuAq23-6L6bDOSm8xQ",
+      "video_id": "y3EUr3sOV18",
+      "title": "WONHO - Don’t Wake Me Up! [Tradução] (Clipe Oficial)"
+    },
+    {
+      "channel_id": "UCOCfm7WIsubQvwGjRfpXm7g",
+      "video_id": "5HzQnXdqtcg",
+      "title": "🌽🤠 ARRUME-SE COMIGO PARA A FESTA JUNINA DA ESCOLA DO MEU FILHO | Comprei Bota e Look Novo! ✨"
+    },
+    {
+      "channel_id": "UCOCfm7WIsubQvwGjRfpXm7g",
+      "video_id": "7geUQVlmPPA",
+      "title": "festa junina 😍✨"
+    },
+    {
+      "channel_id": "UCOCfm7WIsubQvwGjRfpXm7g",
+      "video_id": "B-8HK52m_6Q",
+      "title": "Pesquise UV5NT para achar as peças! CUPOM:samarasantosoficial773   #SHEINsaveinstyle #sheintrends"
+    },
+    {
+      "channel_id": "UCOCfm7WIsubQvwGjRfpXm7g",
+      "video_id": "EcdHISbaVbc",
+      "title": "Arrume-se comigo para festa de São Pedro ✨"
+    },
+    {
+      "channel_id": "UCOCfm7WIsubQvwGjRfpXm7g",
+      "video_id": "OC3rUkm1aZc",
+      "title": "MARIDO FOI PRA COZINHA! 😱 Fez peixe no coco 🥥 + rotina de vários dias + comprinhas"
+    },
+    {
+      "channel_id": "UCOCfm7WIsubQvwGjRfpXm7g",
+      "video_id": "Vm6jdrKDVE0",
+      "title": "VLOG DO NOSSO FINAL DE SEMANA SEM FILTROS - ROTINA REAL + SAIDINHA + REFEIÇÕES + TREINO DE HOJE 😮‍💨😱"
+    },
+    {
+      "channel_id": "UCOCfm7WIsubQvwGjRfpXm7g",
+      "video_id": "VpGSR6AE5lc",
+      "title": "MEU TREINO DE QUADRÍCEPS"
+    },
+    {
+      "channel_id": "UCOCfm7WIsubQvwGjRfpXm7g",
+      "video_id": "_zKvjxXr7XM",
+      "title": "VLOG: Compras de reposição para o mês | Meu treino - Lavei a cozinha inteira / Vida real"
+    },
+    {
+      "channel_id": "UCOCfm7WIsubQvwGjRfpXm7g",
+      "video_id": "fA3cg_nZ69s",
+      "title": "ABRINDO MIL REAIS EM COMPRAS NA SHEIN"
+    },
+    {
+      "channel_id": "UCOCfm7WIsubQvwGjRfpXm7g",
+      "video_id": "k5pbAHlhgyM",
+      "title": "COMPREI LOOK NOVO 🛍️ E FIZEMOS UMA PEQUENA VIAGEM EM FAMÍLIA 🥰❤️ | VLOG"
+    },
+    {
+      "channel_id": "UCu63d5lTTJIKa7mNeJbRNIA",
+      "video_id": "PE0wOyKPBqA",
+      "title": "Bike trekking, pode isso???"
+    },
+    {
+      "channel_id": "UCvQzawL23D-57Qbl6FK_Ogg",
+      "video_id": "BstaMFlSLEM",
+      "title": "fiz um beat usando um reels aleatório... 🫪  #producer  #beatmaker"
+    },
+    {
+      "channel_id": "UCvQzawL23D-57Qbl6FK_Ogg",
+      "video_id": "G34ezhZ_fUc",
+      "title": "você precisa ver esses novos sons do FL Studio 26... #flstudio #producaomusical #shorts"
+    },
+    {
+      "channel_id": "UCvQzawL23D-57Qbl6FK_Ogg",
+      "video_id": "IfXxEmf7ewk",
+      "title": "os REELS são uma mina de ouro para produtores..."
+    },
+    {
+      "channel_id": "UCvQzawL23D-57Qbl6FK_Ogg",
+      "video_id": "PvaIQ7uwmxI",
+      "title": "fiz uma MÚSICA pra COPA DO MUNDO... NEYMAR aprovou? 😳"
+    },
+    {
+      "channel_id": "UCvQzawL23D-57Qbl6FK_Ogg",
+      "video_id": "XIIFBQG98qo",
+      "title": "SARTØR fala sobre como evoluir na GUITARRA na era da informação infinita durante LIVE"
+    },
+    {
+      "channel_id": "UCvQzawL23D-57Qbl6FK_Ogg",
+      "video_id": "YpVf9ePAxgA",
+      "title": "se PABLLO VITTAR fosse METAL..."
+    },
+    {
+      "channel_id": "UCvQzawL23D-57Qbl6FK_Ogg",
+      "video_id": "pLkbmp7IiRM",
+      "title": "minha vocal chain, REVELADA! vocais PRO em SEGUNDOS! 👀  #musicproducer #ableton #vocalchain"
+    },
+    {
+      "channel_id": "UCvQzawL23D-57Qbl6FK_Ogg",
+      "video_id": "vHFWQh3aP24",
+      "title": "tirar um som de voz F#D4 ficou FÁCIL agora! minha VOCAL CHAIN!"
+    },
+    {
+      "channel_id": "UCvQzawL23D-57Qbl6FK_Ogg",
+      "video_id": "vy8PCJDG9NI",
+      "title": "o FL STUDIO 26 acabou de SUBIR de nível... 👀"
+    },
+    {
+      "channel_id": "UCvQzawL23D-57Qbl6FK_Ogg",
+      "video_id": "zAg3Oy-rqYs",
+      "title": "FLIPANDO a sample de vocês na LIVE 👀 #flstudio  #beatmaker"
+    }
+  ],
+  "byChannel": [
+    {
+      "channel_id": "UC-d4a6Vgcld9WA1v6auLOCA",
+      "title": "UNIVERSO MOTOS",
+      "contents": 30,
+      "likes_policy_zero": 0,
+      "description_empty": 2,
+      "types": {
+        "video": 16,
+        "short": 14
+      },
+      "subscriber_count": "1720",
+      "total_view_count": "225893",
+      "total_video_count": "388",
+      "video_views": "9588",
+      "video_likes": "195",
+      "video_comments": "6",
+      "channel_issues": 0,
+      "video_issues": 0
+    },
+    {
+      "channel_id": "UC-u6HYHgypke493mAsoAshQ",
+      "title": "Flor de Farinha",
+      "contents": 4,
+      "likes_policy_zero": 0,
+      "description_empty": 0,
+      "types": {
+        "video": 4
+      },
+      "subscriber_count": "911000",
+      "total_view_count": "104039328",
+      "total_video_count": "452",
+      "video_views": "56217",
+      "video_likes": "3558",
+      "video_comments": "234",
+      "channel_issues": 0,
+      "video_issues": 0
+    },
+    {
+      "channel_id": "UC-vLvoh_mCzD3y8U6yHuAPQ",
+      "title": "PV PALPITES",
+      "contents": 30,
+      "likes_policy_zero": 0,
+      "description_empty": 6,
+      "types": {
+        "video": 24,
+        "short": 6
+      },
+      "subscriber_count": "93500",
+      "total_view_count": "11368604",
+      "total_video_count": "1586",
+      "video_views": "162670",
+      "video_likes": "13200",
+      "video_comments": "883",
+      "channel_issues": 0,
+      "video_issues": 0
+    },
+    {
+      "channel_id": "UC0FaxAZ-OLsfd5OsciRDflA",
+      "title": "Doce Mundo da Sol",
+      "contents": 28,
+      "likes_policy_zero": 0,
+      "description_empty": 15,
+      "types": {
+        "video": 9,
+        "short": 18,
+        "live": 1
+      },
+      "subscriber_count": "15400",
+      "total_view_count": "3987452",
+      "total_video_count": "303",
+      "video_views": "30331",
+      "video_likes": "1079",
+      "video_comments": "47",
+      "channel_issues": 0,
+      "video_issues": 0
+    },
+    {
+      "channel_id": "UC0tQ665T1EJlI422-D_WSiw",
+      "title": "Gigante Richard Cortes",
+      "contents": 30,
+      "likes_policy_zero": 0,
+      "description_empty": 0,
+      "types": {
+        "live": 12,
+        "video": 18
+      },
+      "subscriber_count": "31300",
+      "total_view_count": "7545092",
+      "total_video_count": "2095",
+      "video_views": "106077",
+      "video_likes": "7106",
+      "video_comments": "627",
+      "channel_issues": 0,
+      "video_issues": 0
+    },
+    {
+      "channel_id": "UC1Lh-XiRAzRtg4lIOeztl4A",
+      "title": "WANYA SANTOS ACESSÓRIOS",
+      "contents": 15,
+      "likes_policy_zero": 0,
+      "description_empty": 6,
+      "types": {
+        "video": 9,
+        "short": 6
+      },
+      "subscriber_count": "157000",
+      "total_view_count": "9292098",
+      "total_video_count": "334",
+      "video_views": "84798",
+      "video_likes": "8004",
+      "video_comments": "555",
+      "channel_issues": 0,
+      "video_issues": 0
+    },
+    {
+      "channel_id": "UC1j6f1dgg717ex7Qa-FgHjQ",
+      "title": "Dona Onça - por Erika Barbosa",
+      "contents": 11,
+      "likes_policy_zero": 0,
+      "description_empty": 6,
+      "types": {
+        "short": 10,
+        "video": 1
+      },
+      "subscriber_count": "22300",
+      "total_view_count": "3711952",
+      "total_video_count": "467",
+      "video_views": "12777",
+      "video_likes": "253",
+      "video_comments": "25",
+      "channel_issues": 0,
+      "video_issues": 0
+    },
+    {
+      "channel_id": "UC1kVAZnFwzlU5c6i7LRF9DA",
+      "title": "Kelly Prado Handmade",
+      "contents": 30,
+      "likes_policy_zero": 0,
+      "description_empty": 1,
+      "types": {
+        "video": 29,
+        "short": 1
+      },
+      "subscriber_count": "84200",
+      "total_view_count": "16625878",
+      "total_video_count": "1269",
+      "video_views": "594278",
+      "video_likes": "19951",
+      "video_comments": "689",
+      "channel_issues": 0,
+      "video_issues": 0
+    },
+    {
+      "channel_id": "UC2rz-L190FmdgjN1i32SCOQ",
+      "title": "Motor&CIA",
+      "contents": 30,
+      "likes_policy_zero": 0,
+      "description_empty": 21,
+      "types": {
+        "short": 21,
+        "video": 9
+      },
+      "subscriber_count": "117000",
+      "total_view_count": "48129577",
+      "total_video_count": "1617",
+      "video_views": "597131",
+      "video_likes": "25433",
+      "video_comments": "1319",
+      "channel_issues": 0,
+      "video_issues": 0
+    },
+    {
+      "channel_id": "UC2xt2x1gLb8FmwBsarQ0AdA",
+      "title": "Jéssica Lins",
+      "contents": 26,
+      "likes_policy_zero": 0,
+      "description_empty": 9,
+      "types": {
+        "short": 10,
+        "video": 16
+      },
+      "subscriber_count": "16300",
+      "total_view_count": "3581504",
+      "total_video_count": "513",
+      "video_views": "66714",
+      "video_likes": "1613",
+      "video_comments": "503",
+      "channel_issues": 0,
+      "video_issues": 0
+    },
+    {
+      "channel_id": "UC34nZd7WPP3--8KxjO4_MbA",
+      "title": "Fagner Trainer",
+      "contents": 10,
+      "likes_policy_zero": 0,
+      "description_empty": 0,
+      "types": {
+        "video": 10
+      },
+      "subscriber_count": "128000",
+      "total_view_count": "5322322",
+      "total_video_count": "426",
+      "video_views": "24288",
+      "video_likes": "3111",
+      "video_comments": "532",
+      "channel_issues": 0,
+      "video_issues": 0
+    },
+    {
+      "channel_id": "UC3tWyhbC9dUZAbOXC0DWcCA",
+      "title": "Ricardo Santana",
+      "contents": 30,
+      "likes_policy_zero": 0,
+      "description_empty": 0,
+      "types": {
+        "video": 28,
+        "live": 2
+      },
+      "subscriber_count": "28000",
+      "total_view_count": "3687694",
+      "total_video_count": "592",
+      "video_views": "265428",
+      "video_likes": "40469",
+      "video_comments": "3432",
+      "channel_issues": 0,
+      "video_issues": 0
+    },
+    {
+      "channel_id": "UC5w0z3TmSmabWQRfLcHE6nA",
+      "title": "Luciana Arte em Bijuterias",
+      "contents": 4,
+      "likes_policy_zero": 0,
+      "description_empty": 0,
+      "types": {
+        "video": 3,
+        "short": 1
+      },
+      "subscriber_count": "180000",
+      "total_view_count": "9620339",
+      "total_video_count": "247",
+      "video_views": "12674",
+      "video_likes": "924",
+      "video_comments": "98",
+      "channel_issues": 0,
+      "video_issues": 0
+    },
+    {
+      "channel_id": "UC68VFt5fVXJ1cSXxP1nDPKg",
+      "title": "Rei da Bike",
+      "contents": 10,
+      "likes_policy_zero": 0,
+      "description_empty": 9,
+      "types": {
+        "short": 9,
+        "video": 1
+      },
+      "subscriber_count": "3340",
+      "total_view_count": "1512441",
+      "total_video_count": "234",
+      "video_views": "34349",
+      "video_likes": "1063",
+      "video_comments": "22",
+      "channel_issues": 0,
+      "video_issues": 0
+    },
+    {
+      "channel_id": "UC7OeNNuAq23-6L6bDOSm8xQ",
+      "title": "Johnny",
+      "contents": 30,
+      "likes_policy_zero": 30,
+      "description_empty": 1,
+      "types": {
+        "video": 29,
+        "short": 1
+      },
+      "subscriber_count": "12100",
+      "total_view_count": "3872774",
+      "total_video_count": "499",
+      "video_views": "24613",
+      "video_likes": "0",
+      "video_comments": "50",
+      "channel_issues": 0,
+      "video_issues": 0
+    },
+    {
+      "channel_id": "UC8sg8HnmSOjwTCoKx9j6XVw",
+      "title": "Bead Jewelry Bootcamp",
+      "contents": 4,
+      "likes_policy_zero": 0,
+      "description_empty": 1,
+      "types": {
+        "video": 4
+      },
+      "subscriber_count": "6110",
+      "total_view_count": "143310",
+      "total_video_count": "155",
+      "video_views": "846",
+      "video_likes": "69",
+      "video_comments": "2",
+      "channel_issues": 0,
+      "video_issues": 0
+    },
+    {
+      "channel_id": "UC9zHETING2h3aDX5m_rmW5Q",
+      "title": "Criando Bicos com agulha",
+      "contents": 4,
+      "likes_policy_zero": 0,
+      "description_empty": 4,
+      "types": {
+        "video": 3,
+        "short": 1
+      },
+      "subscriber_count": "23200",
+      "total_view_count": "1584618",
+      "total_video_count": "393",
+      "video_views": "712",
+      "video_likes": "38",
+      "video_comments": "0",
+      "channel_issues": 0,
+      "video_issues": 0
+    },
+    {
+      "channel_id": "UCA9C5eQp89xjeOH1SgeLMnw",
+      "title": "Daiany Sousa",
+      "contents": 30,
+      "likes_policy_zero": 0,
+      "description_empty": 30,
+      "types": {
+        "short": 30
+      },
+      "subscriber_count": "6610",
+      "total_view_count": "2426510",
+      "total_video_count": "590",
+      "video_views": "55229",
+      "video_likes": "1140",
+      "video_comments": "33",
+      "channel_issues": 0,
+      "video_issues": 0
+    },
+    {
+      "channel_id": "UCBN1TFSLLxnnlndRQiFmCfg",
+      "title": "Artes da Cata",
+      "contents": 21,
+      "likes_policy_zero": 0,
+      "description_empty": 1,
+      "types": {
+        "video": 20,
+        "short": 1
+      },
+      "subscriber_count": "673000",
+      "total_view_count": "84809120",
+      "total_video_count": "2171",
+      "video_views": "26872",
+      "video_likes": "2175",
+      "video_comments": "155",
+      "channel_issues": 0,
+      "video_issues": 0
+    },
+    {
+      "channel_id": "UCBozcmoGaBE2_wpvpFDmnyQ",
+      "title": "Teteu Palpites TIPS",
+      "contents": 30,
+      "likes_policy_zero": 0,
+      "description_empty": 11,
+      "types": {
+        "video": 20,
+        "short": 10
+      },
+      "subscriber_count": "23900",
+      "total_view_count": "11355522",
+      "total_video_count": "589",
+      "video_views": "17349",
+      "video_likes": "736",
+      "video_comments": "9",
+      "channel_issues": 0,
+      "video_issues": 0
+    },
+    {
+      "channel_id": "UCCNdDo0Nh-y3PcWeUnDGwtg",
+      "title": "Sala de Trânsito",
+      "contents": 30,
+      "likes_policy_zero": 0,
+      "description_empty": 0,
+      "types": {
+        "video": 30
+      },
+      "subscriber_count": "62700",
+      "total_view_count": "8238415",
+      "total_video_count": "1949",
+      "video_views": "8682",
+      "video_likes": "835",
+      "video_comments": "105",
+      "channel_issues": 0,
+      "video_issues": 0
+    },
+    {
+      "channel_id": "UCD2oSog85xBT8fDvw6i_jCA",
+      "title": "Inteligentista",
+      "contents": 9,
+      "likes_policy_zero": 0,
+      "description_empty": 0,
+      "types": {
+        "live": 4,
+        "video": 5
+      },
+      "subscriber_count": "265000",
+      "total_view_count": "9089001",
+      "total_video_count": "145",
+      "video_views": "217159",
+      "video_likes": "28428",
+      "video_comments": "2037",
+      "channel_issues": 0,
+      "video_issues": 0
+    },
+    {
+      "channel_id": "UCEU4GitV5Hs2b6DKgIm9KMQ",
+      "title": "Matemática das Apostas",
+      "contents": 30,
+      "likes_policy_zero": 0,
+      "description_empty": 0,
+      "types": {
+        "video": 30
+      },
+      "subscriber_count": "29300",
+      "total_view_count": "1992105",
+      "total_video_count": "674",
+      "video_views": "115180",
+      "video_likes": "6476",
+      "video_comments": "569",
+      "channel_issues": 0,
+      "video_issues": 0
+    },
+    {
+      "channel_id": "UCExDl4GyUZKSPJnBMoxQh5A",
+      "title": "O Melhor Prato",
+      "contents": 20,
+      "likes_policy_zero": 0,
+      "description_empty": 8,
+      "types": {
+        "short": 20
+      },
+      "subscriber_count": "108000",
+      "total_view_count": "7066799",
+      "total_video_count": "492",
+      "video_views": "531987",
+      "video_likes": "20712",
+      "video_comments": "492",
+      "channel_issues": 0,
+      "video_issues": 0
+    },
+    {
+      "channel_id": "UCFyvIIY8ju8CxTvlzTDDgoA",
+      "title": "Canal Hoops!",
+      "contents": 2,
+      "likes_policy_zero": 0,
+      "description_empty": 0,
+      "types": {
+        "video": 2
+      },
+      "subscriber_count": "45700",
+      "total_view_count": "6005985",
+      "total_video_count": "370",
+      "video_views": "5622",
+      "video_likes": "327",
+      "video_comments": "44",
+      "channel_issues": 0,
+      "video_issues": 0
+    },
+    {
+      "channel_id": "UCGgOQyJQdCWDu8l5jePsteQ",
+      "title": "Motolama Magazine",
+      "contents": 26,
+      "likes_policy_zero": 0,
+      "description_empty": 0,
+      "types": {
+        "short": 12,
+        "video": 14
+      },
+      "subscriber_count": "39900",
+      "total_view_count": "2892857",
+      "total_video_count": "340",
+      "video_views": "150507",
+      "video_likes": "22933",
+      "video_comments": "2499",
+      "channel_issues": 0,
+      "video_issues": 0
+    },
+    {
+      "channel_id": "UCHyiv8lnjBW43ec0TqQkk9Q",
+      "title": "LUCRANDO AGORA TIPS",
+      "contents": 30,
+      "likes_policy_zero": 0,
+      "description_empty": 0,
+      "types": {
+        "video": 30
+      },
+      "subscriber_count": "11600",
+      "total_view_count": "924344",
+      "total_video_count": "1366",
+      "video_views": "72109",
+      "video_likes": "3798",
+      "video_comments": "87",
+      "channel_issues": 0,
+      "video_issues": 0
+    },
+    {
+      "channel_id": "UCIAWRdkgxcy9_nQVeDN1ZZg",
+      "title": "Bets de Hoje",
+      "contents": 30,
+      "likes_policy_zero": 0,
+      "description_empty": 0,
+      "types": {
+        "video": 30
+      },
+      "subscriber_count": "11500",
+      "total_view_count": "1306603",
+      "total_video_count": "360",
+      "video_views": "105121",
+      "video_likes": "9069",
+      "video_comments": "770",
+      "channel_issues": 0,
+      "video_issues": 0
+    },
+    {
+      "channel_id": "UCJcMjuzX4KeG9XLKAWWL5zw",
+      "title": "Matheus Watanabi",
+      "contents": 14,
+      "likes_policy_zero": 0,
+      "description_empty": 14,
+      "types": {
+        "short": 14
+      },
+      "subscriber_count": "513000",
+      "total_view_count": "385166205",
+      "total_video_count": "2440",
+      "video_views": "360779",
+      "video_likes": "4066",
+      "video_comments": "36",
+      "channel_issues": 0,
+      "video_issues": 0
+    },
+    {
+      "channel_id": "UCKkCo6ITuWFgQ21e3W5CBqg",
+      "title": "Manual Do Artesanato",
+      "contents": 7,
+      "likes_policy_zero": 0,
+      "description_empty": 2,
+      "types": {
+        "video": 5,
+        "short": 2
+      },
+      "subscriber_count": "99900",
+      "total_view_count": "5016948",
+      "total_video_count": "217",
+      "video_views": "5210",
+      "video_likes": "258",
+      "video_comments": "10",
+      "channel_issues": 0,
+      "video_issues": 0
+    },
+    {
+      "channel_id": "UCM5IM0KfYTW3792zuydLgAg",
+      "title": "Guedes tips",
+      "contents": 2,
+      "likes_policy_zero": 0,
+      "description_empty": 0,
+      "types": {
+        "video": 2
+      },
+      "subscriber_count": "61600",
+      "total_view_count": "3744069",
+      "total_video_count": "900",
+      "video_views": "4761",
+      "video_likes": "381",
+      "video_comments": "53",
+      "channel_issues": 0,
+      "video_issues": 0
+    },
+    {
+      "channel_id": "UCMZh4EQg_F8whPx2ZY49Pnw",
+      "title": "Dr. Mateus Bem - Saúde o Caminho",
+      "contents": 4,
+      "likes_policy_zero": 0,
+      "description_empty": 0,
+      "types": {
+        "short": 4
+      },
+      "subscriber_count": "14700",
+      "total_view_count": "594033",
+      "total_video_count": "188",
+      "video_views": "2651",
+      "video_likes": "142",
+      "video_comments": "18",
+      "channel_issues": 0,
+      "video_issues": 0
+    },
+    {
+      "channel_id": "UCNCSZVTzpLwqyl5V2BL8sHg",
+      "title": "JoiasVip",
+      "contents": 29,
+      "likes_policy_zero": 0,
+      "description_empty": 0,
+      "types": {
+        "live": 29
+      },
+      "subscriber_count": "27700",
+      "total_view_count": "4527136",
+      "total_video_count": "589",
+      "video_views": "44058",
+      "video_likes": "1186",
+      "video_comments": "5",
+      "channel_issues": 0,
+      "video_issues": 0
+    },
+    {
+      "channel_id": "UCNjzTdlj-k_aiTtsWipPD8w",
+      "title": "SolarBalls - Brasil",
+      "contents": 30,
+      "likes_policy_zero": 0,
+      "description_empty": 0,
+      "types": {
+        "short": 19,
+        "video": 11
+      },
+      "subscriber_count": "230000",
+      "total_view_count": "58601660",
+      "total_video_count": "229",
+      "video_views": "2105990",
+      "video_likes": "91284",
+      "video_comments": "6130",
+      "channel_issues": 0,
+      "video_issues": 0
+    },
+    {
+      "channel_id": "UCOCfm7WIsubQvwGjRfpXm7g",
+      "title": "Samara Santos",
+      "contents": 15,
+      "likes_policy_zero": 10,
+      "description_empty": 1,
+      "types": {
+        "short": 5,
+        "video": 10
+      },
+      "subscriber_count": "109000",
+      "total_view_count": "10284045",
+      "total_video_count": "638",
+      "video_views": "47670",
+      "video_likes": "2377",
+      "video_comments": "347",
+      "channel_issues": 0,
+      "video_issues": 0
+    },
+    {
+      "channel_id": "UCOzpeyo_EyQi7xatAqSwQWg",
+      "title": "A Fórmula da Semijoia - Fabio Castro",
+      "contents": 8,
+      "likes_policy_zero": 0,
+      "description_empty": 5,
+      "types": {
+        "live": 1,
+        "video": 2,
+        "short": 5
+      },
+      "subscriber_count": "147000",
+      "total_view_count": "2347579",
+      "total_video_count": "363",
+      "video_views": "2244",
+      "video_likes": "82",
+      "video_comments": "5",
+      "channel_issues": 0,
+      "video_issues": 0
+    },
+    {
+      "channel_id": "UCPjIhA6bSDAvokY007j9h5g",
+      "title": "Philippe Iodjahn",
+      "contents": 13,
+      "likes_policy_zero": 0,
+      "description_empty": 0,
+      "types": {
+        "video": 4,
+        "short": 9
+      },
+      "subscriber_count": "256000",
+      "total_view_count": "82057477",
+      "total_video_count": "742",
+      "video_views": "2303580",
+      "video_likes": "46479",
+      "video_comments": "879",
+      "channel_issues": 0,
+      "video_issues": 0
+    },
+    {
+      "channel_id": "UCQpgO_PDgQTd4rlMHj-0iUA",
+      "title": "Sonia Maria Arte",
+      "contents": 7,
+      "likes_policy_zero": 0,
+      "description_empty": 1,
+      "types": {
+        "video": 3,
+        "live": 2,
+        "short": 2
+      },
+      "subscriber_count": "18800",
+      "total_view_count": "1803152",
+      "total_video_count": "593",
+      "video_views": "3568",
+      "video_likes": "154",
+      "video_comments": "11",
+      "channel_issues": 0,
+      "video_issues": 0
+    },
+    {
+      "channel_id": "UCR1uOm9uM6pEaetMDrV7nGQ",
+      "title": "Motocycle & Adventure Pianão",
+      "contents": 4,
+      "likes_policy_zero": 0,
+      "description_empty": 0,
+      "types": {
+        "short": 4
+      },
+      "subscriber_count": "50700",
+      "total_view_count": "4270953",
+      "total_video_count": "305",
+      "video_views": "7159",
+      "video_likes": "93",
+      "video_comments": "8",
+      "channel_issues": 0,
+      "video_issues": 0
+    },
+    {
+      "channel_id": "UCSCo5xAaZLMzpV6gCS1MY7g",
+      "title": "Elaine Croft",
+      "contents": 3,
+      "likes_policy_zero": 0,
+      "description_empty": 0,
+      "types": {
+        "short": 3
+      },
+      "subscriber_count": "24900",
+      "total_view_count": "10416962",
+      "total_video_count": "663",
+      "video_views": "10075",
+      "video_likes": "108",
+      "video_comments": "4",
+      "channel_issues": 0,
+      "video_issues": 0
+    },
+    {
+      "channel_id": "UCTJr1_hL_pse-DTdDEQFX9g",
+      "title": "O Astronauta Urbano",
+      "contents": 1,
+      "likes_policy_zero": 0,
+      "description_empty": 0,
+      "types": {
+        "video": 1
+      },
+      "subscriber_count": "16600",
+      "total_view_count": "1830235",
+      "total_video_count": "183",
+      "video_views": "3129",
+      "video_likes": "393",
+      "video_comments": "57",
+      "channel_issues": 0,
+      "video_issues": 0
+    },
+    {
+      "channel_id": "UCVFCHmRQbIwjj6F3d9JIteg",
+      "title": "Groove Bikes",
+      "contents": 17,
+      "likes_policy_zero": 0,
+      "description_empty": 4,
+      "types": {
+        "short": 15,
+        "video": 2
+      },
+      "subscriber_count": "1820",
+      "total_view_count": "236114",
+      "total_video_count": "138",
+      "video_views": "7787",
+      "video_likes": "195",
+      "video_comments": "9",
+      "channel_issues": 0,
+      "video_issues": 0
+    },
+    {
+      "channel_id": "UCZ0VeEQhJiEKt_kMvnldCHw",
+      "title": "Palpites de Futebol - Guilherme Delpino",
+      "contents": 30,
+      "likes_policy_zero": 0,
+      "description_empty": 26,
+      "types": {
+        "short": 26,
+        "video": 4
+      },
+      "subscriber_count": "275000",
+      "total_view_count": "4445840",
+      "total_video_count": "712",
+      "video_views": "27902",
+      "video_likes": "1247",
+      "video_comments": "244",
+      "channel_issues": 0,
+      "video_issues": 0
+    },
+    {
+      "channel_id": "UCZrt0rNS66rpxyzlfSHBQwg",
+      "title": "Jilsi Indica 💞",
+      "contents": 30,
+      "likes_policy_zero": 0,
+      "description_empty": 30,
+      "types": {
+        "short": 30
+      },
+      "subscriber_count": "1770",
+      "total_view_count": "434442",
+      "total_video_count": "212",
+      "video_views": "15495",
+      "video_likes": "297",
+      "video_comments": "15",
+      "channel_issues": 0,
+      "video_issues": 0
+    },
+    {
+      "channel_id": "UCaBmV5wtglN4Npywdq4ZBQA",
+      "title": "Bike Ride",
+      "contents": 1,
+      "likes_policy_zero": 0,
+      "description_empty": 0,
+      "types": {
+        "short": 1
+      },
+      "subscriber_count": "9490",
+      "total_view_count": "5287720",
+      "total_video_count": "1495",
+      "video_views": "305",
+      "video_likes": "3",
+      "video_comments": "0",
+      "channel_issues": 0,
+      "video_issues": 0
+    },
+    {
+      "channel_id": "UCb6TzWWJjwFKywZOCFcExJQ",
+      "title": "Pedaloucos Curitiba",
+      "contents": 5,
+      "likes_policy_zero": 0,
+      "description_empty": 0,
+      "types": {
+        "video": 5
+      },
+      "subscriber_count": "1550",
+      "total_view_count": "70107",
+      "total_video_count": "339",
+      "video_views": "1993",
+      "video_likes": "177",
+      "video_comments": "26",
+      "channel_issues": 0,
+      "video_issues": 0
+    },
+    {
+      "channel_id": "UCb7yqSJ5BHkr44QpHIzj1gQ",
+      "title": "RAFAEL PALPITES",
+      "contents": 30,
+      "likes_policy_zero": 0,
+      "description_empty": 0,
+      "types": {
+        "video": 30
+      },
+      "subscriber_count": "54100",
+      "total_view_count": "6645683",
+      "total_video_count": "1619",
+      "video_views": "175158",
+      "video_likes": "6924",
+      "video_comments": "315",
+      "channel_issues": 0,
+      "video_issues": 0
+    },
+    {
+      "channel_id": "UCcDerngKTEU5ryjMS-ThLbg",
+      "title": "TV Norte Pará | Afiliada SBT",
+      "contents": 30,
+      "likes_policy_zero": 0,
+      "description_empty": 3,
+      "types": {
+        "video": 29,
+        "live": 1
+      },
+      "subscriber_count": "325000",
+      "total_view_count": "13305106",
+      "total_video_count": "9670",
+      "video_views": "35483",
+      "video_likes": "1380",
+      "video_comments": "147",
+      "channel_issues": 0,
+      "video_issues": 0
+    },
+    {
+      "channel_id": "UCcU0Da1a7MAPKtjITZRpSfQ",
+      "title": "High Torque Store",
+      "contents": 30,
+      "likes_policy_zero": 0,
+      "description_empty": 0,
+      "types": {
+        "short": 30
+      },
+      "subscriber_count": "25400",
+      "total_view_count": "19892233",
+      "total_video_count": "1239",
+      "video_views": "75419",
+      "video_likes": "4764",
+      "video_comments": "79",
+      "channel_issues": 0,
+      "video_issues": 0
+    },
+    {
+      "channel_id": "UCfOh1YhAHARTWbfoEHkGg6w",
+      "title": "ABRINDO O MAPA",
+      "contents": 30,
+      "likes_policy_zero": 0,
+      "description_empty": 0,
+      "types": {
+        "video": 30
+      },
+      "subscriber_count": "32200",
+      "total_view_count": "5485929",
+      "total_video_count": "369",
+      "video_views": "332157",
+      "video_likes": "22353",
+      "video_comments": "2571",
+      "channel_issues": 0,
+      "video_issues": 0
+    },
+    {
+      "channel_id": "UCgItrHIOhKDN_0Qd1TJUITw",
+      "title": "Caio do Anesio o vovô do Brasil",
+      "contents": 30,
+      "likes_policy_zero": 0,
+      "description_empty": 0,
+      "types": {
+        "short": 29,
+        "video": 1
+      },
+      "subscriber_count": "226000",
+      "total_view_count": "107625237",
+      "total_video_count": "13185",
+      "video_views": "101529",
+      "video_likes": "4031",
+      "video_comments": "414",
+      "channel_issues": 0,
+      "video_issues": 0
+    },
+    {
+      "channel_id": "UChqP8zJwR3ZFDRq23q0aftg",
+      "title": "Cipullas",
+      "contents": 15,
+      "likes_policy_zero": 0,
+      "description_empty": 0,
+      "types": {
+        "video": 15
+      },
+      "subscriber_count": "13500",
+      "total_view_count": "2196108",
+      "total_video_count": "293",
+      "video_views": "113223",
+      "video_likes": "7467",
+      "video_comments": "445",
+      "channel_issues": 0,
+      "video_issues": 0
+    },
+    {
+      "channel_id": "UCiN74t7gNYif8vj5TQXri5w",
+      "title": "natan 019",
+      "contents": 30,
+      "likes_policy_zero": 0,
+      "description_empty": 17,
+      "types": {
+        "short": 17,
+        "video": 13
+      },
+      "subscriber_count": "593000",
+      "total_view_count": "121563791",
+      "total_video_count": "2362",
+      "video_views": "109512",
+      "video_likes": "4676",
+      "video_comments": "214",
+      "channel_issues": 0,
+      "video_issues": 0
+    },
+    {
+      "channel_id": "UCinQhZg0ee3s3cEphmUdA2g",
+      "title": "Debora",
+      "contents": 1,
+      "likes_policy_zero": 0,
+      "description_empty": 0,
+      "types": {
+        "video": 1
+      },
+      "subscriber_count": "6520",
+      "total_view_count": "1494223",
+      "total_video_count": "161",
+      "video_views": "27",
+      "video_likes": "2",
+      "video_comments": "0",
+      "channel_issues": 0,
+      "video_issues": 0
+    },
+    {
+      "channel_id": "UCjOxn8cub3rZTAgHq-lnqEg",
+      "title": "Manicômio B",
+      "contents": 30,
+      "likes_policy_zero": 0,
+      "description_empty": 30,
+      "types": {
+        "short": 28,
+        "video": 2
+      },
+      "subscriber_count": "6440",
+      "total_view_count": "1019983",
+      "total_video_count": "746",
+      "video_views": "22881",
+      "video_likes": "807",
+      "video_comments": "70",
+      "channel_issues": 0,
+      "video_issues": 0
+    },
+    {
+      "channel_id": "UCkzIiGG-O2cYHuTu70FBvIA",
+      "title": "Adriana Penna - Nafonte Chinelos",
+      "contents": 28,
+      "likes_policy_zero": 0,
+      "description_empty": 2,
+      "types": {
+        "short": 21,
+        "live": 2,
+        "video": 5
+      },
+      "subscriber_count": "327000",
+      "total_view_count": "18623772",
+      "total_video_count": "1237",
+      "video_views": "86571",
+      "video_likes": "4725",
+      "video_comments": "275",
+      "channel_issues": 0,
+      "video_issues": 0
+    },
+    {
+      "channel_id": "UCl0hWqLLR-auVUXuZ9atTQA",
+      "title": "M. V. 7 - Motos",
+      "contents": 30,
+      "likes_policy_zero": 0,
+      "description_empty": 0,
+      "types": {
+        "video": 16,
+        "short": 14
+      },
+      "subscriber_count": "5970",
+      "total_view_count": "1300449",
+      "total_video_count": "455",
+      "video_views": "115580",
+      "video_likes": "3999",
+      "video_comments": "447",
+      "channel_issues": 0,
+      "video_issues": 0
+    },
+    {
+      "channel_id": "UClehmSvwuhQweUMtN7IcBzw",
+      "title": "PALPITES DO REI",
+      "contents": 30,
+      "likes_policy_zero": 0,
+      "description_empty": 0,
+      "types": {
+        "video": 30
+      },
+      "subscriber_count": "193000",
+      "total_view_count": "32735721",
+      "total_video_count": "2306",
+      "video_views": "430856",
+      "video_likes": "13216",
+      "video_comments": "513",
+      "channel_issues": 0,
+      "video_issues": 0
+    },
+    {
+      "channel_id": "UCnzkR6iSvqowub0jHOETIVQ",
+      "title": "CarlosBarrosBike",
+      "contents": 30,
+      "likes_policy_zero": 0,
+      "description_empty": 8,
+      "types": {
+        "video": 21,
+        "short": 9
+      },
+      "subscriber_count": "16800",
+      "total_view_count": "3267148",
+      "total_video_count": "603",
+      "video_views": "111716",
+      "video_likes": "7712",
+      "video_comments": "1008",
+      "channel_issues": 0,
+      "video_issues": 0
+    },
+    {
+      "channel_id": "UCo15mVX2VxTMffPDz3n1R7w",
+      "title": "WE FLOW",
+      "contents": 29,
+      "likes_policy_zero": 0,
+      "description_empty": 22,
+      "types": {
+        "short": 22,
+        "video": 6,
+        "live": 1
+      },
+      "subscriber_count": "60500",
+      "total_view_count": "2897217",
+      "total_video_count": "188",
+      "video_views": "89580",
+      "video_likes": "5021",
+      "video_comments": "399",
+      "channel_issues": 0,
+      "video_issues": 0
+    },
+    {
+      "channel_id": "UCoTjcpJU0laOUouES7VnBwA",
+      "title": "Rincon Escondido Parrilla",
+      "contents": 26,
+      "likes_policy_zero": 0,
+      "description_empty": 0,
+      "types": {
+        "video": 10,
+        "short": 16
+      },
+      "subscriber_count": "15900",
+      "total_view_count": "1258200",
+      "total_video_count": "242",
+      "video_views": "30171",
+      "video_likes": "613",
+      "video_comments": "2",
+      "channel_issues": 0,
+      "video_issues": 0
+    },
+    {
+      "channel_id": "UCqCMh-veIDV-Q4BQnIaxiFw",
+      "title": "ArtStones",
+      "contents": 4,
+      "likes_policy_zero": 0,
+      "description_empty": 0,
+      "types": {
+        "live": 3,
+        "video": 1
+      },
+      "subscriber_count": "47900",
+      "total_view_count": "2486768",
+      "total_video_count": "202",
+      "video_views": "9013",
+      "video_likes": "824",
+      "video_comments": "44",
+      "channel_issues": 0,
+      "video_issues": 0
+    },
+    {
+      "channel_id": "UCr6uyL4Kly3yWQE-sA3bRpg",
+      "title": "CANAL MOTO START",
+      "contents": 30,
+      "likes_policy_zero": 0,
+      "description_empty": 0,
+      "types": {
+        "video": 30
+      },
+      "subscriber_count": "24900",
+      "total_view_count": "7160373",
+      "total_video_count": "460",
+      "video_views": "263925",
+      "video_likes": "7105",
+      "video_comments": "346",
+      "channel_issues": 0,
+      "video_issues": 0
+    },
+    {
+      "channel_id": "UCtBHNIL3YmfMEEbKvN1TlJA",
+      "title": "Vitor Zamboti BMW MOTORRAD",
+      "contents": 13,
+      "likes_policy_zero": 0,
+      "description_empty": 10,
+      "types": {
+        "short": 10,
+        "live": 1,
+        "video": 2
+      },
+      "subscriber_count": "6850",
+      "total_view_count": "1476933",
+      "total_video_count": "148",
+      "video_views": "23939",
+      "video_likes": "933",
+      "video_comments": "54",
+      "channel_issues": 0,
+      "video_issues": 0
+    },
+    {
+      "channel_id": "UCu63d5lTTJIKa7mNeJbRNIA",
+      "title": "Gravel Stories",
+      "contents": 1,
+      "likes_policy_zero": 1,
+      "description_empty": 1,
+      "types": {
+        "short": 1
+      },
+      "subscriber_count": "6210",
+      "total_view_count": "1274968",
+      "total_video_count": "111",
+      "video_views": "2085",
+      "video_likes": "0",
+      "video_comments": "6",
+      "channel_issues": 0,
+      "video_issues": 0
+    },
+    {
+      "channel_id": "UCuZyA2y2xuh5mdOnUqd9XPw",
+      "title": "Clube do Osciloscópio - VCO Cotta",
+      "contents": 14,
+      "likes_policy_zero": 0,
+      "description_empty": 3,
+      "types": {
+        "short": 11,
+        "video": 3
+      },
+      "subscriber_count": "42500",
+      "total_view_count": "5628766",
+      "total_video_count": "336",
+      "video_views": "36489",
+      "video_likes": "1424",
+      "video_comments": "115",
+      "channel_issues": 0,
+      "video_issues": 0
+    },
+    {
+      "channel_id": "UCvObN8Zwe6VfupZheqreGrg",
+      "title": "CAR.Vapor ACLF",
+      "contents": 30,
+      "likes_policy_zero": 0,
+      "description_empty": 26,
+      "types": {
+        "video": 24,
+        "short": 6
+      },
+      "subscriber_count": "35500",
+      "total_view_count": "7088215",
+      "total_video_count": "1272",
+      "video_views": "39407",
+      "video_likes": "2138",
+      "video_comments": "182",
+      "channel_issues": 0,
+      "video_issues": 0
+    },
+    {
+      "channel_id": "UCvQzawL23D-57Qbl6FK_Ogg",
+      "title": "SARTØR",
+      "contents": 16,
+      "likes_policy_zero": 10,
+      "description_empty": 1,
+      "types": {
+        "short": 7,
+        "video": 9
+      },
+      "subscriber_count": "9700",
+      "total_view_count": "581976",
+      "total_video_count": "128",
+      "video_views": "104359",
+      "video_likes": "2195",
+      "video_comments": "397",
+      "channel_issues": 0,
+      "video_issues": 0
+    },
+    {
+      "channel_id": "UCwuwq5hrXG1pU95ms4FQxng",
+      "title": "CreativeTube",
+      "contents": 30,
+      "likes_policy_zero": 0,
+      "description_empty": 6,
+      "types": {
+        "video": 22,
+        "short": 8
+      },
+      "subscriber_count": "34400",
+      "total_view_count": "2530234",
+      "total_video_count": "229",
+      "video_views": "454385",
+      "video_likes": "22620",
+      "video_comments": "472",
+      "channel_issues": 0,
+      "video_issues": 0
+    },
+    {
+      "channel_id": "UCyZAZxKMeTDVuOesdjeh4JA",
+      "title": "Açougue top das galaxias",
+      "contents": 13,
+      "likes_policy_zero": 0,
+      "description_empty": 13,
+      "types": {
+        "short": 13
+      },
+      "subscriber_count": "9170",
+      "total_view_count": "1926451",
+      "total_video_count": "519",
+      "video_views": "21476",
+      "video_likes": "277",
+      "video_comments": "3",
+      "channel_issues": 0,
+      "video_issues": 0
+    }
+  ]
+}

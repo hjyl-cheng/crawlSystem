@@ -1,0 +1,598 @@
+{
+  "observed_at": "2026-09-08T02:11:57.998Z",
+  "batch": {
+    "dispatch_batch_id": "legacy-results-canary-1788831661581-a7d1264e",
+    "status": "validation_closed",
+    "created_at": "2026-09-08T01:41:04.509Z"
+  },
+  "valid_runs": 498,
+  "ready_auto": 333,
+  "dormant": 164,
+  "partial_active": 1,
+  "rejected": 2,
+  "run_completion_wall_seconds": 1354.159,
+  "valid_channels_per_minute": 22.06535569309069,
+  "last_successful_snapshot_phase_ms": {
+    "admission": 583083,
+    "uploads": 500732,
+    "detail": 22796751,
+    "close_fetch": 55072,
+    "handoff": 7453,
+    "total": 23974107
+  },
+  "queue_timings": {
+    "youtube-agent-batch": {
+      "jobs": 22,
+      "wait_s": {
+        "n": 22,
+        "mean": 0.0027727272727272726,
+        "p50": 0.002,
+        "p95": 0.004,
+        "max": 0.02
+      },
+      "processing_s": {
+        "n": 22,
+        "mean": 13.697136363636364,
+        "p50": 15.134,
+        "p95": 16.617,
+        "max": 17.656
+      },
+      "counts": {
+        "active": 0,
+        "waiting": 0,
+        "delayed": 0,
+        "failed": 0,
+        "paused": 0
+      }
+    },
+    "youtube-finalize": {
+      "jobs": 837,
+      "wait_s": {
+        "n": 837,
+        "mean": 3.8097562724014336,
+        "p50": 0.643,
+        "p95": 13.515,
+        "max": 17.089
+      },
+      "processing_s": {
+        "n": 837,
+        "mean": 0.45661170848267624,
+        "p50": 0.338,
+        "p95": 1.02,
+        "max": 1.7
+      },
+      "counts": {
+        "active": 0,
+        "waiting": 0,
+        "delayed": 0,
+        "failed": 0,
+        "paused": 0
+      }
+    },
+    "youtube-channel-crawl": {
+      "jobs": 498,
+      "wait_s": {
+        "n": 498,
+        "mean": 590.5474899598394,
+        "p50": 600.043,
+        "p95": 1120.571,
+        "max": 1200.605
+      },
+      "processing_s": {
+        "n": 498,
+        "mean": 48.9909297188755,
+        "p50": 50.334,
+        "p95": 72.961,
+        "max": 151.432
+      },
+      "counts": {
+        "active": 0,
+        "waiting": 0,
+        "delayed": 0,
+        "failed": 0,
+        "paused": 0
+      }
+    }
+  },
+  "details_by_disposition": [
+    {
+      "disposition": "terminal_excluded",
+      "reason": "upcoming_live",
+      "count": 66,
+      "ms": "89401"
+    },
+    {
+      "disposition": "terminal_excluded",
+      "reason": "live_in_progress",
+      "count": 4,
+      "ms": "4492"
+    },
+    {
+      "disposition": "terminal_excluded",
+      "reason": "outside_content_window",
+      "count": 8270,
+      "ms": "12455783"
+    },
+    {
+      "disposition": "stored",
+      "reason": null,
+      "count": 6346,
+      "ms": "9782847"
+    }
+  ],
+  "quality": {
+    "at": "2026-09-08T02:05:11.064Z",
+    "batch": "legacy-results-canary-1788831661581-a7d1264e",
+    "channels": 333,
+    "contents": 6316,
+    "channelFields": {
+      "channel_id": {
+        "present": 333,
+        "missing": 0
+      },
+      "title": {
+        "present": 333,
+        "missing": 0
+      },
+      "channel_url": {
+        "present": 333,
+        "missing": 0
+      },
+      "avatar_url": {
+        "present": 333,
+        "missing": 0
+      },
+      "subscriber_count": {
+        "present": 333,
+        "missing": 0
+      },
+      "total_view_count": {
+        "present": 333,
+        "missing": 0
+      },
+      "total_video_count": {
+        "present": 333,
+        "missing": 0
+      }
+    },
+    "channelStatuses": {
+      "subscriber_count_status": {
+        "estimated": 333
+      },
+      "total_view_count_status": {
+        "exact": 333
+      },
+      "total_video_count_status": {
+        "exact": 333
+      },
+      "description_status": {
+        "exact": 311,
+        "empty": 22
+      },
+      "external_links_status": {
+        "observed": 330,
+        "unresolved": 3
+      }
+    },
+    "channelOptional": {
+      "handle": {
+        "present": 333,
+        "missing": 0
+      },
+      "country": {
+        "present": 325,
+        "missing": 8
+      },
+      "country_code": {
+        "present": 325,
+        "missing": 8
+      },
+      "joined_at": {
+        "present": 333,
+        "missing": 0
+      },
+      "about_description": {
+        "present": 311,
+        "missing": 22
+      },
+      "youtube_business_email_available": {
+        "present": 333,
+        "missing": 0
+      }
+    },
+    "videoFields": {
+      "source_content_id": {
+        "present": 6316,
+        "missing": 0
+      },
+      "content_type": {
+        "present": 6316,
+        "missing": 0
+      },
+      "title": {
+        "present": 6316,
+        "missing": 0
+      },
+      "url": {
+        "present": 6316,
+        "missing": 0
+      },
+      "thumbnail_url": {
+        "present": 6316,
+        "missing": 0
+      },
+      "published_at": {
+        "present": 6316,
+        "missing": 0
+      },
+      "duration_seconds": {
+        "present": 6316,
+        "missing": 0
+      },
+      "view_count_text": {
+        "present": 6316,
+        "missing": 0
+      },
+      "like_count": {
+        "present": 6316,
+        "missing": 0
+      },
+      "comment_count": {
+        "present": 6315,
+        "missing": 1
+      },
+      "access_status": {
+        "present": 6316,
+        "missing": 0
+      },
+      "publication_item_hash": {
+        "present": 6316,
+        "missing": 0
+      }
+    },
+    "videoStatuses": {
+      "content_type": {
+        "short": 3161,
+        "video": 2653,
+        "live": 502
+      },
+      "published_at_status": {
+        "exact": 6316
+      },
+      "published_at_precision": {
+        "second": 6316
+      },
+      "duration_status": {
+        "exact": 6316
+      },
+      "view_count_status": {
+        "exact": 6316
+      },
+      "like_count_status": {
+        "exact": 6074,
+        "zero_from_empty": 242
+      },
+      "comment_count_status": {
+        "zero_from_surface": 1855,
+        "exact": 4329,
+        "disabled": 131,
+        "unresolved": 1
+      },
+      "description_status": {
+        "exact": 4520,
+        "empty": 1796
+      },
+      "access_status": {
+        "public": 6316
+      }
+    },
+    "commentPages": {
+      "with_rows": 4329,
+      "zero_rows": 1986,
+      "missing": 1,
+      "positive_total_empty_rows": 0,
+      "shape_mismatch": 1,
+      "rows": 38712
+    },
+    "detailStatuses": [
+      {
+        "detail_status": "done",
+        "count": 9945
+      }
+    ],
+    "problems": [
+      {
+        "channel_id": "UCbRr_iNugU0bOtulkigy2Tg",
+        "title": "Ateliê Juliana Nogueira",
+        "channelIssues": [],
+        "videos": [
+          {
+            "video_id": "HHQNB1X0U70",
+            "failures": [
+              "missing:comment_count",
+              "invalid:comment_count",
+              "status:comment_count_status"
+            ]
+          }
+        ]
+      }
+    ],
+    "optionalExceptions": [
+      {
+        "channel_id": "UC2AjjZ0k-Rba8fiuwpz1R2Q",
+        "title": "JUANRIBE PAGLIARIN",
+        "country": "Brazil",
+        "country_source": "youtube_about",
+        "description_status": "empty"
+      },
+      {
+        "channel_id": "UC3MLH9Ai2P5wC7fiGIWBu1A",
+        "title": "Núcleo de Estudos da Violência",
+        "country": null,
+        "country_source": null,
+        "description_status": "exact"
+      },
+      {
+        "channel_id": "UC3SCNqzMHIRAHwC1FU3Higw",
+        "title": "Pedro Aventura",
+        "country": "Brazil",
+        "country_source": "youtube_about",
+        "description_status": "empty"
+      },
+      {
+        "channel_id": "UC7S0ecaG00LHwuLDmAVmFog",
+        "title": "VICTOR ASMR38",
+        "country": "Brazil",
+        "country_source": "youtube_about",
+        "description_status": "empty"
+      },
+      {
+        "channel_id": "UC9NrNFdAY6YcqC4Yyf0GwDQ",
+        "title": "MORGANA",
+        "country": "Brazil",
+        "country_source": "youtube_about",
+        "description_status": "empty"
+      },
+      {
+        "channel_id": "UCCcEFT428BfhG5yUooTEt7A",
+        "title": "catiane canal tudo junto e misturado",
+        "country": "Brazil",
+        "country_source": "youtube_about",
+        "description_status": "empty"
+      },
+      {
+        "channel_id": "UCDMQEkNgfB8dJ4QF8bN0L0A",
+        "title": "Senna Trader",
+        "country": "Brazil",
+        "country_source": "youtube_about",
+        "description_status": "empty"
+      },
+      {
+        "channel_id": "UCH3wQn6WcflAey2AFlPphOQ",
+        "title": "Hugo Mattos BMX",
+        "country": "Brazil",
+        "country_source": "youtube_about",
+        "description_status": "empty"
+      },
+      {
+        "channel_id": "UCIlhUgrGEcQ_AhudFUqkItQ",
+        "title": "SE LIGA AQUII",
+        "country": "Brazil",
+        "country_source": "youtube_about",
+        "description_status": "empty"
+      },
+      {
+        "channel_id": "UCJDUz4rqMgW46Oiy_hTyUUA",
+        "title": "Robson Sugui",
+        "country": "Brazil",
+        "country_source": "youtube_about",
+        "description_status": "empty"
+      },
+      {
+        "channel_id": "UCKsr0Kzlksez1qjpYMC_8nQ",
+        "title": "Prefeitura Municipal Itinga - MG",
+        "country": null,
+        "country_source": null,
+        "description_status": "exact"
+      },
+      {
+        "channel_id": "UCNaLkgsbLdBS6fReDZm_nWQ",
+        "title": "Brasil Zueiro",
+        "country": null,
+        "country_source": null,
+        "description_status": "exact"
+      },
+      {
+        "channel_id": "UCNdmMv0UNG470K6YHYznwKA",
+        "title": "BMW Brasil",
+        "country": null,
+        "country_source": null,
+        "description_status": "exact"
+      },
+      {
+        "channel_id": "UCOg6CW-xF37zMklY5Gojbcw",
+        "title": "Vivi Winkler",
+        "country": "Brazil",
+        "country_source": "youtube_about",
+        "description_status": "empty"
+      },
+      {
+        "channel_id": "UCY-NUmMAI9Mr05A3a4cmXLw",
+        "title": "Sam's Club Brasil",
+        "country": null,
+        "country_source": null,
+        "description_status": "exact"
+      },
+      {
+        "channel_id": "UCaMm9Dk5Ns7qkU5RYmSVljw",
+        "title": "VÍTOR PARRAGA",
+        "country": "Brazil",
+        "country_source": "youtube_about",
+        "description_status": "empty"
+      },
+      {
+        "channel_id": "UCcZV5VdahPHZqqCJxFrTClg",
+        "title": "SÓ VA'AI",
+        "country": "Brazil",
+        "country_source": "youtube_about",
+        "description_status": "empty"
+      },
+      {
+        "channel_id": "UCd6zFhLfcoilM9wuc3IVqoA",
+        "title": "Canal Fiq Sabendo Oficial",
+        "country": null,
+        "country_source": null,
+        "description_status": "exact"
+      },
+      {
+        "channel_id": "UCe9GDNHPf9mzHkAV5RsL-oQ",
+        "title": "Comando Militar do Sul - Exército Brasileiro",
+        "country": "Brazil",
+        "country_source": "youtube_about",
+        "description_status": "empty"
+      },
+      {
+        "channel_id": "UCh1ZWtIBuyXqv2Q6HPXWrbw",
+        "title": "Essa conta foi hackeada",
+        "country": "Brazil",
+        "country_source": "youtube_about",
+        "description_status": "empty"
+      },
+      {
+        "channel_id": "UChly4JLxUacQ-LgT8yR2DgA",
+        "title": "BREN0RJ",
+        "country": "Brazil",
+        "country_source": "youtube_about",
+        "description_status": "empty"
+      },
+      {
+        "channel_id": "UCjc35jjWhVDtw3SirKN_WhA",
+        "title": "Rod Postal",
+        "country": null,
+        "country_source": null,
+        "description_status": "exact"
+      },
+      {
+        "channel_id": "UCjt2bBBGB1I3iV_a-5hIDOQ",
+        "title": "Dicas da Gabi Torres",
+        "country": "Brazil",
+        "country_source": "youtube_about",
+        "description_status": "empty"
+      },
+      {
+        "channel_id": "UCp15IgkQ7C8EoyyNSK5jpHg",
+        "title": "FERNANDA YAMAO",
+        "country": "Brazil",
+        "country_source": "youtube_about",
+        "description_status": "empty"
+      },
+      {
+        "channel_id": "UCq4AJ9QOToJmfRms5fEVRlA",
+        "title": "Helen Mareth - Crochet Bags",
+        "country": "Brazil",
+        "country_source": "youtube_about",
+        "description_status": "empty"
+      },
+      {
+        "channel_id": "UCrsSseCRum0j9dyhZXuNDbw",
+        "title": "Multi DO Portuguese",
+        "country": "Brazil",
+        "country_source": "youtube_about",
+        "description_status": "empty"
+      },
+      {
+        "channel_id": "UCwaY1tdekONG50d0U0KuoBg",
+        "title": "Helena Luttembarck",
+        "country": "Brazil",
+        "country_source": "youtube_about",
+        "description_status": "empty"
+      },
+      {
+        "channel_id": "UCxRql7KwEurNrmFCGaXX8RQ",
+        "title": "Carol Bresolin",
+        "country": "Brazil",
+        "country_source": "youtube_about",
+        "description_status": "empty"
+      },
+      {
+        "channel_id": "UCy7R4ub3HY9C_08_GaAFCiQ",
+        "title": "Felipe Souza",
+        "country": "Brazil",
+        "country_source": "youtube_about",
+        "description_status": "empty"
+      },
+      {
+        "channel_id": "UCyabfm3a9u7N3Itm4NZ_wnA",
+        "title": "GGPEL Livraria e Papelaria",
+        "country": null,
+        "country_source": null,
+        "description_status": "exact"
+      }
+    ]
+  },
+  "about_gaps": [
+    {
+      "channel_id": "UCVnuLoXTXauz8-d9A7nnYdg",
+      "title": "Caleen",
+      "total_view_count_status": "exact",
+      "total_video_count_status": "exact",
+      "external_links_status": "unresolved"
+    },
+    {
+      "channel_id": "UCLzm2p73mf07KAyP9OO_r4A",
+      "title": "Premier Crypto",
+      "total_view_count_status": "exact",
+      "total_video_count_status": "exact",
+      "external_links_status": "unresolved"
+    },
+    {
+      "channel_id": "UCw4NrzODRN-5Ljle5SBWFag",
+      "title": "Fernando Fenwick - Marketing digital",
+      "total_view_count_status": "exact",
+      "total_video_count_status": "exact",
+      "external_links_status": "unresolved"
+    },
+    {
+      "channel_id": "UCRdhKdx8sCyx6KTwGmMb78g",
+      "title": "Assembleia Legislativa de Roraima",
+      "total_view_count_status": "exact",
+      "total_video_count_status": "unresolved",
+      "external_links_status": "observed"
+    },
+    {
+      "channel_id": "UCXs3LHxIwbfr5_HrySsGXTA",
+      "title": "CNPqOficial",
+      "total_view_count_status": "unresolved",
+      "total_video_count_status": "exact",
+      "external_links_status": "observed"
+    }
+  ],
+  "comment_gap": [
+    {
+      "source_content_id": "HHQNB1X0U70",
+      "channel_id": "UCbRr_iNugU0bOtulkigy2Tg",
+      "title": "Bolsa diamante 💎",
+      "comment_count_status": "unresolved",
+      "comment_count": null,
+      "like_count": "388",
+      "comments_disabled": null,
+      "comments_error": "fingerprint gateway proxy_transport: SSLError curl_code=35",
+      "playability": "UNPLAYABLE",
+      "reason": "Video unavailable",
+      "surface": null
+    }
+  ],
+  "business": {
+    "channels": 333,
+    "contents": 6316,
+    "search_channels": 333,
+    "search_contents": 6316,
+    "projection": [
+      {
+        "status": "delivered",
+        "count": 333
+      }
+    ],
+    "partial_published_contents": 0
+  }
+}
