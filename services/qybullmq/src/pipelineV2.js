@@ -1,3 +1,4 @@
+import { createCheckpointYoutubeJsDetail } from "./checkpointYoutubeJsDetail.js";
 import { closeRepairedFullCrawlScan } from "./fullCrawlScanEvidence.js";
 import { nanoid } from "nanoid";
 import { completeVideoApiRequests } from "./videoApiBatchRequests.js";
@@ -2395,6 +2396,7 @@ async function commitContentDetailExecution(fence, action) {
 
 async function processOneCandidate(row, settings, {
   youtubeJsDetail = null,
+  checkpointDetailFetcher = null,
   signal = null,
   commit,
 } = {}) {
@@ -2473,13 +2475,15 @@ async function processOneCandidate(row, settings, {
 
   if (youtubeJsDetailEnabled()) {
     const youtubeJsResult = youtubeJsDetail === null
-      ? await captureYoutubeJsDetail(row.source_content_id, { signal })
+      ? await (settings.youtubeJsOnly
+        ? checkpointDetailFetcher(row, { signal })
+        : captureYoutubeJsDetail(row.source_content_id, { signal }))
       : await youtubeJsDetail;
     throwIfAborted(signal);
     if (!youtubeJsResult?.error && youtubeJsResult?.detail) {
       const youtubeJsObservation = youtubeJsResult.detail;
-      verifyYoutubeJsDisabledComments =
-        youtubeJsDisabledCommentsNeedVerification(youtubeJsObservation);
+      verifyYoutubeJsDisabledComments = !settings.youtubeJsOnly
+        && youtubeJsDisabledCommentsNeedVerification(youtubeJsObservation);
       detail = mergeDetail(
         detail,
         verifyYoutubeJsDisabledComments
@@ -2489,9 +2493,10 @@ async function processOneCandidate(row, settings, {
       detailExtractor = "youtubejs";
     } else {
       youtubeJsDetailError = youtubeJsResult?.error ?? new Error("YouTube.js detail prefetch returned no result");
+      if (settings.youtubeJsOnly) throw youtubeJsDetailError;
       youtubeJsFallback = ["youtubejs_error"];
     }
-    if (!youtubeJsDetailError) {
+    if (!youtubeJsDetailError && !settings.youtubeJsOnly) {
       youtubeJsFallback = youtubeJsFallbackReasons(
         detail,
         settings.publishedAtRequiredPrecision,
@@ -2517,6 +2522,9 @@ async function processOneCandidate(row, settings, {
     ));
   }
 
+  if (settings.youtubeJsOnly && youtubeJsFallback.length > 0) {
+    throw new Error("Checkpoint repair requires YouTubeJS/API-batch collection");
+  }
   if (youtubeJsFallback.length > 0) {
     try {
       const ytDlpDetail = await fetchVideoYtDlpDetail(
@@ -3119,6 +3127,7 @@ async function processContentDetailRun({
     const crawlSettings = await getCrawlSettingsV2();
     const apiSettings = await getYoutubeApiSettingsV2();
     const settings = {
+      youtubeJsOnly: executionMode === "checkpoint_repair",
       detailMaxAttempts: crawlSettings.detailMaxAttempts,
       detailConcurrency: crawlSettings.detailConcurrency,
       contentMaxAgeDays: intValue(
@@ -3134,14 +3143,19 @@ async function processContentDetailRun({
         ? apiFallbackMode
         : apiSettings.fallbackMode,
     };
+    const captureDetail = settings.youtubeJsOnly
+      ? createCheckpointYoutubeJsDetail({ query, withTransaction,
+        loadSettings: getYoutubeApiSettingsV2, fetchDetail: fetchYoutubeJsVideoDetail })
+      : (row, options) => captureYoutubeJsDetail(row.source_content_id, options);
     const execution = await processWithOrderedPrefetch({
       items: rows.rows,
       concurrency: settings.detailConcurrency,
       signal,
       shouldPrefetch: (row) => shouldPrefetchYoutubeJsDetail(row, settings),
-      prefetch: (row) => captureYoutubeJsDetail(row.source_content_id, { signal }),
+      prefetch: (row) => captureDetail(row, { signal }),
       process: (row, youtubeJsDetail) => processOneCandidate(row, settings, {
         youtubeJsDetail,
+        checkpointDetailFetcher: captureDetail,
         signal,
         commit,
       }),
