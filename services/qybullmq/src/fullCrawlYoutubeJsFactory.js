@@ -66,7 +66,9 @@ function validateChannelSnapshot(snapshot, { channelId, locale }) {
   if (text(metadata.channel_id) !== channelId) {
     throw requiredSurfaceError(`YouTube.js Channel identity conflicts for ${channelId}`, "channel");
   }
-  for (const field of ["title", "handle", "channel_url"]) {
+  // YouTube may omit a handle (including on auto-generated Topic channels).
+  // The channel ID and canonical URL identify the channel without one.
+  for (const field of ["title", "channel_url"]) {
     if (!text(metadata[field])) {
       throw new ParserContractError({
         field,

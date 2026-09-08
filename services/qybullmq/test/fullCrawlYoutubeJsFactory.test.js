@@ -468,3 +468,32 @@ test("a failed Detail request leaves the current Candidate uncommitted", async (
   assert.equal(fixture.calls.includes("store:commit-detail:video-1"), false);
   assert.equal(fixture.calls.includes("store:close-fetch"), false);
 });
+
+for (const handle of [null, undefined, "@full"]) {
+  test(`optional channel handle survives admission and fetch (handle=${handle})`, async () => {
+    const fixture = scriptedFixture();
+    const snapshot = channelSnapshot();
+    snapshot.metadata.handle = handle;
+    fixture.youtube.fetchChannel = async () => snapshot;
+    const commit = fixture.store.commitAdmission;
+    fixture.store.commitAdmission = async (...args) => {
+      assert.equal(args[1].metadata.handle, handle);
+      return commit(...args);
+    };
+    assert.equal((await executor(fixture)(job())).ok, true);
+    assert.ok(fixture.calls.includes("store:commit-admission"));
+    assert.ok(fixture.calls.includes("handoff:fetch"));
+  });
+}
+
+for (const field of ["title", "channel_url", "channel_id"]) {
+  test(`optional handle does not weaken channel identity validation (${field})`, async () => {
+    const fixture = scriptedFixture();
+    const snapshot = channelSnapshot();
+    snapshot.metadata.handle = null;
+    snapshot.metadata[field] = null;
+    fixture.youtube.fetchChannel = async () => snapshot;
+    await assert.rejects(executor(fixture)(job()));
+    assert.ok(!fixture.calls.includes("store:commit-admission"));
+  });
+}
