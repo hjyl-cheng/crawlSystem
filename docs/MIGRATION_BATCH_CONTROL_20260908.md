@@ -93,3 +93,9 @@ The main progress panel now renders only an active batch. When no batch is activ
 
 
 Latest authorized rollout uses code revision `aa939bf` for dashboard, API, controller, Rota, feature-ingest, daily scheduler, and all 20 Full Crawl plus 20 incremental workers. The page was checked in a real browser after deployment: idle message visible, old progress hidden and cleared, start enabled, history retained, no JavaScript errors. Log: `/tmp/migration-ui-production-aa939bf.log`. Final API audit returned active=null, previous batch ended, 397,392 released IDs, and no waiting/active/prioritized/failed crawl jobs. All 40 worker leases were valid. The earlier targeted deployment description above is rollout history; country-recheck code is now also deployed following explicit user authorization.
+
+## Full Crawl capacity: 30 workers
+
+At user request, migration Full Crawl was expanded from 20 to 30 workers, adding `qy-newcrawler-fresh-worker-channel-21` through `-30` with unique `PROXY_WORKER_ID`s. Incremental remains 20. All use code image `pachongsys-aa939bf` and the existing per-worker concurrency of 1. Rota channel slots increased from 41 to 51 (30 Full Crawl + 20 incremental + the existing auxiliary worker); all 51 slots had valid leases after rollout. The existing 100-pending-job prefetch window is unchanged. This is capacity verification, not a measured 50% throughput increase.
+
+For future Compose recreation, append `deploy/compose.migration-rota-scale.yml` to the Rota project's existing Compose files first, and append `deploy/compose.migration-worker-scale.yml` to the crawler project's shared-worker Compose files. They are separate project overrides, not standalone Compose files. Retain the current released image/runtime settings when applying them. Runtime expansion log: `/tmp/scale-migration-30.log`.

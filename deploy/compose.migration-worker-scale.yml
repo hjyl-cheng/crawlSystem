@@ -1,0 +1,9 @@
+# Append to the crawler's existing shared-worker Compose files.
+# Apply compose.migration-rota-scale.yml to the Rota project first.
+services:
+  worker-channel:
+    deploy:
+      replicas: 30
+  worker-incremental:
+    deploy:
+      replicas: 20
