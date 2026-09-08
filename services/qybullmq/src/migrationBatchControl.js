@@ -5,6 +5,8 @@ import {
   materializeControlledMigrationChannel,
 } from "./manualMigrationDispatch.js";
 import { loadMigrationSourceChannel } from "./migrationSource.js";
+import { channelSnapshotPayload } from "./migrationDispatchPolicy.js";
+import { safeJobId, defaultJobOptions } from "./queues.js";
 
 export const MIGRATION_START_JOB = "migration-channel-start";
 export const migrationBatchControlEnabled = () =>
@@ -139,6 +141,7 @@ export async function startControlledMigrationChannel({
   query,
   batchId,
   channelId,
+  executionJobId = null,
 }) {
   const item = (
     await query(
@@ -146,6 +149,14 @@ export async function startControlledMigrationChannel({
       [batchId, channelId],
     )
   ).rows[0];
+  if (executionJobId && item?.state === "started") {
+    return resumeControlledAdmission({
+      query,
+      batchId,
+      channelId,
+      executionJobId,
+    });
+  }
   if (!item || item.state !== "pending" || item.batch_status !== "running")
     return { started: false };
   const snapshot = item.snapshot_json;
@@ -166,15 +177,19 @@ export async function startControlledMigrationChannel({
       String(row.source_candidate_id),
     );
     assert.equal(snapshot.source_id, b.source_id);
-    const count = Number(
-      (
-        await c.query(
-          "SELECT count(*) FROM crawler.migration_control_items WHERE batch_id=$1 AND state='started'",
-          [batchId],
-        )
-      ).rows[0].count,
-    );
-    if (count >= b.max_in_flight) return { started: false };
+    // Only legacy launchers retain the old admission cap during a rolling upgrade.
+    // Direct snapshot Jobs are constrained by the existing BullMQ worker concurrency.
+    if (!executionJobId) {
+      const count = Number(
+        (
+          await c.query(
+            "SELECT count(*) FROM crawler.migration_control_items WHERE batch_id=$1 AND state='started'",
+            [batchId],
+          )
+        ).rows[0].count,
+      );
+      if (count >= b.max_in_flight) return { started: false };
+    }
     const candidate = await materializeControlledMigrationChannel(c, {
       snapshot,
       batchId,
@@ -190,9 +205,70 @@ export async function startControlledMigrationChannel({
         candidate ? null : "existing",
       ],
     );
+    if (candidate && executionJobId) {
+      await c.query(
+        "UPDATE crawler.channel_candidates SET snapshot_active_job_id=$2,snapshot_active_job_attempt=0 WHERE candidate_id=$1",
+        [candidate.candidate_id, executionJobId],
+      );
+      return resumeControlledAdmission({
+        query: c.query.bind(c),
+        batchId,
+        channelId,
+        executionJobId,
+      });
+    }
     return { started: !!candidate, candidate_id: candidate?.candidate_id };
   });
 }
+// Replay the DB commit if the worker stopped before persisting its full Redis payload.
+async function resumeControlledAdmission({
+  query,
+  batchId,
+  channelId,
+  executionJobId,
+}) {
+  const row = (
+    await query(
+      `SELECT c.*,m.migration_intent_id FROM crawler.migration_control_items i
+    JOIN crawler.channel_candidates c USING(candidate_id)
+    JOIN crawler.migration_channel_intents m ON m.target_candidate_id=c.candidate_id
+    WHERE i.batch_id=$1 AND i.channel_id=$2 AND i.state='started' AND c.snapshot_active_job_id=$3`,
+      [batchId, channelId, executionJobId],
+    )
+  ).rows[0];
+  if (!row) throw new Error("Controlled migration admission owner changed");
+  return {
+    started: true,
+    candidate_id: row.candidate_id,
+    payload: channelSnapshotPayload(row, batchId, {
+      minSubscriberCount: Number(process.env.MIN_SUBSCRIBER_COUNT || 1000),
+    }),
+  };
+}
+
+export async function prepareControlledMigrationSnapshot({
+  query,
+  withTransaction,
+  job,
+}) {
+  if (!job.data?.migration_control_start) return true;
+  const admitted = await startControlledMigrationChannel({
+    query,
+    withTransaction,
+    batchId: job.data.batch_id,
+    channelId: job.data.channel_id,
+    executionJobId: job.id,
+  });
+  if (!admitted.started) {
+    // Remove skipped, never-started placeholders on completion so resume can enqueue them again.
+    job.opts.removeOnComplete = true;
+    return false;
+  }
+  const { migration_control_start, ...data } = job.data;
+  await job.updateData({ ...data, ...admitted.payload });
+  return true;
+}
+
 export async function loadMigrationControlProgress(query) {
   const rows = await query(`SELECT b.*,
    (SELECT result_json->>'migration_control_error' FROM crawler.query_dispatch_batches WHERE dispatch_batch_id=b.batch_id) AS control_error,
@@ -243,7 +319,7 @@ export async function reconcileMigrationControl({
   await withTransaction(async (c) => {
     const b = await lockBatch(c, id);
     if (!b) return;
-    // Root ownership and recovery must be settled before a channel frees its slot.
+    // Root ownership and recovery must settle before a channel counts as finished.
     await c.query(
       `WITH settled AS (
     SELECT i.channel_id,CASE
@@ -324,16 +400,9 @@ export async function reconcileMigrationControl({
     )
   ).rows[0];
   if (b.status !== "running") return;
-  const inFlight = Number(
-    (
-      await query(
-        "SELECT count(*) FROM crawler.migration_control_items WHERE batch_id=$1 AND state='started'",
-        [id],
-      )
-    ).rows[0].count,
-  );
-  const slots = Math.max(0, b.max_in_flight - inFlight);
-  if (!slots) return;
+  // Keep a bounded buffer of real snapshot jobs. Downstream Agent/publication work
+  // must not consume crawl capacity; BullMQ already limits actual workers to 20.
+  const slots = 100;
   const pending = (
     await query(
       `SELECT channel_id,source_candidate_id,snapshot_json FROM crawler.migration_control_items WHERE batch_id=$1 AND state='pending' ORDER BY ordinal LIMIT $2`,
@@ -351,6 +420,7 @@ export async function reconcileMigrationControl({
           `UPDATE crawler.migration_control_items SET snapshot_json=$3::jsonb WHERE batch_id=$1 AND channel_id=$2 AND state='pending'`,
           [id, item.channel_id, JSON.stringify(snapshot)],
         );
+        item.snapshot_json = snapshot;
       } catch (error) {
         await withTransaction(async (c) => {
           const locked = await lockBatch(c, id);
@@ -375,14 +445,18 @@ export async function reconcileMigrationControl({
       }
     }
     await queue.add(
-      MIGRATION_START_JOB,
-      { batch_id: id, channel_id: item.channel_id },
+      "channel-snapshot",
       {
-        jobId: `migration-start-${id}-${item.channel_id}`,
-        removeOnComplete: true,
-        removeOnFail: true,
-        attempts: 3,
-        backoff: { type: "exponential", delay: 5000 },
+        batch_id: id,
+        channel_id: item.channel_id,
+        dispatch_batch_id: id,
+        pipeline_cycle_id: id,
+        migration_control_start: true,
+      },
+      {
+        ...defaultJobOptions,
+        jobId: safeJobId("channel-snapshot", id, item.channel_id, "g1"),
+        priority: Number(item.snapshot_json?.priority ?? 100),
       },
     );
   }

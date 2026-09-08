@@ -10,8 +10,10 @@ import {
   controlMigrationBatch,
   reconcileMigrationControl,
   loadMigrationControlProgress,
+  prepareControlledMigrationSnapshot,
 } from "../src/migrationBatchControl.js";
 import { sourceSnapshotHash } from "../src/migrationSource.js";
+import { markChannelCandidateJobAttemptActive } from "../src/managedWorkerJob.js";
 const url = process.env.MIGRATION_CONTROL_TEST_URL;
 test(
   "real SQL freezes All, gates racing starts, drains paused work, resumes and releases unstarted IDs on end",
@@ -104,6 +106,20 @@ test(
       await query(
         "UPDATE crawler.migration_control_batches SET max_in_flight=1 WHERE batch_id=$1",
         [b.batch_id],
+      );
+      const prefetched = [];
+      await reconcileMigrationControl({
+        query,
+        withTransaction,
+        queue: {
+          add: async (name, data, options) =>
+            prefetched.push({ name, data, options }),
+        },
+      });
+      assert.equal(
+        prefetched.length,
+        3,
+        "queue prepares upcoming channels instead of limiting the whole pipeline to worker count",
       );
       const first = await startControlledMigrationChannel({
         query,
@@ -493,6 +509,227 @@ test(
         (await loadMigrationControlProgress(query)).active.status,
         "paused",
       );
+      // Actual Redis prioritized queue + actual admission seam, with a controlled collector.
+      if (process.env.MIGRATION_CONTROL_REDIS_TEST === "true") {
+        const { Queue, Worker } = await import("bullmq");
+        header = (await loadMigrationControlProgress(query)).active;
+        await controlMigrationBatch({
+          withTransaction,
+          batchId: header.batch_id,
+          action: "stop",
+          version: header.version,
+        });
+        await reconcileMigrationControl({ query, withTransaction, queue });
+        // Exclude the previous source-outage test ID from this execution fixture.
+        await query(
+          "DELETE FROM crawler.migration_channel_inventory WHERE source_id=$1 AND channel_id='UCsourceoutage'",
+          [source],
+        );
+        for (let n = 8; n < 108; n++)
+          await query(
+            "INSERT INTO crawler.migration_channel_inventory(source_id,source_candidate_id,channel_id,channel_url,source_candidate_status,sync_token) VALUES($1,$2,$3,$4,'discovered',$5)",
+            [
+              source,
+              n,
+              "UCprefetch" + n,
+              "https://youtube.com/channel/UCprefetch" + n,
+              sync,
+            ],
+          );
+        const runBatch = await createMigrationControlBatch({
+          withTransaction,
+          selection: "100",
+          sourceId: source,
+        });
+        await query(
+          "UPDATE crawler.migration_control_batches SET max_in_flight=1 WHERE batch_id=$1",
+          [runBatch.batch_id],
+        );
+        const opts = {
+          connection: { host: "127.0.0.1", port: 6379 },
+          prefix: "migration-prefetch-test-" + randomUUID(),
+        };
+        const realQueue = new Queue("youtube-channel-crawl", opts);
+        let worker;
+        const releases = [];
+        let executed = 0;
+        const waitFor = async (fn) => {
+          for (let i = 0; i < 400; i++) {
+            if (await fn()) return;
+            await new Promise((r) => setTimeout(r, 25));
+          }
+          throw Error("Timed out waiting for queue transition");
+        };
+        try {
+          await reconcileMigrationControl({
+            query,
+            withTransaction,
+            queue: realQueue,
+            sourceLoader: async ({ channelId, candidateId }) =>
+              makeSnapshot(channelId, candidateId),
+          });
+          assert.equal(
+            await realQueue.getPrioritizedCount(),
+            100,
+            "real snapshot jobs are prequeued before any worker starts",
+          );
+          worker = new Worker(
+            "youtube-channel-crawl",
+            async (job) => {
+              if (executed === 0 && !job.data.candidate_id) {
+                const update = job.updateData.bind(job);
+                job.updateData = async () => {
+                  throw new Error("simulated Redis payload write interruption");
+                };
+                try {
+                  await assert.rejects(
+                    prepareControlledMigrationSnapshot({
+                      query,
+                      withTransaction,
+                      job,
+                    }),
+                    /simulated Redis payload/,
+                  );
+                } finally {
+                  job.updateData = update;
+                }
+              }
+              if (
+                !(await prepareControlledMigrationSnapshot({
+                  query,
+                  withTransaction,
+                  job,
+                }))
+              )
+                return;
+              assert.equal(
+                await markChannelCandidateJobAttemptActive(query, job),
+                true,
+                "prefetched admission enters the existing execution fence",
+              );
+              assert.equal(job.name, "channel-snapshot");
+              assert(job.data.candidate_id);
+              assert(job.data.migration_intent_id);
+              assert.equal(job.data.migration_control_start, undefined);
+              executed++;
+              await new Promise((resolve) => releases.push(resolve));
+              // Simulate fetch completed, leaving Agent/publication unfinished.
+              await query(
+                "UPDATE crawler.channel_candidates SET status='accepted',snapshot_active_job_id=NULL,snapshot_active_job_attempt=NULL WHERE candidate_id=$1",
+                [job.data.candidate_id],
+              );
+            },
+            { ...opts, concurrency: 20 },
+          );
+          await waitFor(() => executed === 20);
+          assert.equal(await realQueue.getPrioritizedCount(), 80);
+          releases.shift()();
+          await waitFor(() => executed === 21);
+          assert.equal(
+            await realQueue.getActiveCount(),
+            20,
+            "a free worker immediately starts the next channel without a controller tick",
+          );
+          assert.equal(
+            Number(
+              (
+                await query(
+                  "SELECT count(*) FROM crawler.migration_control_items WHERE batch_id=$1 AND state='started'",
+                  [runBatch.batch_id],
+                )
+              ).rows[0].count,
+            ),
+            21,
+            "downstream unfinished channels do not limit crawl admission",
+          );
+          header = (await loadMigrationControlProgress(query)).active;
+          await controlMigrationBatch({
+            withTransaction,
+            batchId: header.batch_id,
+            action: "pause",
+            version: header.version,
+          });
+          for (const release of releases.splice(0)) release();
+          await waitFor(
+            async () =>
+              (await realQueue.getActiveCount()) === 0 &&
+              (await realQueue.getPrioritizedCount()) === 0,
+          );
+          assert.equal(
+            executed,
+            21,
+            "pause blocks queued channels at execution entry",
+          );
+          await reconcileMigrationControl({
+            query,
+            withTransaction,
+            queue: realQueue,
+          });
+          assert.equal(
+            (await loadMigrationControlProgress(query)).active.status,
+            "pausing",
+            "pause waits for downstream work",
+          );
+          await query(
+            "UPDATE crawler.channel_candidates SET status='rejected' WHERE dispatch_batch_id=$1",
+            [runBatch.batch_id],
+          );
+          await reconcileMigrationControl({
+            query,
+            withTransaction,
+            queue: realQueue,
+          });
+          header = (await loadMigrationControlProgress(query)).active;
+          assert.equal(header.status, "paused");
+          await controlMigrationBatch({
+            withTransaction,
+            batchId: header.batch_id,
+            action: "resume",
+            version: header.version,
+          });
+          await reconcileMigrationControl({
+            query,
+            withTransaction,
+            queue: realQueue,
+          });
+          await waitFor(() => executed === 41);
+          header = (await loadMigrationControlProgress(query)).active;
+          await controlMigrationBatch({
+            withTransaction,
+            batchId: header.batch_id,
+            action: "stop",
+            version: header.version,
+          });
+          for (const release of releases.splice(0)) release();
+          await waitFor(
+            async () =>
+              (await realQueue.getActiveCount()) === 0 &&
+              (await realQueue.getPrioritizedCount()) === 0,
+          );
+          assert.equal(
+            executed,
+            41,
+            "end also prevents starting remaining queued channels",
+          );
+          await query(
+            "UPDATE crawler.channel_candidates SET status='rejected' WHERE dispatch_batch_id=$1",
+            [runBatch.batch_id],
+          );
+          await reconcileMigrationControl({
+            query,
+            withTransaction,
+            queue: realQueue,
+          });
+          const ended = (await loadMigrationControlProgress(query)).batches[0];
+          assert.equal(ended.status, "ended");
+          assert.equal(ended.counts.released, 59);
+        } finally {
+          for (const release of releases.splice(0)) release();
+          await worker?.close();
+          await realQueue.obliterate({ force: true });
+          await realQueue.close();
+        }
+      }
     } finally {
       await pool.end();
     }
