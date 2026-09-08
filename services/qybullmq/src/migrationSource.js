@@ -1,3 +1,4 @@
+import {loadRestoredMigrationSources, restoredMigrationSourcesEnabled} from "./restoredMigrationSources.js";
 import { createHash } from "node:crypto";
 import { environmentValue } from "./runtimeEnvironment.js";
 import { verifyMigrationSourceDatabase } from "./databaseIdentity.js";
@@ -167,9 +168,21 @@ function migrationSourceSnapshot(row, identity, config) {
   return { ...snapshot, snapshot_sha256: sourceSnapshotHash(snapshot) };
 }
 
+function validateRestoredSourceSnapshot(snapshot, config) {
+  if (snapshot.source_id !== config.sourceId
+    || snapshot.source_database !== config.expectedDatabase
+    || String(snapshot.source_database_oid) !== config.expectedDatabaseOid
+    || snapshot.source_candidate_status !== "discovered"
+    || snapshot.snapshot_sha256 !== sourceSnapshotHash(snapshot)) {
+    throw new Error("Restored Migration Source snapshot identity or hash mismatch");
+  }
+  return snapshot;
+}
+
 export async function loadMigrationSourceChannel({
   channelId,
   candidateId = null,
+  restoredQuery = null,
   pool = null,
   environment = process.env,
 } = {}) {
@@ -177,6 +190,14 @@ export async function loadMigrationSourceChannel({
   const normalizedCandidateId = candidateId == null || candidateId === ""
     ? null
     : requiredText(candidateId, "candidate_id");
+  if (restoredMigrationSourcesEnabled(environment)) {
+    const config = migrationSourceRuntimeConfig(environment);
+    const restored = await loadRestoredMigrationSources({
+      sourceId: config.sourceId, channelId: normalizedChannelId, candidateId: normalizedCandidateId,
+      limit: 1, query: restoredQuery,
+    });
+    if (restored.length) return validateRestoredSourceSnapshot(restored[0], config);
+  }
   return withMigrationSourceReadTransaction(async (client, identity, config) => {
     const result = await client.query(
       `WITH source_candidates AS (
@@ -217,6 +238,7 @@ export async function loadMigrationSourceBatch({
   limit,
   excludeSourceCandidateIds = [],
   excludeChannelIds = [],
+  restoredQuery = null,
   pool = null,
   environment = process.env,
 } = {}) {
@@ -228,7 +250,16 @@ export async function loadMigrationSourceBatch({
   const channelIds = [...new Set(
     excludeChannelIds.map((value) => requiredText(value, "channel_id")),
   )];
-  return withMigrationSourceReadTransaction(async (client, identity, config) => {
+  const restored = restoredMigrationSourcesEnabled(environment)
+    ? await loadRestoredMigrationSources({
+      sourceId: migrationSourceRuntimeConfig(environment).sourceId,
+      query: restoredQuery, limit: normalizedLimit, excludeSourceCandidateIds: candidateIds, excludeChannelIds: channelIds,
+    }) : [];
+  for (const snapshot of restored) validateRestoredSourceSnapshot(snapshot, migrationSourceRuntimeConfig(environment));
+  if (restored.length === normalizedLimit) return restored;
+  candidateIds.push(...restored.map(row => row.source_candidate_id));
+  channelIds.push(...restored.map(row => row.channel_id));
+  const legacy = await withMigrationSourceReadTransaction(async (client, identity, config) => {
     const result = await client.query(
       `WITH source_candidates AS (
          SELECT candidate_id,channel_id,priority,
@@ -258,8 +289,9 @@ export async function loadMigrationSourceBatch({
        FROM source_page page
        JOIN crawler.channel_candidates candidate ON candidate.candidate_id=page.candidate_id
        ORDER BY page.priority DESC,page.candidate_id`,
-      [candidateIds, channelIds, normalizedLimit],
+      [candidateIds, channelIds, normalizedLimit - restored.length],
     );
     return result.rows.map((row) => migrationSourceSnapshot(row, identity, config));
   }, { pool, environment });
+  return [...restored, ...legacy];
 }

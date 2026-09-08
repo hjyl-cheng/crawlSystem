@@ -1,3 +1,4 @@
+import {retainRestoredMigrationInventory, restoredMigrationSourcesEnabled} from "./restoredMigrationSources.js";
 import { randomUUID } from "node:crypto";
 import {
   migrationSourceRuntimeConfig,
@@ -208,7 +209,7 @@ export async function syncMigrationChannelInventory({
       [config.sourceId, config.expectedDatabase, config.expectedDatabaseOid, syncToken],
     );
 
-    const eligibleCount = await withMigrationSourceReadTransaction(
+    let eligibleCount = await withMigrationSourceReadTransaction(
       async (sourceClient, identity) => {
         if (identity.database !== config.expectedDatabase
           || String(identity.databaseOid) !== String(config.expectedDatabaseOid)) {
@@ -233,6 +234,14 @@ export async function syncMigrationChannelInventory({
         statementTimeoutMs: normalizedStatementTimeoutMs,
       },
     );
+
+    if (restoredMigrationSourcesEnabled(environment)) {
+      await retainRestoredMigrationInventory(targetClient, {sourceId: config.sourceId, syncToken});
+      eligibleCount = Number((await targetClient.query(
+        'SELECT count(*)::bigint AS count FROM crawler.migration_channel_inventory WHERE source_id=$1 AND sync_token=$2::uuid',
+        [config.sourceId, syncToken],
+      )).rows[0].count);
+    }
 
     await targetClient.query(
       `DELETE FROM crawler.migration_channel_inventory
