@@ -92,6 +92,11 @@ export async function controlMigrationBatch({
         statusCode: 409,
       });
     const next = batchTransition(b, action);
+    if (action === "resume")
+      await c.query(
+        "UPDATE crawler.query_dispatch_batches SET result_json=result_json-'migration_control_error' WHERE dispatch_batch_id=$1",
+        [batchId],
+      );
     return (
       await c.query(
         `UPDATE crawler.migration_control_batches SET status=$2,version=version+1,
@@ -190,6 +195,7 @@ export async function startControlledMigrationChannel({
 }
 export async function loadMigrationControlProgress(query) {
   const rows = await query(`SELECT b.*,
+   (SELECT result_json->>'migration_control_error' FROM crawler.query_dispatch_batches WHERE dispatch_batch_id=b.batch_id) AS control_error,
    (SELECT count(*)::int FROM publication.outbox o JOIN publication.revision r USING(revision_id)
      JOIN crawler.migration_control_items i ON i.channel_id=r.channel_id WHERE i.batch_id=b.batch_id
      AND i.started_at IS NOT NULL AND o.created_at>=i.started_at AND o.status NOT IN ('delivered','covered_by_baseline')) AS publishing_count,
@@ -349,16 +355,23 @@ export async function reconcileMigrationControl({
         await withTransaction(async (c) => {
           const locked = await lockBatch(c, id);
           if (locked?.status !== "running") return;
+          // A source/configuration outage says nothing about the channel's crawl result.
+          // Stop admission once, preserve every pending ID, and let admitted work drain.
           await c.query(
-            `UPDATE crawler.migration_control_items SET start_failures=start_failures+1,error_message=$3,
-      state=CASE WHEN start_failures>=2 THEN 'terminal' ELSE state END,
-      outcome=CASE WHEN start_failures>=2 THEN 'failed' ELSE outcome END,
-      finished_at=CASE WHEN start_failures>=2 THEN now() ELSE finished_at END
-      WHERE batch_id=$1 AND channel_id=$2 AND state='pending'`,
+            `UPDATE crawler.migration_control_items SET start_failures=start_failures+1,error_message=$3
+             WHERE batch_id=$1 AND channel_id=$2 AND state='pending'`,
             [id, item.channel_id, String(error.message).slice(0, 1000)],
           );
+          await c.query(
+            "UPDATE crawler.migration_control_batches SET status='pausing',version=version+1,updated_at=now() WHERE batch_id=$1",
+            [id],
+          );
+          await c.query(
+            "UPDATE crawler.query_dispatch_batches SET result_json=result_json||jsonb_build_object('migration_control_error',$2::text),updated_at=now() WHERE dispatch_batch_id=$1",
+            [id, String(error.message).slice(0, 1000)],
+          );
         });
-        continue;
+        return;
       }
     }
     await queue.add(

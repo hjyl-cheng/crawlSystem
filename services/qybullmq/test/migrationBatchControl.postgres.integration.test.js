@@ -462,6 +462,37 @@ test(
       header = (await loadMigrationControlProgress(query)).batches[0];
       assert.equal(header.status, "ended");
       assert.equal(header.counts.failed, 2);
+      // Exercise the real source reader with the same missing controller configuration.
+      await query(
+        "INSERT INTO crawler.migration_channel_inventory(source_id,source_candidate_id,channel_id,channel_url,source_candidate_status,sync_token) VALUES($1,7,'UCsourceoutage','https://youtube.com/channel/UCsourceoutage','discovered',$2)",
+        [source, sync],
+      );
+      const outage = await createMigrationControlBatch({
+        withTransaction,
+        selection: "100",
+        sourceId: source,
+      });
+      const queuedBefore = additions;
+      await reconcileMigrationControl({ query, withTransaction, queue });
+      header = (await loadMigrationControlProgress(query)).active;
+      assert.equal(
+        header.status,
+        "pausing",
+        "source configuration failure pauses admission",
+      );
+      assert.equal(
+        header.counts.failed || 0,
+        0,
+        "infrastructure failure is not a failed channel",
+      );
+      assert.equal(header.counts.pending, 1);
+      assert.equal(additions, queuedBefore);
+      assert.match(header.control_error, /EXPECTED_MIGRATION_DATABASE/);
+      await reconcileMigrationControl({ query, withTransaction, queue });
+      assert.equal(
+        (await loadMigrationControlProgress(query)).active.status,
+        "paused",
+      );
     } finally {
       await pool.end();
     }

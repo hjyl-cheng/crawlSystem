@@ -437,6 +437,13 @@ services:
     command: ["node", "src/controller.js"]
     environment:
       <<: [*crawler-database, *crawler-storage, *rota-worker]
+      MIGRATION_BATCH_CONTROL_ENABLED: ${MIGRATION_BATCH_CONTROL_ENABLED:-false}
+      MIGRATION_DATABASE_URL_FILE: /run/secrets/migration_database_url
+      MIGRATION_SOURCE_ID: ${MIGRATION_SOURCE_ID:-qy-migration-v1}
+      MIGRATION_RESTORED_SOURCES_ENABLED: ${MIGRATION_RESTORED_SOURCES_ENABLED:-false}
+      EXPECTED_MIGRATION_DATABASE: ${MIGRATION_POSTGRES_DB:-bullmq_crawler_migration}
+      EXPECTED_MIGRATION_DATABASE_OID: ${MIGRATION_POSTGRES_DATABASE_OID:-0}
+      EXPECTED_MIGRATION_DATABASE_USER: ${MIGRATION_POSTGRES_USER:-migration_reader}
       NODE_ENV: production
       CONTROLLER_INTERVAL_MS: 15000
       CONTROLLER_TICK_SAMPLE_MS: 60000
@@ -462,6 +469,8 @@ services:
       CONTENT_ENRICH_ALERT_REPEAT_SECONDS: ${CONTENT_ENRICH_ALERT_REPEAT_SECONDS:-900}
       LOCAL_PROFILE_PYTHON_BIN: python3
       LOCAL_PROFILE_MODEL_BUNDLE: /opt/qy-channel-profile/model-bundle
+    secrets:
+      - migration_database_url
     networks: [internal]
     logging: *default-logging
 
