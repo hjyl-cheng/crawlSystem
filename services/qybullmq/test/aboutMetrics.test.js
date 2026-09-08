@@ -1,5 +1,25 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+
+test("successful About without a view count defaults only that metric to zero with explicit provenance", () => {
+  const metadata = {
+    subscriber_count_text: "17.5K subscribers", subscriber_count_source: "youtube_about",
+    video_count_text: "38 videos", video_count_source: "youtube_about",
+  };
+  const result = normalizeAboutMetrics({ metadata, aboutObserved: true, locale: "en" });
+  assert.equal(result.total_view_count, 0);
+  assert.equal(result.total_view_count_source, "youtube_about_missing_view_count");
+  assert.equal(result.subscriber_count, 17500);
+  assert.equal(result.total_video_count, 38);
+  assert.equal(result.outcome, "complete");
+  assert.equal(normalizeAboutMetrics({ metadata, aboutObserved: false }).total_view_count, null);
+  assert.equal(normalizeAboutMetrics({ metadata: {
+    ...metadata, view_count_text: "unknown views", view_count_source: "youtube_about",
+  }, aboutObserved: true }).total_view_count_status, "unresolved");
+  assert.equal(normalizeAboutMetrics({ metadata: {
+    ...metadata, total_view_count: -1, view_count_source: "youtube_about",
+  }, aboutObserved: true }).total_view_count, null);
+});
 import { normalizeAboutMetrics } from "../src/aboutMetrics.js";
 import { aboutObservationIdempotencyKey } from "../src/aboutObservationStore.js";
 
@@ -53,7 +73,7 @@ test("compact About values remain explicitly estimated", () => {
   assert.equal(result.total_video_count_status, "estimated");
 });
 
-test("a successful partial About response preserves null plus status", () => {
+test("a successful partial About defaults missing views without defaulting subscribers", () => {
   const result = normalizeAboutMetrics({
     metadata: metadata({
       subscriber_count: 9999,
@@ -70,8 +90,9 @@ test("a successful partial About response preserves null plus status", () => {
   assert.equal(result.snapshot_eligible, true);
   assert.equal(result.subscriber_count, null);
   assert.equal(result.subscriber_count_status, "unavailable");
-  assert.equal(result.total_view_count, null);
-  assert.equal(result.total_view_count_status, "unavailable");
+  assert.equal(result.total_view_count, 0);
+  assert.equal(result.total_view_count_status, "exact");
+  assert.equal(result.total_view_count_source, "youtube_about_missing_view_count");
   assert.equal(result.total_video_count, 42);
 });
 

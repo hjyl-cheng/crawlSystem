@@ -40,6 +40,14 @@ function safeCount(value) {
 function normalizeMetric(metadata, definition, { aboutObserved, locale }) {
   const source = text(metadata?.[definition.sourceKey]);
   const rawText = text(metadata?.[definition.textKey]);
+  if (aboutObserved && definition.name === "total_view_count"
+      && rawText === null && text(metadata?.[definition.valueKey]) === null
+      && (source === null || source === ABOUT_SOURCE)) {
+    // Product policy: an observed About page may omit lifetime views.
+    // Preserve the absent display text and distinguish this default from a
+    // YouTube-provided zero. Failed requests and malformed values stay unresolved.
+    return { value: 0, text: null, status: "exact", source: "youtube_about_missing_view_count" };
+  }
   if (!aboutObserved || source !== ABOUT_SOURCE) {
     return { value: null, text: rawText, status: "unavailable", source };
   }

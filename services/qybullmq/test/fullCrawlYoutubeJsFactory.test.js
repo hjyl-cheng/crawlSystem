@@ -53,6 +53,7 @@ for (const complete of [true, false]) {
           const snapshot = channelSnapshot();
           Object.assign(snapshot.metadata, {
             total_view_count: complete ? 123456 : null,
+            view_count_text: complete ? null : "unsupported views format",
             view_count_source: "youtube_about",
             total_video_count: 30,
             video_count_source: "youtube_about",
