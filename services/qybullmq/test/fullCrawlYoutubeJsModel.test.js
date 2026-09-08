@@ -80,9 +80,9 @@ test("strict detail accepts a complete public YouTubeJS observation", () => {
   assert.equal(resolved.access.access_status, "public");
   assert.equal(resolved.classification.content_type, "video");
   assert.equal(resolved.classification.authoritative, true);
-  assert.equal(validateFullCrawlYoutubeJsDetail("video-1", {
+  assert.throws(() => validateFullCrawlYoutubeJsDetail("video-1", {
     ...resolved.detail, comments_disabled: false,
-  }, { optionalComments: true }).detail.youtubejs_comments_error, "optional comments request timed out");
+  }, { optionalComments: true }), error => error.required_surface === "comments");
   assert.throws(() => validateFullCrawlYoutubeJsDetail("video-1", {
     ...resolved.detail, comments_disabled: false,
   }), error => error.required_surface === "comments");

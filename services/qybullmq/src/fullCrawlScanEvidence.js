@@ -38,3 +38,31 @@ export function fullCrawlUploadScan(run, candidates) {
     detail_processing_complete: candidates.every((row) => row.disposition !== "deferred"),
   };
 }
+
+// The caller must hold its normal transaction/execution guard. Checkpoint
+// repairs use the same frozen target proof as the original Full Crawl.
+export async function closeRepairedFullCrawlScan(client, runId, completedAt = new Date()) {
+  const run = (await client.query('SELECT * FROM crawler.channel_runs WHERE run_id=$1 FOR UPDATE', [runId])).rows[0];
+  if (!run || !isYoutubeJsFullCrawlFetchContract(run.result_json?.fetch_contract)) return null;
+  const rows = (await client.query(`SELECT source_content_id,source_url,position,detail_status,disposition,
+    result_json->'full_crawl_target' AS target FROM crawler.content_candidates
+    WHERE run_id=$1 ORDER BY position,candidate_id FOR UPDATE`, [runId])).rows;
+  const checkpoint = record(run.result_json.full_crawl);
+  if (checkpoint.fetch?.status === 'complete') {
+    fullCrawlUploadScan(run, rows);
+    return checkpoint.fetch;
+  }
+  const receipt = {
+    status: 'complete', completed_at: new Date(completedAt).toISOString(),
+    uploads_hash: checkpoint.uploads?.uploads_hash, target_hash: checkpoint.uploads?.target_hash,
+    selected_count: rows.length,
+    stored_count: rows.filter(row => row.disposition === 'stored').length,
+    excluded_count: rows.filter(row => row.disposition === 'terminal_excluded').length,
+    deferred_count: rows.filter(row => row.disposition === 'deferred').length,
+  };
+  fullCrawlUploadScan({ ...run, result_json: { ...run.result_json,
+    full_crawl: { ...checkpoint, fetch: receipt } } }, rows);
+  await client.query(`UPDATE crawler.channel_runs SET result_json=jsonb_set(result_json,
+    '{full_crawl,fetch}',$2::jsonb,true),updated_at=now() WHERE run_id=$1`, [runId, JSON.stringify(receipt)]);
+  return receipt;
+}

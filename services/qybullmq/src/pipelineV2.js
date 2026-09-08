@@ -1,3 +1,4 @@
+import { closeRepairedFullCrawlScan } from "./fullCrawlScanEvidence.js";
 import { nanoid } from "nanoid";
 import { completeVideoApiRequests } from "./videoApiBatchRequests.js";
 import {
@@ -3168,6 +3169,7 @@ async function processContentDetailRun({
     const finalized = await commit(async (client) => {
       const cancelledApiTasks = await cancelResolvedYoutubeApiTasks(runId, client);
       const summary = await updateRunDetailStatus(runId, { client });
+      if (summary.status === "done") await closeRepairedFullCrawlScan(client, runId);
       const youtubeRequestRows = await client.query(
         `SELECT COALESCE(sum(COALESCE((result_json#>>'{detail,youtubejs_request_count}')::int,0)),0)::int AS request_count
          FROM crawler.content_candidates
