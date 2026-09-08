@@ -1,5 +1,20 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { finalRepairDispatchGeneration } from "../src/finalRepairJobRecovery.js";
+
+test("repair rounds do not replace the accepted Candidate dispatch generation", async () => {
+  const generation = await finalRepairDispatchGeneration(async (sql, params) => {
+    assert.deepEqual(params, [2309]);
+    return { rows: [{ snapshot_dispatch_generation: "2" }] };
+  }, { candidateId: 2309, repairRound: 3 });
+  assert.equal(generation, 2);
+  assert.equal(await finalRepairDispatchGeneration(() => assert.fail("child has no Candidate"), {
+    candidateId: null, repairRound: 3,
+  }), 3);
+  await assert.rejects(finalRepairDispatchGeneration(async () => ({ rows: [] }), {
+    candidateId: 2309, repairRound: 3,
+  }), /Candidate dispatch generation/);
+});
 import { ensureFinalRepairJob } from "../src/finalRepairJobRecovery.js";
 import { finalRepairDispatchDecision } from "../src/repairPolicy.js";
 

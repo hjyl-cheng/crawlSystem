@@ -55,7 +55,7 @@ import {
   finalRepairCandidateSql,
   preparedFinalDetailRepairSql,
 } from "./finalRepairCandidatePolicy.js";
-import { ensureFinalRepairJob, retryFullCrawlSnapshotJob } from "./finalRepairJobRecovery.js";
+import { ensureFinalRepairJob, finalRepairDispatchGeneration, retryFullCrawlSnapshotJob } from "./finalRepairJobRecovery.js";
 import { isYoutubeJsFullCrawlFetchContract } from "./fullCrawlFetchContract.js";
 import { maybeStartMetadataDiscoveryCycle } from "./metadataDiscoveryLoop.js";
 import {
@@ -2766,7 +2766,9 @@ async function maybeRepairFailedChannelRuns(actions, stats, queryScheduler, prox
       {
         name,
         data: {
-          dispatch_generation: round,
+          dispatch_generation: await finalRepairDispatchGeneration(query, {
+            candidateId: repairReference.candidate_id, repairRound: round,
+          }),
           channel_id: row.channel_id,
           channel_url: detailOnly ? row.channel_url : `https://www.youtube.com/channel/${row.channel_id}`,
           ...repairReference,

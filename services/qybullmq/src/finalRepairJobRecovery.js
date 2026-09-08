@@ -1,6 +1,19 @@
 import { normalizePublicationGapDomains } from "./publicationGapRepairExecution.js";
 import { isYoutubeJsFullCrawlFetchContract, assertSameFullCrawlFetchContract } from "./fullCrawlFetchContract.js";
 
+export async function finalRepairDispatchGeneration(query, { candidateId, repairRound }) {
+  if (candidateId == null) return nonNegativeInteger(repairRound, "repairRound");
+  const result = await query(
+    "SELECT snapshot_dispatch_generation FROM crawler.channel_candidates WHERE candidate_id=$1",
+    [candidateId],
+  );
+  const generation = Number(result.rows[0]?.snapshot_dispatch_generation);
+  if (!Number.isSafeInteger(generation) || generation <= 0) {
+    throw new Error(`Candidate dispatch generation is missing for Final Repair: ${candidateId}`);
+  }
+  return generation;
+}
+
 export async function assertFullCrawlSnapshotRecoveryOwner(query, job) {
   if (job?.queueName !== "youtube-channel-crawl" || !job.data?.run_id) return;
   const run = (await query(
