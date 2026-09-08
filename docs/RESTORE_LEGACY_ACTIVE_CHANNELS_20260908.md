@@ -27,3 +27,17 @@
 ## 验证
 
 正式 Node 20 镜像下执行来源读取、恢复入口、库存同步和 schema 单元测试。另以生产回滚事务验证真实 SQL 约束与去重行为。数据恢复后须只读验证页面筛选、单频道快照和批量快照；不提交测试采集任务。
+
+## 正式完成结果
+
+恢复事务已正式提交：`restoration_id=legacy-active-20260908-23507`。23,507 个恢复入口、23,507 个列表匹配、23,507 个有效候选 ID，均通过核验；这些频道的新库 Candidate / Migration Intent 仍为 0，未启动采集。
+
+API 与迁移 controller 已部署 `pachongsys-restored-active-20260908`（业务代码 `cc3aea5`），开启 `MIGRATION_RESTORED_SOURCES_ENABLED=true`；两服务运行正常、无重启，API healthy。正式采集 worker 无需更新。
+
+- 正式 Node 20 来源、恢复入口、库存同步和 schema 测试共 17 项通过。
+- 23,507 个快照哈希全部验证一致。
+- 旧结果来源、旧搜索来源、旧 agent failed 三种单频道读取均通过。
+- 实测两页各 100 个批量来源读取及排除集合，未重复，未派发任务。
+- 通过线上 dashboard 实际 `loadMigrationChannelInventory` 查询确认 Knoxy Brasil 在 discovered 列表可见；库存 ready，总量 401,325。
+
+重新创建 API/controller 时必须携带上述开关；完整受控 schema 发布与 bootstrap 已包含附属表。常驻 Clock scheduler 此前已独立部署成功，与本次恢复入口无关。
