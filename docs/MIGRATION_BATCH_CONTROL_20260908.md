@@ -29,4 +29,16 @@ For rollback, keep the new coordinator available until its batch is ended or com
 - Dashboard existing tests passed after moving selector assertions to the new rendered panel.
 - Isolated browser fixture tested All submission, live progress, pause, drain, resume, end cancellation/confirmation, ended batch controls and mobile layout. No production batch was started by these tests.
 
-Deployment status will be recorded after runtime verification.
+## Production verification
+
+Deployed on 2026-09-08 around 08:00 UTC:
+
+- 20 channel workers, controller and API: `qy-allpachong/qybullmq:pachongsys-28fa83a-migration-control`.
+- Dashboard: `qy-allpachong/dashboard:pachongsys-deb46c6-migration-control` (includes the display fix for ending before list preparation).
+- API and dashboard health checks passed; all upgraded services had zero restarts. Controller ticks continued normally.
+- 20 incremental workers and the daily scheduler remained running on their previous versions.
+- Inventory rows: 401,325. Eligible unstarted channels for All: **398,192**. No controlled migration batch was created during validation.
+- Public URL continues to require administrator login. The actual deployed page was verified through the server's internal network: All present, start enabled, progress HTTP 200, no JavaScript errors. Public authentication was not changed.
+- Backend regression log: `/tmp/migration-control-tests7.log`; dashboard regression: `/tmp/migration-dashboard-tests-final.log`; isolated browser screenshots: `/tmp/migration-ui-desktop.png`, `/tmp/migration-ui-mobile.png`; deployed-page check: `/tmp/migration-ui-production-internal.log`.
+
+Live containers preserve their original network aliases, proxy identities, mounts and resource limits. For a future Compose recreation, retain `MIGRATION_BATCH_CONTROL_ENABLED=true`, `MIGRATION_RESTORED_SOURCES_ENABLED=true` for source readers, and the image tags above (`QYBULLMQ_IMAGE_TAG` / `QY_DASHBOARD_IMAGE_TAG`). These flags default off in the generic Compose template so older images are not accidentally enabled before schema/worker rollout.
