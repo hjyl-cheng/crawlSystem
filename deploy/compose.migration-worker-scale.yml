@@ -3,7 +3,7 @@
 services:
   worker-channel:
     deploy:
-      replicas: 30
+      replicas: 40
   worker-incremental:
     deploy:
       replicas: 20
