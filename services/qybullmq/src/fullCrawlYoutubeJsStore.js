@@ -37,6 +37,7 @@ import { reconcileFullCrawlAgentState } from "./fullCrawlAgentState.js";
 import { reconcileRunDetailStatus } from "./runDetailStatus.js";
 import { resolveYoutubeContentType } from "./youtubeContentType.js";
 import { resolveCollectedVideoOutcome } from "./collectedVideoOutcome.js";
+import { completeAboutOnlyPublicationGapRepair } from "./publicationGapRepairExecution.js";
 
 function text(value) {
   const output = String(value ?? "").trim();
@@ -297,6 +298,24 @@ export class FullCrawlYoutubeJsStore {
     this.query = query;
     this.withTransaction = withTransaction;
     this.environment = environment;
+  }
+
+  async completeAboutOnlyRepair(job, { aboutObservation, enqueueFinalize }) {
+    const identity = jobIdentity(job);
+    return completeAboutOnlyPublicationGapRepair(
+      (sql, params) => this.withTransaction(async (client) => {
+        await lockChannelCandidateAttempt(client.query.bind(client), identity.candidateAttemptFence);
+        return client.query(sql, params);
+      }),
+      {
+        jobData: job.data,
+        runId: identity.runId,
+        channelId: identity.channelId,
+        aboutOutcome: aboutObservation.about.outcome,
+        aboutObservationCommand: aboutObservation,
+        enqueueFinalize,
+      },
+    );
   }
 
   async loadSettings() {

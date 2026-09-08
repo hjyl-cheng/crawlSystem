@@ -24,6 +24,7 @@ import {
 } from "./fullCrawlYoutubeJsModel.js";
 import { evaluateMigrationUploadsActivity } from "./migrationActivityPolicy.js";
 import { ParserContractError } from "./localizedParsing.js";
+import { publicationGapRepairJobIntent } from "./publicationGapRepairExecution.js";
 import { resolveYoutubeContentType } from "./youtubeContentType.js";
 
 function text(value) {
@@ -242,6 +243,40 @@ export function createFullCrawlYoutubeJsExecutor({
       const result = await store.settleExistingChannel(job);
       await notifyCandidateSettled();
       return result;
+    }
+    const repairIntent = publicationGapRepairJobIntent(job.data);
+    if (repairIntent?.scope === "about_only") {
+      if (state.phase !== "handoff") {
+        throw new Error("About-only repair requires a completed Full Crawl checkpoint");
+      }
+      if (state.run?.publication_finalized_status === "ready_auto"
+          && state.run?.result_json?.publication_gap_repair_execution?.scope === "about_only") {
+        return { ok: true, repaired: true, already_complete: true, scope: "about_only",
+          channel_id: state.identity.channelId, run_id: state.identity.runId };
+      }
+      const snapshot = await youtube.fetchChannel(state.identity.channelId, {
+        includeAbout: true,
+        signal: currentChannelExecutionAbortSignal(),
+      });
+      const admission = normalizeAdmission(snapshot, job, settings, {
+        locale, observedAt: nowIso(clock), startedAt,
+      });
+      if (admission.aboutObservation.about.outcome !== "complete") {
+        const error = new Error("About-only Publication Gap repair requires complete About metrics");
+        error.code = "publication_gap_about_incomplete";
+        throw error;
+      }
+      const repair = await store.completeAboutOnlyRepair(job, {
+        aboutObservation: { ...admission.aboutObservation, triggerReason: "repair" },
+        enqueueFinalize: (target) => handoff.fetchCompleted({
+          ...target, candidateAttemptFence: state.identity.candidateAttemptFence,
+        }),
+      });
+      return {
+        ok: true, repaired: true, channel_id: state.identity.channelId,
+        run_id: state.identity.runId, candidate_id: state.identity.candidateId,
+        ...repair,
+      };
     }
     if (state.phase !== "admission") await notifyCandidateSettled();
 

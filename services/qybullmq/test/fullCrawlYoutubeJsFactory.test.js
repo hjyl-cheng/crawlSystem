@@ -6,6 +6,75 @@ import { YOUTUBEJS_FULL_CRAWL_FETCH_CONTRACT, YOUTUBEJS_FULL_CRAWL_V1_FETCH_CONT
 
 const OBSERVED_AT = "2026-09-04T00:00:00.000Z";
 
+test("completed About-only publication repair is replayed without refetching or restaging", async () => {
+  const value = job();
+  Object.assign(value.data, { publication_gap_domains: ["channel"],
+    publication_gap_root_run_id: value.data.run_id, publication_gap_scope: "about_only",
+    require_complete_about_metrics: true });
+  const state = checkpointState("handoff");
+  state.run.publication_finalized_status = "ready_auto";
+  state.run.result_json.publication_gap_repair_execution = { scope: "about_only", status: "staged" };
+  const unexpected = async () => assert.fail("completed repair must not execute again");
+  const execute = createFullCrawlYoutubeJsExecutor({
+    store: { loadSettings: async () => ({}), restore: async () => state, completeAboutOnlyRepair: unexpected },
+    youtube: { fetchChannel: unexpected, fetchUploads: unexpected, fetchDetail: unexpected },
+    handoff: { fetchCompleted: unexpected },
+  });
+  assert.equal((await execute(value)).already_complete, true);
+});
+
+for (const complete of [true, false]) {
+  test(`About-only repair fetches fresh About despite completed Full Crawl checkpoint (complete=${complete})`, async () => {
+    const repairJob = job();
+    Object.assign(repairJob.data, {
+      publication_gap_domains: ["channel"],
+      publication_gap_root_run_id: repairJob.data.run_id,
+      publication_gap_scope: "about_only",
+      require_complete_about_metrics: true,
+    });
+    const calls = [];
+    const executor = createFullCrawlYoutubeJsExecutor({
+      clock: () => OBSERVED_AT,
+      store: {
+        loadSettings: async () => ({}),
+        restore: async () => checkpointState("handoff", { fetch: { status: "complete", stored_count: 30 } }),
+        async completeAboutOnlyRepair(receivedJob, { aboutObservation, enqueueFinalize }) {
+          assert.equal(receivedJob, repairJob);
+          assert.equal(aboutObservation.about.total_view_count, 123456);
+          assert.equal(aboutObservation.triggerReason, "repair");
+          calls.push("stage_about");
+          await enqueueFinalize({ channelId: "UCfull", runId: "run-full-1", reason: "publication-gap-about-only" });
+          return { scope: "about_only", candidate_count: 30, about_outcome: "complete" };
+        },
+      },
+      youtube: {
+        async fetchChannel() {
+          calls.push("fetch_about");
+          const snapshot = channelSnapshot();
+          Object.assign(snapshot.metadata, {
+            total_view_count: complete ? 123456 : null,
+            view_count_source: "youtube_about",
+            total_video_count: 30,
+            video_count_source: "youtube_about",
+          });
+          return snapshot;
+        },
+        fetchUploads: async () => assert.fail("must not refetch uploads"),
+        fetchDetail: async () => assert.fail("must not refetch video details"),
+      },
+      handoff: { fetchCompleted: async ({ reason }) => { assert.equal(reason, "publication-gap-about-only"); calls.push("finalize"); } },
+    });
+    if (complete) {
+      const result = await executor(repairJob, { resumeMode: "resume" });
+      assert.equal(result.scope, "about_only");
+      assert.deepEqual(calls, ["fetch_about", "stage_about", "finalize"]);
+    } else {
+      await assert.rejects(executor(repairJob), { code: "publication_gap_about_incomplete" });
+      assert.deepEqual(calls, ["fetch_about"]);
+    }
+  });
+}
+
 function job() {
   return {
     id: "channel-snapshot__batch-1__UCfull__g1",
@@ -294,7 +363,7 @@ test("Uploads checkpoint recovery does not fetch Channel again", async () => {
   assert.equal(fixture.calls.filter((call) => call.startsWith("youtube:detail:")).length, 2);
 });
 
-test("v1 replay still requires comments while v2 stores a complete video with optional comment failure", async () => {
+test("v1 and v2 both recover actual comment request failures before storing a video", async () => {
   for (const contract of [YOUTUBEJS_FULL_CRAWL_V1_FETCH_CONTRACT, YOUTUBEJS_FULL_CRAWL_FETCH_CONTRACT]) {
     const fixture = scriptedFixture({ phase: "uploads" });
     fixture.youtube.fetchDetail = async (id, options) => {
@@ -303,14 +372,8 @@ test("v1 replay still requires comments while v2 stores a complete video with op
     };
     const value = job();
     value.data.fetch_contract = contract;
-    if (contract.executor_version === 1) {
-      await assert.rejects(executor(fixture)(value), error => error.required_surface === "comments");
-      assert.equal(fixture.calls.some(call => call.startsWith("store:commit-detail:")), false);
-    } else {
-      const result = await executor(fixture)(value);
-      assert.equal(result.fetch_contract, "youtubejs_full_v2");
-      assert.equal(result.detail_processed, 2);
-    }
+    await assert.rejects(executor(fixture)(value), error => error.required_surface === "comments");
+    assert.equal(fixture.calls.some(call => call.startsWith("store:commit-detail:")), false);
   }
 });
 
