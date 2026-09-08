@@ -18,6 +18,7 @@ import {
   StaleChannelCandidateAttemptError,
 } from "./channelCandidateAttemptMutations.js";
 import { activeChannelCandidateAttemptFence } from "./channelCandidateAttemptFence.js";
+import { isAboutOnlyPublicationGapRepair } from "./publicationGapRepairExecution.js";
 
 function requiredFunction(value, name) {
   if (typeof value !== "function") throw new TypeError(`${name} is required`);
@@ -186,6 +187,7 @@ export async function failChannelCandidateWorkerJob({
     maxAttempts,
   });
   const shouldFailRun = !failure.terminalChannel
+    && !isAboutOnlyPublicationGapRepair(job?.data)
     && !failure.businessRunBudgetTerminal
     && !failure.systemFailure
     && (failure.permanentFailure || attemptsMade >= maxAttempts)

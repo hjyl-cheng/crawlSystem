@@ -1,6 +1,34 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+test("an exhausted About-only repair does not invalidate completed video work", async () => {
+  const value = completedJob();
+  value.opts = { attempts: 1 };
+  Object.assign(value.data, { run_id: "run:about", publication_gap_root_run_id: "run:about",
+    publication_gap_domains: ["channel"], publication_gap_scope: "about_only",
+    require_complete_about_metrics: true });
+  const result = await failChannelCandidateWorkerJob({
+    query: async () => assert.fail("must use transaction"),
+    withTransaction: async action => action({ query: async sql => {
+      assert.equal(sql.includes("UPDATE crawler.channel_runs"), false);
+      if (sql.includes("UPDATE crawler.channel_candidates")) return {
+        rowCount: 1, rows: [{ candidate_id: value.data.candidate_id, snapshot_active_job_id: null,
+          snapshot_active_job_attempt: null }],
+      };
+      return { rowCount: 0, rows: [] };
+    } }),
+    job: value, error: new Error("About metrics incomplete"),
+    failure: { message: "About metrics incomplete", terminalChannel: null,
+      businessRunBudgetTerminal: false, systemFailure: null, parserDetails: null,
+      permanentFailure: true },
+    refreshDispatchCandidateCounts: async () => {},
+    signalReadyDiscoveryPageQualifications: async () => {},
+    finishMigrationRetryIntent: async () => {},
+  });
+  assert.equal(result.terminal, true);
+  assert.equal(result.runFailureRecorded, false);
+});
+
 import {
   completeChannelCandidateWorkerJob,
   failChannelCandidateWorkerJob,
