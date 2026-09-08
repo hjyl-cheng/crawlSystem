@@ -39,7 +39,6 @@ ON crawler.migration_channel_inventory (
   priority DESC,
   source_candidate_id ASC
 );
--- migration-channel-inventory-schema:end
 
 -- Explicitly restored legacy channels; original source remains immutable.
 CREATE TABLE IF NOT EXISTS crawler.restored_migration_sources (
@@ -56,3 +55,4 @@ CREATE TABLE IF NOT EXISTS crawler.restored_migration_sources (
   CHECK(snapshot_json->>'source_id'=source_id),
   CHECK(snapshot_json->>'source_candidate_status'='discovered')
 );
+-- migration-channel-inventory-schema:end
