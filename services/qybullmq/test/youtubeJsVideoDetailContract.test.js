@@ -61,22 +61,30 @@ test("both pipelines reject incomplete public metadata with recoverable partial 
   await assert.rejects(incremental(detail), surfaceFailure(detail, "player"));
 });
 
-test("optional Full Crawl comments do not relax Incremental or legacy Full Crawl", async () => {
+test("optional comment rows never waive a failed comments request", async () => {
   const detail = video({
     comment_count: null,
     comment_count_status: "unresolved",
     youtubejs_comments_error: "comments request failed",
   });
-  assert.equal(validateFullCrawlYoutubeJsDetail(detail.id, detail, {
+  assert.throws(() => validateFullCrawlYoutubeJsDetail(detail.id, detail, {
     optionalComments: true,
-  }).detail, detail);
+  }), surfaceFailure(detail, "comments"));
   assert.throws(() => validateFullCrawlYoutubeJsDetail(detail.id, detail), surfaceFailure(detail, "comments"));
   await assert.rejects(incremental(detail), surfaceFailure(detail, "comments"));
   assert.equal(detail.comment_count, null);
+  const observedCount = { ...detail, comment_count: 12, comment_count_status: "exact" };
+  assert.throws(() => validateFullCrawlYoutubeJsDetail(detail.id, observedCount, {
+    optionalComments: true,
+  }), surfaceFailure(observedCount, "comments"));
+  const successfulEmpty = { ...observedCount, youtubejs_comments_error: null };
+  assert.equal(validateFullCrawlYoutubeJsDetail(detail.id, successfulEmpty, {
+    optionalComments: true,
+  }).detail, successfulEmpty);
 });
 
 test("optional comments never relax the required player fields", () => {
-  const detail = video({ title: null, youtubejs_comments_error: "comments request failed" });
+  const detail = video({ title: null });
   assert.throws(() => validateFullCrawlYoutubeJsDetail(detail.id, detail, {
     optionalComments: true,
   }), surfaceFailure(detail, "player"));

@@ -60,7 +60,7 @@ export function validateYoutubeJsVideoDetail(videoIdValue, detailValue, {
   const terminalAccess = ["members_only", "private", "unavailable"]
     .includes(access.access_status);
   const upcoming = isUpcomingLiveDetail(detail);
-  if (!optionalComments && !terminalAccess && !upcoming
+  if (!terminalAccess && !upcoming
       && detail.comments_disabled !== true && text(detail.youtubejs_comments_error)) {
     throw requiredSurfaceError(videoId,
       `YouTube.js required comments surface failed for ${videoId}: ${detail.youtubejs_comments_error}`,

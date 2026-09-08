@@ -36,6 +36,27 @@ function harness({ existing = null, settings = {}, result = api } = {}) {
     validate: detail => validateYoutubeJsVideoDetail("video1", detail, { optionalComments: true }) };
   return { fallback, options, requests };
 }
+
+for (const [consumer, detailMode] of [["full", "full"], ["incremental", "full"], ["incremental", "metrics"]]) {
+  test(`${consumer} ${detailMode} comments failures use batch comment recovery only at the managed budget limit`, async () => {
+    const comments = { version: 1, sort: "TOP_COMMENTS", total_count: 12, returned_count: 0, comments: [] };
+    const { fallback, options, requests } = harness({ result: { ...api, comments_disabled: false,
+      comment_count: 12, comment_count_status: "exact", comments_first_page: comments } });
+    const error = Object.assign(new Error("required comments surface failed", { cause: networkError() }), {
+      name: "YoutubeJsRequiredSurfaceError", required_surface: "comments",
+      partial_detail: { ...partial, youtubejs_comments_error: "connect ECONNRESET" },
+    });
+    const call = () => fallback({ ...options, consumer, detailMode, optionalComments: true,
+      fetch: async () => { throw error; } });
+    await assert.rejects(withVideoFallbackExecution({ getBudget: async () => ({ business_tasks_used: 4, business_tasks_limit: 9 }) }, call), e => e === error);
+    assert.equal(requests.length, 0);
+    const resolved = await withVideoFallbackExecution({ getBudget: async () => ({ business_tasks_used: 9, business_tasks_limit: 9 }) }, call);
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0].requireComments, true);
+    assert.equal(resolved.detail.youtubejs_comments_error, null);
+    assert.equal(resolved.detail.comment_count, 12);
+  });
+}
 test("exhausted player parsing uses batch evidence and preserves authoritative Shorts", async () => {
   const { fallback, options, requests } = harness();
   const value = await fallback(options);

@@ -96,14 +96,10 @@ test("strict detail preserves the main response and original comments failure as
     const legacy = await fetchYoutubeJsVideoDetail("strict-comments-default");
     assert.match(legacy.youtubejs_comments_error, /429 Too Many Requests/);
 
-    const optional = await fetchYoutubeJsVideoDetail("optional-comments-enabled", {
+    await assert.rejects(fetchYoutubeJsVideoDetail("optional-comments-enabled", {
       strictRequiredSurfaces: true,
       optionalComments: true,
-    });
-    assert.equal(optional.id, "optional-comments-enabled");
-    assert.match(optional.youtubejs_comments_error, /429 Too Many Requests/);
-    assert.equal(optional.comment_count, null);
-    assert.equal(optional.comment_count_status, "unresolved");
+    }), error => error.required_surface === "comments" && error.cause === commentsFailure);
 
     await assert.rejects(
       fetchYoutubeJsVideoDetail("strict-comments-enabled", {
@@ -126,6 +122,54 @@ test("strict detail preserves the main response and original comments failure as
     else process.env.YOUTUBEJS_EXTRACTOR_MODE = previousMode;
     if (previousProxy === undefined) delete process.env.YOUTUBE_PROXY_URL;
     else process.env.YOUTUBE_PROXY_URL = previousProxy;
+  }
+});
+
+test("transient comments SSL failure retries only comments and preserves video metrics", async () => {
+  const originalCreate = Innertube.create;
+  const previousMode = process.env.YOUTUBEJS_EXTRACTOR_MODE;
+  process.env.YOUTUBEJS_EXTRACTOR_MODE = "full";
+  let infoCalls = 0;
+  let commentsCalls = 0;
+  let alwaysFail = false;
+  const failure = Object.assign(new Error("fingerprint gateway proxy_transport: SSLError curl_code=35"), {
+    code: "FINGERPRINT_PROXY_TRANSPORT",
+  });
+  Innertube.create = async () => ({
+    getInfo: async id => {
+      infoCalls++;
+      const info = publicVideoInfo(id);
+      info.basic_info.like_count = 388;
+      return info;
+    },
+    actions: { execute: async () => {
+      commentsCalls++;
+      if (alwaysFail || commentsCalls === 1) throw failure;
+      return { success: true, data: { commentsHeaderRenderer: { countText: { simpleText: "12 Comments" } } } };
+    } },
+  });
+  try {
+    const detail = await fetchYoutubeJsVideoDetail("HHQNB1X0U70", { strictRequiredSurfaces: true, optionalComments: true });
+    assert.equal(detail.comment_count, 12);
+    assert.equal(detail.youtubejs_comments_error, null);
+    assert.equal(detail.like_count, 388);
+    assert.equal(infoCalls, 1);
+    assert.equal(commentsCalls, 2);
+    alwaysFail = true;
+    commentsCalls = 0;
+    await assert.rejects(fetchYoutubeJsVideoDetail("HHQNB1X0U70", { strictRequiredSurfaces: true, optionalComments: true }), error => {
+      assert.equal(error.cause, failure);
+      assert.equal(error.partial_detail.like_count, 388);
+      assert.equal(error.partial_detail.comment_count, null);
+      assert.equal(shouldReportProxyFailure({ error }), true);
+      return true;
+    });
+    assert.equal(commentsCalls, 2);
+  } finally {
+    await closeYoutubeJs();
+    Innertube.create = originalCreate;
+    if (previousMode === undefined) delete process.env.YOUTUBEJS_EXTRACTOR_MODE;
+    else process.env.YOUTUBEJS_EXTRACTOR_MODE = previousMode;
   }
 });
 

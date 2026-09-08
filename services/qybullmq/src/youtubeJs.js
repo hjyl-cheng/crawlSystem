@@ -20,7 +20,7 @@ import { ParserContractError } from "./localizedParsing.js";
 import { localizedAbsoluteUtcDay, localizedPublishedUtcDay } from "./localizedTime.js";
 import { publicationLinkTarget } from "./publicationLinks.js";
 import { normalizeVideoKeywords, normalizeVideoTextMetadata } from "./videoMetadata.js";
-import { annotateYoutubeFailure } from "./youtubeFailurePolicy.js";
+import { annotateYoutubeFailure, selectYoutubeFailure } from "./youtubeFailurePolicy.js";
 import { observeYoutubeBusinessEmail } from "./youtubeBusinessEmailAvailability.js";
 import { extractYoutubePlayerContentTypeSignals, resolveYoutubeContentType } from "./youtubeContentType.js";
 import { currentManagedAbortSignal } from "./proxyIdentity.js";
@@ -2051,24 +2051,33 @@ export async function fetchYoutubeJsVideoDetail(videoId, {
         context: { video_id: cleanVideoId },
       },
     );
-    try {
-      const raw = await fetchYoutubeJsCommentsSection(current.client, cleanVideoId, {
-        fallbackToNewest: optionalComments,
-      });
-      throwIfYoutubeJsOperationAborted();
-      if (youtubeCommentsDisabled(raw)) {
-        comments = emptyYoutubeCommentPage({ totalCount: 0 });
-        comments.comments_disabled = true;
-      } else {
-        comments = normalizeYoutubeCommentPage(raw, {
-          locale: DEFAULT_LANGUAGE,
-          totalCount: hint,
+    for (let commentAttempt = 0; commentAttempt < 2; commentAttempt += 1) {
+      try {
+        const raw = await fetchYoutubeJsCommentsSection(current.client, cleanVideoId, {
+          fallbackToNewest: optionalComments,
         });
+        throwIfYoutubeJsOperationAborted();
+        if (youtubeCommentsDisabled(raw)) {
+          comments = emptyYoutubeCommentPage({ totalCount: 0 });
+          comments.comments_disabled = true;
+        } else {
+          comments = normalizeYoutubeCommentPage(raw, {
+            locale: DEFAULT_LANGUAGE,
+            totalCount: hint,
+          });
+        }
+        commentsError = null;
+        commentsFailure = null;
+        break;
+      } catch (error) {
+        throwIfYoutubeJsOperationAborted();
+        commentsError = String(error?.message || error);
+        commentsFailure = error;
+        // Retry a transient connection failure once without refetching player
+        // metadata. Persistent failures return to managed route/budget recovery.
+        const kind = selectYoutubeFailure({ error }).decision.kind;
+        if (!["proxy_transport", "upstream_transient"].includes(kind)) break;
       }
-    } catch (error) {
-      throwIfYoutubeJsOperationAborted();
-      commentsError = String(error?.message || error);
-      commentsFailure = error;
     }
     throwIfYoutubeJsOperationAborted();
     const detail = {
@@ -2086,7 +2095,7 @@ export async function fetchYoutubeJsVideoDetail(videoId, {
       .includes(detail.access_status)
       && detail.is_upcoming !== true
       && detail.comments_disabled !== true;
-    if (strictRequiredSurfaces === true && !optionalComments && commentsRequired && commentsFailure != null) {
+    if (strictRequiredSurfaces === true && commentsRequired && commentsFailure != null) {
       const error = new Error(
         `YouTube.js required comments surface failed for ${cleanVideoId}: ${commentsError}`,
         { cause: commentsFailure },

@@ -82,9 +82,9 @@ export function createVideoDetailApiFallback({ query, withTransaction, loadSetti
             throw videoApiResultError("Video API fallback unavailable: key or daily allowance missing");
           }
           await request(withTransaction, { requestId, runId, videoId, consumer, partialDetail: partial,
-            requireComments: detailMode === "full" && !optionalComments
-              && (Boolean(partial.youtubejs_comments_error) || !partial.comments_first_page)
-              && partial.comments_disabled !== true });
+            requireComments: partial.comments_disabled !== true
+              && (Boolean(partial.youtubejs_comments_error)
+                || (detailMode === "full" && !optionalComments && !partial.comments_first_page)) });
           console.log(JSON.stringify({ event: "video_api_fallback_requested", run_id: runId,
             video_id: videoId, consumer, detail_attempt: detailAttempt, failure_kind: failure.kind }));
           break;

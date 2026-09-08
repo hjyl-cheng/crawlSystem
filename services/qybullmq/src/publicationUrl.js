@@ -65,15 +65,15 @@ export function normalizePublicationUrl(rawValue, {
   const legacyMailtoUrl = candidate.match(/^mailto:(https?:\/\/.*)$/i);
   if (legacyMailtoUrl) candidate = legacyMailtoUrl[1];
 
-  const bareEmail = !candidate.includes("/")
-    && !/^[a-z][a-z0-9+.-]*:/i.test(candidate)
-    && /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(candidate);
-  if (allowMailto && (/^mailto:/i.test(candidate) || bareEmail)) {
-    return normalizeMailto(candidate);
-  }
-  if (allowTel && /^tel:/i.test(candidate)) return normalizeTelephone(candidate);
-
   for (let redirects = 0; redirects < 3; redirects += 1) {
+    // Contact targets may appear only after unwrapping a YouTube redirect.
+    const bareEmail = !candidate.includes("/")
+      && !/^[a-z][a-z0-9+.-]*:/i.test(candidate)
+      && /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(candidate);
+    if (allowMailto && (/^mailto:/i.test(candidate) || bareEmail)) {
+      return normalizeMailto(candidate);
+    }
+    if (allowTel && /^tel:/i.test(candidate)) return normalizeTelephone(candidate);
     let parsed;
     try {
       if (candidate.startsWith("//")) {
