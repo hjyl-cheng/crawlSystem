@@ -72,6 +72,7 @@ import {
 } from "./migrationRetryIntent.js";
 import { ManagedPolicyUnavailableError } from "./managedJobIntents.js";
 import { settleCompletedMigrationBatch } from "./migrationBatchCompletion.js";
+import { dispatchFinalizeForRun } from "./finalizeDispatch.js";
 import {
   automaticCompletedMigrationRecoveryEnabled,
   MigrationSystemRetryRecoveryReconciler,
@@ -1017,28 +1018,13 @@ async function reconcileFinalizeQueue(actions, pipelineCycleId) {
   let enqueued = 0;
   for (const row of rows) {
     if (representedRunIds.has(String(row.run_id))) continue;
-    const sourceUpdatedAt = new Date(row.source_updated_at).toISOString();
-    const jobId = safeJobId("finalize-reconcile", row.run_id, sourceUpdatedAt);
-    const existing = await queues[queuesByRole.finalize].getJob(jobId);
-    if (existing) {
-      const state = await existing.getState();
-      if (["waiting", "active", "delayed", "prioritized", "paused", "waiting-children"].includes(state)) continue;
-      try {
-        await existing.remove();
-      } catch {
-        continue;
-      }
-    }
-    await queues[queuesByRole.finalize].add(
-      "finalize-channel",
-      {
-        channel_id: row.channel_id,
-        run_id: row.run_id,
-        reason: "controller-finalize-reconcile",
-        pipeline_cycle_id: pipelineCycleId,
-      },
-      { jobId },
-    );
+    await dispatchFinalizeForRun({
+      query,
+      queue: queues[queuesByRole.finalize],
+      channelId: row.channel_id,
+      runId: row.run_id,
+      reason: "controller-finalize-reconcile",
+    });
     enqueued += 1;
   }
   if (enqueued > 0) {
