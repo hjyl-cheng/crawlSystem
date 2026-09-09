@@ -6,6 +6,35 @@ import { requestVideoApiDetail, waitForVideoApiDetail, videoApiResultError } fro
 
 const execution = new AsyncLocalStorage();
 const NETWORK_KINDS = new Set(["proxy_transport", "youtube_rate_limited", "youtube_challenge", "upstream_transient", "token_or_client"]);
+// User-approved heuristic, exclusively for completed live replays whose views
+// are absent from both YouTubeJS and a successful official API response.
+const REPLAY_ESTIMATE_LIKE_RATE = 0.025;
+
+function estimateMissingReplayViews(detail, partial, api) {
+  if (partial?.view_count != null || partial?.view_count_text != null
+      || api.view_count != null || api.view_count_text != null
+      || api.source !== "youtube_data_api_videos_list"
+      || api.api_verification?.videos_list?.returned !== true
+      || api.privacy_status !== "public"
+      || api.was_live !== true || api.live_status !== "was_live"
+      || api.is_live !== false || api.is_upcoming !== false
+      || !api.live_ended_at || !Number.isFinite(Date.parse(api.live_ended_at))
+      || api.like_count_source !== "youtube_data_api_statistics"
+      || !Number.isSafeInteger(api.like_count) || api.like_count <= 0) return;
+  const estimatedViews = Math.round(api.like_count / REPLAY_ESTIMATE_LIKE_RATE);
+  if (!Number.isSafeInteger(estimatedViews)) return;
+  detail.view_count = estimatedViews;
+  detail.view_count_text = String(estimatedViews);
+  detail.view_count_status = "estimated";
+  detail.view_count_source = "youtube_data_api_likes_estimate";
+  detail.view_count_estimation = {
+    version: 1,
+    reason: "ended_live_views_missing_after_api",
+    method: "likes_divided_by_rate",
+    like_rate: REPLAY_ESTIMATE_LIKE_RATE,
+    like_count: api.like_count,
+  };
+}
 
 export function withVideoFallbackExecution(context, action) {
   return execution.run(context, action);
@@ -27,10 +56,12 @@ export function mergeVideoApiEvidence(videoId, partial, api) {
     delete detail.playability_retry_mode;
     delete detail.playability_reason_code;
   }
-  if (api.view_count_text != null) {
-    detail.view_count = Number(api.view_count_text);
+  if (api.view_count_text != null || api.view_count != null) {
+    detail.view_count = Number(api.view_count ?? api.view_count_text);
     detail.view_count_status = "exact";
+    delete detail.view_count_estimation;
   }
+  estimateMissingReplayViews(detail, partial, api);
   if (api.like_count != null) detail.like_count_status = "exact";
   if (api.comments_first_page || api.comments_disabled === true) detail.youtubejs_comments_error = null;
   detail.video_detail_fallback = { source: "youtube_data_api_batch", youtubejs_exhausted: true };

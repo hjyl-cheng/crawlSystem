@@ -60,3 +60,20 @@ A fresh official videos.list request for RECEBA video `rGxicmKEPCY` returned
 likeCount=801, commentCount=17, and no viewCount. Missing view count was not caused
 by dropping a returned API field. Do not manufacture a zero or mark that detail
 complete without evidence.
+
+## Narrow replay view estimate
+
+The user approved a fixed 2.5% like/view ratio for completed live replays only
+when YouTubeJS has no view count and a successful official videos.list response
+also omits it. The API must confirm a public ended live, with a valid end timestamp,
+not live/upcoming, and a positive safe-integer like count from API statistics.
+No estimate is made for ordinary videos, failed/unverified API responses, malformed
+counts, zero/missing likes, private content, or an existing view count (including 0).
+
+The merged detail records `view_count_status=estimated`,
+`view_count_source=youtube_data_api_likes_estimate`, and the method/rate/input in
+`view_count_estimation`; the raw API response is preserved. A later real API count
+replaces the estimate and removes its estimation metadata. For `rGxicmKEPCY`,
+801 / 0.025 = 32,040. Replaying the stored production evidence passes both Full
+Crawl and incremental metrics validation. This ratio is a user-selected heuristic,
+not a measured platform benchmark.

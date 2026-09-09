@@ -15,6 +15,49 @@ const parserError = () => Object.assign(new Error("required player surface incom
   name: "YoutubeJsRequiredSurfaceError", partial_detail: partial,
 });
 const networkError = () => Object.assign(new Error("connect ECONNRESET"), { code: "ECONNRESET" });
+const replayWithoutViews = { ...api, view_count_text: undefined, like_count: 801,
+  like_count_source: "youtube_data_api_statistics", was_live: true, live_status: "was_live",
+  is_live: false, is_upcoming: false, live_ended_at: "2026-07-12T22:37:36Z",
+  api_verification: { videos_list: { returned: true } } };
+
+test("only a verified ended replay missing views in both sources estimates at the approved 2.5%", () => {
+  const merged = mergeVideoApiEvidence("video1", {}, replayWithoutViews);
+  const facts = projectVideoDetail(merged);
+  assert.equal(facts.view_count, 32040);
+  assert.equal(facts.view_count_status, "estimated");
+  assert.equal(facts.view_count_source, "youtube_data_api_likes_estimate");
+  assert.equal(merged.view_count_estimation.like_rate, 0.025);
+  assert.equal(merged.view_count_estimation.like_count, 801);
+  assert.equal(replayWithoutViews.view_count, undefined);
+  assert.doesNotThrow(() => validateYoutubeJsVideoDetail("video1", merged, { detailMode: "metrics" }));
+});
+
+for (const change of [
+  { was_live: false, live_status: "not_live", live_ended_at: null },
+  { is_live: true }, { is_upcoming: true }, { live_status: "is_live" },
+  { live_ended_at: null }, { live_ended_at: "invalid" },
+  { api_verification: { videos_list: { returned: false } } },
+  { source: "youtubejs_player" }, { privacy_status: "private" },
+  { like_count: 0 }, { like_count: null }, { like_count: -1 },
+  { like_count: Number.MAX_SAFE_INTEGER }, { like_count_source: null },
+  { view_count_text: "invalid" },
+]) test(`replay view estimate does not broaden to ${JSON.stringify(change)}`, () => {
+  const detail = mergeVideoApiEvidence("video1", {}, { ...replayWithoutViews, ...change });
+  assert.equal(detail.view_count_estimation, undefined);
+});
+
+test("real counts including zero survive, and real API views replace estimated provenance", () => {
+  for (const count of [0, 123]) {
+    const retained = mergeVideoApiEvidence("video1", { view_count: count, view_count_status: "exact" }, replayWithoutViews);
+    assert.equal(retained.view_count, count);
+    assert.equal(retained.view_count_estimation, undefined);
+  }
+  const estimate = mergeVideoApiEvidence("video1", {}, replayWithoutViews);
+  const updated = mergeVideoApiEvidence("video1", estimate, { ...replayWithoutViews, view_count_text: "456", view_count_source: "youtube_data_api_statistics" });
+  assert.equal(updated.view_count, 456);
+  assert.equal(updated.view_count_status, "exact");
+  assert.equal(updated.view_count_estimation, undefined);
+});
 test("exact API counts replace unresolved or estimated scraper count statuses", () => {
   const facts = projectVideoDetail(mergeVideoApiEvidence("video1", {
     view_count_status: "estimated", like_count_status: "unresolved", like_count: null,
@@ -36,6 +79,16 @@ function harness({ existing = null, settings = {}, result = api } = {}) {
     validate: detail => validateYoutubeJsVideoDetail("video1", detail, { optionalComments: true }) };
   return { fallback, options, requests };
 }
+
+for (const consumer of ["full", "incremental"]) test(`${consumer} resumes the saved missing-view replay without another API request`, async () => {
+  const { fallback, options, requests } = harness({ result: replayWithoutViews,
+    existing: { run_id: "run1", source_content_id: "video1", consumer, partial_detail: {} } });
+  const result = await fallback({ ...options, consumer,
+    fetch: async () => assert.fail("saved API evidence must be reused") });
+  assert.equal(result.detail.view_count, 32040);
+  assert.equal(result.detail.view_count_status, "estimated");
+  assert.equal(requests.length, 0);
+});
 
 for (const [consumer, detailMode] of [["full", "full"], ["incremental", "full"], ["incremental", "metrics"]]) {
   test(`${consumer} ${detailMode} comments failures use batch comment recovery only at the managed budget limit`, async () => {
