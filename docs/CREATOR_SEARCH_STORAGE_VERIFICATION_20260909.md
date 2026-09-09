@@ -1,9 +1,9 @@
 # Creator Search incremental storage verification
 
 The existing `shadow/legacy` to `incremental/live` storage transition eliminates
-full Search release copies during normal publication. This change prepares and
-tests that transition; production storage mode and historical data were not
-changed during this verification.
+full Search release copies during normal publication. Production was switched
+using the guarded administrator on 2026-09-09 at 07:46:57 UTC after isolated
+tests and a publication drain. Historical data was not pruned.
 
 ## Production evidence
 
@@ -18,9 +18,11 @@ These are point-in-time observations, not parameters for a future cutover.
 The earlier storage survey found about 26.4 GiB in Legacy Search and indexes,
 with 1,235 retired releases. Historical pruning was not executed.
 
-The deployed `kollavo-api-1` compiled Creator service reads
-`creator_search_live` for searches, totals, details and facets. This is code-path
-inspection, not an authenticated browser or HTTP end-to-end acceptance test.
+The deployed `kollavo-api-1` Creator service reads `creator_search_live` for
+searches, totals, details and facets. During cutover, its real service and data
+source were invoked inside the deployed container against `newcrawler_business`
+with read-only sessions. This exercises deployed queries, but is not an
+authenticated browser or HTTP end-to-end acceptance test.
 
 ## Compatibility fix
 
@@ -80,12 +82,60 @@ node --test test/businessCreatorSearchIncremental.postgres.integration.test.js
 
 ## Production transition
 
-Use the existing guarded administrator documented in
-[CURRENT_SYSTEM_OPTIMIZATION_PLAN.md](CURRENT_SYSTEM_OPTIMIZATION_PLAN.md#101-creator-search-存储管理).
-It requires zero in-flight Projection records. The production observation above
-does not yet satisfy that condition. Arrange a publication drain window, deploy
-the readiness compatibility fix, obtain a fresh read-only plan and execute the
-exact guarded transition. Verify subsequent releases keep Live current without
-retaining full new Legacy snapshots; verify the consumer-facing queries and
-readiness report after publication. Preserve the cutover Legacy release for
-rollback. Historical pruning and physical disk reclamation are separate work.
+The existing guarded administrator documented in
+[CURRENT_SYSTEM_OPTIMIZATION_PLAN.md](CURRENT_SYSTEM_OPTIMIZATION_PLAN.md#101-creator-search-存储管理)
+was used without relaxing its zero-open-projection guard. Image
+`qy-allpachong/qybullmq:pachongsys-b36c362` contains the readiness fix and was
+also deployed to the crawler API. The fresh plan showed 22,709 Live and active
+Legacy rows, zero parity differences, zero open projections, and zero abnormal
+ownership records. Apply completed with no warnings.
+
+Before and immediately after cutover, the full Live document fingerprint
+(excluding only watermark) was `d089dd1850d86a36b2501aafdb58b9eb`, with all 22,709
+channels retained. Five deployed API searches (default, keyword, BR/pt filters,
+second-page average views sorting, and engagement sorting), detail, and facets
+had identical response hashes. Search totals were respectively 22,709, 80,
+22,349, 22,709 and 22,709. Individual queries took 39–160 ms before and
+40–136 ms after; these are smoke observations, not a throughput benchmark.
+
+The original Projector and Reconciler were restarted with their original
+configuration. Both reported ready, running with zero restarts and no new errors.
+The Projector/Reconciler source files are unchanged between their retained image
+revision `60a7314` and `b36c362`; the SQL storage mode selects the new write path.
+At 07:51:36 UTC, the database remained incremental/live, all 29,673 projection
+records were delivered, and all Live rows joined their channel snapshots.
+The updated readiness report's real Business query also passed for 100 channels.
+Its separate full-dataset diagnostic had exceeded a 30-second timeout; full-report
+performance remains a limitation, not a failed storage parity check.
+
+No new projection inputs had arrived after resumption at that observation, so
+no post-cutover incremental release or production publication-speed improvement
+was measured. Changed-row-only writes, subsequent releases, exact results and
+rollback were verified in the isolated integration test above. Observe the next
+normal publication for production timing and zero retained Legacy rows rather
+than generating synthetic production records. The cutover Legacy release is
+preserved for rollback. Historical pruning and disk reclamation are separate work.
+
+
+## Production drain observations (2026-09-09)
+
+The guarded administrator requires no open Projection Outbox records. Reconciler
+and Projector were stopped cleanly, and a temporary Projector using the same real
+transaction, version-vector and retry code drained existing publications. Crawling
+workers and result ingress continued running. These are business/search publication
+records, not new channel crawls or mere task dispatches.
+
+Eight batches of 250 committed between 06:42 and 07:14 UTC, taking 262–289 seconds
+each. The next 250 and a smaller 100-record attempt rolled back on the legacy
+search statement's 300-second timeout. No task was manually marked delivered.
+430 records remained. A temporary container then used a 900-second statement
+limit and matching 1,200-second lease, with JIT disabled; the normal services'
+timeout and lease configuration were unchanged. Its first 250 committed at
+07:39:08 UTC in 328,842 ms; the final 180 committed at 07:44:22 UTC in 313,394 ms.
+The drain then reported zero remaining records and exited successfully.
+
+The prolonged window reflects the cost of draining through the old full-copy
+search publisher, including the conservative drain-before-cutover workflow. It
+is not evidence that dispatching 1,000 IDs should take minutes. Search Current
+and indexes occupied about 28 GB during this window, versus about 62 MB for Live.
+Neither historical pruning nor physical disk reclamation was performed.
