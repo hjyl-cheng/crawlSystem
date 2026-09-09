@@ -469,6 +469,31 @@ test(
         "UPDATE crawler.migration_system_retry_items SET status='pending' WHERE candidate_id=$1",
         [admitted[1]],
       );
+      await query(`UPDATE crawler.channel_candidates SET status='accepted',
+        snapshot_active_job_id=NULL,snapshot_active_job_attempt=NULL,
+        snapshot_json=jsonb_build_object('failure_type','retryable_system_failure',
+          'failed_dispatch_batch_id',$2::text,'system_failure',jsonb_build_object('code','test'))
+        WHERE candidate_id=$1`, [admitted[1], failedBatch.batch_id]);
+      await query(`INSERT INTO crawler.channels(channel_id,channel_url,title,status)
+        VALUES('UCfailure6','https://youtube.com/channel/UCfailure6','Recovery','active')`);
+      await query(`INSERT INTO crawler.channel_runs(run_id,channel_id,candidate_id,status,crawl_mode,detail_status,result_json)
+        VALUES('control-ownerless-run','UCfailure6',$1,'waiting_detail','full','queued',
+          jsonb_build_object('job_id','failed-root'))`, [admitted[1]]);
+      for (const change of [
+        "failed_dispatch_generation=99",
+        "failed_dispatch_batch_id='old-batch'",
+        "failed_job_id='old-job'",
+        "failure_code='other-failure'",
+      ]) {
+        await withTransaction(async c => {
+          await c.query('SAVEPOINT stale_evidence');
+          await c.query(`UPDATE crawler.migration_system_retry_items SET ${change} WHERE candidate_id=$1`, [admitted[1]]);
+          const staleQuery = c.query.bind(c);
+          await reconcileMigrationControl({ query: staleQuery, withTransaction: fn => fn(c), queue, maxSnapshotAttempts: 3 });
+          assert.equal((await loadMigrationControlProgress(staleQuery)).active.status, 'stopping', change);
+          await c.query('ROLLBACK TO SAVEPOINT stale_evidence');
+        });
+      }
       await reconcileMigrationControl({
         query,
         withTransaction,

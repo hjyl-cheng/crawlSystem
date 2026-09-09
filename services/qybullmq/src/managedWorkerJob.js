@@ -294,17 +294,19 @@ export async function markChannelCandidateJobAttemptActive(query, job) {
                snapshot_active_job_id,snapshot_active_job_attempt,dispatch_batch_id
      ), resumed_retry AS (
        UPDATE crawler.migration_system_retry_items retry
-       SET status='retrying',updated_at=now()
+       SET status='retrying',recovery_run_id=NULL,updated_at=now()
        FROM claimed_candidate candidate
        WHERE retry.candidate_id=candidate.candidate_id
-         AND retry.status='pending'
+         AND retry.status IN ('pending','retrying')
          AND retry.failed_dispatch_batch_id=candidate.dispatch_batch_id
          AND retry.failed_dispatch_batch_id=$5
          AND retry.failed_dispatch_generation=$4
          AND retry.failed_job_id=$2
          AND retry.failed_job_attempt>0 AND retry.failed_job_attempt<$3
          AND retry.retry_dispatch_generation IS NULL
-         AND retry.recovery_run_id IS NULL
+         -- A controller may pin this run before replaying its original Snapshot.
+         -- Hand it back only to a newer attempt of that exact root Job.
+         AND (retry.recovery_run_id IS NULL OR retry.recovery_run_id=$6)
          AND EXISTS (
            SELECT 1 FROM crawler.channel_runs run
            JOIN crawler.channels channel ON channel.channel_id=run.channel_id
@@ -312,6 +314,8 @@ export async function markChannelCandidateJobAttemptActive(query, job) {
              AND channel.latest_run_id=run.run_id
              AND run.result_json->>'job_id'=$2
              AND COALESCE(run.result_json->>'dispatch_batch_id',run.result_json->>'pipeline_cycle_id')=$5
+             AND (retry.recovery_run_id IS NULL
+               OR run.result_json#>>'{fetch_contract,executor_id}'='youtubejs_full')
          )
        RETURNING retry.system_retry_id
      )

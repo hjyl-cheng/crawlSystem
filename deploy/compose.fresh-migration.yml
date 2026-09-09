@@ -71,7 +71,7 @@ services:
         condition: service_healthy
       local-agent-config:
         condition: service_completed_successfully
-    networks: !override [internal, qy_rota]
+    networks: !override [internal, qy_rota, migration_source]
 
   worker-channel:
     depends_on: !override

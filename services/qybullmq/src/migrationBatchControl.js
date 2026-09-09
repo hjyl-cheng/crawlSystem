@@ -348,7 +348,13 @@ export async function reconcileMigrationControl({
       SELECT 1 FROM crawler.migration_system_retry_items retry WHERE retry.candidate_id=cc.candidate_id
        AND retry.failed_dispatch_batch_id=i.batch_id AND retry.status='pending'
        AND retry.failed_dispatch_generation=cc.snapshot_dispatch_generation
-       AND retry.failed_job_id=cc.snapshot_active_job_id AND retry.failed_job_attempt=cc.snapshot_active_job_attempt
+       AND (retry.failed_job_id=cc.snapshot_active_job_id AND retry.failed_job_attempt=cc.snapshot_active_job_attempt
+         OR (cc.status='accepted' AND cc.snapshot_active_job_id IS NULL AND cc.snapshot_active_job_attempt IS NULL
+           AND cc.dispatch_batch_id=i.batch_id
+           AND cc.snapshot_json->>'failure_type'='retryable_system_failure'
+           AND cc.snapshot_json->>'failed_dispatch_batch_id'=i.batch_id
+           AND cc.snapshot_json#>>'{system_failure,code}'=retry.failure_code
+           AND r.result_json->>'job_id'=retry.failed_job_id))
     ) AS pending) manual ON true
     WHERE (cc.snapshot_active_job_id IS NULL OR manual.pending)
       AND NOT EXISTS(SELECT 1 FROM crawler.migration_system_retry_items retry WHERE retry.candidate_id=cc.candidate_id AND retry.status IN ('retrying','dispatched'))

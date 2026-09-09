@@ -702,7 +702,11 @@ test("inline Content Detail uses the parent Channel Candidate attemptsStarted Fe
   await client.query(`UPDATE crawler.migration_system_retry_items
     SET status='pending',failed_job_attempt=2 WHERE system_retry_id=$1`, [systemRetryId]);
   await client.query(`UPDATE crawler.channel_runs SET result_json=result_json ||
-    jsonb_build_object('job_id',$2::text) WHERE run_id=$1`, [runId, second.jobId]);
+    jsonb_build_object('job_id',$2::text,'fetch_contract',$3::jsonb) WHERE run_id=$1`,
+  [runId, second.jobId, JSON.stringify(YOUTUBEJS_FULL_CRAWL_FETCH_CONTRACT)]);
+  // The controller pins the same run before retrying its original Snapshot Job.
+  await client.query(`UPDATE crawler.migration_system_retry_items SET recovery_run_id=$2
+    WHERE system_retry_id=$1`, [systemRetryId, runId]);
   assert.equal(await transaction(client, tx => lockContentDetailExecution(tx, second)), null,
     "a pending terminal failure blocks the old attempt from writing");
   await client.query(`UPDATE crawler.channel_candidates SET snapshot_active_job_id=NULL,
@@ -729,6 +733,16 @@ test("inline Content Detail uses the parent Channel Candidate attemptsStarted Fe
     "replaying the original Snapshot Job takes over the persisted detail checkpoint");
   assert.equal(await transaction(client, tx => lockContentDetailExecution(tx, second)), null,
     "the old Snapshot attempt still cannot write after recovery");
+  assert.equal((await client.query('SELECT recovery_run_id FROM crawler.migration_system_retry_items WHERE system_retry_id=$1',
+    [systemRetryId])).rows[0].recovery_run_id, null,
+  'the original Job reclaims recovery ownership atomically');
+  await client.query(`UPDATE crawler.migration_system_retry_items SET recovery_run_id=$2
+    WHERE system_retry_id=$1`, [systemRetryId, runId]);
+  assert.equal(await markChannelCandidateJobAttemptActive(client.query.bind(client), original), true);
+  assert.ok(await transaction(client, tx => lockContentDetailExecution(tx, resumed)),
+    'a retrying record pinned by the controller also hands back the same run');
+  await client.query(`INSERT INTO crawler.channel_runs(run_id,channel_id,candidate_id,status,crawl_mode,detail_status)
+    VALUES($1,$2,$3,'waiting_detail','full','queued')`, [runId + '-other', channelId, candidateId]);
 
   // Activating a Job must never approve unrelated pending recovery evidence.
   for (const patch of [
@@ -737,7 +751,7 @@ test("inline Content Detail uses the parent Channel Candidate attemptsStarted Fe
     { failed_dispatch_batch_id: 'another-batch' },
     { failed_job_attempt: original.attemptsStarted },
     { retry_dispatch_generation: 2 },
-    { recovery_run_id: runId },
+    { recovery_run_id: runId + '-other' },
   ]) {
     const row = { failed_job_id: original.id, failed_dispatch_generation: 1,
       failed_dispatch_batch_id: batchId, failed_job_attempt: 2,
