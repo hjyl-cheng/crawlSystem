@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import { assertVideoApiNetworkAllowed } from "./videoApiContinuation.js";
 import { isStaleExecutionFailure, classifyRetryableSystemFailure } from "./managedWorkerJob.js";
 import { selectYoutubeFailure } from "./youtubeFailurePolicy.js";
 import { requestVideoApiDetail, waitForVideoApiDetail, videoApiResultError } from "./videoApiBatchRequests.js";
@@ -47,6 +48,7 @@ export function createVideoDetailApiFallback({ query, withTransaction, loadSetti
     if (existing && (existing.run_id !== runId || existing.source_content_id !== videoId
         || existing.consumer !== consumer)) throw new Error("Video API consumer identity conflicts");
     if (!existing) {
+      assertVideoApiNetworkAllowed();
       for (let detailAttempt = Math.max(1, Number(attempt) || 1); ; detailAttempt += 1) {
         try {
           const observed = await fetch();

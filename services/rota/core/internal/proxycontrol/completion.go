@@ -83,7 +83,8 @@ func (m *Manager) CompleteTask(ctx context.Context, request CompleteTaskRequest)
 	}
 
 	result := CompleteTaskResult{
-		OK: true, TaskCompleted: true, CompletionRequestID: request.CompletionRequestID,
+		APIContinuation: request.APIContinuation,
+		OK:              true, TaskCompleted: true, CompletionRequestID: request.CompletionRequestID,
 		TaskID: request.TaskID, SlotName: request.SlotName, LeaseID: request.LeaseID,
 		ControlState: CompletionReadyKeepRoute, Ready: true,
 		CompletedTaskRouteGeneration: request.RouteGeneration,
@@ -571,6 +572,9 @@ func normalizeCompleteTaskRequest(request CompleteTaskRequest) CompleteTaskReque
 }
 
 func validateCompleteTaskRequest(request CompleteTaskRequest) error {
+	if request.APIContinuation && (request.Outcome != TaskOutcomeSuccess || request.BusinessComplete || len(request.ObservationIDs) != 0 || request.RecheckCountry != "") {
+		return fmt.Errorf("%w: API continuation requires a successful quiesced handoff with unfinished business work and no network failure observation", ErrInvalidInput)
+	}
 	if request.RecheckCountry != "" {
 		if len(request.RecheckCountry) != 2 || request.RecheckCountry[0] < 'A' || request.RecheckCountry[0] > 'Z' || request.RecheckCountry[1] < 'A' || request.RecheckCountry[1] > 'Z' || request.BusinessComplete {
 			return fmt.Errorf("%w: country recheck requires ISO alpha-2 and unfinished business work", ErrInvalidInput)
@@ -607,6 +611,7 @@ func validateCompleteTaskRequest(request CompleteTaskRequest) error {
 
 func completeTaskRequestHash(request CompleteTaskRequest) (string, error) {
 	payload, err := json.Marshal(struct {
+		APIContinuation       bool     `json:"api_continuation,omitempty"`
 		SchemaVersion         int      `json:"schema_version"`
 		RecheckCountry        string   `json:"recheck_country,omitempty"`
 		SlotName              string   `json:"slot_name"`
@@ -623,8 +628,9 @@ func completeTaskRequestHash(request CompleteTaskRequest) (string, error) {
 		AttemptQuiesced       bool     `json:"attempt_quiesced"`
 		ActiveManagedRequests int      `json:"active_managed_requests"`
 	}{
-		RecheckCountry: request.RecheckCountry,
-		SchemaVersion:  1, SlotName: request.SlotName, WorkerID: request.WorkerID,
+		APIContinuation: request.APIContinuation,
+		RecheckCountry:  request.RecheckCountry,
+		SchemaVersion:   1, SlotName: request.SlotName, WorkerID: request.WorkerID,
 		WorkerInstanceID: request.WorkerInstanceID, LeaseID: request.LeaseID,
 		RouteGeneration: request.RouteGeneration, TaskID: request.TaskID,
 		BusinessRunID: request.BusinessRunID, Outcome: request.Outcome,

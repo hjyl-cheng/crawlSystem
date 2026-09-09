@@ -31,7 +31,8 @@ func (m *Manager) BusinessRunBudget(
 		  (SELECT COUNT(*)::int
 		   FROM proxy_control_tasks task
 		   WHERE task.workload_scope=run.workload_scope
-		     AND task.business_run_id=run.business_run_id),
+		     AND task.business_run_id=run.business_run_id
+		     AND NOT (task.status='completed' AND task.outcome='success' AND COALESCE(task.completion_result->>'api_continuation','false')='true')),
 		  run.max_network_attempts_per_business_run,
 		  COALESCE(latest.job_execution_id,''),
 		  COALESCE(latest.task_count,0),
@@ -39,7 +40,7 @@ func (m *Manager) BusinessRunBudget(
 		  run.budget_exhausted_at
 		FROM proxy_control_business_runs run
 		LEFT JOIN LATERAL (
-		  SELECT task.job_execution_id,COUNT(*)::int AS task_count,
+		  SELECT task.job_execution_id,COUNT(*) FILTER (WHERE NOT (task.status='completed' AND task.outcome='success' AND COALESCE(task.completion_result->>'api_continuation','false')='true'))::int AS task_count,
 		         MAX(task.attempt_number) AS latest_attempt
 		  FROM proxy_control_tasks task
 		  WHERE task.workload_scope=run.workload_scope

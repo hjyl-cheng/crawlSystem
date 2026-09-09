@@ -1,5 +1,6 @@
 import {MIGRATION_START_JOB,startControlledMigrationChannel,prepareControlledMigrationSnapshot,migrationBatchControlEnabled} from "./migrationBatchControl.js";
 import { Worker } from "bullmq";
+import { gateVideoApiJob, isVideoApiHandoff, runVideoApiResumable } from "./videoApiContinuation.js";
 import { nanoid } from "nanoid";
 import { ensureDefaultAgentConfig } from "./agentConfig.js";
 import { ChannelExecutionRuntimeAdapter } from "./channelExecutionRuntimeAdapter.js";
@@ -1343,7 +1344,7 @@ async function processJobInner(job, { resumeMode = "initial", prepared = null } 
       : await runWithProxyIdentity(proxyStart, execute);
   } catch (error) {
     // This is a quiesced route-selection handoff, not a failed crawl.
-    if (error?.code === "UPLOADS_COUNTRY_RECHECK") throw error;
+    if (error?.code === "UPLOADS_COUNTRY_RECHECK" || isVideoApiHandoff(error)) throw error;
     const failureDecision = retryableSystemFailureDecision(error)
       ?? decideYoutubeFailure({ error });
     error.youtube_failure_decision = failureDecision;
@@ -1410,7 +1411,7 @@ async function processJobInner(job, { resumeMode = "initial", prepared = null } 
     }
     const maxAttempts = Math.max(1, Number(job?.opts?.attempts ?? 1));
     const terminalAttempt = failureDecision.retry_mode === "none"
-      || Number(job?.attemptsStarted ?? 0) >= maxAttempts;
+      || Number(job?.attemptsMade ?? 0) + 1 >= maxAttempts;
     if (
       terminalAttempt
       && job?.queueName === queuesByRole.contentDetail
@@ -1539,6 +1540,7 @@ async function persistManagedRetryCheckpoint({ job, prepared, error, failure }) 
 }
 
 async function processJob(job, token) {
+  await gateVideoApiJob({ query, job, token });
   if(job.queueName===queuesByRole.channelCrawl&&job.name==='channel-snapshot'&&job.data?.migration_control_start){
     if(!migrationBatchControlEnabled())throw new Error('Migration batch control is not enabled on this worker');
     if(!await prepareControlledMigrationSnapshot({query,withTransaction,job}))return {not_started:true};
@@ -1590,7 +1592,7 @@ async function processJobWithOwnership(job, token) {
       throw error;
     }
   }
-  const execute = () => {
+  const executeManaged = () => {
     if (!configuredForProxySlot()) return processJobInner(job);
     return processManagedWorkerJob({
       job,
@@ -1613,6 +1615,8 @@ async function processJobWithOwnership(job, token) {
       onDeferred: (event) => console.log(JSON.stringify({ event: "rota_job_deferred", ...event })),
     });
   };
+  const execute = () => runVideoApiResumable({ job, token, execute: executeManaged,
+    executeReplay: () => processJobInner(job, { resumeMode: "api_continuation" }) });
   if (job?.queueName === queuesByRole.channelCrawl && job?.data?.candidate_id) {
     return runChannelCandidateWorkerJobWithDurableSettlement({
       query,

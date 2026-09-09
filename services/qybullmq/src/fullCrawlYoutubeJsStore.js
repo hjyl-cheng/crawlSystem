@@ -1,3 +1,4 @@
+import { assertVideoApiNetworkAllowed, isVideoApiReplay } from "./videoApiContinuation.js";
 import { activeChannelCandidateAttemptFence } from "./channelCandidateAttemptFence.js";
 import {
   beginChannelCandidateValidation,
@@ -795,6 +796,11 @@ export class FullCrawlYoutubeJsStore {
       );
       const row = selected.rows[0];
       if (!row) return null;
+      if (isVideoApiReplay()) {
+        const existing = await client.query("SELECT 1 FROM crawler.youtube_api_detail_requests WHERE request_id=$1",
+          [JSON.stringify(["full", fence.runId, row.source_content_id])]);
+        if (!existing.rows.length) assertVideoApiNetworkAllowed();
+      }
       const claimed = await client.query(
         `UPDATE crawler.content_candidates
          SET detail_status='running',attempts=attempts+1,error_message=NULL,updated_at=now()

@@ -1,6 +1,20 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { IncrementalChannelRunner } from "../src/incrementalChannelRunner.js";
+import { videoApiPendingError } from "../src/videoApiContinuation.js";
+import { incrementalPlanHash, validateIncrementalPlan } from "../src/incrementalPlan.js";
+
+test("API handoff preserves frozen incremental Plan and never marks its video domain failed", async () => {
+  const data = plan({ video: true });
+  const hash = incrementalPlanHash(data);
+  data.video_api_continuation = { request_id: "request" };
+  assert.equal(incrementalPlanHash(validateIncrementalPlan(data)), hash);
+  const runStore = storeFixture(data);
+  const runner = new IncrementalChannelRunner({ runStore, withTransaction: async action => action({}),
+    query: async () => ({ rows: [] }), video: async () => { throw videoApiPendingError("request"); } });
+  await assert.rejects(runner.execute(job(data)), { code: "VIDEO_API_PENDING" });
+  assert.deepEqual(runStore.calls, [["domain", "video", "running"]]);
+});
 
 function plan(masks = {}) {
   const taskMask = {

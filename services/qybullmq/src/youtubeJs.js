@@ -1,3 +1,4 @@
+import { assertVideoApiNetworkAllowed } from "./videoApiContinuation.js";
 import { emptyUploadsDecision, prepareDormantUploadsProbe, pendingUploadsDormancy, uploadsResponseEvidence, assertNormalEmptyUploadsResponse } from "./youtubeUploadsCountry.js";
 import { canonicalizeCrawlerCountry } from "./agentCountryPolicy.js";
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -1098,6 +1099,7 @@ async function createRuntime(proxyUrl, profile = null) {
 }
 
 async function getRuntime() {
+  assertVideoApiNetworkAllowed();
   if (extractorMode() === "disabled") return null;
   const proxyUrl = activeLease?.proxyUrl ?? currentProxyUrl();
   const profile = activeLease?.profile ?? null;

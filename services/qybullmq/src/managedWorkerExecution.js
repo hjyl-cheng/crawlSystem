@@ -156,6 +156,10 @@ export async function executeManagedWorkerAttempt({
       result,
     };
   } catch (error) {
+    if (error?.code === "VIDEO_API_PENDING") {
+      return { kind: "managed_work_complete", businessState: "waiting_downstream",
+        result: { video_api_pending: error.requestId } };
+    }
     if (error?.code === "UPLOADS_COUNTRY_RECHECK") {
       const data = { ...job.data, uploads_country_recheck: { country: error.country, status: "requested" } };
       await job.updateData(data);

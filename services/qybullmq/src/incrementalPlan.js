@@ -112,6 +112,13 @@ export function incrementalRunId(planId) {
 }
 
 export function validateIncrementalPlan(value) {
+  // Execution metadata is durable on the Job, but is not part of the frozen Plan/hash.
+  if (Object.prototype.hasOwnProperty.call(value ?? {}, "video_api_continuation")) {
+    exactKeys(value.video_api_continuation, ["request_id"], "video_api_continuation");
+    requiredText(value.video_api_continuation.request_id, "video_api_continuation.request_id");
+    const { video_api_continuation, ...payload } = value;
+    value = payload;
+  }
   exactKeys(value, PAYLOAD_KEYS, "payload");
   if (value.schema_version !== 5) {
     throw new IncrementalPlanContractError("schema_version must be 5");

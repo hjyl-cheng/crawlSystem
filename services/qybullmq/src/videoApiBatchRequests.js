@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { setTimeout as delay } from "node:timers/promises";
+import { videoApiPendingError } from "./videoApiContinuation.js";
 import { safeJobId } from "./queues.js";
 
 export const VIDEO_API_BATCH_SCOPE = "youtubejs-video-fallback";
@@ -77,26 +77,16 @@ export async function completeVideoApiRequests(client, taskId, detail, returned)
     Boolean(detail?.comments_first_page || detail?.comments_disabled === true)]);
 }
 
-export async function waitForVideoApiDetail(query, requestId, { signal, timeoutMs = 180000 } = {}) {
-  const deadline = Date.now() + timeoutMs;
-  while (true) {
-    signal?.throwIfAborted();
-    const row = (await query(`SELECT r.status,r.detail_json,r.error_message,t.next_retry_at
-      FROM crawler.youtube_api_detail_requests r JOIN crawler.youtube_api_tasks t USING(task_id)
-      WHERE request_id=$1`, [requestId])).rows[0];
-    if (!row) throw new Error("Video API request disappeared");
-    if (row.status === "done") return row.detail_json;
-    if (["unavailable", "failed"].includes(row.status)) {
-      throw videoApiResultError(row.error_message ?? "Data API did not return the requested video; access remains unresolved");
-    }
-    if (row.next_retry_at && new Date(row.next_retry_at).getTime() > deadline) {
-      throw videoApiResultError(`Data API request is deferred until ${new Date(row.next_retry_at).toISOString()}; durable request retained`);
-    }
-    if (Date.now() >= deadline) {
-      throw videoApiResultError("Data API fallback is still pending; durable request retained for recovery");
-    }
-    await delay(500, undefined, signal ? { signal } : undefined);
+export async function waitForVideoApiDetail(query, requestId, { signal } = {}) {
+  signal?.throwIfAborted();
+  const row = (await query(`SELECT status,detail_json,error_message
+    FROM crawler.youtube_api_detail_requests WHERE request_id=$1`, [requestId])).rows[0];
+  if (!row) throw new Error("Video API request disappeared");
+  if (row.status === "done") return row.detail_json;
+  if (["unavailable", "failed"].includes(row.status)) {
+    throw videoApiResultError(row.error_message ?? "Data API did not return the requested video; access remains unresolved");
   }
+  throw videoApiPendingError(requestId);
 }
 
 function batchJob(batch) {

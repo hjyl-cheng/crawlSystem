@@ -127,7 +127,19 @@ func (m *Manager) BeginTask(ctx context.Context, request BeginTaskRequest) (Task
 	); err != nil {
 		return Task{}, fmt.Errorf("lock proxy business run: %w", err)
 	}
-	if budgetErr := taskBudgetError(nextAttempt, maxAttempts, 0, maxSwitches); budgetErr != nil {
+	// Sequence numbers remain monotonic fencing identities. A durable API handoff
+	// releases a Task without spending an additional network retry on its resumption.
+	var apiContinuations int
+	if err := tx.QueryRow(ctx, `
+		SELECT COUNT(*) FROM proxy_control_tasks
+		WHERE workload_scope=$1 AND business_run_id=$2
+		  AND status='completed' AND outcome='success'
+		  AND completion_result->>'api_continuation'='true'
+	`, m.options.WorkloadScope, request.BusinessRunID).Scan(&apiContinuations); err != nil {
+		return Task{}, fmt.Errorf("count API continuations: %w", err)
+	}
+	budgetAttempt := nextAttempt - apiContinuations
+	if budgetErr := taskBudgetError(budgetAttempt, maxAttempts, 0, maxSwitches); budgetErr != nil {
 		if !errors.Is(budgetErr, ErrBusinessRunBudget) {
 			return Task{}, budgetErr
 		}
@@ -163,10 +175,11 @@ func (m *Manager) BeginTask(ctx context.Context, request BeginTaskRequest) (Task
 		SELECT COUNT(*)
 		FROM proxy_control_tasks
 		WHERE workload_scope=$1 AND job_execution_id=$2
+		  AND NOT (status='completed' AND outcome='success' AND COALESCE(completion_result->>'api_continuation','false')='true')
 	`, m.options.WorkloadScope, request.JobExecutionID).Scan(&executionTaskCount); err != nil {
 		return Task{}, fmt.Errorf("count proxy execution tasks: %w", err)
 	}
-	if budgetErr := taskBudgetError(nextAttempt, maxAttempts, executionTaskCount, maxSwitches); budgetErr != nil {
+	if budgetErr := taskBudgetError(budgetAttempt, maxAttempts, executionTaskCount, maxSwitches); budgetErr != nil {
 		return Task{}, budgetErr
 	}
 

@@ -201,6 +201,28 @@ function prepared() {
   };
 }
 
+test("API handoff quiesces the route, releases its slot and preserves the Business Run for continuation", async () => {
+  const { adapter, calls, runtimeCalls } = createFixture();
+  const complete = adapter.client.completeTask.bind(adapter.client);
+  adapter.client.completeTask = async request => ({ ...await complete(request), api_continuation: request.api_continuation });
+  await adapter.start();
+  try {
+    const result = await adapter.executeJob(job(), { prepare: async () => prepared(),
+      executeAttempt: async () => ({ kind: "managed_work_complete", businessState: "waiting_downstream",
+        result: { video_api_pending: "request" } }) });
+    assert.deepEqual(result, { video_api_pending: "request" });
+    const completion = calls.find(c => c.command === "complete").request;
+    assert.equal(completion.api_continuation, true);
+    assert.equal(completion.business_complete, false);
+    assert.equal(completion.outcome, "success");
+    assert.equal(completion.attempt_quiesced, true);
+    assert.equal(completion.active_managed_requests, 0);
+    assert.deepEqual(completion.observation_ids, []);
+    assert.equal(calls.filter(c => c.command === "begin").length, 1);
+    assert.ok(runtimeCalls.some(c => c.action === "quiesce"));
+  } finally { await adapter.close(); }
+});
+
 test("a normal managed job uses one fenced Rota task", async () => {
   const { adapter, calls, runtimeCalls } = createFixture();
   await adapter.start();

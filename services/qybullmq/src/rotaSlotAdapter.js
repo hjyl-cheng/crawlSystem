@@ -384,6 +384,7 @@ export class RotaSlotAdapter {
           outcome,
           durationMs: Math.max(0, Math.round(this.monotonicNow() - startedAt)),
           businessComplete: attemptResult.kind === "country_recheck" ? false : businessComplete(attemptResult),
+          apiContinuation: Boolean(attemptResult.result?.video_api_pending),
           recheckCountry: attemptResult.kind === "country_recheck" ? attemptResult.country : null,
           observationIDs,
           activeManagedRequests: Number(quiesced?.active_managed_requests ?? 0),
@@ -645,6 +646,7 @@ export class RotaSlotAdapter {
     observationIDs,
     activeManagedRequests,
     recheckCountry = null,
+    apiContinuation = false,
   }) {
     if (activeManagedRequests !== 0) {
       throw new RotaSlotContractError("identity runtime did not quiesce all managed requests");
@@ -652,6 +654,7 @@ export class RotaSlotAdapter {
     const request = Object.freeze({
       completion_request_id: this.randomUUID(),
       ...(recheckCountry ? { recheck_country: recheckCountry } : {}),
+      ...(apiContinuation ? { api_continuation: true } : {}),
       slot_name: frozen.slot_name,
       worker_id: this.workerId,
       worker_instance_id: this.workerInstanceId,
@@ -670,6 +673,9 @@ export class RotaSlotAdapter {
     this.completionUncertain = false;
     try {
       const completed = await this.#sendCompletionRequest(request);
+      if (apiContinuation && completed.api_continuation !== true) {
+        throw new RotaSlotContractError("Rota did not acknowledge API continuation support");
+      }
       if (this.pendingCompletion === request) this.pendingCompletion = null;
       this.completionUncertain = false;
       return completed;

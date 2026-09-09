@@ -2,10 +2,11 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import test from "node:test";
 import pg from "pg";
+import { videoApiPendingError, withVideoApiReplay } from "../src/videoApiContinuation.js";
 import { executeIncrementalYoutubeJsVideo } from "../src/incrementalYoutubeJsVideo.js";
 import { PUBLICATION_WRITER_VERSION } from "../src/publicationWriterVersion.js";
 import { BusinessRunBindingStore } from "../src/businessRunBindingStore.js";
-import { YOUTUBEJS_FULL_CRAWL_FETCH_CONTRACT } from "../src/fullCrawlFetchContract.js";
+import { YOUTUBEJS_FULL_CRAWL_FETCH_CONTRACT, YOUTUBEJS_API_FULL_CRAWL_FETCH_CONTRACT } from "../src/fullCrawlFetchContract.js";
 import { createFullCrawlYoutubeJsExecutor } from "../src/fullCrawlYoutubeJsFactory.js";
 import { FullCrawlYoutubeJsStore } from "../src/fullCrawlYoutubeJsStore.js";
 
@@ -80,7 +81,8 @@ function publicDetail(videoId) {
   };
 }
 
-async function initializeThroughFullCrawl(pool, withTransaction, channelId, videoId, suffix, emptyUploads = false) {
+async function initializeThroughFullCrawl(pool, withTransaction, channelId, videoId, suffix, emptyUploads = false, apiPending = false) {
+  const contract = apiPending ? YOUTUBEJS_API_FULL_CRAWL_FETCH_CONTRACT : YOUTUBEJS_FULL_CRAWL_FETCH_CONTRACT;
   const batchId = `shared-full-${suffix}`;
   const runId = `full:${suffix}`;
   const jobId = `channel-snapshot__${batchId}__${channelId}__g1`;
@@ -96,22 +98,28 @@ async function initializeThroughFullCrawl(pool, withTransaction, channelId, vide
   await new BusinessRunBindingStore({ withTransaction }).resolve({
     businessRunKey, explicitBusinessRunId: runId, requestedStatus: "reserved", runKind: "full",
     channelId, candidateId, policy: { id: "shared-test", version: 1, hash: "sha256:shared-test" },
-    intent: { job_name: "channel-snapshot", crawl_mode: "full", fetch_contract: YOUTUBEJS_FULL_CRAWL_FETCH_CONTRACT },
+    intent: { job_name: "channel-snapshot", crawl_mode: "full", fetch_contract: contract },
   });
   const detail = { ...publicDetail(videoId), title: "Stored recent Video",
     thumbnail_url: "https://i.ytimg.com/vi/stored/default.jpg", description: "Stored description",
     keywords: ["stored"], published_at: "2026-09-01T00:00:00Z",
     published_at_precision: "date_only", duration_seconds: 45 };
+  let pending = apiPending;
+  let channelRequests = 0, uploadsRequests = 0;
   const execute = createFullCrawlYoutubeJsExecutor({
+    videoApiFallback: apiPending ? async request => {
+      if (pending) throw videoApiPendingError("full-api-request");
+      return request.validate(detail);
+    } : null,
     store: new FullCrawlYoutubeJsStore({ query: pool.query.bind(pool), withTransaction }),
     clock: () => new Date("2026-09-02T00:00:00Z"),
     youtube: {
-      fetchChannel: async () => ({ about_requested: true, about_observed: true,
+      fetchChannel: async () => (channelRequests++, { about_requested: true, about_observed: true,
         metadata: { channel_id: channelId, channel_url: `https://www.youtube.com/channel/${channelId}`,
           handle: "@shared-test", title: "Full to Incremental", country: "Brazil",
           subscriber_count: 10000, subscriber_count_text: "10,000", subscriber_count_source: "youtube_about" },
         raw: { engine: "youtubei.js@test" } }),
-      fetchUploads: async () => emptyUploads ? {
+      fetchUploads: async () => (uploadsRequests++, emptyUploads) ? {
         playlist_id: `UU${channelId.slice(2)}`, entries: [], activity_evidence_complete: true,
         scan: { complete: true, stop_reason: "list_end", terminal_reason: "list_end", pages: 1, inspected_count: 0, parse_gap_count: 0,
           empty_uploads: { version: 1, outcome: "dormant", country: "BR", reason: "no_country_reserve" } },
@@ -125,16 +133,32 @@ async function initializeThroughFullCrawl(pool, withTransaction, channelId, vide
       fetchDetail: async () => detail,
     },
   });
-  const result = await execute({ id: jobId, name: "channel-snapshot", attemptsStarted: 1,
+  const originalJob = { id: jobId, name: "channel-snapshot", attemptsStarted: 1,
     queueName: "youtube-channel-crawl", data: { channel_id: channelId, candidate_id: candidateId,
       run_id: runId, business_run_key: businessRunKey, dispatch_batch_id: batchId,
-      dispatch_generation: 1, fetch_contract: YOUTUBEJS_FULL_CRAWL_FETCH_CONTRACT } });
+      dispatch_generation: 1, fetch_contract: contract } };
+  if (apiPending) {
+    await assert.rejects(execute(originalJob), { code: "VIDEO_API_PENDING" });
+    assert.equal((await pool.query("SELECT detail_status FROM crawler.content_candidates WHERE run_id=$1", [runId])).rows[0].detail_status, "running");
+    await assert.rejects(withVideoApiReplay(() => execute(originalJob)), { code: "VIDEO_API_NETWORK_REQUIRED" });
+    assert.equal(Number((await pool.query("SELECT attempts FROM crawler.content_candidates WHERE run_id=$1", [runId])).rows[0].attempts), 1);
+    await pool.query("UPDATE crawler.channel_candidates SET snapshot_active_job_attempt=2 WHERE candidate_id=$1", [candidateId]);
+    await assert.rejects(execute(originalJob), { code: "CONTENT_DETAIL_EXECUTION_FENCE_STALE" });
+    originalJob.attemptsStarted = 2;
+    pending = false;
+  }
+  const result = await execute(originalJob);
+  if (apiPending) {
+    assert.equal(channelRequests, 1);
+    assert.equal(uploadsRequests, 1);
+    assert.equal((await pool.query("SELECT count(*)::int n FROM crawler.contents WHERE channel_id=$1", [channelId])).rows[0].n, 1);
+  }
   assert.equal(result.ok, true);
   assert.equal(result.detail_processed, emptyUploads ? 0 : 1);
   return result;
 }
 
-async function checkpointReplayScenario(enrichPending, emptyUploads = false) {
+async function checkpointReplayScenario(enrichPending, emptyUploads = false, apiPending = false) {
   const pool = new Pool({
     connectionString: integrationUrl,
     max: 4,
@@ -195,7 +219,8 @@ async function checkpointReplayScenario(enrichPending, emptyUploads = false) {
       contents: (await pool.query("SELECT * FROM crawler.contents WHERE channel_id=$1", [channelId])).rows,
       cursors: (await pool.query("SELECT anchor_video_ids,source_cursor FROM crawler.channel_domain_cursors WHERE channel_id=$1 AND observation_kind='video'", [channelId])).rows,
     } : null;
-    const result = await executeIncrementalYoutubeJsVideo({
+    let pending = apiPending;
+    const executionOptions = {
       plan,
       runId,
       startedAt: "2026-09-03T00:00:00.000Z",
@@ -246,12 +271,25 @@ async function checkpointReplayScenario(enrichPending, emptyUploads = false) {
         },
       }),
       fetchDetail: async (requestedVideoId) => {
+        if (pending) throw videoApiPendingError("durable-api-request");
         fetched.push(requestedVideoId);
         return publicDetail(requestedVideoId);
       },
       now: () => new Date("2026-09-03T01:00:00.000Z"),
       crawlerVersion: "youtubejs-checkpoint-integration",
-    });
+    };
+    if (apiPending) {
+      await assert.rejects(executeIncrementalYoutubeJsVideo(executionOptions), { code: "VIDEO_API_PENDING" });
+      const waiting = (await pool.query("SELECT status,claim_token,captured_at FROM crawler.incremental_youtubejs_video_items WHERE run_id=$1 AND phase='first_seen'", [runId])).rows[0];
+      assert.equal(waiting.status, "pending");
+      assert.equal(waiting.claim_token, null);
+      assert.equal(waiting.captured_at, null);
+      assert.equal((await pool.query("SELECT count(*)::int n FROM crawler.crawl_observations WHERE run_id=$1", [runId])).rows[0].n, 0);
+      await assert.rejects(withVideoApiReplay(() => executeIncrementalYoutubeJsVideo(executionOptions)), { code: "VIDEO_API_NETWORK_REQUIRED" });
+      assert.equal(Number((await pool.query("SELECT attempt_count FROM crawler.incremental_youtubejs_video_items WHERE run_id=$1 AND phase='first_seen'", [runId])).rows[0].attempt_count), 1);
+      pending = false;
+    }
+    const result = await executeIncrementalYoutubeJsVideo(executionOptions);
 
     assert.equal(result.outcome, "complete");
     if (emptyUploads) {
@@ -295,7 +333,7 @@ async function checkpointReplayScenario(enrichPending, emptyUploads = false) {
     ]);
     const item = items[0];
     assert.equal(item.status, "captured");
-    assert.equal(Number(item.attempt_count), 1);
+    assert.equal(Number(item.attempt_count), apiPending ? 2 : 1);
     assert.equal(item.detail_json.description, "Captured once");
     assert.equal(item.field_status_json.description, "exact");
     assert.equal(item.field_status_json.comment_count, "exact");
@@ -459,3 +497,16 @@ for (const enrichPending of [false, true]) {
     await pool.end();
   }
  });
+
+ test("Incremental API waiting releases its Item claim and resumes the same frozen video batch exactly once", { skip: !integrationUrl }, async () => {
+   await checkpointReplayScenario(false, false, true);
+ });
+
+test("Full Crawl resumes the API video under a newer attempt fence without repeating About or uploads", { skip: !integrationUrl }, async () => {
+  const pool = new Pool({ connectionString: integrationUrl, options: `-c publication.writer_version=${PUBLICATION_WRITER_VERSION}` });
+  const suffix = randomUUID().replaceAll("-", "");
+  const channelId = `UCapiresume${suffix}`;
+  try {
+    await initializeThroughFullCrawl(pool, transactionRunner(pool), channelId, `api-video-${suffix}`, suffix, false, true);
+  } finally { await pool.query("DELETE FROM crawler.channels WHERE channel_id=$1", [channelId]).catch(() => {}); await pool.end(); }
+});

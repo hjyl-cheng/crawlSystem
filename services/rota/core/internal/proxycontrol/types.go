@@ -155,6 +155,7 @@ type ObservationResult struct {
 }
 
 type CompleteTaskRequest struct {
+	APIContinuation bool `json:"api_continuation,omitempty"`
 	// Optional, strict country selection after the current attempt is quiesced.
 	RecheckCountry        string   `json:"recheck_country,omitempty"`
 	CompletionRequestID   string   `json:"completion_request_id"`
@@ -174,6 +175,7 @@ type CompleteTaskRequest struct {
 }
 
 type CompleteTaskResult struct {
+	APIContinuation              bool   `json:"api_continuation,omitempty"`
 	OK                           bool   `json:"ok"`
 	TaskCompleted                bool   `json:"task_completed"`
 	CompletionRequestID          string `json:"completion_request_id"`

@@ -98,5 +98,5 @@ test("shared API task delivery, batching, replay and bounded failures in Postgre
   });
   assert.equal(quota.deferred, true);
   assert.equal((await query("SELECT attempts FROM crawler.youtube_api_tasks WHERE task_id=$1", [quotaRequest.task_id])).rows[0].attempts, 0);
-  await assert.rejects(waitForVideoApiDetail(query, "quota1"), /deferred until/);
+  await assert.rejects(waitForVideoApiDetail(query, "quota1"), { code: "VIDEO_API_PENDING" });
 });

@@ -1,3 +1,4 @@
+import { assertVideoApiNetworkAllowed, isVideoApiReplay, isVideoApiHandoff } from "./videoApiContinuation.js";
 import { upsertDiscoveredVideoContent, refreshVideoContent } from "./videoContentStore.js";
 import { createVideoDetailApiFallback } from "./videoDetailApiFallback.js";
 import { createHash, randomUUID } from "node:crypto";
@@ -2304,6 +2305,13 @@ async function claimCheckpointItem(withTransaction, { runId, cycleKey, phase }) 
       [runId, cycleKey, phase, claimToken, claimLeaseMs],
     );
     const row = result.rows[0];
+    if (row && isVideoApiReplay()) {
+      const existing = await client.query("SELECT 1 FROM crawler.youtube_api_detail_requests WHERE request_id=$1",
+        [JSON.stringify(["incremental", runId, cycleKey, phase, row.video_id])]);
+      // Throw inside the transaction so a network-only target is not charged an
+      // extra claim/attempt merely for discovering that replay cannot handle it.
+      if (!existing.rows.length) assertVideoApiNetworkAllowed();
+    }
     return row
       ? { ...normalizeCheckpointBatch({}, [row]).items[0], claim_lease_ms: claimLeaseMs }
       : null;
@@ -2549,7 +2557,7 @@ export async function captureIncrementalYoutubeJsVideoCheckpointPhase({
       const selectedFailure = selectYoutubeFailure({ error });
       const routeFailure = selectedFailure.decision.proxy_action !== "none";
       const canSettle = CHECKPOINT_SETTLED_FAILURE_KINDS.has(selectedFailure.decision.kind);
-      if (aborted || !canSettle) {
+      if (aborted || !canSettle || isVideoApiHandoff(error)) {
         try {
           await releaseCheckpointClaim(withTransaction, item);
         } catch (releaseError) {
