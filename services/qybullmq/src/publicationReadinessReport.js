@@ -93,11 +93,24 @@ WHERE ($1::text[] IS NULL OR cursor.channel_id=ANY($1::text[]))
 ORDER BY cursor.channel_id,cursor.observation_kind`;
 
 const BUSINESS_SQL = `/* publication-readiness:business-current */
-WITH active_search AS (
+WITH storage_state AS (
+  SELECT COALESCE((
+    SELECT read_mode FROM publication.creator_search_storage_state
+    WHERE singleton=true
+  ),'legacy') AS read_mode
+), active_search AS (
+  SELECT search.*
+  FROM public.creator_search_live search
+  CROSS JOIN storage_state state
+  WHERE state.read_mode='live'
+    AND ($1::text[] IS NULL OR search.channel_id=ANY($1::text[]))
+  UNION ALL
   SELECT search.*
   FROM public.creator_search_active active
   JOIN public.creator_search_current search ON search.watermark=active.watermark
-  WHERE ($1::text[] IS NULL OR search.channel_id=ANY($1::text[]))
+  CROSS JOIN storage_state state
+  WHERE state.read_mode='legacy'
+    AND ($1::text[] IS NULL OR search.channel_id=ANY($1::text[]))
 ), active_snapshots AS (
   SELECT snapshot.*
   FROM public.channel_snapshots snapshot
