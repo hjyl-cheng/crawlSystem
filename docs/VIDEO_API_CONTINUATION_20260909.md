@@ -77,3 +77,24 @@ replaces the estimate and removes its estimation metadata. For `rGxicmKEPCY`,
 801 / 0.025 = 32,040. Replaying the stored production evidence passes both Full
 Crawl and incremental metrics validation. This ratio is a user-selected heuristic,
 not a measured platform benchmark.
+
+## Pending snapshot recovery handoff
+
+Andreza receitas (`10731`, `run:fceb63e7-a827-49c9-806c-04b8e2103ba0`)
+retained pending retry evidence for original snapshot attempt 3. Final Repair
+requeued that same Job as attempt 4 without changing the pending record. The
+inline detail fence correctly rejected pending recovery ownership before details
+could resume. Rota Task 9 (`464d4880-5248-4aa3-8ebe-15bf58556da6`) lasted under
+half a second, recorded no network failure observations, and consumed the last
+business allowance. Attempt 5 subsequently terminated on budget exhaustion.
+
+Candidate activation now atomically transitions matching pending retry evidence
+to retrying, before allocating a Rota Task. It requires the exact original Job,
+candidate, generation, batch and current materialized Run, a newer attempt, and
+no separately allocated recovery generation or Run. The detail fence is unchanged.
+This also handles a crash/retry between queue dispatch and worker activation.
+The PostgreSQL regression reproduces the pending mismatch, accepts the resumed
+Job, rejects the old writer, and rejects six mismatched recovery identities.
+An operational repair restores Andreza's exact old binding and compensates the
+single historical internal-failure Task; it does not reset route history or
+increase the global failure limit.

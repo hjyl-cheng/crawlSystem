@@ -274,7 +274,7 @@ test("a Candidate attempt claim is monotonic within one dispatch generation", as
   assert.match(statement.sql, /snapshot_active_job_attempt<=\$3/);
   assert.match(statement.sql, /snapshot_dispatch_generation=\$4/);
   assert.match(statement.sql, /status IN \('discovered','queued','validating','accepted'\)/);
-  assert.deepEqual(statement.params, [42, "channel-job-01", 2, 7]);
+  assert.deepEqual(statement.params, [42, "channel-job-01", 2, 7, null, null]);
 });
 
 test("a completed Job only clears its own active Candidate attempt", async () => {

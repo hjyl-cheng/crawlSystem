@@ -699,7 +699,12 @@ test("inline Content Detail uses the parent Channel Candidate attemptsStarted Fe
   );
   assert.ok(await transaction(client, (tx) => lockContentDetailExecution(tx, second)));
 
-  await client.query("UPDATE crawler.migration_system_retry_items SET status='resolved' WHERE system_retry_id=$1", [systemRetryId]);
+  await client.query(`UPDATE crawler.migration_system_retry_items
+    SET status='pending',failed_job_attempt=2 WHERE system_retry_id=$1`, [systemRetryId]);
+  await client.query(`UPDATE crawler.channel_runs SET result_json=result_json ||
+    jsonb_build_object('job_id',$2::text) WHERE run_id=$1`, [runId, second.jobId]);
+  assert.equal(await transaction(client, tx => lockContentDetailExecution(tx, second)), null,
+    "a pending terminal failure blocks the old attempt from writing");
   await client.query(`UPDATE crawler.channel_candidates SET snapshot_active_job_id=NULL,
     snapshot_active_job_attempt=NULL WHERE candidate_id=$1`, [candidateId]);
   const original = { ...parentJob(2), attemptsMade: 3,
@@ -716,9 +721,35 @@ test("inline Content Detail uses the parent Channel Candidate attemptsStarted Fe
   });
   original.attemptsStarted++;
   assert.equal(await markChannelCandidateJobAttemptActive(client.query.bind(client), original), true);
+  assert.equal((await client.query('SELECT status FROM crawler.migration_system_retry_items WHERE system_retry_id=$1',
+    [systemRetryId])).rows[0].status, 'retrying',
+  'claiming the resumed original Job must atomically hand off its pending recovery');
   const resumed = inlineFence(original.attemptsStarted);
   assert.ok(await transaction(client, tx => claimContentDetailExecution(tx, resumed)),
     "replaying the original Snapshot Job takes over the persisted detail checkpoint");
   assert.equal(await transaction(client, tx => lockContentDetailExecution(tx, second)), null,
     "the old Snapshot attempt still cannot write after recovery");
+
+  // Activating a Job must never approve unrelated pending recovery evidence.
+  for (const patch of [
+    { failed_job_id: 'another-job' },
+    { failed_dispatch_generation: 2 },
+    { failed_dispatch_batch_id: 'another-batch' },
+    { failed_job_attempt: original.attemptsStarted },
+    { retry_dispatch_generation: 2 },
+    { recovery_run_id: runId },
+  ]) {
+    const row = { failed_job_id: original.id, failed_dispatch_generation: 1,
+      failed_dispatch_batch_id: batchId, failed_job_attempt: 2,
+      retry_dispatch_generation: null, recovery_run_id: null, ...patch };
+    await client.query(`UPDATE crawler.migration_system_retry_items SET status='pending',
+      failed_job_id=$2,failed_dispatch_generation=$3,failed_dispatch_batch_id=$4,
+      failed_job_attempt=$5,retry_dispatch_generation=$6,recovery_run_id=$7 WHERE system_retry_id=$1`,
+    [systemRetryId,row.failed_job_id,row.failed_dispatch_generation,row.failed_dispatch_batch_id,
+      row.failed_job_attempt,row.retry_dispatch_generation,row.recovery_run_id]);
+    await markChannelCandidateJobAttemptActive(client.query.bind(client), original);
+    assert.equal((await client.query('SELECT status FROM crawler.migration_system_retry_items WHERE system_retry_id=$1',
+      [systemRetryId])).rows[0].status, 'pending', JSON.stringify(patch));
+    assert.equal(await transaction(client, tx => lockContentDetailExecution(tx, resumed)), null);
+  }
 });

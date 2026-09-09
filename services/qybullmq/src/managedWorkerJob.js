@@ -278,7 +278,8 @@ export async function markChannelCandidateJobAttemptActive(query, job) {
   if (typeof query !== "function") throw new TypeError("query is required");
   const fence = activeChannelCandidateAttemptFence(job);
   const updated = await query(
-    `UPDATE crawler.channel_candidates
+    `WITH claimed_candidate AS (
+     UPDATE crawler.channel_candidates
      SET snapshot_active_job_id=$2,snapshot_active_job_attempt=$3,updated_at=now()
      WHERE candidate_id=$1 AND snapshot_dispatch_generation=$4
        AND status IN ('discovered','queued','validating','accepted')
@@ -290,8 +291,37 @@ export async function markChannelCandidateJobAttemptActive(query, job) {
          )
        )
      RETURNING candidate_id,snapshot_dispatch_generation,
-               snapshot_active_job_id,snapshot_active_job_attempt`,
-    [fence.candidateId, fence.jobId, fence.bullmqAttempt, fence.dispatchGeneration],
+               snapshot_active_job_id,snapshot_active_job_attempt,dispatch_batch_id
+     ), resumed_retry AS (
+       UPDATE crawler.migration_system_retry_items retry
+       SET status='retrying',updated_at=now()
+       FROM claimed_candidate candidate
+       WHERE retry.candidate_id=candidate.candidate_id
+         AND retry.status='pending'
+         AND retry.failed_dispatch_batch_id=candidate.dispatch_batch_id
+         AND retry.failed_dispatch_batch_id=$5
+         AND retry.failed_dispatch_generation=$4
+         AND retry.failed_job_id=$2
+         AND retry.failed_job_attempt>0 AND retry.failed_job_attempt<$3
+         AND retry.retry_dispatch_generation IS NULL
+         AND retry.recovery_run_id IS NULL
+         AND EXISTS (
+           SELECT 1 FROM crawler.channel_runs run
+           JOIN crawler.channels channel ON channel.channel_id=run.channel_id
+           WHERE run.run_id=$6 AND run.candidate_id=candidate.candidate_id
+             AND channel.latest_run_id=run.run_id
+             AND run.result_json->>'job_id'=$2
+             AND COALESCE(run.result_json->>'dispatch_batch_id',run.result_json->>'pipeline_cycle_id')=$5
+         )
+       RETURNING retry.system_retry_id
+     )
+     SELECT candidate_id,snapshot_dispatch_generation,
+            snapshot_active_job_id,snapshot_active_job_attempt
+     FROM claimed_candidate
+     CROSS JOIN (SELECT count(*) FROM resumed_retry) resumed`,
+    [fence.candidateId, fence.jobId, fence.bullmqAttempt, fence.dispatchGeneration,
+      job.data?.dispatch_batch_id ?? job.data?.pipeline_cycle_id ?? null,
+      job.data?.run_id ?? null],
   );
   return updated?.rowCount === 1;
 }
