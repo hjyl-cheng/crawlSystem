@@ -95,6 +95,23 @@ no separately allocated recovery generation or Run. The detail fence is unchange
 This also handles a crash/retry between queue dispatch and worker activation.
 The PostgreSQL regression reproduces the pending mismatch, accepts the resumed
 Job, rejects the old writer, and rejects six mismatched recovery identities.
-An operational repair restores Andreza's exact old binding and compensates the
-single historical internal-failure Task; it does not reset route history or
-increase the global failure limit.
+The fix passed 41 regression tests and three PostgreSQL concurrency tests, and
+image `pachongsys-b457385` was deployed to the API, 40 Full Crawl workers and
+20 incremental workers.
+
+Before the proposed original-Job repair could run, the existing checkpoint
+repair completed all 30 details at 2026-09-09 03:50:45 UTC. The repair script's
+preconditions stopped it from resetting that completed Run or its binding.
+The unused one-Task allowance was withdrawn, restoring the original limit of 9;
+no additional Task was allocated and route history was preserved.
+
+Historical retry 637 still remained pending. A one-time guarded transaction
+verified the exact candidate, generation, batch, original failed Job, latest Run
+and all 30 completed details, then moved only that retry to `retrying`, recording
+the checkpoint handoff in its failure evidence. The existing recovery reconciler,
+scoped to retry 637, then ran the fenced Agent and Finalize jobs. The original
+Run published as `ready_auto` at 2026-09-09 03:59:36 UTC with 30/30 details done,
+Agent done and no Run error. This live completion used checkpoint recovery;
+the original-Job activation fix is verified by the PostgreSQL regression.
+The scoped reconciler subsequently resolved retry 637 from the verified
+publication outcome, with zero stale fences or queue conflicts.
