@@ -1,7 +1,43 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { collectYoutubeJsUploadBundle, scanYoutubeJsFeed } from "../src/youtubeJs.js";
+import { collectYoutubeJsUploadBundle, scanYoutubeJsFeed, getValidatedUploadsPlaylist } from "../src/youtubeJs.js";
 import { emptyUploadsDecision, prepareDormantUploadsProbe, withUploadsCountryExecution } from "../src/youtubeUploadsCountry.js";
+import { uploadsResponseEvidence, assertNormalEmptyUploadsResponse } from "../src/youtubeUploadsCountry.js";
+
+// Captured from Psicose and Darek BR: HTTP 200 with a structured ERROR alert.
+const missingRaw = { alerts: [{ alertRenderer: { type: "ERROR", text: { runs: [{ text: "The playlist does not exist." }] } } }] };
+function missingRuntime(raw = missingRaw, message = "The playlist does not exist.") {
+  const current = { stats: {}, client: { getPlaylist: async () => {
+    current.stats.uploads_response_evidence = uploadsResponseEvidence(raw);
+    const error = new Error(message);
+    error.info = { type: "Alert", alert_type: "ERROR" };
+    throw error;
+  } } };
+  return current;
+}
+
+test("explicit unavailable uploads enter Full Crawl country recheck and incremental empty scan", async () => {
+  const current = missingRuntime();
+  const client = {
+    getPlaylist: id => getValidatedUploadsPlaylist(current, id),
+    validateEmptyUploads: () => assertNormalEmptyUploadsResponse({ videos: [] }, current.stats.uploads_response_evidence),
+  };
+  await assert.rejects(withUploadsCountryExecution({ egressCountry: "US" }, () =>
+    collectYoutubeJsUploadBundle(client, "UCtest", 30, { country: "BR" })), { code: "UPLOADS_COUNTRY_RECHECK" });
+  const scan = await scanYoutubeJsFeed(await getValidatedUploadsPlaylist(current, "UUtest"));
+  assert.equal(scan.complete, true);
+  assert.equal(scan.entries.length, 0);
+  assert.doesNotThrow(() => assertNormalEmptyUploadsResponse({ videos: [] }, current.stats.uploads_response_evidence));
+  const result = await withUploadsCountryExecution({ egressCountry: "BR" }, () =>
+    collectYoutubeJsUploadBundle(client, "UCtest", 30, { country: "BR" }));
+  assert.equal(result.uploads.empty_uploads.reason, "country_checked");
+});
+
+test("missing uploads require structured YouTube evidence, never a transport error or lost video", async () => {
+  for (const current of [missingRuntime({}), missingRuntime({ ...missingRaw, unknownRenderer: { videoId: "lost" } }), missingRuntime(missingRaw, "network timeout")]) {
+    await assert.rejects(getValidatedUploadsPlaylist(current, "UUtest"));
+  }
+});
 
 const emptyClient = { getPlaylist: async () => ({ videos: [], has_continuation: false }) };
 

@@ -21,7 +21,7 @@ export function withUploadsCountryExecution(context, callback) {
   return storage.run(context, callback);
 }
 
-// Only call for a completely parsed, normally terminated empty feed. Country
+// Only call for a verified empty feed or explicit missing-uploads response. Country
 // comes from About (or a persisted About-based recheck), never the UI locale.
 export function emptyUploadsDecision(countryValue) {
   const country = uploadsCountryCode(countryValue);
@@ -74,6 +74,7 @@ export function dormantUploadsScan(channelId, anchors, decision) {
 export function uploadsResponseEvidence(value) {
   let videoIds = 0;
   const messages = [];
+  const errors = [];
   const visit = node => {
     if (!node || typeof node !== "object") return;
     for (const [key, child] of Object.entries(node)) {
@@ -82,11 +83,26 @@ export function uploadsResponseEvidence(value) {
         const text = child?.text;
         messages.push(String(text?.simpleText ?? text?.runs?.map(run => run.text ?? "").join("") ?? "").slice(0, 300));
       }
+      if (key === "alertRenderer" && child?.type === "ERROR") {
+        const text = child.text;
+        errors.push(String(text?.simpleText ?? text?.runs?.map(run => run.text ?? "").join("") ?? "").slice(0, 300));
+      }
       visit(child);
     }
   };
   visit(value);
-  return { video_id_count: videoIds, messages: messages.slice(0, 5) };
+  return { video_id_count: videoIds, messages: messages.slice(0, 5), errors: errors.slice(0, 5) };
+}
+
+export function isMissingUploadsResponse(evidence) {
+  return evidence?.video_id_count === 0 && evidence.errors?.length === 1
+    && evidence.errors[0] === "The playlist does not exist.";
+}
+
+export function isMissingUploadsError(error, evidence) {
+  return error?.message === "The playlist does not exist."
+    && error.info?.type === "Alert" && error.info?.alert_type === "ERROR"
+    && isMissingUploadsResponse(evidence);
 }
 
 export function assertNormalEmptyUploadsResponse(feed, evidence) {
@@ -94,6 +110,7 @@ export function assertNormalEmptyUploadsResponse(feed, evidence) {
   // Empty continuations can be followed normally; they are not proof of an
   // empty playlist. Unknown renderers must not silently become dormancy.
   if (feed.has_continuation) return;
+  if (isMissingUploadsResponse(evidence)) return;
   if (!evidence || evidence.video_id_count > 0
       || !evidence.messages.some(message => /no videos in this playlist|this playlist is empty/i.test(message))) {
     const error = new Error("YouTube uploads returned an unverified empty response");

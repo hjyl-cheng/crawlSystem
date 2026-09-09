@@ -1,5 +1,5 @@
 import { assertVideoApiNetworkAllowed } from "./videoApiContinuation.js";
-import { emptyUploadsDecision, prepareDormantUploadsProbe, pendingUploadsDormancy, uploadsResponseEvidence, assertNormalEmptyUploadsResponse } from "./youtubeUploadsCountry.js";
+import { emptyUploadsDecision, prepareDormantUploadsProbe, pendingUploadsDormancy, uploadsResponseEvidence, assertNormalEmptyUploadsResponse, isMissingUploadsError } from "./youtubeUploadsCountry.js";
 import { canonicalizeCrawlerCountry } from "./agentCountryPolicy.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createRequire } from "node:module";
@@ -1209,9 +1209,17 @@ export function youtubeJsState() {
   };
 }
 
-async function getValidatedUploadsPlaylist(current, playlistId) {
+export async function getValidatedUploadsPlaylist(current, playlistId) {
   current.stats.uploads_response_evidence = null;
-  const feed = await current.client.getPlaylist(playlistId);
+  let feed;
+  try {
+    feed = await current.client.getPlaylist(playlistId);
+  } catch (error) {
+    // Both Full Crawl and incremental scans use this uploads-only boundary.
+    // A structured missing-playlist alert must reach the existing country policy.
+    if (!isMissingUploadsError(error, current.stats.uploads_response_evidence)) throw error;
+    feed = { videos: [], has_continuation: false };
+  }
   assertNormalEmptyUploadsResponse(feed, current.stats.uploads_response_evidence);
   return feed;
 }

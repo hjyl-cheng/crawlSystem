@@ -35,6 +35,7 @@ test("Finalize recovery is database-driven and can scan after a scheduler stops"
   assert.match(calls[0].sql, /run\.publication_finalized_status IS NULL/);
   assert.match(calls[0].sql, /finalized\.status=ANY\(\$4::text\[\]\)/);
   assert.match(calls[0].sql, /\$1::text IS NULL/);
+  assert.match(calls[0].sql, /content\.channel_id=channel\.channel_id AND content\.run_id=run\.run_id/);
 });
 
 test("pipeline completion counts an unfinalized dormant Promotion Run", async () => {

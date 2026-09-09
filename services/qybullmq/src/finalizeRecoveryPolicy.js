@@ -294,7 +294,7 @@ export async function loadFinalizeRecoveryCandidates(queryValue, {
      LEFT JOIN LATERAL (
        SELECT max(COALESCE(content.last_enriched_at,content.last_seen_at)) AS updated_at
        FROM crawler.contents content
-       WHERE content.run_id=run.run_id
+       WHERE content.channel_id=channel.channel_id AND content.run_id=run.run_id
      ) content_revision ON true
      LEFT JOIN crawler.finalized_profiles finalized ON finalized.channel_id=channel.channel_id
      WHERE channel.status=ANY($3::text[])

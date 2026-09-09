@@ -24,3 +24,39 @@ The 15 affected channels have 20 durable API results. Worker trigger logs identi
 `scripts/recoverPendingVideoApiSnapshots.mjs --candidate-ids <explicit list>` checks the latest Run, original failed Job, candidate generation, publication state and stored API evidence. `--apply` records the original timeout in Run audit metadata and retries the same snapshot with monotonic attempt fences; it does not start new migration inventory.
 
 Historical Rota Tasks predate the handoff receipt. Before replay, inspect each affected Run's last Task and its timeout timestamp. If that failed Task consumed the final budget solely at the API wait boundary, an audited one-time allowance of one Task compensates that historical handoff; do not reset network history or change the global failure limit. Preserve the explicit Run/task list and before/after values in the deployment audit.
+
+## Deployment follow-up
+
+Revision `3e1a849` was deployed to Rota, API, controller, 40 Full Crawl workers,
+20 incremental workers, the API batch worker, three Agent workers, Finalize and
+content enrichment. The Node 20 image passed 92 tests; the real Redis/PostgreSQL
+continuation test held API delivery for 185 seconds across a worker restart.
+
+Automatic final repair can replace the original API timeout with a budget-exhausted
+terminal Business Run Binding. The explicit recovery script accepts the saved
+validated dry-run plan for the same candidate/Run/Job/request, and restores only
+that budget-exhausted binding in the repair transaction. A later, already completed
+or published Run is not retried. The audited 15 historical Runs each received one
+additional Rota allowance for the old API timeout boundary; global limits and Task
+history were preserved.
+
+Psicose (`UCnptMlmRB4HiS7F9IRP0v7Q`) and Darek BR
+(`UCM-UsGS5XNIOvcxAadYuYWQ`) reproduce HTTP 200 with a structured YouTube ERROR
+alert, `The playlist does not exist.` Their About country is Brazil; all three
+content tabs are absent. The shared uploads loader now passes that exact verified
+response to the existing country/dormancy policy. Transport failures, missing raw
+evidence, and responses containing unparsed video IDs still throw. Real managed
+probes from GB requested BR, received `unavailable`, and returned dormant with
+`no_country_reserve` for both channels. This proves policy execution, not that
+regional restriction was the cause of the missing playlists.
+
+The Finalize recovery contents revision lookup now specifies both channel_id and
+run_id, matching the existing index. On the production stopped batch, the fixed
+full read-only query returned 200 candidates in 19,566 ms; the original exceeded
+10 seconds and the live controller query ran for minutes. The whole query remains
+substantial; this is not a measured migration throughput claim.
+
+A fresh official videos.list request for RECEBA video `rGxicmKEPCY` returned
+likeCount=801, commentCount=17, and no viewCount. Missing view count was not caused
+by dropping a returned API field. Do not manufacture a zero or mark that detail
+complete without evidence.
