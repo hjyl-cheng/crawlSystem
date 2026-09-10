@@ -9,6 +9,7 @@ import {
   migrationLifecycleState,
 } from "./migrationCompletion.js";
 import { loadMigrationChannelInventory } from "./migrationInventory.js";
+import { readMigrationInventory } from "./migrationInventoryRead.js";
 
 const databaseUrl = String(process.env.MIGRATION_INVENTORY_POSTGRES_TEST_URL || "").trim();
 
@@ -180,6 +181,11 @@ test("PostgreSQL pages 410k Migration inventory rows in Target only", {
       status text NOT NULL,
       updated_at timestamptz NOT NULL
     );
+    CREATE TABLE crawler.migration_system_retry_items (
+      system_retry_id bigint PRIMARY KEY,
+      candidate_id bigint NOT NULL,
+      status text NOT NULL
+    );
     CREATE TABLE crawler.channels (
       channel_id text PRIMARY KEY,
       status text NOT NULL,
@@ -295,7 +301,7 @@ test("PostgreSQL pages 410k Migration inventory rows in Target only", {
   const result = await loadMigrationChannelInventory({
     read: async (sql, params) => {
       calls.push({ sql, params });
-      return pool.query(sql, params);
+      return readMigrationInventory(pool, sql, params);
     },
     sourceId,
     expectedSourceDatabase: "migration_source_test",
@@ -319,7 +325,7 @@ test("PostgreSQL pages 410k Migration inventory rows in Target only", {
   assert.equal(result.stats.finishing, 5);
   assert.ok(elapsedMs < 5000, `Target-only first page took ${elapsedMs.toFixed(1)}ms`);
   const pageCall = calls.find(({ sql }) => sql.includes("filtered_page AS"));
-  const planResult = await pool.query(
+  const planResult = await readMigrationInventory(pool,
     `EXPLAIN (ANALYZE, FORMAT JSON) ${pageCall.sql}`,
     pageCall.params,
   );
@@ -354,7 +360,7 @@ test("PostgreSQL pages 410k Migration inventory rows in Target only", {
   assert.equal(contentAggregate["Actual Loops"], 50);
 
   const secondPage = await loadMigrationChannelInventory({
-    read: pool.query.bind(pool),
+    read: (sql, params) => readMigrationInventory(pool, sql, params),
     sourceId,
     expectedSourceDatabase: "migration_source_test",
     expectedSourceDatabaseOid: "16384",
@@ -370,7 +376,7 @@ test("PostgreSQL pages 410k Migration inventory rows in Target only", {
   );
 
   const sparse = await loadMigrationChannelInventory({
-    read: pool.query.bind(pool),
+    read: (sql, params) => readMigrationInventory(pool, sql, params),
     sourceId,
     expectedSourceDatabase: "migration_source_test",
     expectedSourceDatabaseOid: "16384",
@@ -389,7 +395,7 @@ test("PostgreSQL pages 410k Migration inventory rows in Target only", {
   );
 
   const finishing = await loadMigrationChannelInventory({
-    read: pool.query.bind(pool),
+    read: (sql, params) => readMigrationInventory(pool, sql, params),
     sourceId,
     expectedSourceDatabase: "migration_source_test",
     expectedSourceDatabaseOid: "16384",

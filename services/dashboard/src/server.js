@@ -43,6 +43,7 @@ import {
 import { loadChannelCurrentContent } from "./channelCurrentContent.js";
 import { loadLatestContentEnrichOperational } from "./contentEnrichOperational.js";
 import { loadMigrationChannelInventory } from "./migrationInventory.js";
+import { readMigrationInventory } from "./migrationInventoryRead.js";
 import {
   loadMigrationSystemRetriesSafely,
   renderMigrationSystemRetries,
@@ -1570,7 +1571,10 @@ async function migrationChannelListData(req) {
   try {
     const [inventory, systemRetries] = await Promise.all([
       loadMigrationChannelInventory({
-        read: db,
+        read: async (sql, params) => {
+          await ensureSchema();
+          return readMigrationInventory(pool, sql, params);
+        },
         sourceId: migrationSourceId,
         expectedSourceDatabase: expectedMigrationDatabase,
         expectedSourceDatabaseOid: expectedMigrationDatabaseOid,
@@ -3523,7 +3527,7 @@ function migrationChannelListPage(migration) {
     </table>
   </div>
 </section>`
-    : `<div class="alert alert-bad">${h(migration.error || (migration.configured ? "迁移数据库当前不可用" : "迁移数据库未配置"))}</div>`;
+    : `<div class="alert alert-bad">${h(migration.error || (migration.configured ? "迁移频道列表当前不可用" : "迁移数据库未配置"))}</div>`;
 
   return layout({
     title: "迁移频道列表",
@@ -4801,7 +4805,7 @@ app.get("/migration-channels", async (req, res, next) => {
   try {
     const data = await migrationChannelListData(req);
     data.notice = String(req.query.notice || "");
-    data.error = String(req.query.error || "");
+    data.error = data.error || String(req.query.error || "");
     res.type("html").send(migrationChannelListPage(data));
   } catch (error) {
     next(error);
