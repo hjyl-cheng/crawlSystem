@@ -51,6 +51,21 @@ export function normalizeServerNode(input) {
   return { name, host, port, username, sshAlias, kind: input.kind, notes, workers };
 }
 
+export function serverNodeDeletionEligibility(node) {
+  if (node.kind === "center") return { allowed: false, reason: "中心节点不能从此页面删除。" };
+  // V1 records created before provisioning was introduced contain only these
+  // metadata fields. A saved worker plan or SSH alias is not a deployment.
+  const metadataFields = new Set(["id", "name", "host", "port", "username", "sshAlias", "kind", "notes", "workers", "createdAt", "updatedAt", "provisioning"]);
+  const knownMetadata = Object.keys(node).every(key => metadataFields.has(key));
+  const neverStarted = !Object.hasOwn(node, "provisioning") || (
+    node.provisioning?.state === "not_started" && Object.keys(node.provisioning).length === 1
+  );
+  if (node.kind !== "execution" || !knownMetadata || !neverStarted) {
+    return { allowed: false, reason: "该节点已经开始初始化、部署，或状态无法确认。需要先停止派发，并确认没有运行中的 Worker、已分配任务和进行中的操作。" };
+  }
+  return { allowed: true, reason: "此节点仅保存了登记信息，尚未通过系统初始化或部署，可以直接删除登记记录。" };
+}
+
 // This registry stores user-entered configuration only. Runtime observations and
 // deployment commands must not be inferred from the saved worker counts.
 export function createServerNodeStore(query) {
@@ -78,11 +93,14 @@ export function createServerNodeStore(query) {
       throw invalid("此地址和 SSH 端口的服务器已经添加", 409);
     }
     const now = new Date().toISOString();
+    const existing = previous.nodes.find(item => item.id === id);
     const saved = {
+      ...existing,
       ...normalized,
       id: id ?? randomUUID(),
-      createdAt: previous.nodes.find(item => item.id === id)?.createdAt ?? now,
+      createdAt: existing?.createdAt ?? now,
       updatedAt: now,
+      ...(existing ? {} : { provisioning: { state: "not_started" } }),
     };
     const next = { version: version + 1, nodes: id ? previous.nodes.map(item => item.id === id ? saved : item) : [...previous.nodes, saved] };
     // Compare and swap also protects concurrent creation of the initial registry.
@@ -90,9 +108,35 @@ export function createServerNodeStore(query) {
       VALUES($1,$2::jsonb,now()) ON CONFLICT(setting_key) DO UPDATE
       SET value_json=EXCLUDED.value_json,updated_at=now()
       WHERE (crawler.settings.value_json->>'version')::bigint=$3
-      RETURNING value_json`, [settingKey, JSON.stringify(next), version]);
+        AND crawler.settings.value_json=$4::jsonb
+      RETURNING value_json`, [settingKey, JSON.stringify(next), version, JSON.stringify(previous)]);
     if (result.rowCount !== 1) throw invalid("配置已被更新，请刷新页面后重试；你的输入仍保留在表单中", 409);
     return next;
   }
-  return { load, save };
+  async function deletionCheck(id) {
+    const registry = await load();
+    const node = registry.nodes.find(item => item.id === id);
+    if (!node) throw invalid("服务器不存在", 404);
+    return { id, version: registry.version, ...serverNodeDeletionEligibility(node) };
+  }
+
+  async function remove({ id, version }) {
+    integer(version, "配置版本", 0, Number.MAX_SAFE_INTEGER);
+    const previous = await load();
+    if (previous.version !== version) throw invalid("节点配置或状态已变化，请重新打开删除窗口确认", 409);
+    const node = previous.nodes.find(item => item.id === id);
+    if (!node) throw invalid("服务器不存在", 404);
+    const eligibility = serverNodeDeletionEligibility(node);
+    if (!eligibility.allowed) throw invalid(eligibility.reason, 409);
+    const next = { version: version + 1, nodes: previous.nodes.filter(item => item.id !== id) };
+    // Recheck the entire registry atomically. Future onboarding must persist its
+    // started state in this registry BEFORE performing any SSH/deployment work;
+    // it must never start an operation after the node has been removed.
+    const result = await query(`UPDATE crawler.settings SET value_json=$2::jsonb,updated_at=now()
+      WHERE setting_key=$1 AND value_json=$3::jsonb RETURNING value_json`,
+    [settingKey, JSON.stringify(next), JSON.stringify(previous)]);
+    if (result.rowCount !== 1) throw invalid("节点配置或状态已变化，请重新打开删除窗口确认", 409);
+    return next;
+  }
+  return { load, save, deletionCheck, remove };
 }

@@ -56,11 +56,11 @@ export function renderServerNodesPage() {
 
   <dialog id="node-delete" class="nodes-dialog" aria-labelledby="node-delete-title">
     <div class="nodes-dialog-heading"><div><div class="nodes-eyebrow" id="node-delete-name"></div><h2 id="node-delete-title">删除服务器</h2></div><button class="nodes-icon-button" type="button" data-close="node-delete" aria-label="关闭">×</button></div>
-    <p class="nodes-dialog-intro">仅当节点停止接收新任务、没有运行中的 Worker 且没有已分配任务时才能删除。空闲但仍在运行的 Worker 也需要先停止。</p>
+    <p class="nodes-dialog-intro">仅登记、尚未通过系统初始化或部署的执行节点，可以直接删除登记。已经开始初始化或部署的节点，需要先核实运行与任务状态。</p>
     <div class="nodes-deletion-reason" id="node-delete-reason" role="status"></div>
-    <ul class="nodes-deletion-checks"><li><span>节点已停止接收新任务</span><b>无法核实</b></li><li><span>没有运行中的 Worker（包括空闲实例）</span><b>无法核实</b></li><li><span>没有执行、排队或等待重试的已分配任务</span><b>无法核实</b></li><li><span>没有进行中的初始化或部署</span><b>无法核实</b></li></ul>
-    <p class="nodes-footnote">删除校验尚未接入，当前不能执行删除。接通后会在删除期间阻止新派发和新部署，不会自动停止正在运行的 Worker。已采集的业务数据保留。</p>
-    <div class="nodes-dialog-footer"><button type="button" class="nodes-button" data-close="node-delete">返回</button><button type="button" class="nodes-button danger" disabled>删除服务器 · 条件未确认</button></div>
+    <ul class="nodes-deletion-checks" id="node-delete-checks" hidden><li><span>节点已停止接收新任务</span><b>无法核实</b></li><li><span>没有运行中的 Worker（包括空闲实例）</span><b>无法核实</b></li><li><span>没有执行、排队或等待重试的已分配任务</span><b>无法核实</b></li><li><span>没有进行中的初始化或部署</span><b>无法核实</b></li></ul>
+    <p class="nodes-footnote">删除仅移除本页的服务器登记和保存的 Worker 计划，不会卸载远程服务、删除 SSH 密钥或清除已采集的业务数据。已初始化节点的运行校验尚未接入，暂不开放删除。</p>
+    <div class="nodes-dialog-footer"><button type="button" class="nodes-button" data-close="node-delete">返回</button><button type="button" id="node-delete-confirm" class="nodes-button danger" disabled>正在检查…</button></div>
   </dialog>
   <script type="module" src="/assets/server-nodes.js"></script>`;
 }

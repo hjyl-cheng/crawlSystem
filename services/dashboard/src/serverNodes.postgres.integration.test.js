@@ -56,7 +56,62 @@ test("node registration persists only configuration, survives reload, and reject
   assert.deepEqual(await createServerNodeStore(pool.query.bind(pool)).load(), registry, "reopening the store retains configuration");
   assert.deepEqual((await pool.query("SELECT value_json FROM crawler.settings WHERE setting_key='query_scheduler'")).rows[0].value_json, { status: "running" });
   assert.equal((await fetch(base + "/api/server-nodes/" + savedNode.id + "/deploy", { method: "POST" })).status, 423);
-  assert.equal((await fetch(base + "/api/server-nodes/" + savedNode.id, { method: "DELETE" })).status, 423, "unknown runtime state never authorizes deletion");
+  const remove = (id, version) => fetch(base + "/api/server-nodes/" + id, {
+    method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ version }),
+  });
+  const check = async id => (await fetch(base + "/api/server-nodes/" + id + "/deletion-check")).json();
+  const persist = () => pool.query("UPDATE crawler.settings SET value_json=$1::jsonb WHERE setting_key='dashboard_server_nodes_v1'", [JSON.stringify(registry)]);
+  assert.deepEqual(registry.nodes[0].provisioning, { state: "not_started" });
+  assert.equal((await check(savedNode.id)).allowed, true, "saved plans and SSH aliases do not block metadata deletion");
+  assert.equal((await fetch(base + "/api/server-nodes/" + savedNode.id, { method: "DELETE" })).status, 415);
+  assert.equal((await remove(savedNode.id, 0)).status, 409);
+  assert.equal((await remove(savedNode.id)).status, 400);
+  for (const patch of [{ provisioning: { state: "started" } }, { kind: "center" }, { deployment: { status: "running" } }]) {
+    const original = registry.nodes[0];
+    registry.nodes[0] = { ...original, ...patch };
+    await persist();
+    assert.equal((await check(savedNode.id)).allowed, false);
+    assert.equal((await remove(savedNode.id, registry.version)).status, 409);
+    assert.deepEqual(await store.load(), registry, "rejected deletion preserves the complete registry");
+    registry.nodes[0] = original;
+  }
+  // Editing must not discard evidence of initialization/deployment.
+  registry.nodes[0].provisioning = { state: "started", operationId: "test-operation" };
+  await persist();
+  registry = await (await save({ ...planned, notes: "Preserve server-owned state" }, registry.version, savedNode.id)).json();
+  assert.deepEqual(registry.nodes[0].provisioning, { state: "started", operationId: "test-operation" });
+  assert.equal((await remove(savedNode.id, registry.version)).status, 409);
+  delete registry.nodes[0].provisioning;
+  await persist();
+  assert.equal((await check(savedNode.id)).allowed, true, "legacy V1 metadata records remain deletable");
+  const checkedVersion = registry.version;
+  registry = await (await save({ ...node, host: "192.0.2.50" }, registry.version)).json();
+  const otherNode = registry.nodes.find(item => item.id !== savedNode.id);
+  assert.equal((await remove(savedNode.id, checkedVersion)).status, 409, "check does not authorize a stale deletion");
+  // Change provisioning after the store read but before CAS, without a version
+  // increment: the entire-document comparison must still reject the write.
+  for (const operation of ["remove", "save"]) {
+    const beforeRace = structuredClone(registry);
+    const racingStore = createServerNodeStore(async (sql, params) => {
+      if (!sql.startsWith("SELECT")) {
+        registry.nodes[0].provisioning = { state: "started" };
+        await persist();
+      }
+      return pool.query(sql, params);
+    });
+    await assert.rejects(() => racingStore[operation]({ id: savedNode.id, version: registry.version, node: planned }), { statusCode: 409 });
+    assert.deepEqual(await store.load(), registry, "racing write cannot remove a started node or erase its marker");
+    registry = beforeRace;
+    await persist();
+  }
+  const deleted = await remove(savedNode.id, registry.version);
+  assert.equal(deleted.status, 200);
+  registry = await deleted.json();
+  assert.deepEqual(registry.nodes, [otherNode], "deleting one registration preserves other nodes exactly");
+  assert.deepEqual(await createServerNodeStore(pool.query.bind(pool)).load(), registry);
+  assert.equal((await remove(savedNode.id, registry.version)).status, 404);
+  assert.equal((await fetch(base + "/api/server-nodes/" + savedNode.id + "/deletion-check")).status, 404);
+  assert.deepEqual((await pool.query("SELECT value_json FROM crawler.settings WHERE setting_key='query_scheduler'")).rows[0].value_json, { status: "running" });
   assert.equal((await fetch(base + "/server-nodes")).status, 200);
   assert.equal((await fetch(base + "/assets/server-nodes.js")).status, 200);
   assert.equal((await fetch(base + "/assets/server-nodes.css")).status, 200);

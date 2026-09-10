@@ -25,5 +25,21 @@ export function serverNodesRoutes({ store, layout }) {
   };
   router.post("/api/server-nodes", save);
   router.put("/api/server-nodes/:id", save);
+  router.get("/api/server-nodes/:id/deletion-check", async (req, res, next) => {
+    try { res.set("Cache-Control", "no-store").json(await store.deletionCheck(req.params.id)); }
+    catch (error) {
+      if (error.statusCode) return res.status(error.statusCode).json({ error: error.message });
+      next(error);
+    }
+  });
+  router.delete("/api/server-nodes/:id", async (req, res, next) => {
+    try {
+      if (!req.is("application/json")) return res.status(415).json({ error: "请使用 JSON 格式确认删除" });
+      res.set("Cache-Control", "no-store").json(await store.remove({ id: req.params.id, version: req.body?.version }));
+    } catch (error) {
+      if (error.statusCode) return res.status(error.statusCode).json({ error: error.message });
+      next(error);
+    }
+  });
   return router;
 }

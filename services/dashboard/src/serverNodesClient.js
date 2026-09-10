@@ -11,6 +11,7 @@ let registry = null;
 let editor = null;
 let detailId = null;
 let refreshing = false;
+let deletion = null;
 
 function announce(message, error = false) {
   const element = $("nodes-message");
@@ -19,12 +20,12 @@ function announce(message, error = false) {
   element.hidden = !message;
 }
 
-async function request(path, options = {}) {
+async function request(path, options = {}, expectRegistry = true) {
   const response = await fetch(path, { ...options, headers: { "Accept": "application/json", ...options.headers }, signal: AbortSignal.timeout(15000) });
   if (response.redirected || !response.headers.get("content-type")?.includes("application/json")) throw new Error("读取失败或登录已过期，请刷新页面后重试");
   const result = await response.json();
   if (!response.ok) throw new Error(result.error || "保存失败，请稍后重试");
-  if (!Number.isInteger(result.version) || !Array.isArray(result.nodes)) throw new Error("服务器列表格式异常，请稍后刷新");
+  if (expectRegistry && (!Number.isInteger(result.version) || !Array.isArray(result.nodes))) throw new Error("服务器列表格式异常，请稍后刷新");
   return result;
 }
 
@@ -113,12 +114,56 @@ function openInitialize(id) {
   $("node-initialize").showModal();
 }
 
-function openDelete(id) {
+async function openDelete(id) {
   const node = registry.nodes.find(item => item.id === id);
   if (!node) return;
+  const current = { id };
+  deletion = current;
   $("node-delete-name").textContent = node.name;
-  $("node-delete-reason").textContent = node.kind === "center" ? "中心节点不能从此页面删除，以免影响管理服务。" : "暂时不能删除：运行状态与派发校验尚未接入，无法确认该节点是否满足删除条件。";
+  $("node-delete-reason").textContent = "正在检查登记与初始化状态…";
+  $("node-delete-checks").hidden = true;
+  $("node-delete-confirm").disabled = true;
+  $("node-delete-confirm").textContent = "正在检查…";
   $("node-delete").showModal();
+  try {
+    const check = await request(`/api/server-nodes/${encodeURIComponent(id)}/deletion-check`, {}, false);
+    if (deletion !== current || !$("node-delete").open) return;
+    if (check.id !== id || !Number.isInteger(check.version) || typeof check.allowed !== "boolean") throw new Error("删除条件返回异常，请重新打开窗口检查");
+    Object.assign(current, check);
+    $("node-delete-reason").textContent = check.reason;
+    $("node-delete-checks").hidden = check.allowed || node.kind === "center";
+    $("node-delete-confirm").disabled = !check.allowed;
+    $("node-delete-confirm").textContent = check.allowed ? "确认删除登记" : "暂时不能删除";
+  } catch (error) {
+    if (deletion !== current || !$("node-delete").open) return;
+    $("node-delete-reason").textContent = error.message;
+    $("node-delete-confirm").textContent = "检查失败，请重新打开";
+  }
+}
+
+async function confirmDelete() {
+  const dialog = $("node-delete");
+  if (!deletion?.allowed || dialog.dataset.saving) return;
+  const current = deletion;
+  const controls = [...dialog.querySelectorAll("button")];
+  controls.forEach(control => { control.disabled = true; });
+  dialog.dataset.saving = "true";
+  $("node-delete-confirm").textContent = "正在删除…";
+  try {
+    registry = await request(`/api/server-nodes/${encodeURIComponent(current.id)}`, {
+      method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ version: current.version }),
+    });
+    render();
+    dialog.close();
+    announce("服务器登记已删除。");
+  } catch (error) {
+    current.allowed = false;
+    $("node-delete-reason").textContent = `${error.message}。请关闭窗口、刷新列表后重新确认。`;
+    $("node-delete-confirm").textContent = "请重新检查";
+  } finally {
+    controls.forEach(control => { control.disabled = control.id === "node-delete-confirm"; });
+    delete dialog.dataset.saving;
+  }
 }
 
 async function saveForm({ form, dialog, errorId, edit, node, message }) {
@@ -156,7 +201,7 @@ $("node-form").addEventListener("submit", event => {
 document.addEventListener("click", event => {
   const target = event.target.closest("button");
   if (!target || target.disabled) return;
-  if (target.hasAttribute("data-close")) $(target.dataset.close).close();
+  if (target.hasAttribute("data-close") && !$(target.dataset.close).dataset.saving) $(target.dataset.close).close();
   if (target.hasAttribute("data-add")) openEditor();
   if (target.hasAttribute("data-detail")) openDetail(target.dataset.detail);
   if (target.hasAttribute("data-initialize")) openInitialize(target.dataset.initialize);
@@ -178,4 +223,6 @@ $("nodes-kind").addEventListener("change", render);
 $("node-detail-edit").addEventListener("click", () => { $("node-detail").close(); openEditor(registry.nodes.find(node => node.id === detailId)); });
 $("node-detail-initialize").addEventListener("click", () => { $("node-detail").close(); openInitialize(detailId); });
 $("node-detail-delete").addEventListener("click", () => { $("node-detail").close(); openDelete(detailId); });
+$("node-delete").addEventListener("close", () => { deletion = null; });
+$("node-delete-confirm").addEventListener("click", () => void confirmDelete());
 void refresh();

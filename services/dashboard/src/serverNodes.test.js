@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { normalizeServerNode } from "./serverNodes.js";
+import { normalizeServerNode, serverNodeDeletionEligibility } from "./serverNodes.js";
 import { allowDashboardRequestDuringControlledMigration } from "./controlledWritePolicy.js";
 
 const node = { name: "Test node", host: "192.0.2.10", port: 22, username: "ubuntu", kind: "execution", workers: [] };
@@ -13,18 +13,33 @@ test("node registration accepts addresses but never credentials, shell commands 
     { username: "ubuntu; id" }, { sshAlias: "-F /tmp/config" }, { port: 0 },
     { password: "should-not-be-stored" }, { privateKey: "should-not-be-stored" },
     { online: true }, { workers: [{ role: "fullcrawl", count: 1, running: true }] },
+    { provisioning: { state: "not_started" } },
     { workers: [{ role: "toString", count: 1 }] },
     { workers: [{ role: "fullcrawl", count: 1 }, { role: "fullcrawl", count: 2 }] },
     { workers: [{ role: "incremental", count: -1 }] },
   ]) assert.throws(() => normalizeServerNode({ ...node, ...patch }), { statusCode: 400 });
 });
 
-test("controlled migration allows node metadata changes but no deployment, deletion or queue control", () => {
+test("controlled migration allows node metadata changes and removal but no deployment or queue control", () => {
   assert.equal(allowDashboardRequestDuringControlledMigration("POST", "/api/server-nodes"), true);
   assert.equal(allowDashboardRequestDuringControlledMigration("PUT", "/api/server-nodes/65e95c15-0311-4079-a90c-bdf887db6604"), true);
+  assert.equal(allowDashboardRequestDuringControlledMigration("DELETE", "/api/server-nodes/65e95c15-0311-4079-a90c-bdf887db6604"), true);
   for (const [method, path] of [
     ["POST", "/api/server-nodes/65e95c15-0311-4079-a90c-bdf887db6604/deploy"],
-    ["DELETE", "/api/server-nodes/65e95c15-0311-4079-a90c-bdf887db6604"],
+    ["DELETE", "/api/server-nodes/65e95c15-0311-4079-a90c-bdf887db6604/deploy"],
+    ["DELETE", "/api/server-nodes"],
     ["POST", "/api/server-nodes/deploy"], ["POST", "/queues/pause"],
   ]) assert.equal(allowDashboardRequestDuringControlledMigration(method, path), false);
+});
+
+test("only known uninitialized execution registrations are eligible for metadata removal", () => {
+  for (const patch of [{}, { provisioning: { state: "not_started" } },
+    { sshAlias: "existing-key", workers: [{ role: "incremental", count: 4 }] }]) {
+    assert.equal(serverNodeDeletionEligibility({ ...node, ...patch }).allowed, true);
+  }
+  for (const patch of [{ kind: "center" }, { kind: "unknown" }, { provisioning: null },
+    { provisioning: { state: "started" } }, { provisioning: { state: "completed" } },
+    { provisioning: { state: "not_started", operationId: "pending" } }, { deployment: {} }]) {
+    assert.equal(serverNodeDeletionEligibility({ ...node, ...patch }).allowed, false);
+  }
 });
