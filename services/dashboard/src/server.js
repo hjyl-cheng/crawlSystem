@@ -1,4 +1,6 @@
 import {migrationBatchPanel} from "./migrationBatchPanel.js";
+import { createServerNodeStore } from "./serverNodes.js";
+import { serverNodesRoutes } from "./serverNodesRoutes.js";
 import express from "express";
 import morgan from "morgan";
 import { allowDashboardRequestDuringControlledMigration } from "./controlledWritePolicy.js";
@@ -2176,6 +2178,7 @@ function layout({ title, active, body, mainClass = "" }) {
     ["/daily-clocks", "每日 Clock", "daily-clocks"],
     ["/channels", "频道列表", "channels"],
     ["/migration-channels", "迁移频道列表", "migration-channels"],
+    ["/server-nodes", "服务器节点", "server-nodes"],
   ];
   const externalNav = [
     ["/external/queues", "队列监控", "external-queues"],
@@ -4734,6 +4737,7 @@ app.use((req, res, next) => {
 });
 
 app.get("/", (_req, res) => res.redirect("/queries"));
+app.use(serverNodesRoutes({ store: createServerNodeStore(db), layout }));
 
 app.get("/health", async (_req, res) => {
   try {

@@ -1,0 +1,55 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import express from "express";
+import pg from "pg";
+import { createServerNodeStore } from "./serverNodes.js";
+import { serverNodesRoutes } from "./serverNodesRoutes.js";
+import { allowDashboardRequestDuringControlledMigration } from "./controlledWritePolicy.js";
+
+const url = process.env.SERVER_NODES_TEST_DATABASE_URL;
+test("node registration persists only configuration, survives reload, and rejects concurrent stale updates", { skip: !url }, async t => {
+  const parsed = new URL(url);
+  assert.equal(parsed.pathname, "/server_nodes_dashboard_test");
+  assert.ok(["127.0.0.1", "localhost"].includes(parsed.hostname));
+  const pool = new pg.Pool({ connectionString: url });
+  t.after(() => pool.end());
+  await pool.query(`CREATE SCHEMA IF NOT EXISTS crawler;
+    CREATE TABLE IF NOT EXISTS crawler.settings(setting_key TEXT PRIMARY KEY,value_json JSONB NOT NULL,updated_at TIMESTAMPTZ DEFAULT now());
+    DELETE FROM crawler.settings;
+    INSERT INTO crawler.settings(setting_key,value_json) VALUES('query_scheduler','{"status":"running"}')`);
+  const store = createServerNodeStore(pool.query.bind(pool));
+  const app = express();
+  app.use(express.json());
+  app.use((req, res, next) => allowDashboardRequestDuringControlledMigration(req.method, req.path) ? next() : res.sendStatus(423));
+  app.use(serverNodesRoutes({ store, layout: ({ body }) => body }));
+  app.use((error, _req, res, _next) => res.status(500).json({ error: error.message }));
+  const server = app.listen(0, "127.0.0.1");
+  await new Promise(resolve => server.once("listening", resolve));
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const node = { name: "Hand-entered server", host: "192.0.2.15", port: 22, username: "ubuntu", kind: "execution", workers: [] };
+  const save = (node, version, id) => fetch(base + "/api/server-nodes" + (id ? "/" + id : ""), {
+    method: id ? "PUT" : "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ node, version }),
+  });
+  assert.deepEqual(await (await fetch(base + "/api/server-nodes")).json(), { version: 0, nodes: [] });
+  assert.equal((await pool.query("SELECT count(*)::int AS count FROM crawler.settings")).rows[0].count, 1, "reading an empty registry must not seed nodes");
+  const concurrent = await Promise.all([save(node, 0), save({ ...node, host: "192.0.2.16" }, 0)]);
+  assert.deepEqual(concurrent.map(response => response.status).sort(), [200, 409]);
+  let registry = await concurrent.find(response => response.ok).json();
+  const savedNode = registry.nodes[0];
+  assert.equal((await save(savedNode, registry.version)).status, 400, "server-generated fields cannot be supplied as config");
+  assert.equal((await save({ ...node, host: savedNode.host }, registry.version)).status, 409, "duplicate endpoints are rejected");
+  assert.equal((await fetch(base + "/api/server-nodes", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: "name=unsafe" })).status, 415);
+  const response = await save({ ...node, host: savedNode.host, workers: [{ role: "incremental", count: 4 }] }, registry.version, savedNode.id);
+  assert.equal(response.status, 200);
+  registry = await response.json();
+  assert.deepEqual(registry.nodes[0].workers, [{ role: "incremental", count: 4 }]);
+  assert.equal((await save(node, 1, savedNode.id)).status, 409, "stale editor cannot erase a newly saved worker plan");
+  assert.deepEqual(await createServerNodeStore(pool.query.bind(pool)).load(), registry, "reopening the store retains configuration");
+  assert.deepEqual((await pool.query("SELECT value_json FROM crawler.settings WHERE setting_key='query_scheduler'")).rows[0].value_json, { status: "running" });
+  assert.equal((await fetch(base + "/api/server-nodes/" + savedNode.id + "/deploy", { method: "POST" })).status, 423);
+  assert.equal((await fetch(base + "/server-nodes")).status, 200);
+  assert.equal((await fetch(base + "/assets/server-nodes.js")).status, 200);
+  assert.equal((await fetch(base + "/assets/server-nodes.css")).status, 200);
+  await pool.query("DELETE FROM crawler.settings WHERE setting_key='dashboard_server_nodes_v1'");
+});

@@ -1041,6 +1041,7 @@ services:
       EXPECTED_CRAWLER_DATABASE: ${CRAWLER_DB_NAME:-newcrawler_crawler}
       FORBIDDEN_CRAWLER_DATABASE: bullmq_crawler_migration
       POSTGRES_POOL_MAX: 8
+      SKIP_SCHEMA_MIGRATION: "true"
       MIGRATION_DATABASE_URL_FILE: /run/secrets/migration_database_url
       MIGRATION_SOURCE_ID: ${MIGRATION_SOURCE_ID:-qy-migration-v1}
       MIGRATION_RESTORED_SOURCES_ENABLED: ${MIGRATION_RESTORED_SOURCES_ENABLED:-false}

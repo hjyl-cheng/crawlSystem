@@ -1,0 +1,30 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { normalizeServerNode } from "./serverNodes.js";
+import { allowDashboardRequestDuringControlledMigration } from "./controlledWritePolicy.js";
+
+const node = { name: "Test node", host: "192.0.2.10", port: 22, username: "ubuntu", kind: "execution", workers: [] };
+
+test("node registration accepts addresses but never credentials, shell commands or runtime state", () => {
+  assert.equal(normalizeServerNode({ ...node, host: "2001:db8::10" }).host, "2001:db8::10");
+  assert.equal(normalizeServerNode({ ...node, host: "NODE.example.test" }).host, "node.example.test");
+  for (const patch of [
+    { host: "https://192.0.2.10" }, { host: "host; id" }, { host: "999.999.1.1" },
+    { username: "ubuntu; id" }, { sshAlias: "-F /tmp/config" }, { port: 0 },
+    { password: "should-not-be-stored" }, { privateKey: "should-not-be-stored" },
+    { online: true }, { workers: [{ role: "fullcrawl", count: 1, running: true }] },
+    { workers: [{ role: "toString", count: 1 }] },
+    { workers: [{ role: "fullcrawl", count: 1 }, { role: "fullcrawl", count: 2 }] },
+    { workers: [{ role: "incremental", count: -1 }] },
+  ]) assert.throws(() => normalizeServerNode({ ...node, ...patch }), { statusCode: 400 });
+});
+
+test("controlled migration allows node metadata changes but no deployment, deletion or queue control", () => {
+  assert.equal(allowDashboardRequestDuringControlledMigration("POST", "/api/server-nodes"), true);
+  assert.equal(allowDashboardRequestDuringControlledMigration("PUT", "/api/server-nodes/65e95c15-0311-4079-a90c-bdf887db6604"), true);
+  for (const [method, path] of [
+    ["POST", "/api/server-nodes/65e95c15-0311-4079-a90c-bdf887db6604/deploy"],
+    ["DELETE", "/api/server-nodes/65e95c15-0311-4079-a90c-bdf887db6604"],
+    ["POST", "/api/server-nodes/deploy"], ["POST", "/queues/pause"],
+  ]) assert.equal(allowDashboardRequestDuringControlledMigration(method, path), false);
+});
