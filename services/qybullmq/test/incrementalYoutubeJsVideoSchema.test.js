@@ -10,7 +10,19 @@ test("checkpoint schema block contains generation-scoped Batch and CAS Item cons
     readFile(new URL("../../../database/bootstrap/crawler.sql", import.meta.url), "utf8"),
   ]);
   const block = incrementalYoutubeJsVideoCheckpointSchemaBlock(schema);
-  assert.equal(incrementalYoutubeJsVideoCheckpointSchemaBlock(bootstrap), block);
+  // pg_dump emits tables, constraints and indexes separately, without the
+  // runtime migration markers. Check the exported checkpoint contract directly.
+  assert.match(bootstrap, /CREATE TABLE crawler\.incremental_youtubejs_video_batches/);
+  assert.match(bootstrap, /incremental_youtubejs_video_batches_pkey PRIMARY KEY \(run_id, cycle_key\)/);
+  assert.match(bootstrap, /CREATE TABLE crawler\.incremental_youtubejs_video_items/);
+  assert.match(bootstrap, /incremental_youtubejs_video_items_pkey PRIMARY KEY \(run_id, cycle_key, phase, video_id\)/);
+  assert.match(bootstrap, /UNIQUE \(run_id, cycle_key, video_id\)/);
+  assert.match(bootstrap, /claim_token uuid/);
+  assert.match(bootstrap, /first_seen_checkpoints_json jsonb/);
+  assert.match(bootstrap, /final_observation_id uuid/);
+  assert.match(bootstrap, /final_result_json ->> 'observation_id'::text\) IS DISTINCT FROM \(final_observation_id\)::text/);
+  assert.match(bootstrap, /status = 'captured'::text[^\n]*detail_json IS NOT NULL/);
+  assert.match(bootstrap, /status = 'settled_error'::text[^\n]*error_json IS NOT NULL/);
   assert.match(block, /incremental_youtubejs_video_batches/);
   assert.match(block, /PRIMARY KEY \(run_id, cycle_key\)/);
   assert.match(block, /incremental_youtubejs_video_items/);

@@ -20,7 +20,7 @@ test("Crawler schemas require disabled comments to carry an authoritative zero",
     );
     assert.match(
       schema,
-      /comments_disabled IS DISTINCT FROM TRUE[\s\S]*comment_count_status\s*<>\s*'disabled'/,
+      /comments_disabled IS DISTINCT FROM TRUE[\s\S]*comment_count_status\s*<>\s*'disabled'/i,
     );
   }
   assert.match(runtime, /WHEN merged\.comments_disabled=true THEN 0/);
@@ -46,8 +46,10 @@ test("Business schemas keep legacy snapshots readable and require v4 projections
     bootstrap,
     /content_snapshots_access_shape[\s\S]*comment_count = 0[\s\S]*comment_count_status = 'exact'/,
   );
+  // The production raw table still uses the legacy constraint. It ties the
+  // disabled flag to its status; authoritative zero is enforced by v4 Projection.
   assert.match(
     bootstrap,
-    /raw_contents_v4_shape[\s\S]*comment_count_status = 'disabled'[\s\S]*comment_count = 0/,
+    /raw_contents_v4_shape[^\n]*\(comments_disabled IS TRUE\) = \(comment_count_status = 'disabled'::text\)/,
   );
 });

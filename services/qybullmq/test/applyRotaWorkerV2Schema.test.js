@@ -103,7 +103,8 @@ test("Crawler bootstrap includes the Candidate attempt Fence shape", async () =>
   assert.match(bootstrap, /snapshot_active_job_attempt integer/);
   assert.match(bootstrap, /channel_candidates_snapshot_active_job_check/);
   assert.match(bootstrap, /snapshot_active_job_attempt >= 0/);
-  assert.match(bootstrap, /ux_crawler_proxy_job_dispatch_outbox_channel_snapshot_generation/);
+  // PostgreSQL truncates identifiers to 63 bytes in its schema export.
+  assert.match(bootstrap, /CREATE UNIQUE INDEX ux_crawler_proxy_job_dispatch_outbox_channel_snapshot_generatio ON/);
   assert.match(bootstrap, /channel_execution_attempts[\s\S]*dispatch_generation bigint/);
   assert.match(bootstrap, /migration_retry_intents[\s\S]*terminal_job_attempt bigint/);
   assert.match(bootstrap, /CREATE TABLE crawler\.migration_system_retry_items/);

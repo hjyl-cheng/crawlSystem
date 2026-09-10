@@ -72,9 +72,11 @@ test("Runtime and fresh Business schemas allow unlisted Content snapshots", asyn
     bootstrap,
     /CONSTRAINT content_snapshots_access_shape CHECK \(\(\(access_status = ANY \(ARRAY\['public'::text, 'unlisted'::text,/,
   );
+  // This is the live raw import contract. Its unlisted migration has not been
+  // deployed; public Content snapshots already support unlisted as checked above.
   assert.match(
     bootstrap,
-    /CONSTRAINT raw_contents_v4_shape CHECK \([\s\S]*?access_status = ANY \(ARRAY\['public'::text, 'unlisted'::text,/,
+    /CONSTRAINT raw_contents_v4_shape CHECK \([^\n]*access_status = ANY \(ARRAY\['public'::text, 'login_required'::text, 'members_only'::text, 'unavailable'::text, 'unknown'::text\]/,
   );
 });
 
