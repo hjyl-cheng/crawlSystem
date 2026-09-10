@@ -40,14 +40,23 @@ test("node registration persists only configuration, survives reload, and reject
   assert.equal((await save(savedNode, registry.version)).status, 400, "server-generated fields cannot be supplied as config");
   assert.equal((await save({ ...node, host: savedNode.host }, registry.version)).status, 409, "duplicate endpoints are rejected");
   assert.equal((await fetch(base + "/api/server-nodes", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: "name=unsafe" })).status, 415);
-  const response = await save({ ...node, host: savedNode.host, workers: [{ role: "incremental", count: 4 }] }, registry.version, savedNode.id);
+  const planned = { ...node, host: savedNode.host, sshAlias: "existing-node", workers: [{ role: "incremental", count: 4 }] };
+  assert.equal((await save(planned, registry.version, savedNode.id)).status, 409, "worker configuration requires verified readiness, even through the API");
+  assert.equal((await save({ ...planned, host: "192.0.2.99" }, registry.version)).status, 409, "new nodes cannot bypass onboarding with embedded worker plans");
+  // A registry saved by the previous page can already contain a worker plan.
+  registry.nodes[0] = { ...registry.nodes[0], workers: planned.workers, sshAlias: planned.sshAlias };
+  await pool.query("UPDATE crawler.settings SET value_json=$1::jsonb WHERE setting_key='dashboard_server_nodes_v1'", [JSON.stringify(registry)]);
+  const response = await save({ ...planned, notes: "Edited description" }, registry.version, savedNode.id);
   assert.equal(response.status, 200);
   registry = await response.json();
   assert.deepEqual(registry.nodes[0].workers, [{ role: "incremental", count: 4 }]);
+  assert.equal(registry.nodes[0].sshAlias, "existing-node");
+  assert.equal((await save({ ...planned, workers: [] }, registry.version, savedNode.id)).status, 409, "editing cannot silently remove existing plans");
   assert.equal((await save(node, 1, savedNode.id)).status, 409, "stale editor cannot erase a newly saved worker plan");
   assert.deepEqual(await createServerNodeStore(pool.query.bind(pool)).load(), registry, "reopening the store retains configuration");
   assert.deepEqual((await pool.query("SELECT value_json FROM crawler.settings WHERE setting_key='query_scheduler'")).rows[0].value_json, { status: "running" });
   assert.equal((await fetch(base + "/api/server-nodes/" + savedNode.id + "/deploy", { method: "POST" })).status, 423);
+  assert.equal((await fetch(base + "/api/server-nodes/" + savedNode.id, { method: "DELETE" })).status, 423, "unknown runtime state never authorizes deletion");
   assert.equal((await fetch(base + "/server-nodes")).status, 200);
   assert.equal((await fetch(base + "/assets/server-nodes.js")).status, 200);
   assert.equal((await fetch(base + "/assets/server-nodes.css")).status, 200);

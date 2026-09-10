@@ -65,6 +65,14 @@ export function createServerNodeStore(query) {
     const previous = await load();
     if (previous.version !== version) throw invalid("配置已被更新，请刷新页面后重试；你的输入仍保留在表单中", 409);
     if (id && !previous.nodes.some(item => item.id === id)) throw invalid("服务器不存在", 404);
+    // Runtime readiness is not available yet. Preserve existing plans while
+    // rejecting new ones until SSH and monitoring readiness can be verified.
+    const previousWorkers = previous.nodes.find(item => item.id === id)?.workers ?? [];
+    if (Object.keys(workerRoles).some(role =>
+      (previousWorkers.find(worker => worker.role === role)?.count ?? 0)
+      !== (normalized.workers.find(worker => worker.role === role)?.count ?? 0))) {
+      throw invalid("请先完成服务器初始化并接入监控，再配置 Worker；当前初始化功能尚未接入", 409);
+    }
     if (!id && previous.nodes.length >= 200) throw invalid("最多登记 200 台服务器");
     if (previous.nodes.some(item => item.id !== id && item.host === normalized.host && item.port === normalized.port)) {
       throw invalid("此地址和 SSH 端口的服务器已经添加", 409);

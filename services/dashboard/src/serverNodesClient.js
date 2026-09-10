@@ -9,7 +9,6 @@ const roles = {
 const serverIcon = '<svg width="27" height="27" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="3" y="3" width="18" height="7" rx="2"/><rect x="3" y="14" width="18" height="7" rx="2"/><path d="M7 6.5h.01M7 17.5h.01M11 6.5h6M11 17.5h6" stroke-linecap="round"/></svg>';
 let registry = null;
 let editor = null;
-let workerEditor = null;
 let detailId = null;
 let refreshing = false;
 
@@ -36,10 +35,10 @@ function metrics() {
 function card(node) {
   const total = node.workers.reduce((sum, worker) => sum + worker.count, 0);
   return `<article class="nodes-card">
-    <div class="nodes-card-main"><div class="nodes-card-top"><div class="nodes-card-icon">${serverIcon}</div><div class="nodes-card-title"><h3>${escapeHtml(node.name)}</h3><div class="nodes-address">${escapeHtml(node.host)} · ${node.port}</div></div><span class="nodes-badge">已登记</span></div>
-      <div class="nodes-card-tags"><span class="nodes-badge ${node.kind === "center" ? "center" : ""}">${node.kind === "center" ? "中心节点" : "执行节点"}</span><span class="nodes-badge pending">监控未接入</span></div>
-      ${metrics()}<div class="nodes-card-workers"><span>Worker 计划</span><strong>${total ? total + " 个" : "未配置"}</strong>${total ? '<span class="nodes-badge pending">尚未部署</span>' : ""}</div>
-    </div><div class="nodes-card-footer"><span>SSH 尚未验证</span><div><button type="button" class="nodes-text-button" data-detail="${escapeHtml(node.id)}">查看详情</button><button type="button" class="nodes-text-button" data-workers="${escapeHtml(node.id)}">配置 Worker</button></div></div>
+    <div class="nodes-card-main"><div class="nodes-card-top"><div class="nodes-card-icon">${serverIcon}</div><div class="nodes-card-title"><h3>${escapeHtml(node.name)}</h3><div class="nodes-address">${escapeHtml(node.host)} · ${node.port}</div></div><details class="nodes-card-menu"><summary aria-label="${escapeHtml(node.name)}的更多操作">⋯</summary><div><button type="button" data-edit="${escapeHtml(node.id)}">编辑服务器</button><button type="button" class="danger" data-delete="${escapeHtml(node.id)}">删除服务器</button></div></details></div>
+      <div class="nodes-card-tags"><span class="nodes-badge ${node.kind === "center" ? "center" : ""}">${node.kind === "center" ? "中心节点" : "执行节点"}</span><span class="nodes-badge pending">待初始化</span></div>
+      ${metrics()}<div class="nodes-card-workers"><span>Worker 计划</span><strong>${total ? total + " 个" : "未配置"}</strong>${total ? '<span class="nodes-badge pending">尚未部署</span>' : ""}</div><p class="nodes-worker-gate">完成 SSH 与监控接入后，可配置 Worker。</p>
+    </div><div class="nodes-card-footer"><button type="button" class="nodes-text-button" data-detail="${escapeHtml(node.id)}">查看详情</button><div><button type="button" class="nodes-button" disabled title="请先完成初始化并接入监控">配置 Worker</button><button type="button" class="nodes-button primary" data-initialize="${escapeHtml(node.id)}">初始化</button></div></div>
   </article>`;
 }
 
@@ -53,7 +52,7 @@ function render() {
   const nodes = registry.nodes.filter(node => (kind === "all" || node.kind === kind) && `${node.name} ${node.host}`.toLowerCase().includes(search));
   $("nodes-count").textContent = registry.nodes.length ? `${nodes.length} / ${registry.nodes.length}` : "";
   if (!registry.nodes.length) {
-    $("nodes-list").innerHTML = `<div class="nodes-empty"><div class="nodes-empty-icon">${serverIcon}</div><h3>添加你的第一台服务器</h3><p>从中心服务器或一个采集节点开始。添加后可以配置 Worker 计划，后续再接入监控和部署。</p><button type="button" class="nodes-button primary" data-add>＋ 添加服务器</button><div class="nodes-steps"><b>01 登记服务器</b><span>02 配置 Worker</span><span>03 接入与部署</span></div></div>`;
+    $("nodes-list").innerHTML = `<div class="nodes-empty"><div class="nodes-empty-icon">${serverIcon}</div><h3>添加你的第一台服务器</h3><p>登记服务器后，先验证 SSH、配置密钥并接入监控，节点就绪后再添加 Worker。当前可先保存基本信息。</p><button type="button" class="nodes-button primary" data-add>＋ 添加服务器</button><div class="nodes-steps"><b>01 添加服务器</b><span>02 初始化与监控</span><span>03 配置 Worker</span></div></div>`;
   } else if (!nodes.length) {
     $("nodes-list").innerHTML = '<div class="nodes-empty"><h3>没有匹配的服务器</h3><p>换一个名称、IP 地址或节点类型试试。</p><button type="button" class="nodes-button" data-clear>清除筛选</button></div>';
   } else {
@@ -78,10 +77,15 @@ function openEditor(node = null) {
   editor = { node, version: registry.version };
   const form = $("node-form");
   form.reset();
-  for (const field of ["name", "host", "port", "username", "sshAlias", "kind", "notes"]) {
+  for (const field of ["name", "host", "port", "username", "kind", "notes"]) {
     form.elements[field].value = node?.[field] ?? ({ port: 22, kind: "execution" }[field] ?? "");
   }
   $("node-editor-title").textContent = node ? "编辑服务器" : "添加服务器";
+  $("node-editor-intro").textContent = node ? "更新服务器的登记信息。已有 SSH 配置引用和 Worker 计划会保留。" : "初始化接通后，添加服务器将自动验证登录、配置 SSH 密钥并接入 Beszel；完成后再配置 Worker。";
+  $("node-password-section").hidden = !!node;
+  $("node-register-help").hidden = !!node;
+  $("node-add-initialize").hidden = !!node;
+  $("node-save").textContent = node ? "保存修改" : "仅保存信息";
   $("node-form-error").hidden = true;
   $("node-editor").showModal();
   form.elements.name.focus();
@@ -92,30 +96,33 @@ function openDetail(id) {
   if (!node) return;
   detailId = id;
   $("node-detail-title").textContent = node.name;
-  const fields = [["节点类型", node.kind === "center" ? "中心节点" : "执行节点"], ["服务器地址", node.host], ["SSH 用户名", node.username], ["SSH 端口", node.port], ["SSH 配置别名", node.sshAlias || "未填写"], ["配置更新时间", new Date(node.updatedAt).toLocaleString("zh-CN")]];
+  const fields = [["节点类型", node.kind === "center" ? "中心节点" : "执行节点"], ["服务器地址", node.host], ["SSH 用户名", node.username], ["SSH 端口", node.port], ["SSH 配置引用", node.sshAlias || "初始化时自动配置"], ["配置更新时间", new Date(node.updatedAt).toLocaleString("zh-CN")]];
   $("node-detail-content").innerHTML = `<div class="nodes-detail-section"><dl class="nodes-detail-meta">${fields.map(([key, value]) => `<div><dt>${key}</dt><dd>${escapeHtml(value)}</dd></div>`).join("")}</dl>${node.notes ? `<p class="nodes-detail-notes">${escapeHtml(node.notes)}</p>` : ""}</div>
     <section class="nodes-detail-section"><h3>资源监控 <span class="nodes-badge">尚未接入</span></h3>${metrics()}<div class="nodes-monitor-placeholder"><strong>等待接入 Beszel 监控</strong>接入后可查看 CPU、内存、磁盘和网络历史曲线。</div></section>
-    <section class="nodes-detail-section"><h3>Worker 配置</h3>${node.workers.length ? node.workers.map(worker => `<div class="nodes-worker-summary"><span>${escapeHtml(roles[worker.role]?.[0] ?? worker.role)}</span><span><strong>计划 ${worker.count} 个</strong><span class="nodes-badge pending">尚未部署</span></span></div>`).join("") : '<p class="nodes-footnote">尚未配置 Worker。可以先保存类型和数量，后续再部署。</p>'}</section>
+    <section class="nodes-detail-section"><h3>Worker 配置</h3>${node.workers.length ? node.workers.map(worker => `<div class="nodes-worker-summary"><span>${escapeHtml(roles[worker.role]?.[0] ?? worker.role)}</span><span><strong>计划 ${worker.count} 个</strong><span class="nodes-badge pending">尚未部署</span></span></div>`).join("") : '<p class="nodes-footnote">尚未配置 Worker。</p>'}<p class="nodes-worker-gate">请先完成初始化并接入监控，再配置 Worker。已有计划保留，当前不可调整。</p><button type="button" class="nodes-button" disabled>配置 Worker · 节点尚未就绪</button></section>
     <p class="nodes-footnote">SSH 连通性、实际运行状态和部署记录尚未接入。</p>`;
   $("node-detail").showModal();
 }
 
-function openWorkers(id) {
+function openInitialize(id) {
   const node = registry.nodes.find(item => item.id === id);
   if (!node) return;
-  workerEditor = { node, version: registry.version };
-  $("node-workers-name").textContent = node.name;
-  $("node-workers-error").hidden = true;
-  $("node-worker-fields").innerHTML = Object.entries(roles).map(([role, [label, description]]) => `<div class="nodes-worker-row"><div><label for="worker-${role}">${label}</label><small>${description}</small></div><div class="nodes-worker-count"><input id="worker-${role}" name="${role}" type="number" min="0" max="100" required value="${node.workers.find(worker => worker.role === role)?.count ?? 0}"><span>个</span></div></div>`).join("");
-  $("node-workers").showModal();
+  $("node-initialize-name").textContent = node.name;
+  $("node-initialize-auth").textContent = node.sshAlias ? `已登记 SSH 引用 ${node.sshAlias}，初始化时优先验证其是否可用。` : "首次接入时使用登录密码配置专用密钥；若已有可用密钥，将优先复用。";
+  $("node-initialize-password").value = "";
+  $("node-initialize").showModal();
 }
 
-function nodeInput(node) {
-  return Object.fromEntries(["name", "host", "port", "username", "sshAlias", "kind", "notes", "workers"].map(key => [key, node[key]]));
+function openDelete(id) {
+  const node = registry.nodes.find(item => item.id === id);
+  if (!node) return;
+  $("node-delete-name").textContent = node.name;
+  $("node-delete-reason").textContent = node.kind === "center" ? "中心节点不能从此页面删除，以免影响管理服务。" : "暂时不能删除：运行状态与派发校验尚未接入，无法确认该节点是否满足删除条件。";
+  $("node-delete").showModal();
 }
 
 async function saveForm({ form, dialog, errorId, edit, node, message }) {
-  const controls = [...form.querySelectorAll("button,input,textarea,select")];
+  const controls = [...form.querySelectorAll("button,input,textarea,select")].filter(control => !control.disabled);
   controls.forEach(control => { control.disabled = true; });
   dialog.dataset.saving = "true";
   $(errorId).hidden = true;
@@ -140,30 +147,27 @@ async function saveForm({ form, dialog, errorId, edit, node, message }) {
 $("node-form").addEventListener("submit", event => {
   event.preventDefault();
   if (!editor || $("node-editor").dataset.saving) return;
-  const values = Object.fromEntries(new FormData(event.currentTarget));
+  // Only metadata is submitted. A password must never enter the registry payload.
+  const values = Object.fromEntries(["name", "host", "port", "username", "kind", "notes"].map(key => [key, event.currentTarget.elements[key].value]));
   void saveForm({ form: event.currentTarget, dialog: $("node-editor"), errorId: "node-form-error", edit: editor,
-    node: { ...values, port: Number(values.port), workers: editor.node?.workers ?? [] },
+    node: { ...values, port: Number(values.port), sshAlias: editor.node?.sshAlias ?? "", workers: editor.node?.workers ?? [] },
     message: "服务器配置已保存，尚未连接或部署。" });
 });
-$("node-workers-form").addEventListener("submit", event => {
-  event.preventDefault();
-  if (!workerEditor || $("node-workers").dataset.saving) return;
-  const workers = [...new FormData(event.currentTarget)].map(([role, count]) => ({ role, count: Number(count) })).filter(worker => worker.count > 0);
-  void saveForm({ form: event.currentTarget, dialog: $("node-workers"), errorId: "node-workers-error", edit: workerEditor,
-    node: { ...nodeInput(workerEditor.node), workers }, message: "Worker 计划已保存，尚未部署；实际运行数量未改变。" });
-});
-
 document.addEventListener("click", event => {
   const target = event.target.closest("button");
   if (!target || target.disabled) return;
   if (target.hasAttribute("data-close")) $(target.dataset.close).close();
   if (target.hasAttribute("data-add")) openEditor();
   if (target.hasAttribute("data-detail")) openDetail(target.dataset.detail);
-  if (target.hasAttribute("data-workers")) openWorkers(target.dataset.workers);
+  if (target.hasAttribute("data-initialize")) openInitialize(target.dataset.initialize);
+  if (target.hasAttribute("data-edit")) openEditor(registry.nodes.find(node => node.id === target.dataset.edit));
+  if (target.hasAttribute("data-delete")) openDelete(target.dataset.delete);
+  target.closest(".nodes-card-menu")?.removeAttribute("open");
   if (target.hasAttribute("data-retry")) void refresh();
   if (target.hasAttribute("data-clear")) { $("nodes-search").value = ""; $("nodes-kind").value = "all"; render(); }
 });
 for (const dialog of document.querySelectorAll(".nodes-dialog")) {
+  dialog.addEventListener("close", () => { for (const input of dialog.querySelectorAll('input[type="password"]')) input.value = ""; });
   dialog.addEventListener("cancel", event => { if (dialog.dataset.saving) event.preventDefault(); });
   dialog.addEventListener("click", event => { if (dialog.dataset.saving && event.target === dialog) event.stopPropagation(); });
 }
@@ -172,5 +176,6 @@ $("nodes-refresh").addEventListener("click", () => void refresh());
 $("nodes-search").addEventListener("input", render);
 $("nodes-kind").addEventListener("change", render);
 $("node-detail-edit").addEventListener("click", () => { $("node-detail").close(); openEditor(registry.nodes.find(node => node.id === detailId)); });
-$("node-detail-workers").addEventListener("click", () => { $("node-detail").close(); openWorkers(detailId); });
+$("node-detail-initialize").addEventListener("click", () => { $("node-detail").close(); openInitialize(detailId); });
+$("node-detail-delete").addEventListener("click", () => { $("node-detail").close(); openDelete(detailId); });
 void refresh();

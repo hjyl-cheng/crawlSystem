@@ -12,8 +12,20 @@ hostnames are embedded in this source directory.
 The main pages cover Query, Migration, Incremental clocks, Agent configuration,
 Crawler health, Publication state, and BullMQ queues.
 
-The `/server-nodes` page starts empty. Operators can manually register servers
-and save per-role worker counts as **plans only**. The registry is persisted in
+The `/server-nodes` page starts empty. Operators can manually register servers.
+The intended flow is registration, SSH/key setup and Beszel onboarding, then
+worker configuration. Password fields and initialization controls are visibly
+disabled until the onboarding backend is available; passwords are never sent to
+the metadata API. SSH aliases are no longer hand-entered, and editing preserves
+existing aliases and worker plans. New or changed worker plans are rejected until
+readiness can be verified, including requests made directly to the API.
+
+Node cards have edit, initialization, and deletion-review entries. Deletion is
+blocked while dispatch, worker, task, and operation states cannot be verified.
+Unknown state is never shown as zero workers or a successful safety check. The
+UI also explains center-node protection. No deletion endpoint is enabled.
+
+The registry is persisted in
 `crawler.settings` under `dashboard_server_nodes_v1`, with optimistic concurrency
 checks. Registration does not connect over SSH, install software, change queues,
 or deploy containers. SSH aliases are references only; passwords and private keys
