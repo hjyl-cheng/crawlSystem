@@ -129,4 +129,18 @@ test('bounded recovery and durable source generations survive Redis failures, co
     assert.equal(intent.requested_generation, '1');
     assert.equal(intent.handled_generation, '0');
   });
+  await t.test('an expensive page retries the same cursor with a smaller page after timeout', async () => {
+    await query("UPDATE crawler.finalize_recovery_scan SET after_channel_id='',upper_channel_id=NULL,lease_token=NULL,lease_until=NULL");
+    let timeout = true;
+    const scan = createFinalizeRecoveryScan({ query: async (sql, args) => {
+      if (timeout && sql.includes('finalize-recovery:candidates')) {
+        timeout = false;
+        throw Object.assign(new Error('synthetic statement timeout'), { code: '57014' });
+      }
+      return query(sql, args);
+    }, withTransaction, queue, pageSize: 2, registerChanges: true });
+    await assert.rejects(scan, /synthetic statement timeout/);
+    assert.equal((await query("SELECT after_channel_id FROM crawler.finalize_recovery_scan WHERE scope='global'")).rows[0].after_channel_id, '');
+    assert.equal((await scan()).examined, 1);
+  });
 });

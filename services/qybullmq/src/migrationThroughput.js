@@ -21,7 +21,16 @@ export function migrationRollingRates(batch, samples, now = new Date()) {
 }
 
 export async function sampleMigrationThroughput(query) {
-  const progress = await loadMigrationControlProgress(query);
+  // Closed batches cannot gain newly admitted work. Keep their final sample
+  // instead of repeatedly joining historical inventories and publication rows.
+  const ids = (await query(`SELECT b.batch_id FROM (
+    SELECT * FROM crawler.migration_control_batches ORDER BY created_at DESC LIMIT 10
+  ) b LEFT JOIN LATERAL (
+    SELECT sampled_at FROM crawler.migration_throughput_samples WHERE batch_id=b.batch_id
+    ORDER BY sampled_at DESC LIMIT 1
+  ) s ON true WHERE b.status NOT IN ('ended','completed') OR s.sampled_at IS NULL
+    OR b.finished_at>s.sampled_at`)).rows.map(row => row.batch_id);
+  const progress = ids.length ? await loadMigrationControlProgress(query, { batchIds: ids }) : { batches: [] };
   for (const batch of progress.batches) {
     // Count each admitted channel once, even if it has multiple completed Runs.
     // Detail completion is distinct from Agent/Finalize/publication settlement.
@@ -33,7 +42,8 @@ export async function sampleMigrationThroughput(query) {
     await query(`INSERT INTO crawler.migration_throughput_samples(batch_id,active_seconds,counts,publishing_count)
       VALUES($1,$2,$3::jsonb,$4)`, [batch.batch_id, batch.active_seconds, JSON.stringify(batch.counts), batch.publishing_count]);
   }
-  await query("DELETE FROM crawler.migration_throughput_samples WHERE sampled_at<now()-interval '2 hours'");
+  await query(`DELETE FROM crawler.migration_throughput_samples s WHERE sampled_at<now()-interval '2 hours'
+    AND sampled_at<(SELECT max(keep.sampled_at) FROM crawler.migration_throughput_samples keep WHERE keep.batch_id=s.batch_id)`);
   return { batches: progress.batches.length };
 }
 

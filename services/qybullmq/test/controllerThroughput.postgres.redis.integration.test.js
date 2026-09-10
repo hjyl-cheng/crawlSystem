@@ -157,4 +157,12 @@ test('40 concurrent real consumers keep receiving frozen migration jobs during a
     assert.equal(progress.active.counts.started, 250);
     assert.equal(progress.active.counts.success ?? 0, 0);
   });
+  await t.test('closed batch final statistics are sampled once and retained without recounting', async () => {
+    await query("UPDATE crawler.migration_control_batches SET status='ended',finished_at=now() WHERE batch_id=$1", [batch.batch_id]);
+    assert.equal((await sampleMigrationThroughput(query)).batches, 1);
+    const statements = [];
+    assert.equal((await sampleMigrationThroughput((sql, args) => { statements.push(sql); return query(sql, args); })).batches, 0);
+    assert.ok(statements.every(sql => !sql.includes('FROM crawler.migration_control_items')));
+    assert.equal((await createMigrationProgressReader(query)()).batches[0].counts.fetch_completed, 1);
+  });
 });

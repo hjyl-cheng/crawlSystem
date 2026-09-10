@@ -275,7 +275,7 @@ export async function prepareControlledMigrationSnapshot({
   return true;
 }
 
-export async function loadMigrationControlProgress(query) {
+export async function loadMigrationControlProgress(query, { batchIds = null } = {}) {
   const rows = await query(`SELECT b.*,
    (SELECT result_json->>'migration_control_error' FROM crawler.query_dispatch_batches WHERE dispatch_batch_id=b.batch_id) AS control_error,
    (SELECT count(*)::int FROM publication.outbox o JOIN publication.revision r USING(revision_id)
@@ -289,7 +289,8 @@ export async function loadMigrationControlProgress(query) {
      SELECT CASE WHEN state='terminal' THEN outcome ELSE state END AS label,count(*)::int AS n
      FROM crawler.migration_control_items WHERE batch_id=b.batch_id GROUP BY 1
     ) x
-   ) s ON true ORDER BY b.created_at DESC LIMIT 10`);
+   ) s ON true ${batchIds ? "WHERE b.batch_id=ANY($1::text[])" : ""}
+   ORDER BY b.created_at DESC LIMIT 10`, batchIds ? [batchIds] : []);
   return {
     ok: true,
     batches: rows.rows,

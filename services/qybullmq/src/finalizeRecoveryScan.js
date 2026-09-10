@@ -5,8 +5,9 @@ import { dispatchFinalizeForRun } from './finalizeDispatch.js';
 // Cursor advances only after every page dispatch succeeds. A crash replays the
 // same source-revision Job IDs. Database ownership protects duplicate processes.
 export function createFinalizeRecoveryScan({ query, withTransaction, queue, pageSize = 200, roundPauseMs = 0, registerChanges = false }) {
+  let currentPageSize = Math.max(1, Math.min(1000, Math.floor(pageSize) || 200));
   return async function scan() {
-    const size = Math.max(1, Math.min(1000, Math.floor(pageSize) || 200));
+    const size = currentPageSize;
     const claim = await withTransaction(async client => {
       await client.query("INSERT INTO crawler.finalize_recovery_scan(scope) VALUES ('global') ON CONFLICT DO NOTHING");
       return (await client.query(`UPDATE crawler.finalize_recovery_scan
@@ -44,6 +45,10 @@ export function createFinalizeRecoveryScan({ query, withTransaction, queue, page
       [claim.lease_token, wrapped ? '' : ids.at(-1), wrapped ? null : upper, wrapped ? 1 : 0]);
       return { examined: ids.length, eligible: candidates.length, dispatched: registerChanges ? 0 : candidates.length, registered: registerChanges ? candidates.length : 0, wrapped };
     } catch (error) {
+      // Production channels can contain many more videos than the benchmark.
+      // Retry the same cursor with less work after a query timeout; never skip
+      // an expensive page or treat its channels as failed.
+      if (error.code === '57014' && size > 1) currentPageSize = Math.max(1, Math.floor(size / 2));
       await query("UPDATE crawler.finalize_recovery_scan SET lease_until=NULL,lease_token=NULL WHERE scope='global' AND lease_token=$1", [claim.lease_token]).catch(() => {});
       throw error;
     }
