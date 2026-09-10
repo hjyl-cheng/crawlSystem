@@ -266,10 +266,13 @@ export async function loadPublicationGapRepairCandidates(queryValue, {
 export async function loadFinalizeRecoveryCandidates(queryValue, {
   pipelineCycleId = null,
   limit = 200,
+  channelIds = null,
+  includeCurrent = false,
 } = {}) {
   const query = requiredQuery(queryValue);
   const rows = await query(
     `/* finalize-recovery:candidates */
+     ${channelIds ? "WITH recovery_channels AS MATERIALIZED (SELECT * FROM crawler.channels WHERE channel_id=ANY($5::text[]))" : ""}
      SELECT channel.channel_id,run.run_id,
             greatest(
               channel.updated_at,
@@ -277,7 +280,7 @@ export async function loadFinalizeRecoveryCandidates(queryValue, {
               COALESCE(candidate_revision.updated_at,'epoch'::timestamptz),
               COALESCE(content_revision.updated_at,'epoch'::timestamptz)
             ) AS source_updated_at
-     FROM crawler.channels channel
+     FROM ${channelIds ? "recovery_channels" : "crawler.channels"} channel
      JOIN crawler.channel_runs run ON run.run_id=CASE
        WHEN channel.status='dormant' THEN channel.registry_promotion_run_id
        ELSE channel.latest_run_id
@@ -315,7 +318,7 @@ export async function loadFinalizeRecoveryCandidates(queryValue, {
          $1::text IS NULL
          OR COALESCE(run.result_json->>'dispatch_batch_id',run.result_json->>'pipeline_cycle_id')=$1
        )
-       AND (
+       AND (${includeCurrent ? 'true OR' : ''}
          (channel.status='dormant' AND run.publication_finalized_at IS NULL)
          OR (
            channel.status='active'
@@ -341,6 +344,7 @@ export async function loadFinalizeRecoveryCandidates(queryValue, {
       boundedLimit(limit),
       FINALIZABLE_CHANNEL_STATUSES,
       SUCCESSFUL_PUBLICATION_FINALIZE_STATUSES,
+      ...(channelIds ? [channelIds] : []),
     ],
   );
   return rows.rows;

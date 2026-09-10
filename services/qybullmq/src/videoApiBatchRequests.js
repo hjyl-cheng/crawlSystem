@@ -129,6 +129,12 @@ export async function dispatchVideoApiRequests({ query, withTransaction, queue, 
   }
   for (let index = queued.length; index < maxBatches; index += 1) {
     const batch = await withTransaction(async client => {
+      // Short intake cycles must not multiply the global in-flight batch limit.
+      await client.query("SELECT pg_advisory_xact_lock(781137246)");
+      const inFlight = Number((await client.query(`SELECT count(*)::int AS count
+        FROM crawler.youtube_api_batches WHERE status IN ('queued','running')
+          AND result_json->>'video_api_scope'=$1`, [VIDEO_API_BATCH_SCOPE])).rows[0].count);
+      if (inFlight >= maxBatches) return null;
       const rows = (await client.query(`SELECT t.task_id,t.source_content_id FROM crawler.youtube_api_tasks t
         WHERE t.status IN ('pending','failed') AND t.attempts<3
           AND (t.next_retry_at IS NULL OR t.next_retry_at<=now())
