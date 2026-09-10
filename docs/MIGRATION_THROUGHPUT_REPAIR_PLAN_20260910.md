@@ -210,3 +210,18 @@ pause/stop 与补队列存在竞争时，Worker 端原子 admission 是最终屏
 - 受影响完整 Node 测试 1863 项：1680 通过、183 因外部依赖未配置跳过、0 失败；其余完整仓库测试与 verify 已通过。
 
 截至本记录，最终采样修正尚待镜像替换，60 分钟稳定性观察尚未完成。回退容器保留 `-before-throughput` 和 `-before-finalize-events` 两个阶段；回退时仍须确保单一 Controller。不要以早期 active=40 快照宣称小时吞吐验收完成。
+
+**12. 正常收尾与补漏争用同一队列的修正**
+
+10:25 UTC 首个可用 15 分钟样本：758 个详情抓取完成、84 个最终结算，有效时间约 936 秒，折算分别为 2916 / 323 个每小时。这是发布和消化历史积压期间的窗口，不能作为稳定性能结论。
+
+只读核对 Finalize 等待任务 3343 个，其中 controller-finalize-source-change 2274 个；其余主要为 migration-activity-dormant、channel-full-fetch-complete、agent-complete。恢复派发速度高于单个 Finalize 消费者的剩余容量，历史补漏排在正常新任务前面，是本次 rollout 暴露的额外拥塞点。
+
+补充修正：
+
+- 恢复消费者发现 waiting + prioritized 达到 200 时不领取新 generation，也不再扫描来源或派发。意图保留在 PostgreSQL，消费者有空位后继续；正常 Worker 的直接收尾不受此上限限制。
+- 仅 Controller 的恢复投递使用 BullMQ priority=100，正常流水线保留原默认 priority=0；真实 Redis 测试确认后到达的正常任务先于历史恢复执行。
+- 已排队且 reason 精确为本次 Controller 两种恢复来源的任务，需要一次性调整为同样的恢复优先级；保留原 Job ID、Run、source revision 和重试状态，不删除或重建任务。
+- 恢复数据库/Redis 集成 11 项通过，包含容量等待不推进 generation、正常任务优先、并发来源变更、未齐数据与游标缩页重试。
+
+最终采样镜像 b83be07 已上线 Controller/API；Dashboard 使用 acbc650。新版本统计单轮约 2.9–3.8 秒，API 进度请求 145 毫秒、Dashboard 转发 316 毫秒，两个服务健康且重启次数 0。用户公开路径返回登录重定向 302；未绕过登录。优先级与容量修正的最终镜像和稳定观测结果随后补记。

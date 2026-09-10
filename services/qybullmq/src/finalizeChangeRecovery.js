@@ -3,8 +3,13 @@ import { finalizedProfileIsCurrent } from "./finalizePolicy.js";
 import { loadFinalizeRecoveryCandidates } from './finalizeRecoveryPolicy.js';
 import { dispatchFinalizeForRun } from './finalizeDispatch.js';
 
-export function createFinalizeChangeRecovery({ query, withTransaction, queue, limit = 40 }) {
+export function createFinalizeChangeRecovery({ query, withTransaction, queue, limit = 40, maxQueuedJobs = 200 }) {
   return async function recover() {
+    // Historical recovery must not flood the queue shared with normal source
+    // writes. Keep durable generations pending until consumers have capacity.
+    const counts = await queue.getJobCounts('waiting', 'prioritized');
+    const backlog = Number(counts.waiting ?? 0) + Number(counts.prioritized ?? 0);
+    if (backlog >= maxQueuedJobs) return { checked: 0, dispatched: 0, backlog, capacity_wait: true };
     const rows = (await withTransaction(client => client.query(`WITH due AS (
       SELECT channel_id FROM crawler.finalize_recovery_requests
       WHERE requested_generation>handled_generation AND next_check_at<=now()
@@ -62,7 +67,9 @@ export function createFinalizeChangeRecovery({ query, withTransaction, queue, li
             && source.run.publication_finalized_at != null
             && finalizedProfileIsCurrent(existing, candidates[0].run_id, source.sourceRevision, outcomes);
           if (!completed) {
-            receipt = await dispatchFinalizeForRun({ query, queue, channelId: row.channel_id, runId: candidates[0].run_id, reason: 'controller-finalize-source-change' });
+            receipt = await dispatchFinalizeForRun({ query,
+              queue: { add: (name, data, options) => queue.add(name, data, { ...options, priority: 100 }) },
+              channelId: row.channel_id, runId: candidates[0].run_id, reason: 'controller-finalize-source-change' });
             const job = await queue.getJob(receipt.jobId);
             const state = job ? await job.getState() : null;
             if (['completed', 'failed'].includes(state)) await job.retry(state);

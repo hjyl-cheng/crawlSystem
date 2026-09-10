@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFile } from 'node:fs/promises';
 import pg from 'pg';
-import { Queue } from 'bullmq';
+import { Queue, Worker } from 'bullmq';
 import { createFinalizeRecoveryScan } from '../src/finalizeRecoveryScan.js';
 import { createFinalizeChangeRecovery } from '../src/finalizeChangeRecovery.js';
 import { loadFinalizeRecoveryCandidates } from '../src/finalizeRecoveryPolicy.js';
@@ -44,7 +44,7 @@ test('bounded recovery and durable source generations survive Redis failures, co
     const reports = [await scan(), await scan(), await scan()];
     assert.deepEqual(reports.map(r => r.examined), [2, 2, 1]);
     assert.equal(reports.at(-1).wrapped, true);
-    assert.deepEqual((await queue.getJobs(['waiting'])).map(j => j.data.channel_id).sort(), expected);
+    assert.deepEqual((await queue.getJobs(['waiting', 'prioritized'])).map(j => j.data.channel_id).sort(), expected);
     assert.equal((await query('SELECT completed_rounds FROM crawler.finalize_recovery_scan')).rows[0].completed_rounds, '1');
   });
 
@@ -67,7 +67,7 @@ test('bounded recovery and durable source generations survive Redis failures, co
       add: async (...args) => {
         await query('UPDATE crawler.channels SET title=COALESCE(title,\'\')||\'changed\',updated_at=now() WHERE channel_id=$1', [args[1].channel_id]);
         return queue.add(...args);
-      }, getJob: queue.getJob.bind(queue),
+      }, getJob: queue.getJob.bind(queue), getJobCounts: queue.getJobCounts.bind(queue),
     } });
     const result = await recovery();
     assert.equal(result.dispatched, 4);
@@ -142,5 +142,27 @@ test('bounded recovery and durable source generations survive Redis failures, co
     await assert.rejects(scan, /synthetic statement timeout/);
     assert.equal((await query("SELECT after_channel_id FROM crawler.finalize_recovery_scan WHERE scope='global'")).rows[0].after_channel_id, '');
     assert.equal((await scan()).examined, 1);
+  });
+  await t.test('historical recovery waits for queue capacity without consuming source generations', async () => {
+    const before = (await query('SELECT channel_id,requested_generation,handled_generation FROM crawler.finalize_recovery_requests ORDER BY channel_id')).rows;
+    const result = await createFinalizeChangeRecovery({
+      query: () => assert.fail('a full queue must not start source scans'),
+      withTransaction: () => assert.fail('a full queue must not claim generations'),
+      queue, maxQueuedJobs: 1,
+    })();
+    assert.equal(result.capacity_wait, true);
+    assert.equal(result.dispatched, 0);
+    assert.deepEqual((await query('SELECT channel_id,requested_generation,handled_generation FROM crawler.finalize_recovery_requests ORDER BY channel_id')).rows, before);
+  });
+  await t.test('a newly ready normal channel runs ahead of historical recovery jobs', async () => {
+    await queue.add('normal-channel-ready', { channel_id: 'normal' });
+    const worker = new Worker(queue.name, async () => {}, {
+      prefix: queue.opts.prefix, connection: { host: '127.0.0.1', port: redisPort, maxRetriesPerRequest: null }, autorun: false,
+    });
+    try {
+      const job = await worker.getNextJob('priority-test-token');
+      assert.equal(job.name, 'normal-channel-ready');
+      await job.moveToCompleted({}, 'priority-test-token', false);
+    } finally { await worker.close(true); }
   });
 });
