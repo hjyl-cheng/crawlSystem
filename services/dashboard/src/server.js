@@ -1,6 +1,7 @@
 import {migrationBatchPanel} from "./migrationBatchPanel.js";
 import { createServerNodeStore } from "./serverNodes.js";
 import { serverNodesRoutes } from "./serverNodesRoutes.js";
+import { nodeOnboardingFromEnv } from "./serverNodeOnboarding.js";
 import express from "express";
 import morgan from "morgan";
 import { allowDashboardRequestDuringControlledMigration } from "./controlledWritePolicy.js";
@@ -4737,7 +4738,8 @@ app.use((req, res, next) => {
 });
 
 app.get("/", (_req, res) => res.redirect("/queries"));
-app.use(serverNodesRoutes({ store: createServerNodeStore(db), layout }));
+const serverNodeStore = createServerNodeStore(db);
+app.use(serverNodesRoutes({ store: serverNodeStore, layout, onboarding: nodeOnboardingFromEnv(serverNodeStore) }));
 
 app.get("/health", async (_req, res) => {
   try {

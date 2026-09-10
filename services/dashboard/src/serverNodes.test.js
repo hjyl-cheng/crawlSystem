@@ -24,10 +24,12 @@ test("controlled migration allows node metadata changes and removal but no deplo
   assert.equal(allowDashboardRequestDuringControlledMigration("POST", "/api/server-nodes"), true);
   assert.equal(allowDashboardRequestDuringControlledMigration("PUT", "/api/server-nodes/65e95c15-0311-4079-a90c-bdf887db6604"), true);
   assert.equal(allowDashboardRequestDuringControlledMigration("DELETE", "/api/server-nodes/65e95c15-0311-4079-a90c-bdf887db6604"), true);
+  assert.equal(allowDashboardRequestDuringControlledMigration("POST", "/api/server-nodes/65e95c15-0311-4079-a90c-bdf887db6604/initialize"), true);
   for (const [method, path] of [
     ["POST", "/api/server-nodes/65e95c15-0311-4079-a90c-bdf887db6604/deploy"],
     ["DELETE", "/api/server-nodes/65e95c15-0311-4079-a90c-bdf887db6604/deploy"],
     ["DELETE", "/api/server-nodes"],
+    ["DELETE", "/api/server-nodes/65e95c15-0311-4079-a90c-bdf887db6604/initialize"],
     ["POST", "/api/server-nodes/deploy"], ["POST", "/queues/pause"],
   ]) assert.equal(allowDashboardRequestDuringControlledMigration(method, path), false);
 });
@@ -41,5 +43,13 @@ test("only known uninitialized execution registrations are eligible for metadata
     { provisioning: { state: "started" } }, { provisioning: { state: "completed" } },
     { provisioning: { state: "not_started", operationId: "pending" } }, { deployment: {} }]) {
     assert.equal(serverNodeDeletionEligibility({ ...node, ...patch }).allowed, false);
+  }
+});
+
+test("failed login is removable only when the stored operation proves no remote changes began", () => {
+  const provisioning = { state: "failed", remoteChanges: false, steps: { ssh: "failed", key: "pending", monitoring: "pending", metrics: "pending" } };
+  assert.equal(serverNodeDeletionEligibility({ ...node, provisioning }).allowed, true);
+  for (const patch of [{ remoteChanges: true }, { deployment: "unknown" }, { state: "running" }]) {
+    assert.equal(serverNodeDeletionEligibility({ ...node, provisioning: { ...provisioning, ...patch } }).allowed, false);
   }
 });

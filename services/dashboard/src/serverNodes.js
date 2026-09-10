@@ -8,6 +8,11 @@ export const workerRoles = Object.freeze({
   discover: "Query / 发现",
   query_quality: "Query 质量评估",
 });
+export const initializationSteps = ["ssh", "key", "monitoring", "metrics"];
+export function nodeReady(node) {
+  return node?.provisioning?.state === "ready" && !!node.provisioning.systemId
+    && initializationSteps.every(step => node.provisioning.steps?.[step] === "completed");
+}
 
 function invalid(message, statusCode = 400) {
   return Object.assign(new Error(message), { statusCode });
@@ -57,13 +62,17 @@ export function serverNodeDeletionEligibility(node) {
   // metadata fields. A saved worker plan or SSH alias is not a deployment.
   const metadataFields = new Set(["id", "name", "host", "port", "username", "sshAlias", "kind", "notes", "workers", "createdAt", "updatedAt", "provisioning"]);
   const knownMetadata = Object.keys(node).every(key => metadataFields.has(key));
-  const neverStarted = !Object.hasOwn(node, "provisioning") || (
+  const failedBeforeChanges = node.provisioning?.state === "failed" && node.provisioning.remoteChanges === false
+    && node.provisioning.steps?.ssh === "failed"
+    && ["key", "monitoring", "metrics"].every(step => node.provisioning.steps?.[step] === "pending")
+    && Object.keys(node.provisioning).every(key => ["state", "remoteChanges", "steps", "operationId", "startedAt", "deadline", "finishedAt", "error"].includes(key));
+  const neverStarted = failedBeforeChanges || !Object.hasOwn(node, "provisioning") || (
     node.provisioning?.state === "not_started" && Object.keys(node.provisioning).length === 1
   );
   if (node.kind !== "execution" || !knownMetadata || !neverStarted) {
     return { allowed: false, reason: "该节点已经开始初始化、部署，或状态无法确认。需要先停止派发，并确认没有运行中的 Worker、已分配任务和进行中的操作。" };
   }
-  return { allowed: true, reason: "此节点仅保存了登记信息，尚未通过系统初始化或部署，可以直接删除登记记录。" };
+  return { allowed: true, reason: failedBeforeChanges ? "初始化在修改远程服务器前失败，可以直接删除登记记录。" : "此节点仅保存了登记信息，尚未通过系统初始化或部署，可以直接删除登记记录。" };
 }
 
 // This registry stores user-entered configuration only. Runtime observations and
@@ -80,20 +89,23 @@ export function createServerNodeStore(query) {
     const previous = await load();
     if (previous.version !== version) throw invalid("配置已被更新，请刷新页面后重试；你的输入仍保留在表单中", 409);
     if (id && !previous.nodes.some(item => item.id === id)) throw invalid("服务器不存在", 404);
-    // Runtime readiness is not available yet. Preserve existing plans while
-    // rejecting new ones until SSH and monitoring readiness can be verified.
+    const existing = previous.nodes.find(item => item.id === id);
+    if (existing?.provisioning?.state === "running") throw invalid("服务器正在初始化，请完成后再编辑", 409);
+    if (existing && (existing.kind === "center" || ![undefined, "not_started"].includes(existing.provisioning?.state))
+      && ["host", "port", "username", "kind"].some(key => existing[key] !== normalized[key])) {
+      throw invalid("已初始化或受保护节点不能修改连接地址、用户名或类型，请登记新的服务器", 409);
+    }
     const previousWorkers = previous.nodes.find(item => item.id === id)?.workers ?? [];
-    if (Object.keys(workerRoles).some(role =>
+    if (!nodeReady(existing) && Object.keys(workerRoles).some(role =>
       (previousWorkers.find(worker => worker.role === role)?.count ?? 0)
       !== (normalized.workers.find(worker => worker.role === role)?.count ?? 0))) {
-      throw invalid("请先完成服务器初始化并接入监控，再配置 Worker；当前初始化功能尚未接入", 409);
+      throw invalid("请先完成服务器初始化并接入监控，再配置 Worker", 409);
     }
     if (!id && previous.nodes.length >= 200) throw invalid("最多登记 200 台服务器");
     if (previous.nodes.some(item => item.id !== id && item.host === normalized.host && item.port === normalized.port)) {
       throw invalid("此地址和 SSH 端口的服务器已经添加", 409);
     }
     const now = new Date().toISOString();
-    const existing = previous.nodes.find(item => item.id === id);
     const saved = {
       ...existing,
       ...normalized,
@@ -138,5 +150,48 @@ export function createServerNodeStore(query) {
     if (result.rowCount !== 1) throw invalid("节点配置或状态已变化，请重新打开删除窗口确认", 409);
     return next;
   }
-  return { load, save, deletionCheck, remove };
+  async function mutateNode(id, change) {
+    for (let attempt = 0; attempt < 8; attempt++) {
+      const previous = await load();
+      const node = previous.nodes.find(item => item.id === id);
+      if (!node) throw invalid("服务器不存在", 404);
+      const updated = change(structuredClone(node), previous);
+      const next = { ...previous, version: previous.version + 1, nodes: previous.nodes.map(item => item.id === id ? updated : item) };
+      const result = await query(`UPDATE crawler.settings SET value_json=$2::jsonb,updated_at=now()
+        WHERE setting_key=$1 AND value_json=$3::jsonb RETURNING value_json`, [settingKey, JSON.stringify(next), JSON.stringify(previous)]);
+      if (result.rowCount === 1) return next;
+    }
+    throw invalid("节点状态正在更新，请稍后重试", 409);
+  }
+  async function beginInitialization({ id, version, operationId }) {
+    integer(version, "配置版本", 0, Number.MAX_SAFE_INTEGER);
+    return mutateNode(id, (node, registry) => {
+      if (registry.version !== version) throw invalid("配置已更新，请刷新后重试", 409);
+      if (node.kind !== "execution") throw invalid("中心节点不通过此入口初始化", 409);
+      if (nodeReady(node)) throw invalid("服务器已初始化，可直接配置 Worker", 409);
+      if (![undefined, "not_started", "failed", "running"].includes(node.provisioning?.state)
+        || (node.provisioning?.state === "running" && !Number.isFinite(Date.parse(node.provisioning.deadline)))) throw invalid("节点初始化状态无法确认，请先检查已有操作", 409);
+      if (node.provisioning?.state === "running" && Date.parse(node.provisioning.deadline) > Date.now()) throw invalid("该节点正在初始化，请勿重复提交", 409);
+      if (registry.nodes.filter(item => item.provisioning?.state === "running" && Date.parse(item.provisioning.deadline) > Date.now()).length >= 3) throw invalid("已有 3 台服务器正在初始化，请完成后再添加", 409);
+      const now = new Date().toISOString();
+      node.provisioning = { ...node.provisioning, state: "running", operationId, startedAt: now,
+        remoteChanges: node.provisioning?.remoteChanges ?? ![undefined, "not_started"].includes(node.provisioning?.state),
+        deadline: new Date(Date.now() + 15 * 60000).toISOString(), error: null,
+        steps: Object.fromEntries(initializationSteps.map(step => [step, "pending"])) };
+      node.updatedAt = now;
+      return node;
+    });
+  }
+  async function advanceInitialization(id, operationId, patch) {
+    return mutateNode(id, node => {
+      if (node.provisioning?.operationId !== operationId || node.provisioning.state !== "running"
+        || Date.parse(node.provisioning.deadline) <= Date.now()) throw invalid("初始化任务状态已变化，已停止后续操作", 409);
+      node.provisioning = { ...node.provisioning, ...patch,
+        steps: { ...node.provisioning.steps, ...patch.steps } };
+      if (patch.state === "ready") node.sshAlias = `qy-managed-${id}`;
+      node.updatedAt = new Date().toISOString();
+      return node;
+    });
+  }
+  return { load, save, deletionCheck, remove, beginInitialization, advanceInitialization };
 }

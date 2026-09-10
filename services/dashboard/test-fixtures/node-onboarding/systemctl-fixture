@@ -1,0 +1,20 @@
+#!/bin/sh
+set -eu
+case "$1" in
+  daemon-reload) systemd-analyze verify /etc/systemd/system/qy-beszel-agent.service ;;
+  enable) : ;;
+  restart)
+    pkill -x beszel-agent || true
+    set -a
+    . /etc/qy-node/beszel.env
+    set +a
+    setsid runuser -u qy-beszel -- /opt/qy-node/beszel-agent >/tmp/beszel-fixture.log 2>&1 </dev/null &
+    ;;
+  is-active)
+    for attempt in 1 2 3 4 5 6 7 8 9 10; do
+      if pgrep -x beszel-agent >/dev/null; then exit 0; fi
+      sleep 0.1
+    done
+    exit 1 ;;
+  *) exit 1 ;;
+esac

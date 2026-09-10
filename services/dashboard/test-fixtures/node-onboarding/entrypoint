@@ -1,0 +1,5 @@
+#!/bin/sh
+set -eu
+printf 'ubuntu:%s\n' "$TEST_SSH_PASSWORD" | chpasswd
+unset TEST_SSH_PASSWORD
+exec /usr/sbin/sshd -D -e

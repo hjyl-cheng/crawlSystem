@@ -31,7 +31,7 @@ test("node registration persists only configuration, survives reload, and reject
   const save = (node, version, id) => fetch(base + "/api/server-nodes" + (id ? "/" + id : ""), {
     method: id ? "PUT" : "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ node, version }),
   });
-  assert.deepEqual(await (await fetch(base + "/api/server-nodes")).json(), { version: 0, nodes: [] });
+  assert.deepEqual(await (await fetch(base + "/api/server-nodes")).json(), { version: 0, nodes: [], capabilities: { onboarding: false } });
   assert.equal((await pool.query("SELECT count(*)::int AS count FROM crawler.settings")).rows[0].count, 1, "reading an empty registry must not seed nodes");
   const concurrent = await Promise.all([save(node, 0), save({ ...node, host: "192.0.2.16" }, 0)]);
   assert.deepEqual(concurrent.map(response => response.status).sort(), [200, 409]);
@@ -115,5 +115,27 @@ test("node registration persists only configuration, survives reload, and reject
   assert.equal((await fetch(base + "/server-nodes")).status, 200);
   assert.equal((await fetch(base + "/assets/server-nodes.js")).status, 200);
   assert.equal((await fetch(base + "/assets/server-nodes.css")).status, 200);
+  // Durable admission and operation fencing protect metadata, even if a browser
+  // retries or the Dashboard restarts while an initialization is outstanding.
+  const executionId = otherNode.id;
+  const operationId = 'operation-one';
+  registry = await store.beginInitialization({ id: executionId, version: registry.version, operationId });
+  assert.equal((await remove(executionId, registry.version)).status, 409);
+  await assert.rejects(() => store.beginInitialization({ id: executionId, version: registry.version, operationId: 'duplicate' }), { statusCode: 409 });
+  await assert.rejects(() => store.save({ id: executionId, version: registry.version, node: { ...node, host: otherNode.host } }), { statusCode: 409 });
+  await assert.rejects(() => store.advanceInitialization(executionId, 'stale-operation', { state: 'ready' }), { statusCode: 409 });
+  registry = await store.advanceInitialization(executionId, operationId, { state: 'failed', error: 'Test connection failure' });
+  registry = await store.beginInitialization({ id: executionId, version: registry.version, operationId: 'retry-operation' });
+  await assert.rejects(() => store.advanceInitialization(executionId, operationId, { state: 'ready' }), { statusCode: 409 });
+  registry = await store.advanceInitialization(executionId, 'retry-operation', {
+    state: 'ready', systemId: 'monitorsystem123', steps: { ssh: 'completed', key: 'completed', monitoring: 'completed', metrics: 'completed' },
+  });
+  assert.match(registry.nodes[0].sshAlias, /^qy-managed-/);
+  const readyNode = { ...node, host: otherNode.host, sshAlias: registry.nodes[0].sshAlias, workers: [{ role: 'incremental', count: 3 }] };
+  registry = await store.save({ id: executionId, version: registry.version, node: readyNode });
+  assert.equal(registry.nodes[0].workers[0].count, 3, 'only fully initialized nodes can save worker plans');
+  await assert.rejects(() => store.save({ id: executionId, version: registry.version, node: { ...readyNode, host: '192.0.2.99' } }), { statusCode: 409 });
+  assert.equal((await remove(executionId, registry.version)).status, 409, 'a ready node still requires runtime deletion checks');
+  assert.deepEqual((await pool.query("SELECT value_json FROM crawler.settings WHERE setting_key='query_scheduler'")).rows[0].value_json, { status: "running" });
   await pool.query("DELETE FROM crawler.settings WHERE setting_key='dashboard_server_nodes_v1'");
 });

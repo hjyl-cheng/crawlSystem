@@ -1,0 +1,29 @@
+# Add this overlay to the existing production compose files to enable onboarding.
+# QY_BESZEL_PASSWORD and server-nodes/beszel.json must contain matching credentials.
+# The Hub is internal; nginx exposes ONLY its authenticated agent WebSocket.
+services:
+  beszel:
+    image: henrygd/beszel:0.19.0@sha256:fefb27166f5e1611ebf67f8697ea928a23f44efdb00af922e2ac3b5faa2efd5c
+    restart: unless-stopped
+    environment:
+      BESZEL_HUB_USER_EMAIL: ${QY_BESZEL_EMAIL:-dashboard@example.invalid}
+      BESZEL_HUB_USER_PASSWORD: ${QY_BESZEL_PASSWORD:?QY_BESZEL_PASSWORD is required for node onboarding}
+      BESZEL_HUB_DISABLE_TELEMETRY: "true"
+    volumes:
+      - ${QY_RUNTIME_ROOT:?QY_RUNTIME_ROOT is required}/beszel:/beszel_data
+    networks: [internal]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 256m
+    cpus: 0.5
+    logging:
+      driver: json-file
+      options: { max-size: 10m, max-file: "3" }
+  dashboard:
+    environment:
+      SERVER_NODE_STATE_DIR: /var/lib/qy-server-nodes/ssh
+      BESZEL_URL: http://beszel:8090
+      BESZEL_PUBLIC_URL: https://${QY_DASHBOARD_HOST}/node-monitoring
+      BESZEL_CREDENTIALS_FILE: /var/lib/qy-server-nodes/beszel.json
+    volumes:
+      - ${QY_RUNTIME_ROOT:?QY_RUNTIME_ROOT is required}/server-nodes:/var/lib/qy-server-nodes
