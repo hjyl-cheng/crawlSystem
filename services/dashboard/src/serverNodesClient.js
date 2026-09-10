@@ -14,6 +14,7 @@ let refreshing = false;
 let deletion = null;
 let onboardingAvailable = false;
 let initializeId = null;
+let closeInitializationOnSuccess = false;
 let workerEditor = null;
 const observations = new Map();
 const isReady = node => node?.provisioning?.state === "ready";
@@ -149,6 +150,8 @@ function openInitialize(id) {
   const node = registry.nodes.find(item => item.id === id);
   if (!node) return;
   initializeId = id;
+  // Keep completed details available when explicitly reopened for inspection.
+  closeInitializationOnSuccess = !isReady(node);
   $("node-initialize-name").textContent = node.name;
   $("node-initialize-auth").textContent = node.sshAlias ? `已登记 SSH 引用 ${node.sshAlias}，初始化时优先验证其是否可用。` : "首次接入时使用登录密码配置专用密钥；若已有可用密钥，将优先复用。";
   $("node-initialize-password").value = "";
@@ -171,6 +174,11 @@ function renderInitialization() {
   $("node-initialize-start").disabled = !onboardingAvailable || running || ready || node.kind === "center" || !!$("node-initialize").dataset.saving;
   $("node-initialize-start").textContent = ready ? "初始化完成" : running ? "初始化中…" : "开始 / 重试初始化";
   $("node-initialize-status").textContent = node.provisioning?.error || (ready ? "SSH 密钥与监控均已验证，可以配置 Worker。" : running ? "初始化在后台执行，可以关闭窗口；刷新页面仍可查看进度。" : node.provisioning?.state === "running" ? "上次初始化未在时限内完成，可重新输入密码重试。已完成的密钥和监控配置会复用。" : !onboardingAvailable ? "中心初始化服务尚未配置" : "点击开始后自动执行以上步骤，密码只用于本次初始化。");
+  if (ready && closeInitializationOnSuccess && $("node-initialize").open) {
+    closeInitializationOnSuccess = false;
+    $("node-initialize").close();
+    announce(`${node.name} 初始化完成，可以配置 Worker。`);
+  }
 }
 
 async function startInitialization(initialPassword = null) {
