@@ -34,7 +34,7 @@ test("fresh Migration defaults cannot resolve either legacy Writer database", as
   assert.doesNotMatch(bootstrap, /default_transaction_read_only/);
 });
 
-test("fresh Migration overlay gives Source access only to API and Dashboard", async () => {
+test("fresh Migration overlay gives Source access only to API, Dashboard and the migration Controller", async () => {
   const overlay = await readFile(
     new URL("../../../deploy/compose.fresh-migration.yml", import.meta.url),
     "utf8",
@@ -45,8 +45,11 @@ test("fresh Migration overlay gives Source access only to API and Dashboard", as
     assert.match(block, /MIGRATION_DATABASE_URL_FILE: \/run\/secrets\/migration_database_url/);
     assert.match(block, /CONTROLLED_MIGRATION_ONLY: "true"/);
   }
+  const controller = serviceBlock(overlay, "controller");
+  assert.match(controller, /migration_source/);
+  const compose = await readFile(new URL("../../../deploy/compose.yml", import.meta.url), "utf8");
+  assert.match(serviceBlock(compose, "controller"), /MIGRATION_DATABASE_URL_FILE: \/run\/secrets\/migration_database_url/);
   for (const service of [
-    "controller",
     "worker-channel",
     "worker-content-enrich",
     "worker-data-api",

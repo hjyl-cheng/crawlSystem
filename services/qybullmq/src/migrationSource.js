@@ -81,6 +81,7 @@ async function migrationSourcePool(config) {
       application_name: "newcrawler-migration-source-readonly",
       options: "-c timezone=UTC",
       max: Math.max(1, Number(process.env.MIGRATION_POSTGRES_POOL_MAX || 4)),
+      connectionTimeoutMillis: 5000,
     });
   }
   return defaultPool;

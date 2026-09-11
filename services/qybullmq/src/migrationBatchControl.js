@@ -275,7 +275,7 @@ export async function prepareControlledMigrationSnapshot({
   return true;
 }
 
-export async function loadMigrationControlProgress(query) {
+export async function loadMigrationControlProgress(query, { batchIds = null } = {}) {
   const rows = await query(`SELECT b.*,
    (SELECT result_json->>'migration_control_error' FROM crawler.query_dispatch_batches WHERE dispatch_batch_id=b.batch_id) AS control_error,
    (SELECT count(*)::int FROM publication.outbox o JOIN publication.revision r USING(revision_id)
@@ -289,7 +289,8 @@ export async function loadMigrationControlProgress(query) {
      SELECT CASE WHEN state='terminal' THEN outcome ELSE state END AS label,count(*)::int AS n
      FROM crawler.migration_control_items WHERE batch_id=b.batch_id GROUP BY 1
     ) x
-   ) s ON true ORDER BY b.created_at DESC LIMIT 10`);
+   ) s ON true ${batchIds ? "WHERE b.batch_id=ANY($1::text[])" : ""}
+   ORDER BY b.created_at DESC LIMIT 10`, batchIds ? [batchIds] : []);
   return {
     ok: true,
     batches: rows.rows,
@@ -307,12 +308,13 @@ export async function managedBatchBlocksLegacyCompletion(query, batchId) {
     ).rows.length > 0
   );
 }
-export async function reconcileMigrationControl({
+export async function maintainMigrationControl({
   query,
   withTransaction,
   queue,
   sourceLoader = loadMigrationSourceChannel,
   maxSnapshotAttempts = 6,
+  settlementPageSize = 0,
 }) {
   const active = (
     await query(
@@ -325,13 +327,25 @@ export async function reconcileMigrationControl({
   await withTransaction(async (c) => {
     const b = await lockBatch(c, id);
     if (!b) return;
+    let afterOrdinal = 0;
+    let throughOrdinal = null;
+    if (settlementPageSize > 0) {
+      await c.query("INSERT INTO crawler.migration_settlement_cursors(batch_id) VALUES($1) ON CONFLICT DO NOTHING", [id]);
+      afterOrdinal = Number((await c.query("SELECT after_ordinal FROM crawler.migration_settlement_cursors WHERE batch_id=$1", [id])).rows[0].after_ordinal);
+      let page = (await c.query("SELECT ordinal FROM crawler.migration_control_items WHERE batch_id=$1 AND state='started' AND ordinal>$2 ORDER BY ordinal LIMIT $3", [id, afterOrdinal, settlementPageSize])).rows;
+      if (!page.length) {
+        afterOrdinal = 0;
+        page = (await c.query("SELECT ordinal FROM crawler.migration_control_items WHERE batch_id=$1 AND state='started' ORDER BY ordinal LIMIT $2", [id, settlementPageSize])).rows;
+      }
+      throughOrdinal = Number(page.at(-1)?.ordinal ?? 0);
+    }
     // Materialize only started work before joining outcomes or the large All target.
     // Stale statistics after freezing must not turn empty settlement into a huge join.
     // Root ownership and recovery must settle before a channel counts as finished.
     await c.query(
       `WITH started AS MATERIALIZED (
       SELECT channel_id,candidate_id,batch_id FROM crawler.migration_control_items
-      WHERE batch_id=$1 AND state='started'
+      WHERE batch_id=$1 AND state='started' AND ordinal>$3 AND ($4::bigint IS NULL OR ordinal<=$4)
     ), settled AS MATERIALIZED (
     SELECT i.channel_id,CASE
       WHEN cc.status='rejected' THEN 'rejected'
@@ -360,8 +374,14 @@ export async function reconcileMigrationControl({
       AND NOT EXISTS(SELECT 1 FROM crawler.migration_system_retry_items retry WHERE retry.candidate_id=cc.candidate_id AND retry.status IN ('retrying','dispatched'))
    ) UPDATE crawler.migration_control_items i SET state='terminal',outcome=s.outcome,finished_at=now()
      FROM settled s WHERE i.batch_id=$1 AND i.channel_id=s.channel_id AND s.outcome IS NOT NULL`,
-      [id, maxSnapshotAttempts],
+      [id, maxSnapshotAttempts, afterOrdinal, throughOrdinal],
     );
+    if (settlementPageSize > 0) {
+      await c.query("UPDATE crawler.migration_settlement_cursors SET after_ordinal=$2 WHERE batch_id=$1", [id, throughOrdinal]);
+      // While unstarted inventory exists this batch cannot complete. Avoid a
+      // full inventory/publication count while holding the admission lock.
+      if (b.status === 'running' && (await c.query("SELECT EXISTS(SELECT 1 FROM crawler.migration_control_items WHERE batch_id=$1 AND state='pending') AS pending", [id])).rows[0].pending) return;
+    }
     const stats = (
       await c.query(
         `SELECT count(*) FILTER(WHERE state='pending')::int AS pending,count(*) FILTER(WHERE state='started')::int AS started,
@@ -410,6 +430,18 @@ export async function reconcileMigrationControl({
       }
     }
   });
+  return { batch_id: id };
+}
+
+export async function refillMigrationControl({
+  query, withTransaction, queue, sourceLoader = loadMigrationSourceChannel,
+  bufferSize = 100,
+}) {
+  const active = (await query(
+    "SELECT batch_id FROM crawler.migration_control_batches WHERE status='running' AND frozen_at IS NOT NULL ORDER BY created_at LIMIT 1",
+  )).rows[0];
+  if (!active) return { dispatched: 0 };
+  const id = active.batch_id;
   const b = (
     await query(
       "SELECT * FROM crawler.migration_control_batches WHERE batch_id=$1",
@@ -421,14 +453,19 @@ export async function reconcileMigrationControl({
   // must not consume crawl capacity; BullMQ already limits actual workers to 20.
   // Queued-but-not-started IDs remain pending and occupy this same window on
   // every tick. Deterministic job IDs deduplicate them; do not OFFSET this query.
-  const slots = 100;
+  const slots = Math.max(1, Math.min(500, Math.floor(bufferSize) || 100));
   const pending = (
     await query(
       `SELECT channel_id,source_candidate_id,snapshot_json FROM crawler.migration_control_items WHERE batch_id=$1 AND state='pending' ORDER BY ordinal LIMIT $2`,
       [id, slots],
     )
   ).rows;
+  let dispatched = 0;
   for (const item of pending) {
+    const jobId = safeJobId("channel-snapshot", id, item.channel_id, "g1");
+    // Pending placeholders already queued count toward the same frozen window.
+    // Delayed continuations belong to started items and do not fill this window.
+    if (typeof queue.getJob === "function" && await queue.getJob(jobId)) continue;
     if (!item.snapshot_json) {
       try {
         const snapshot = await sourceLoader({
@@ -474,9 +511,17 @@ export async function reconcileMigrationControl({
       },
       {
         ...defaultJobOptions,
-        jobId: safeJobId("channel-snapshot", id, item.channel_id, "g1"),
+        jobId,
         priority: Number(item.snapshot_json?.priority ?? 100),
       },
     );
+    dispatched += 1;
   }
+  return { batch_id: id, dispatched, window: pending.length };
+}
+
+// Compatibility entry point for callers that deliberately run one complete pass.
+export async function reconcileMigrationControl(options) {
+  await maintainMigrationControl(options);
+  return refillMigrationControl(options);
 }

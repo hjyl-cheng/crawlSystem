@@ -20,9 +20,11 @@ function completedScheduler() {
 test("controlled Migration mode exposes only the existing controlled write surfaces", async () => {
   const server = await readFile(new URL("../src/server.js", import.meta.url), "utf8");
 
-  assert.match(server, /req\.path\.startsWith\("\/api\/migration\/channels"\)/);
-  assert.match(server, /\^\\\/api\\\/migration\\\/system-retries/);
-  assert.doesNotMatch(server, /req\.path\.startsWith\("\/api\/migration\/"\)/);
+  const guard = await readFile(new URL("../src/controlledMigrationGuard.js", import.meta.url), "utf8");
+  assert.match(server, /app\.use\(controlledMigrationGuard/);
+  assert.match(guard, /req\.path\.startsWith\(['"]\/api\/migration\/channels['"]\)/);
+  assert.match(guard, /\^\\\/api\\\/migration\\\/system-retries/);
+  assert.doesNotMatch(guard, /req\.path\.startsWith\("\/api\/migration\/"\)/);
 });
 
 test("controlled system retry allocates exactly one G+1 Outbox", async () => {

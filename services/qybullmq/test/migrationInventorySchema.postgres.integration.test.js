@@ -5,7 +5,6 @@ import {
   assertMigrationChannelInventorySchemaState,
   loadMigrationChannelInventorySchemaSql,
   loadMigrationChannelInventorySchemaState,
-  migrationChannelInventorySchemaBlock,
 } from "../src/migrationInventorySchema.js";
 
 const databaseUrl = String(
@@ -56,10 +55,16 @@ test("PostgreSQL catalog check rejects incomplete Migration inventory contracts"
   const Pool = pg.default?.Pool || pg.Pool;
   const pool = new Pool({ connectionString: databaseUrl, max: 1 });
   const schemaSql = await loadMigrationChannelInventorySchemaSql();
-  const bootstrapSql = migrationChannelInventorySchemaBlock(await readFile(
+  const bootstrap = await readFile(
     new URL("../../../database/bootstrap/crawler.sql", import.meta.url),
     "utf8",
-  ));
+  );
+  // The production export separates table definitions from their constraints.
+  // Restore the two inventory tables and all their catalog objects here.
+  const bootstrapSql = [...bootstrap.matchAll(
+    /CREATE TABLE crawler\.migration_channel_inventory(?:_syncs)? \([\s\S]*?\n\);|ALTER TABLE ONLY crawler\.migration_channel_inventory(?:_syncs)?\n[\s\S]*?;|CREATE INDEX idx_crawler_migration_inventory_page[^;]*;/g,
+  )].map(([sql]) => sql).join("\n");
+  assert.equal((bootstrapSql.match(/CREATE TABLE /g) || []).length, 2);
   t.after(async () => {
     await pool.query("DROP SCHEMA IF EXISTS crawler CASCADE").catch(() => {});
     await pool.end();

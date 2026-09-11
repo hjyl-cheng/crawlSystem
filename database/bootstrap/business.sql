@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict Sf4gQ0ucPgbD9EiBQYZfjZedS6nldo10cznALxvzrPwEuo798jq2FGMuR3WhMrH
+\restrict gsHieC9dSLqF0Xf5dRsdnWQJhcaHqvMjRlY1ePncxdTDL5uLDzpSp5Votf4uoOb
 
 -- Dumped from database version 18.4
 -- Dumped by pg_dump version 18.4
@@ -3731,7 +3731,11 @@ CREATE TABLE public.content_snapshots (
     description_source text,
     hashtags text[] DEFAULT '{}'::text[] NOT NULL,
     keywords text[] DEFAULT '{}'::text[] NOT NULL,
-    CONSTRAINT content_snapshots_access_shape CHECK (((access_status = ANY (ARRAY['public'::text, 'unlisted'::text, 'login_required'::text, 'members_only'::text, 'unavailable'::text, 'unknown'::text])) AND ((access_status_source IS NULL) OR (btrim(access_status_source) <> ''::text)) AND ((source_position IS NULL) OR (source_position > 0)) AND ((comments_disabled IS DISTINCT FROM true) OR ((comment_count = 0) AND (comment_count_status = 'exact'::text))))),
+    CONSTRAINT content_snapshots_access_shape CHECK (((access_status = ANY (ARRAY['public'::text, 'unlisted'::text, 'login_required'::text, 'members_only'::text, 'unavailable'::text, 'unknown'::text])) AND ((access_status_source IS NULL) OR (btrim(access_status_source) <> ''::text)) AND ((source_position IS NULL) OR (source_position > 0)) AND ((comments_disabled IS DISTINCT FROM true) OR
+CASE
+    WHEN ((raw_item ->> 'adapter_version'::text) = 'business-publication-projection-v4'::text) THEN ((comment_count = 0) AND (comment_count_status = 'exact'::text))
+    ELSE (((comment_count IS NULL) AND (comment_count_status = 'unavailable'::text)) OR ((comment_count = 0) AND (comment_count_status = 'exact'::text)))
+END))),
     CONSTRAINT content_snapshots_content_kind_check CHECK ((content_kind = ANY (ARRAY['videos'::text, 'shorts'::text, 'lives'::text]))),
     CONSTRAINT content_snapshots_description_shape CHECK (((description_status = ANY (ARRAY['exact'::text, 'empty'::text, 'unavailable'::text, 'unresolved'::text])) AND (((description_status = 'exact'::text) AND (description IS NOT NULL) AND (description <> ''::text)) OR ((description_status = 'empty'::text) AND (description = ''::text)) OR ((description_status = ANY (ARRAY['unavailable'::text, 'unresolved'::text])) AND (description IS NULL))) AND ((description_source IS NULL) OR (btrim(description_source) <> ''::text)))),
     CONSTRAINT content_snapshots_nonnegative_counts CHECK ((((view_count IS NULL) OR (view_count >= 0)) AND ((like_count IS NULL) OR (like_count >= 0)) AND ((comment_count IS NULL) OR (comment_count >= 0)) AND ((duration_seconds IS NULL) OR (duration_seconds >= 0)))),
@@ -5069,6 +5073,20 @@ CREATE TABLE publication.creator_search_storage_state (
 
 
 --
+-- Name: database_identity; Type: TABLE; Schema: publication; Owner: -
+--
+
+CREATE TABLE publication.database_identity (
+    singleton boolean DEFAULT true NOT NULL,
+    database_kind text NOT NULL,
+    database_name text NOT NULL,
+    initialized_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT database_identity_kind_check CHECK ((database_kind = 'business'::text)),
+    CONSTRAINT database_identity_singleton_check CHECK (singleton)
+);
+
+
+--
 -- Name: inbox; Type: TABLE; Schema: publication; Owner: -
 --
 
@@ -5088,6 +5106,11 @@ CREATE TABLE publication.inbox (
     first_received_at timestamp with time zone DEFAULT now() NOT NULL,
     last_received_at timestamp with time zone DEFAULT now() NOT NULL,
     receive_count integer DEFAULT 1 NOT NULL,
+    CONSTRAINT chk_business_publication_inbox_envelope_evidence CHECK (
+CASE
+    WHEN (receive_status = ANY (ARRAY['rejected'::text, 'conflict'::text])) THEN ((received_envelope IS NOT NULL) AND (jsonb_typeof(received_envelope) = 'object'::text))
+    ELSE ((received_envelope IS NULL) OR (jsonb_typeof(received_envelope) = 'object'::text))
+END),
     CONSTRAINT inbox_channel_id_check CHECK ((btrim(channel_id) <> ''::text)),
     CONSTRAINT inbox_check CHECK ((last_received_at >= first_received_at)),
     CONSTRAINT inbox_check1 CHECK ((((receive_status = ANY (ARRAY['rejected'::text, 'conflict'::text])) AND (error_code IS NOT NULL)) OR (receive_status <> ALL (ARRAY['rejected'::text, 'conflict'::text])))),
@@ -5097,14 +5120,7 @@ CREATE TABLE publication.inbox (
     CONSTRAINT inbox_payload_hash_check CHECK ((payload_hash ~ '^sha256:[0-9a-f]{64}$'::text)),
     CONSTRAINT inbox_receive_count_check CHECK ((receive_count > 0)),
     CONSTRAINT inbox_receive_status_check CHECK ((receive_status = ANY (ARRAY['accepted'::text, 'waiting_gap'::text, 'waiting_ownership'::text, 'rejected'::text, 'conflict'::text]))),
-    CONSTRAINT inbox_received_envelope_check CHECK ((jsonb_typeof(received_envelope) = 'object'::text)),
-    CONSTRAINT chk_business_publication_inbox_envelope_evidence CHECK (
-      CASE
-        WHEN (receive_status = ANY (ARRAY['rejected'::text, 'conflict'::text]))
-          THEN ((received_envelope IS NOT NULL) AND (jsonb_typeof(received_envelope) = 'object'::text))
-        ELSE ((received_envelope IS NULL) OR (jsonb_typeof(received_envelope) = 'object'::text))
-      END
-    )
+    CONSTRAINT inbox_received_envelope_check CHECK ((jsonb_typeof(received_envelope) = 'object'::text))
 );
 
 
@@ -5371,12 +5387,12 @@ CREATE TABLE publication.stream (
     status_changed_by text NOT NULL,
     status_reason text NOT NULL,
     status_changed_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT chk_business_publication_automatic_onboarding_projection_mode CHECK ((automatic_onboarding_projection_mode = ANY (ARRAY['held_shadow'::text, 'online'::text]))),
     CONSTRAINT stream_accepted_contract_versions_check CHECK ((cardinality(accepted_contract_versions) > 0)),
     CONSTRAINT stream_accepted_contract_versions_check1 CHECK ((array_position(accepted_contract_versions, NULL::integer) IS NULL)),
     CONSTRAINT stream_accepted_contract_versions_check2 CHECK ((0 < ALL (accepted_contract_versions))),
     CONSTRAINT stream_check CHECK (((btrim(registered_by) <> ''::text) AND (btrim(registered_reason) <> ''::text))),
     CONSTRAINT stream_check1 CHECK (((btrim(status_changed_by) <> ''::text) AND (btrim(status_reason) <> ''::text))),
-    CONSTRAINT chk_business_publication_automatic_onboarding_projection_mode CHECK ((automatic_onboarding_projection_mode = ANY (ARRAY['held_shadow'::text, 'online'::text]))),
     CONSTRAINT stream_source_deployment_key_check CHECK ((btrim(source_deployment_key) <> ''::text)),
     CONSTRAINT stream_source_identity_json_check CHECK ((jsonb_typeof(source_identity_json) = 'object'::text)),
     CONSTRAINT stream_status_check CHECK ((status = ANY (ARRAY['active'::text, 'sealed'::text, 'revoked'::text])))
@@ -5671,7 +5687,7 @@ CREATE TABLE raw_crawler.contents (
     keywords text[] DEFAULT '{}'::text[] NOT NULL,
     CONSTRAINT contents_content_type_check CHECK ((content_type = ANY (ARRAY['video'::text, 'short'::text, 'live'::text]))),
     CONSTRAINT contents_published_at_status_check CHECK ((published_at_status = ANY (ARRAY['exact'::text, 'relative'::text, 'estimated'::text, 'unavailable'::text, 'unresolved'::text]))),
-    CONSTRAINT raw_contents_v4_shape CHECK (((view_count_status = ANY (ARRAY['exact'::text, 'estimated'::text, 'recovered'::text, 'unavailable'::text, 'unresolved'::text])) AND (like_count_status = ANY (ARRAY['exact'::text, 'zero_from_empty'::text, 'unavailable'::text, 'unresolved'::text])) AND (comment_count_status = ANY (ARRAY['exact'::text, 'zero_from_empty'::text, 'zero_from_surface'::text, 'zero_from_upcoming'::text, 'disabled'::text, 'unavailable'::text, 'unresolved'::text])) AND (duration_status = ANY (ARRAY['exact'::text, 'unavailable'::text, 'unresolved'::text])) AND (access_status = ANY (ARRAY['public'::text, 'unlisted'::text, 'login_required'::text, 'members_only'::text, 'unavailable'::text, 'unknown'::text])) AND (description_status = ANY (ARRAY['exact'::text, 'empty'::text, 'unavailable'::text, 'unresolved'::text])) AND (((description_status = 'exact'::text) AND (description IS NOT NULL) AND (description <> ''::text)) OR ((description_status = 'empty'::text) AND (description = ''::text)) OR ((description_status = ANY (ARRAY['unavailable'::text, 'unresolved'::text])) AND (description IS NULL))) AND ((access_status_source IS NULL) OR (btrim(access_status_source) <> ''::text)) AND ((content_type_source IS NULL) OR (btrim(content_type_source) <> ''::text)) AND ((description_source IS NULL) OR (btrim(description_source) <> ''::text)) AND (("position" IS NULL) OR ("position" > 0)) AND ((duration_seconds IS NULL) OR (duration_seconds >= 0)) AND ((published_at_precision IS NULL) OR (published_at_precision = ANY (ARRAY['second'::text, 'date_only'::text, 'unknown'::text]))) AND ((comments_disabled IS TRUE) = (comment_count_status = 'disabled'::text)) AND ((comments_disabled IS DISTINCT FROM TRUE) OR (comment_count = 0))))
+    CONSTRAINT raw_contents_v4_shape CHECK (((view_count_status = ANY (ARRAY['exact'::text, 'estimated'::text, 'recovered'::text, 'unavailable'::text, 'unresolved'::text])) AND (like_count_status = ANY (ARRAY['exact'::text, 'zero_from_empty'::text, 'unavailable'::text, 'unresolved'::text])) AND (comment_count_status = ANY (ARRAY['exact'::text, 'zero_from_empty'::text, 'zero_from_surface'::text, 'zero_from_upcoming'::text, 'disabled'::text, 'unavailable'::text, 'unresolved'::text])) AND (duration_status = ANY (ARRAY['exact'::text, 'unavailable'::text, 'unresolved'::text])) AND (access_status = ANY (ARRAY['public'::text, 'login_required'::text, 'members_only'::text, 'unavailable'::text, 'unknown'::text])) AND (description_status = ANY (ARRAY['exact'::text, 'empty'::text, 'unavailable'::text, 'unresolved'::text])) AND (((description_status = 'exact'::text) AND (description IS NOT NULL) AND (description <> ''::text)) OR ((description_status = 'empty'::text) AND (description = ''::text)) OR ((description_status = ANY (ARRAY['unavailable'::text, 'unresolved'::text])) AND (description IS NULL))) AND ((access_status_source IS NULL) OR (btrim(access_status_source) <> ''::text)) AND ((content_type_source IS NULL) OR (btrim(content_type_source) <> ''::text)) AND ((description_source IS NULL) OR (btrim(description_source) <> ''::text)) AND (("position" IS NULL) OR ("position" > 0)) AND ((duration_seconds IS NULL) OR (duration_seconds >= 0)) AND ((published_at_precision IS NULL) OR (published_at_precision = ANY (ARRAY['second'::text, 'date_only'::text, 'unknown'::text]))) AND ((comments_disabled IS TRUE) = (comment_count_status = 'disabled'::text))))
 );
 
 
@@ -6176,16 +6192,6 @@ ALTER TABLE ONLY public.content_type_taxonomy
     ADD CONSTRAINT content_type_taxonomy_source_kind_key UNIQUE (source_content_type, content_kind);
 
 
-INSERT INTO public.content_type_taxonomy (
-    source_content_type, content_kind, canonical_priority
-) VALUES
-    ('live', 'lives', 1),
-    ('short', 'shorts', 2),
-    ('video', 'videos', 3)
-ON CONFLICT (source_content_type,content_kind) DO UPDATE
-SET canonical_priority = EXCLUDED.canonical_priority;
-
-
 --
 -- Name: crawler_ingest_batches crawler_ingest_batches_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
@@ -6544,6 +6550,14 @@ ALTER TABLE ONLY publication.creator_search_legacy_prune_audit
 
 ALTER TABLE ONLY publication.creator_search_storage_state
     ADD CONSTRAINT creator_search_storage_state_pkey PRIMARY KEY (singleton);
+
+
+--
+-- Name: database_identity database_identity_pkey; Type: CONSTRAINT; Schema: publication; Owner: -
+--
+
+ALTER TABLE ONLY publication.database_identity
+    ADD CONSTRAINT database_identity_pkey PRIMARY KEY (singleton);
 
 
 --
@@ -8542,6 +8556,23 @@ ALTER TABLE ONLY result.video_current
     ADD CONSTRAINT video_current_publication_stream_id_fkey FOREIGN KEY (publication_stream_id) REFERENCES publication.stream(publication_stream_id) ON DELETE RESTRICT;
 
 
+--
+-- PostgreSQL database dump complete
+--
+
+\unrestrict gsHieC9dSLqF0Xf5dRsdnWQJhcaHqvMjRlY1ePncxdTDL5uLDzpSp5Votf4uoOb
+
+-- Fresh database seed configuration; not exported production rows.
+-- fresh-bootstrap-seeds:start
+INSERT INTO public.content_type_taxonomy (
+    source_content_type, content_kind, canonical_priority
+) VALUES
+    ('live', 'lives', 1),
+    ('short', 'shorts', 2),
+    ('video', 'videos', 3)
+ON CONFLICT (source_content_type,content_kind) DO UPDATE
+SET canonical_priority = EXCLUDED.canonical_priority;
+
 INSERT INTO public.import_batches (
     id, source_file, source_sha256, captured_at, schema_version, raw_payload,
     parse_warnings, source_kind, status, row_counts
@@ -8575,22 +8606,6 @@ FROM public.creator_search_active AS active
 WHERE active.singleton = true
   AND NOT EXISTS (SELECT 1 FROM publication.creator_search_storage_state);
 
-
-CREATE TABLE publication.database_identity (
-    singleton boolean DEFAULT true NOT NULL,
-    database_kind text NOT NULL,
-    database_name text NOT NULL,
-    initialized_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT database_identity_kind_check CHECK ((database_kind = 'business'::text)),
-    CONSTRAINT database_identity_singleton_check CHECK (singleton),
-    CONSTRAINT database_identity_pkey PRIMARY KEY (singleton)
-);
-
 INSERT INTO publication.database_identity (singleton, database_kind, database_name)
 VALUES (true, 'business', current_database());
-
---
--- PostgreSQL database dump complete
---
-
-\unrestrict Sf4gQ0ucPgbD9EiBQYZfjZedS6nldo10cznALxvzrPwEuo798jq2FGMuR3WhMrH
+-- fresh-bootstrap-seeds:end

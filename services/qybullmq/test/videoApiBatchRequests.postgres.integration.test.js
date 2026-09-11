@@ -99,4 +99,18 @@ test("shared API task delivery, batching, replay and bounded failures in Postgre
   assert.equal(quota.deferred, true);
   assert.equal((await query("SELECT attempts FROM crawler.youtube_api_tasks WHERE task_id=$1", [quotaRequest.task_id])).rows[0].attempts, 0);
   await assert.rejects(waitForVideoApiDetail(query, "quota1"), { code: "VIDEO_API_PENDING" });
+
+  // A shorter dispatcher period must not increase the total queued/running
+  // batch budget. A running batch still consumes it after leaving queued.
+  await subscribe("capacity1", "capacity-video");
+  const batchCount = async () => Number((await query("SELECT count(*) FROM crawler.youtube_api_batches WHERE status IN ('queued','running') AND result_json->>'video_api_scope'='youtubejs-video-fallback'")).rows[0].count);
+  await dispatchVideoApiRequests({ query, withTransaction: transaction, queue, maxBatches: 1, batchSize: 1 });
+  await query("UPDATE crawler.youtube_api_batches SET status='running' WHERE status='queued' AND result_json->>'video_api_scope'='youtubejs-video-fallback'");
+  const before = await batchCount();
+  await subscribe("capacity2", "capacity-video-next");
+  assert.ok(before > 0);
+  for (let tick = 0; tick < 3; tick++) await dispatchVideoApiRequests({ query, withTransaction: transaction, queue, maxBatches: before });
+  assert.equal(await batchCount(), before);
+  assert.equal((await query("SELECT status FROM crawler.youtube_api_tasks WHERE source_content_id='capacity-video-next'")).rows[0].status, 'pending');
+
 });

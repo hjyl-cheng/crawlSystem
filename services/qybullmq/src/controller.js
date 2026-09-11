@@ -1,4 +1,10 @@
-import {reconcileMigrationControl,managedBatchBlocksLegacyCompletion,migrationBatchControlEnabled} from "./migrationBatchControl.js";
+import { sampleMigrationThroughput } from "./migrationThroughput.js";
+import { closeMigrationSourcePool } from "./migrationSource.js";
+import { createControllerWorkLoops } from "./controllerWorkLoops.js";
+import { createControllerDatabase } from "./controllerDatabase.js";
+import { createFinalizeRecoveryScan } from "./finalizeRecoveryScan.js";
+import { createFinalizeChangeRecovery } from "./finalizeChangeRecovery.js";
+import {reconcileMigrationControl,maintainMigrationControl,refillMigrationControl,managedBatchBlocksLegacyCompletion,migrationBatchControlEnabled} from "./migrationBatchControl.js";
 import { nanoid } from "nanoid";
 import { dispatchVideoApiRequests } from "./videoApiBatchRequests.js";
 import { isFullCrawlCanaryBatch } from "./fullCrawlCanary.js";
@@ -166,6 +172,9 @@ function booleanEnv(name, fallback) {
   return !["0", "false", "no", "off"].includes(value);
 }
 
+const independentRecoveryEnabled = process.env.CONTROLLER_THROUGHPUT_ENABLED === "true";
+let backgroundLoops = null;
+const recoveryDatabases = [];
 const intervalMs = intEnv("CONTROLLER_INTERVAL_MS", 15000, 1000, 300000);
 const wakeupDelayMs = intEnv("CONTROLLER_WAKEUP_DELAY_MS", 25, 0, 1000);
 const tickSampleMs = intEnv("CONTROLLER_TICK_SAMPLE_MS", 60000, 15000, 3600000);
@@ -648,7 +657,7 @@ async function persistControllerTick(stats, actions, queryScheduler) {
   return true;
 }
 
-async function getCrawlSettings() {
+async function getCrawlSettings(settingsQuery = query) {
   const now = Date.now();
   if (crawlSettingsCache.value && crawlSettingsCache.expiresAt > now) return crawlSettingsCache.value;
   const fallback = {
@@ -657,7 +666,7 @@ async function getCrawlSettings() {
     youtubeApiFallbackMode: process.env.YOUTUBE_DATA_API_FALLBACK_MODE === "disabled" ? "disabled" : "emergency",
   };
   try {
-    const rows = await query("SELECT value_json FROM crawler.settings WHERE setting_key = 'youtube_api' LIMIT 1");
+    const rows = await settingsQuery("SELECT value_json FROM crawler.settings WHERE setting_key = 'youtube_api' LIMIT 1");
     const value = rows.rows[0]?.value_json || {};
     const settings = {
       youtubeApiBatchSize: intEnv("YOUTUBE_DATA_API_BATCH_SIZE", Number(value.batch_size ?? fallback.youtubeApiBatchSize), 1, 50),
@@ -2956,7 +2965,7 @@ async function tick() {
     stats[queuesByRole.contentEnrich].content_enrich_operational = contentEnrichController.operational;
   }
   await reconcileQueryQualityQueue(actions);
-  if(migrationBatchControlEnabled())await reconcileMigrationControl({query,withTransaction,queue:queues[queuesByRole.channelCrawl],maxSnapshotAttempts:channelSnapshotMaxAttempts});
+  if(!independentRecoveryEnabled&&migrationBatchControlEnabled())await reconcileMigrationControl({query,withTransaction,queue:queues[queuesByRole.channelCrawl],maxSnapshotAttempts:channelSnapshotMaxAttempts});
   let queryScheduler = await getQueryScheduler();
   queryScheduler = await resumeLegacyAutomaticFinalization(queryScheduler, actions);
   if (await reconcileAutomaticDiscoveryClosure(query, queryScheduler)) {
@@ -3007,7 +3016,7 @@ async function tick() {
   const videoApiDemand = Number((await query(`SELECT count(*)::int AS count
     FROM crawler.youtube_api_detail_requests WHERE status='pending'`)).rows[0].count);
   // Subscriber demand is already bounded by per-video retries and the shared API quota.
-  if (videoApiDemand > 0 && crawlSettings.youtubeApiFallbackMode === "emergency") {
+  if (!independentRecoveryEnabled && videoApiDemand > 0 && crawlSettings.youtubeApiFallbackMode === "emergency") {
     const dispatched = await dispatchVideoApiRequests({
       query, withTransaction, queue: queues[queuesByRole.dataApiBatch],
       batchSize: crawlSettings.youtubeApiBatchSize,
@@ -3197,7 +3206,7 @@ async function tick() {
   await maybeDispatchContentCompletenessRepairs(actions, stats, queryScheduler, proxyCapacity);
   await maybeRepairFailedChannelRuns(actions, stats, queryScheduler, proxyCapacity);
   await cleanupRecoveredFailedJobs(actions);
-  await reconcileFinalizeQueue(actions, queryScheduler.pipeline_cycle_id);
+  if (!independentRecoveryEnabled) await reconcileFinalizeQueue(actions, queryScheduler.pipeline_cycle_id);
   await maybeCompleteAutomaticPipeline(actions, queryScheduler);
 
   const finalManagedDispatch = await managedJobOutboxDispatcher.dispatchAvailable({
@@ -3273,6 +3282,8 @@ async function runControllerTick() {
 }
 
 async function closeControllerResources() {
+  await backgroundLoops?.shutdown();
+  await Promise.all(recoveryDatabases.map(database => database.close()));
   if (wakeSubscriber) {
     wakeSubscriber.removeAllListeners();
     await wakeSubscriber.quit();
@@ -3280,6 +3291,7 @@ async function closeControllerResources() {
   }
   await closeQueues(queues);
   await closeProxyControlClient();
+  await closeMigrationSourcePool();
   await closeDb();
 }
 
@@ -3306,6 +3318,59 @@ function loop() {
 
 await ensureSchema();
 await ensureDefaultAgentConfig();
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+process.on("SIGINT", () => shutdown("SIGINT"));
+if (independentRecoveryEnabled) {
+  const requiredTables = ['finalize_recovery_scan', 'finalize_recovery_requests', 'migration_settlement_cursors', 'migration_throughput_samples'];
+  for (const table of requiredTables) {
+    if (!(await query("SELECT to_regclass($1) AS name", [`crawler.${table}`])).rows[0].name) {
+      throw new Error(`Apply throughputRecoverySchema.sql before enabling Controller throughput: missing ${table}`);
+    }
+  }
+  const database = (name, options) => {
+    const db = createControllerDatabase(name, options);
+    recoveryDatabases.push(db);
+    return db;
+  };
+  const intake = database("migration-intake");
+  const maintenance = database("migration-settlement", { statementTimeoutMs: 30000 });
+  const api = database("video-api");
+  const scanDb = database("finalize-scan");
+  const changeDb = database("finalize-changes");
+  const metricsDb = database("migration-metrics", { statementTimeoutMs: 30000 });
+  const channelQueue = queues[queuesByRole.channelCrawl];
+  const finalizeQueue = queues[queuesByRole.finalize];
+  const tasks = {
+    migration_metrics: { intervalMs: 30000, run: () => migrationBatchControlEnabled() ? sampleMigrationThroughput(metricsDb.query) : null },
+    migration_intake: {
+      intervalMs: intEnv("MIGRATION_REFILL_INTERVAL_MS", 2000, 500, 30000),
+      run: () => migrationBatchControlEnabled() ? refillMigrationControl({ ...intake, queue: channelQueue }) : null,
+    },
+    migration_settlement: {
+      intervalMs: 5000,
+      run: () => migrationBatchControlEnabled() ? maintainMigrationControl({ ...maintenance, settlementPageSize: 200, maxSnapshotAttempts: channelSnapshotMaxAttempts }) : null,
+    },
+    video_api: {
+      intervalMs: 3000,
+      run: async () => {
+        const settings = await getCrawlSettings(api.query);
+        if (settings.youtubeApiFallbackMode !== "emergency") return { disabled: true };
+        return dispatchVideoApiRequests({ ...api, queue: queues[queuesByRole.dataApiBatch], batchSize: settings.youtubeApiBatchSize });
+      },
+    },
+    finalize_scan: { intervalMs: 2000, run: createFinalizeRecoveryScan({ ...scanDb, queue: finalizeQueue, registerChanges: process.env.FINALIZE_CHANGE_RECOVERY_ENABLED === "true", roundPauseMs: process.env.FINALIZE_CHANGE_RECOVERY_ENABLED === "true" ? 3600000 : 0 }) },
+  };
+  if (process.env.FINALIZE_CHANGE_RECOVERY_ENABLED === "true") {
+    tasks.finalize_changes = { intervalMs: 2000, run: createFinalizeChangeRecovery({ ...changeDb, queue: finalizeQueue }) };
+  }
+  backgroundLoops = createControllerWorkLoops({
+    tasks,
+    onResult: result => console.log(JSON.stringify({ event: "controller_work_cycle", ...result })),
+    onError: ({ name, duration_ms, error }) => console.error(JSON.stringify({ event: "controller_work_cycle_failed", name, duration_ms, error: error.message })),
+  });
+  backgroundLoops.start();
+}
+
 controllerWakeup = createCoalescedWakeup(async () => {
   if (controllerLifecycle.isRunning() || controllerLifecycle.isShuttingDown()) return;
   immediateWakeRequested = false;
@@ -3352,6 +3417,7 @@ console.log(`controller started interval_ms=${intervalMs} tick_sample_ms=${tickS
 function shutdown(signal) {
   if (shutdownPromise) return shutdownPromise;
   console.log(`received ${signal}, shutting down controller`);
+  void backgroundLoops?.shutdown();
   if (timer) {
     clearInterval(timer);
     timer = null;
@@ -3368,6 +3434,3 @@ function shutdown(signal) {
     });
   return shutdownPromise;
 }
-
-process.on("SIGTERM", () => { void shutdown("SIGTERM"); });
-process.on("SIGINT", () => { void shutdown("SIGINT"); });

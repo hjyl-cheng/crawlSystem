@@ -106,4 +106,4 @@ docker exec qy-remote-node-center node scripts/checkRemoteNodeCenter.mjs
 
 后续维护新服务时需要同时带 `deploy/compose.remote-node-services.yml`，以保留中心的内部 TLS 与 Rota 路由地址。Dashboard 的生产接线使用 `SERVER_NODE_REGISTRY_CREDENTIALS_FILE` 读取匹配镜像主机的私有拉取凭据；节点只在下载期间创建临时 Docker config。公网 `/v2/` 仅允许经认证的 GET/HEAD，管理员通过中心回环端口 35000 上传。
 
-本次 Dashboard 基于原线上镜像叠加节点功能，使用 `services/dashboard/Dockerfile.node-management`，保留了本工作区尚未包含的线上迁移列表修复。不要用本工作区普通 Dockerfile 全量覆盖线上 Dashboard，须先合并这些差异。详细部署、测试与回退记录见 [第十五阶段](../../docs/REMOTE_NODE_INGESTION_20260910.md#第十五阶段生产路由读取私有仓库与页面部署接线)。
+2026-09-10 的 Dashboard 基于原线上镜像叠加节点功能，使用 `services/dashboard/Dockerfile.node-management` 保留当时尚未合入的迁移列表修复。2026-09-11 已归并 `agent/bugfix-optimization`，统一源码现已同时包含节点管理与这些迁移修复，后续可使用普通 Dashboard Dockerfile 构建。叠加构建文件保留作历史部署记录，不需要为本次源码归并重启正在迁移的服务。详细部署、测试与回退记录见 [第十五阶段](../../docs/REMOTE_NODE_INGESTION_20260910.md#第十五阶段生产路由读取私有仓库与页面部署接线)。

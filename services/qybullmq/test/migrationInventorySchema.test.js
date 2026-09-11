@@ -43,7 +43,7 @@ test("only the controlled publisher and fresh bootstrap include inventory DDL", 
     assert.match(schema, /UNIQUE \(source_id, source_candidate_id\)/);
     assert.match(
       schema,
-      /migration_inventory_page[\s\S]*source_id[\s\S]*priority DESC[\s\S]*source_candidate_id ASC/,
+      /CREATE INDEX(?: IF NOT EXISTS)? idx_crawler_migration_inventory_page[^;]*source_id[^;]*priority DESC[^;]*source_candidate_id(?: ASC)?\s*\)/,
     );
   }
 });

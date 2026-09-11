@@ -19,6 +19,9 @@ test('central ownership, heartbeat expiry and operator intent gate real queue co
     for(const table of ['worker_connections','network_slots','nodes'])await pool.query(`DELETE FROM remote_ingestion.${table} WHERE node_id=$1`,[nodeId]);
     guard.release();await guardPool.end();await pool.end();});
   await assertIsolatedRemoteDatabase(pool);await guard.query('SELECT pg_advisory_lock(781137981)');
+  // The supervisor checks original execution attempts even for an empty slot.
+  // Initialize its business dependency so this test also runs in a fresh DB.
+  await pool.query(await readFile(new URL('../src/schema.sql',import.meta.url),'utf8'));
   for(const file of ['schema.sql','routeSchema.sql','workerConnectionSchema.sql','workerActivationSchema.sql'])await pool.query(await readFile(new URL(`../src/remoteNodes/${file}`,import.meta.url),'utf8'));
   const store=new RemoteNodeStore({pool});await store.registerNode({nodeId,token:randomBytes(32).toString('hex'),capabilities:['fixture.supervisor']});
   let active;const activation=new RemoteWorkerActivationStore({store,verifyExecution:(client,row)=>active?.verifyExecution(client,row)??false});

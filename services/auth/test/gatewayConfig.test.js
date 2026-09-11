@@ -59,7 +59,18 @@ test("portable QY hosts enforce one authentication boundary", async () => {
   assert.match(config, /proxy_set_header X-Auth-Renew "1";/);
   assert.match(config, /auth_request_set \$qy_auth_cookie \$upstream_http_set_cookie;/);
   assert.equal(occurrences(proxyParams, "proxy_http_version 1.1;"), 1);
-  assert.equal(occurrences(config, "proxy_http_version 1.1;"), 0);
+  const agentSocket = config.match(/location = \/node-monitoring\/api\/beszel\/agent-connect \{[\s\S]*?\n    \}/)?.[0];
+  assert.ok(agentSocket, "the node agent WebSocket has an explicit HTTP/1.1 location");
+  const nodeExecution = config.match(/location \^~ \/node-execution\/v1\/ \{[\s\S]*?\n    \}/)?.[0];
+  assert.ok(nodeExecution, "the node execution API has an explicit HTTP/1.1 location");
+  assert.match(nodeExecution, /proxy_pass http:\/\/qy_remote_center\/v1\//);
+  let remaining = config;
+  for (const location of [agentSocket, nodeExecution]) {
+    assert.equal(occurrences(location, "proxy_http_version 1.1;"), 1);
+    assert.doesNotMatch(location, /include \/etc\/nginx\/proxy_params;/);
+    remaining = remaining.replace(location, "");
+  }
+  assert.equal(occurrences(remaining, "proxy_http_version 1.1;"), 0);
 });
 
 test("gateway re-resolves Docker upstreams after a container replacement", async () => {

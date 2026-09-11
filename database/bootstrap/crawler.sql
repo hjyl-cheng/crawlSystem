@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict lJLMm7kerNHrnNnKPrSGNhBVfEqa6y3pntHpQL3Og2IziHLUyFiTXlh9XI747T8
+\restrict Hn17jwQMC3o3Sda2kwtDZXUnyNfpkDeZNqtQQgCfV8zKrCk5Scw5vEx1yaSRWtK
 
 -- Dumped from database version 16.14
 -- Dumped by pg_dump version 16.14
@@ -37,6 +37,39 @@ CREATE SCHEMA feature_clock;
 --
 
 CREATE SCHEMA publication;
+
+
+--
+-- Name: capture_finalize_recovery_change(); Type: FUNCTION; Schema: crawler; Owner: -
+--
+
+CREATE FUNCTION crawler.capture_finalize_recovery_change() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE source_channel TEXT; old_value JSONB; new_value JSONB;
+BEGIN
+  IF TG_OP='UPDATE' AND TG_TABLE_NAME='channel_runs' THEN
+    old_value=jsonb_build_array(OLD.channel_id,OLD.detail_status,OLD.expected_content_count,
+      OLD.result_json);
+    new_value=jsonb_build_array(NEW.channel_id,NEW.detail_status,NEW.expected_content_count,
+      NEW.result_json);
+    IF old_value IS NOT DISTINCT FROM new_value THEN RETURN NULL; END IF;
+  ELSIF TG_OP='UPDATE' AND to_jsonb(OLD) IS NOT DISTINCT FROM to_jsonb(NEW) THEN
+    RETURN NULL;
+  END IF;
+  FOR source_channel IN
+    SELECT DISTINCT id FROM unnest(ARRAY[
+      CASE WHEN TG_OP<>'INSERT' THEN OLD.channel_id END,
+      CASE WHEN TG_OP<>'DELETE' THEN NEW.channel_id END
+    ]) ids(id) WHERE id IS NOT NULL ORDER BY id
+  LOOP
+    INSERT INTO crawler.finalize_recovery_requests(channel_id) VALUES(source_channel)
+    ON CONFLICT(channel_id) DO UPDATE SET
+      requested_generation=crawler.finalize_recovery_requests.requested_generation+1,
+      next_check_at=now(),requested_at=now(),updated_at=now();
+  END LOOP;
+  RETURN NULL;
+END $$;
 
 
 --
@@ -288,6 +321,40 @@ BEGIN
   IF OLD.dispatch_status='terminal' AND NEW.dispatch_status<>'terminal' THEN
     RAISE EXCEPTION 'terminal Query Quality dispatch cannot regress: %', OLD.quality_chunk_id
       USING ERRCODE='check_violation';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: prevent_migration_intent_source_update(); Type: FUNCTION; Schema: crawler; Owner: -
+--
+
+CREATE FUNCTION crawler.prevent_migration_intent_source_update() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF ROW(
+    NEW.source_id,
+    NEW.source_database,
+    NEW.source_database_oid,
+    NEW.source_candidate_id,
+    NEW.channel_id,
+    NEW.source_snapshot,
+    NEW.snapshot_sha256,
+    NEW.first_dispatch_batch_id
+  ) IS DISTINCT FROM ROW(
+    OLD.source_id,
+    OLD.source_database,
+    OLD.source_database_oid,
+    OLD.source_candidate_id,
+    OLD.channel_id,
+    OLD.source_snapshot,
+    OLD.snapshot_sha256,
+    OLD.first_dispatch_batch_id
+  ) THEN
+    RAISE EXCEPTION 'Migration intent source identity is immutable';
   END IF;
   RETURN NEW;
 END;
@@ -1205,9 +1272,6 @@ CREATE TABLE crawler.channel_candidates (
     priority integer DEFAULT 100 NOT NULL,
     status text DEFAULT 'discovered'::text NOT NULL,
     snapshot_attempts integer DEFAULT 0 NOT NULL,
-    snapshot_dispatch_generation bigint DEFAULT 0 NOT NULL,
-    snapshot_active_job_id text,
-    snapshot_active_job_attempt integer,
     snapshot_json jsonb DEFAULT '{}'::jsonb NOT NULL,
     source_json jsonb DEFAULT '{}'::jsonb NOT NULL,
     reject_reason text,
@@ -1218,6 +1282,9 @@ CREATE TABLE crawler.channel_candidates (
     accepted_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    snapshot_dispatch_generation bigint DEFAULT 0 NOT NULL,
+    snapshot_active_job_id text,
+    snapshot_active_job_attempt integer,
     CONSTRAINT channel_candidates_snapshot_active_job_check CHECK ((((snapshot_active_job_id IS NULL) AND (snapshot_active_job_attempt IS NULL)) OR ((snapshot_active_job_id IS NOT NULL) AND (snapshot_active_job_attempt IS NOT NULL) AND (snapshot_active_job_attempt >= 0)))),
     CONSTRAINT channel_candidates_snapshot_dispatch_generation_check CHECK ((snapshot_dispatch_generation >= 0)),
     CONSTRAINT channel_candidates_status_check CHECK ((status = ANY (ARRAY['discovered'::text, 'queued'::text, 'validating'::text, 'accepted'::text, 'rejected'::text, 'existing'::text, 'failed'::text])))
@@ -1278,7 +1345,6 @@ CREATE TABLE crawler.channel_execution_attempts (
     queue_name text NOT NULL,
     job_id text,
     job_attempt integer DEFAULT 0 NOT NULL,
-    dispatch_generation bigint,
     worker_id text NOT NULL,
     slot_name text NOT NULL,
     proxy_user text NOT NULL,
@@ -1305,6 +1371,7 @@ CREATE TABLE crawler.channel_execution_attempts (
     network_identity_key text,
     identity_policy_id text,
     identity_policy_version integer,
+    dispatch_generation bigint,
     CONSTRAINT channel_execution_attempts_dispatch_generation_check CHECK (((dispatch_generation IS NULL) OR (dispatch_generation > 0))),
     CONSTRAINT channel_execution_attempts_status_check CHECK ((status = ANY (ARRAY['running'::text, 'success'::text, 'failed'::text, 'aborted'::text])))
 );
@@ -1465,7 +1532,7 @@ CREATE TABLE crawler.channels (
     CONSTRAINT channels_country_code_check CHECK (((country_code IS NULL) OR (country_code ~ '^[A-Z]{2}$'::text))),
     CONSTRAINT channels_description_status_check CHECK ((description_status = ANY (ARRAY['exact'::text, 'empty'::text, 'unresolved'::text]))),
     CONSTRAINT channels_dormant_cycle_check CHECK ((dormant_cycle >= 0)),
-    CONSTRAINT channels_dormant_state_check CHECK ((((status = 'dormant'::text) AND (dormant_reason = 'no_published_content_within_90_days'::text) AND (dormant_since IS NOT NULL) AND (dormant_recheck_day IS NOT NULL) AND (dormant_last_probe_at IS NOT NULL) AND (dormant_cycle > 0) AND (reject_reason IS NULL)) OR ((status <> 'dormant'::text) AND (dormant_reason IS NULL) AND (dormant_since IS NULL) AND (dormant_recheck_day IS NULL) AND (dormant_last_probe_at IS NULL) AND (dormant_cycle = 0)))),
+    CONSTRAINT channels_dormant_state_check CHECK ((((status = 'dormant'::text) AND (dormant_reason = ANY (ARRAY['no_published_content_within_90_days'::text, 'uploads_empty'::text])) AND (dormant_since IS NOT NULL) AND (dormant_recheck_day IS NOT NULL) AND (dormant_last_probe_at IS NOT NULL) AND (dormant_cycle > 0) AND (reject_reason IS NULL)) OR ((status <> 'dormant'::text) AND (dormant_reason IS NULL) AND (dormant_since IS NULL) AND (dormant_recheck_day IS NULL) AND (dormant_last_probe_at IS NULL) AND (dormant_cycle = 0)))),
     CONSTRAINT channels_external_links_status_check CHECK ((external_links_status = ANY (ARRAY['observed'::text, 'unresolved'::text]))),
     CONSTRAINT channels_joined_at_precision_check CHECK ((joined_at_precision = ANY (ARRAY['date_only'::text, 'unknown'::text]))),
     CONSTRAINT channels_keywords_status_check CHECK ((keywords_status = ANY (ARRAY['observed'::text, 'unresolved'::text]))),
@@ -1521,11 +1588,11 @@ CREATE TABLE crawler.content_candidates (
     error_message text,
     disposition text,
     next_attempt_at timestamp with time zone,
-    first_seen_ledger_status text DEFAULT 'not_applicable'::text NOT NULL,
-    first_seen_ledger_observation_id uuid,
     first_seen_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     finished_at timestamp with time zone,
+    first_seen_ledger_status text DEFAULT 'not_applicable'::text NOT NULL,
+    first_seen_ledger_observation_id uuid,
     CONSTRAINT content_candidates_api_status_check CHECK ((api_status = ANY (ARRAY['not_needed'::text, 'pending'::text, 'queued'::text, 'running'::text, 'done'::text, 'failed'::text, 'unavailable'::text]))),
     CONSTRAINT content_candidates_content_type_check CHECK ((content_type = ANY (ARRAY['video'::text, 'short'::text, 'live'::text]))),
     CONSTRAINT content_candidates_detail_status_check CHECK ((detail_status = ANY (ARRAY['queued'::text, 'running'::text, 'api_pending'::text, 'done'::text, 'unavailable'::text, 'failed'::text]))),
@@ -1648,8 +1715,8 @@ CREATE TABLE crawler.contents (
     comments_first_page jsonb,
     CONSTRAINT contents_access_status_check CHECK ((access_status = ANY (ARRAY['public'::text, 'unlisted'::text, 'members_only'::text, 'private'::text, 'unavailable'::text, 'login_required'::text, 'unknown'::text]))),
     CONSTRAINT contents_comment_count_status_check CHECK ((comment_count_status = ANY (ARRAY['exact'::text, 'zero_from_empty'::text, 'zero_from_surface'::text, 'zero_from_upcoming'::text, 'disabled'::text, 'unavailable'::text, 'unresolved'::text]))),
-    CONSTRAINT contents_comment_state_shape CHECK ((((comments_disabled IS TRUE) AND (comment_count = 0) AND (comment_count_status = 'disabled'::text)) OR ((comments_disabled IS DISTINCT FROM TRUE) AND (comment_count_status <> 'disabled'::text)))),
-    CONSTRAINT contents_comments_first_page_shape_check CHECK (((comments_first_page IS NULL) OR ((jsonb_typeof(comments_first_page) = 'object'::text) AND ((comments_first_page ->> 'version'::text) = '1'::text) AND ((comments_first_page ->> 'sort'::text) = 'TOP_COMMENTS'::text) AND (jsonb_typeof((comments_first_page -> 'comments'::text)) = 'array'::text) AND ((comments_first_page ->> 'returned_count'::text) ~ '^[0-9]+$'::text) AND (((comments_first_page ->> 'returned_count'::text))::integer = jsonb_array_length((comments_first_page -> 'comments'::text)))))),
+    CONSTRAINT contents_comment_state_shape CHECK ((((comments_disabled IS TRUE) AND (comment_count = 0) AND (comment_count_status = 'disabled'::text)) OR ((comments_disabled IS DISTINCT FROM true) AND (comment_count_status <> 'disabled'::text)))),
+    CONSTRAINT contents_comments_first_page_shape_check CHECK (((comments_first_page IS NULL) OR ((jsonb_typeof(comments_first_page) = 'object'::text) AND ((comments_first_page ->> 'version'::text) = '1'::text) AND ((comments_first_page ->> 'sort'::text) = ANY (ARRAY['TOP_COMMENTS'::text, 'NEWEST_FIRST'::text])) AND (jsonb_typeof((comments_first_page -> 'comments'::text)) = 'array'::text) AND ((comments_first_page ->> 'returned_count'::text) ~ '^[0-9]+$'::text) AND (((comments_first_page ->> 'returned_count'::text))::integer = jsonb_array_length((comments_first_page -> 'comments'::text)))))),
     CONSTRAINT contents_content_type_check CHECK ((content_type = ANY (ARRAY['video'::text, 'short'::text, 'live'::text, 'post'::text]))),
     CONSTRAINT contents_description_status_check CHECK ((description_status = ANY (ARRAY['exact'::text, 'empty'::text, 'unavailable'::text, 'unresolved'::text]))),
     CONSTRAINT contents_publication_item_hash_check CHECK (((publication_item_hash IS NULL) OR (publication_item_hash ~ '^sha256:[0-9a-f]{64}$'::text))),
@@ -1774,6 +1841,56 @@ CREATE TABLE crawler.crawler_outbox (
 
 
 --
+-- Name: database_identity; Type: TABLE; Schema: crawler; Owner: -
+--
+
+CREATE TABLE crawler.database_identity (
+    singleton boolean DEFAULT true NOT NULL,
+    database_kind text NOT NULL,
+    database_name text NOT NULL,
+    initialized_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT database_identity_kind_check CHECK ((database_kind = 'crawler'::text)),
+    CONSTRAINT database_identity_singleton_check CHECK (singleton)
+);
+
+
+--
+-- Name: finalize_recovery_requests; Type: TABLE; Schema: crawler; Owner: -
+--
+
+CREATE TABLE crawler.finalize_recovery_requests (
+    channel_id text NOT NULL,
+    requested_generation bigint DEFAULT 1 NOT NULL,
+    handled_generation bigint DEFAULT 0 NOT NULL,
+    next_check_at timestamp with time zone DEFAULT now() NOT NULL,
+    lease_token uuid,
+    lease_until timestamp with time zone,
+    dispatched_run_id text,
+    dispatched_job_id text,
+    dispatched_generation bigint,
+    last_decision text,
+    requested_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: finalize_recovery_scan; Type: TABLE; Schema: crawler; Owner: -
+--
+
+CREATE TABLE crawler.finalize_recovery_scan (
+    scope text NOT NULL,
+    after_channel_id text DEFAULT ''::text NOT NULL,
+    upper_channel_id text,
+    lease_token uuid,
+    lease_until timestamp with time zone,
+    completed_rounds bigint DEFAULT 0 NOT NULL,
+    last_completed_at timestamp with time zone,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
 -- Name: finalized_profiles; Type: TABLE; Schema: crawler; Owner: -
 --
 
@@ -1790,6 +1907,315 @@ CREATE TABLE crawler.finalized_profiles (
     last_observed_at timestamp with time zone,
     current_output_hash text,
     CONSTRAINT finalized_profiles_status_check CHECK ((status = ANY (ARRAY['pending'::text, 'ready_auto'::text, 'ready_partial'::text, 'pending_detail'::text, 'pending_api'::text, 'pending_enrich'::text, 'pending_agent'::text, 'failed'::text])))
+);
+
+
+--
+-- Name: incremental_youtubejs_video_batches; Type: TABLE; Schema: crawler; Owner: -
+--
+
+CREATE TABLE crawler.incremental_youtubejs_video_batches (
+    run_id text NOT NULL,
+    cycle_key text NOT NULL,
+    plan_id uuid NOT NULL,
+    channel_id text NOT NULL,
+    status text DEFAULT 'fetching'::text NOT NULL,
+    cycle_observed_at timestamp with time zone NOT NULL,
+    started_at timestamp with time zone NOT NULL,
+    scan_json jsonb NOT NULL,
+    anchors_json jsonb DEFAULT '[]'::jsonb NOT NULL,
+    discovery_entries_json jsonb DEFAULT '[]'::jsonb NOT NULL,
+    pending_deferred_video_ids jsonb DEFAULT '[]'::jsonb NOT NULL,
+    sampling_plan_json jsonb DEFAULT '{}'::jsonb NOT NULL,
+    sampling_config_json jsonb DEFAULT '{}'::jsonb NOT NULL,
+    target_hash text NOT NULL,
+    first_seen_checkpoint_status text DEFAULT 'pending'::text NOT NULL,
+    first_seen_checkpoints_json jsonb DEFAULT '[]'::jsonb NOT NULL,
+    final_observation_id uuid,
+    final_result_json jsonb,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    finalized_at timestamp with time zone,
+    CONSTRAINT incremental_youtubejs_video__first_seen_checkpoint_status_check CHECK ((first_seen_checkpoint_status = ANY (ARRAY['pending'::text, 'complete'::text, 'not_applicable'::text]))),
+    CONSTRAINT incremental_youtubejs_video_b_first_seen_checkpoints_json_check CHECK ((jsonb_typeof(first_seen_checkpoints_json) = 'array'::text)),
+    CONSTRAINT incremental_youtubejs_video_ba_pending_deferred_video_ids_check CHECK ((jsonb_typeof(pending_deferred_video_ids) = 'array'::text)),
+    CONSTRAINT incremental_youtubejs_video_batche_discovery_entries_json_check CHECK ((jsonb_typeof(discovery_entries_json) = 'array'::text)),
+    CONSTRAINT incremental_youtubejs_video_batches_anchors_json_check CHECK ((jsonb_typeof(anchors_json) = 'array'::text)),
+    CONSTRAINT incremental_youtubejs_video_batches_check CHECK (((final_result_json IS NULL) OR ((final_result_json ? 'observation_id'::text) AND (NOT ((final_result_json ->> 'observation_id'::text) IS DISTINCT FROM (final_observation_id)::text))))),
+    CONSTRAINT incremental_youtubejs_video_batches_check1 CHECK ((((status = 'finalized'::text) AND (final_observation_id IS NOT NULL) AND (final_result_json IS NOT NULL) AND (finalized_at IS NOT NULL)) OR ((status <> 'finalized'::text) AND (final_observation_id IS NULL) AND (final_result_json IS NULL) AND (finalized_at IS NULL)))),
+    CONSTRAINT incremental_youtubejs_video_batches_cycle_key_check CHECK ((btrim(cycle_key) <> ''::text)),
+    CONSTRAINT incremental_youtubejs_video_batches_final_result_json_check CHECK (((final_result_json IS NULL) OR (jsonb_typeof(final_result_json) = 'object'::text))),
+    CONSTRAINT incremental_youtubejs_video_batches_sampling_config_json_check CHECK ((jsonb_typeof(sampling_config_json) = 'object'::text)),
+    CONSTRAINT incremental_youtubejs_video_batches_sampling_plan_json_check CHECK ((jsonb_typeof(sampling_plan_json) = 'object'::text)),
+    CONSTRAINT incremental_youtubejs_video_batches_scan_json_check CHECK ((jsonb_typeof(scan_json) = 'object'::text)),
+    CONSTRAINT incremental_youtubejs_video_batches_status_check CHECK ((status = ANY (ARRAY['fetching'::text, 'ready'::text, 'finalized'::text])))
+);
+
+
+--
+-- Name: incremental_youtubejs_video_items; Type: TABLE; Schema: crawler; Owner: -
+--
+
+CREATE TABLE crawler.incremental_youtubejs_video_items (
+    run_id text NOT NULL,
+    cycle_key text NOT NULL,
+    phase text NOT NULL,
+    ordinal integer NOT NULL,
+    video_id text NOT NULL,
+    target_json jsonb NOT NULL,
+    status text DEFAULT 'pending'::text NOT NULL,
+    claim_token uuid,
+    claim_expires_at timestamp with time zone,
+    detail_json jsonb,
+    field_status_json jsonb,
+    error_json jsonb,
+    attempt_count integer DEFAULT 0 NOT NULL,
+    captured_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT incremental_youtubejs_video_items_attempt_count_check CHECK ((attempt_count >= 0)),
+    CONSTRAINT incremental_youtubejs_video_items_check CHECK ((((status = 'pending'::text) AND (claim_token IS NULL) AND (claim_expires_at IS NULL) AND (detail_json IS NULL) AND (field_status_json IS NULL) AND (error_json IS NULL) AND (captured_at IS NULL)) OR ((status = 'claimed'::text) AND (claim_token IS NOT NULL) AND (claim_expires_at IS NOT NULL) AND (detail_json IS NULL) AND (field_status_json IS NULL) AND (error_json IS NULL) AND (captured_at IS NULL)) OR ((status = 'captured'::text) AND (claim_token IS NULL) AND (claim_expires_at IS NULL) AND (detail_json IS NOT NULL) AND (field_status_json IS NOT NULL) AND (error_json IS NULL) AND (captured_at IS NOT NULL)) OR ((status = 'settled_error'::text) AND (claim_token IS NULL) AND (claim_expires_at IS NULL) AND (field_status_json IS NOT NULL) AND (error_json IS NOT NULL) AND (captured_at IS NOT NULL)))),
+    CONSTRAINT incremental_youtubejs_video_items_detail_json_check CHECK (((detail_json IS NULL) OR (jsonb_typeof(detail_json) = 'object'::text))),
+    CONSTRAINT incremental_youtubejs_video_items_error_json_check CHECK (((error_json IS NULL) OR (jsonb_typeof(error_json) = 'object'::text))),
+    CONSTRAINT incremental_youtubejs_video_items_field_status_json_check CHECK (((field_status_json IS NULL) OR (jsonb_typeof(field_status_json) = 'object'::text))),
+    CONSTRAINT incremental_youtubejs_video_items_ordinal_check CHECK ((ordinal >= 0)),
+    CONSTRAINT incremental_youtubejs_video_items_phase_check CHECK ((phase = ANY (ARRAY['first_seen'::text, 'recent'::text]))),
+    CONSTRAINT incremental_youtubejs_video_items_status_check CHECK ((status = ANY (ARRAY['pending'::text, 'claimed'::text, 'captured'::text, 'settled_error'::text]))),
+    CONSTRAINT incremental_youtubejs_video_items_target_json_check CHECK ((jsonb_typeof(target_json) = 'object'::text)),
+    CONSTRAINT incremental_youtubejs_video_items_video_id_check CHECK ((btrim(video_id) <> ''::text))
+);
+
+
+--
+-- Name: migration_channel_intents; Type: TABLE; Schema: crawler; Owner: -
+--
+
+CREATE TABLE crawler.migration_channel_intents (
+    migration_intent_id bigint NOT NULL,
+    source_id text NOT NULL,
+    source_database text NOT NULL,
+    source_database_oid oid NOT NULL,
+    source_candidate_id bigint NOT NULL,
+    channel_id text NOT NULL,
+    source_snapshot jsonb NOT NULL,
+    snapshot_sha256 text NOT NULL,
+    target_candidate_id bigint,
+    first_dispatch_batch_id text NOT NULL,
+    dispatch_attempts integer DEFAULT 0 NOT NULL,
+    last_dispatch_at timestamp with time zone,
+    last_error text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT migration_channel_intents_dispatch_attempts_check CHECK ((dispatch_attempts >= 0)),
+    CONSTRAINT migration_channel_intents_snapshot_sha256_check CHECK ((snapshot_sha256 ~ '^[a-f0-9]{64}$'::text))
+);
+
+
+--
+-- Name: migration_channel_intents_migration_intent_id_seq; Type: SEQUENCE; Schema: crawler; Owner: -
+--
+
+ALTER TABLE crawler.migration_channel_intents ALTER COLUMN migration_intent_id ADD GENERATED BY DEFAULT AS IDENTITY (
+    SEQUENCE NAME crawler.migration_channel_intents_migration_intent_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: migration_channel_inventory; Type: TABLE; Schema: crawler; Owner: -
+--
+
+CREATE TABLE crawler.migration_channel_inventory (
+    source_id text NOT NULL,
+    source_candidate_id bigint NOT NULL,
+    channel_id text NOT NULL,
+    channel_url text NOT NULL,
+    handle text,
+    title text,
+    avatar_url text,
+    search_subscriber_count bigint,
+    priority integer DEFAULT 100 NOT NULL,
+    source_candidate_status text NOT NULL,
+    source_updated_at timestamp with time zone,
+    sync_token uuid NOT NULL,
+    synced_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT migration_channel_inventory_source_candidate_status_check CHECK ((source_candidate_status = ANY (ARRAY['discovered'::text, 'queued'::text, 'validating'::text, 'failed'::text])))
+);
+
+
+--
+-- Name: migration_channel_inventory_syncs; Type: TABLE; Schema: crawler; Owner: -
+--
+
+CREATE TABLE crawler.migration_channel_inventory_syncs (
+    source_id text NOT NULL,
+    source_database text NOT NULL,
+    source_database_oid oid NOT NULL,
+    status text DEFAULT 'syncing'::text NOT NULL,
+    sync_token uuid NOT NULL,
+    eligible_count bigint DEFAULT 0 NOT NULL,
+    started_at timestamp with time zone DEFAULT now() NOT NULL,
+    completed_at timestamp with time zone,
+    last_error text,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT migration_channel_inventory_syncs_eligible_count_check CHECK ((eligible_count >= 0)),
+    CONSTRAINT migration_channel_inventory_syncs_status_check CHECK ((status = ANY (ARRAY['syncing'::text, 'ready'::text, 'failed'::text])))
+);
+
+
+--
+-- Name: migration_control_batches; Type: TABLE; Schema: crawler; Owner: -
+--
+
+CREATE TABLE crawler.migration_control_batches (
+    batch_id text NOT NULL,
+    source_id text NOT NULL,
+    selection text NOT NULL,
+    status text NOT NULL,
+    version bigint DEFAULT 1 NOT NULL,
+    total_count integer DEFAULT 0 NOT NULL,
+    max_in_flight integer DEFAULT 20 NOT NULL,
+    frozen_at timestamp with time zone,
+    paused_at timestamp with time zone,
+    paused_seconds double precision DEFAULT 0 NOT NULL,
+    finished_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT migration_control_batches_max_in_flight_check CHECK (((max_in_flight >= 1) AND (max_in_flight <= 200))),
+    CONSTRAINT migration_control_batches_status_check CHECK ((status = ANY (ARRAY['preparing'::text, 'running'::text, 'pausing'::text, 'paused'::text, 'stopping'::text, 'ended'::text, 'completed'::text])))
+);
+
+
+--
+-- Name: migration_control_items; Type: TABLE; Schema: crawler; Owner: -
+--
+
+CREATE TABLE crawler.migration_control_items (
+    batch_id text NOT NULL,
+    channel_id text NOT NULL,
+    source_candidate_id bigint NOT NULL,
+    snapshot_json jsonb,
+    ordinal bigint NOT NULL,
+    state text DEFAULT 'pending'::text NOT NULL,
+    candidate_id bigint,
+    outcome text,
+    error_message text,
+    start_failures integer DEFAULT 0 NOT NULL,
+    started_at timestamp with time zone,
+    finished_at timestamp with time zone,
+    CONSTRAINT migration_control_items_outcome_check CHECK ((outcome = ANY (ARRAY['success'::text, 'dormant'::text, 'rejected'::text, 'failed'::text, 'existing'::text]))),
+    CONSTRAINT migration_control_items_state_check CHECK ((state = ANY (ARRAY['pending'::text, 'started'::text, 'terminal'::text, 'released'::text])))
+);
+
+
+--
+-- Name: migration_retry_intents; Type: TABLE; Schema: crawler; Owner: -
+--
+
+CREATE TABLE crawler.migration_retry_intents (
+    retry_intent_id text NOT NULL,
+    request_key text NOT NULL,
+    candidate_id bigint NOT NULL,
+    previous_business_run_id text NOT NULL,
+    new_business_run_id text NOT NULL,
+    new_business_run_key text NOT NULL,
+    new_job_id text NOT NULL,
+    dispatch_generation bigint NOT NULL,
+    reason text NOT NULL,
+    intent_hash text NOT NULL,
+    job_payload_json jsonb DEFAULT '{}'::jsonb NOT NULL,
+    status text DEFAULT 'requested'::text NOT NULL,
+    dispatch_status text DEFAULT 'pending'::text NOT NULL,
+    requested_at timestamp with time zone DEFAULT now() NOT NULL,
+    dispatched_at timestamp with time zone,
+    finished_at timestamp with time zone,
+    last_error text,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    terminal_job_attempt bigint,
+    CONSTRAINT migration_retry_intents_dispatch_generation_check CHECK ((dispatch_generation > 0)),
+    CONSTRAINT migration_retry_intents_dispatch_status_check CHECK ((dispatch_status = ANY (ARRAY['pending'::text, 'deferred'::text, 'enqueued'::text, 'terminal'::text]))),
+    CONSTRAINT migration_retry_intents_status_check CHECK ((status = ANY (ARRAY['requested'::text, 'dispatched'::text, 'running'::text, 'finished'::text, 'failed'::text]))),
+    CONSTRAINT migration_retry_intents_terminal_job_attempt_check CHECK (((terminal_job_attempt IS NULL) OR (terminal_job_attempt > 0)))
+);
+
+
+--
+-- Name: migration_settlement_cursors; Type: TABLE; Schema: crawler; Owner: -
+--
+
+CREATE TABLE crawler.migration_settlement_cursors (
+    batch_id text NOT NULL,
+    after_ordinal bigint DEFAULT 0 NOT NULL
+);
+
+
+--
+-- Name: migration_system_retry_items; Type: TABLE; Schema: crawler; Owner: -
+--
+
+CREATE TABLE crawler.migration_system_retry_items (
+    system_retry_id bigint NOT NULL,
+    migration_intent_id bigint NOT NULL,
+    candidate_id bigint NOT NULL,
+    failed_dispatch_batch_id text NOT NULL,
+    failed_dispatch_generation bigint NOT NULL,
+    failed_job_id text NOT NULL,
+    failed_job_attempt integer NOT NULL,
+    failure_code text NOT NULL,
+    failure_category text NOT NULL,
+    failure_evidence jsonb DEFAULT '{}'::jsonb NOT NULL,
+    status text DEFAULT 'pending'::text NOT NULL,
+    retry_dispatch_generation bigint,
+    recovery_run_id text,
+    recovery_agent_job_epoch bigint DEFAULT 0 NOT NULL,
+    recovery_agent_active_job_id text,
+    recovery_agent_active_job_attempt bigint,
+    resolution text,
+    requested_at timestamp with time zone DEFAULT now() NOT NULL,
+    dispatched_at timestamp with time zone,
+    resolved_at timestamp with time zone,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT migration_system_retry_items_check CHECK (((retry_dispatch_generation IS NULL) OR (retry_dispatch_generation > failed_dispatch_generation))),
+    CONSTRAINT migration_system_retry_items_failed_dispatch_generation_check CHECK ((failed_dispatch_generation > 0)),
+    CONSTRAINT migration_system_retry_items_failed_job_attempt_check CHECK ((failed_job_attempt >= 0)),
+    CONSTRAINT migration_system_retry_items_recovery_agent_active_job_check CHECK (((recovery_agent_job_epoch >= 0) AND (((recovery_agent_active_job_id IS NULL) AND (recovery_agent_active_job_attempt IS NULL)) OR ((recovery_agent_active_job_id IS NOT NULL) AND (recovery_agent_active_job_attempt IS NOT NULL) AND (recovery_agent_active_job_attempt > 0))))),
+    CONSTRAINT migration_system_retry_items_status_check CHECK ((status = ANY (ARRAY['retrying'::text, 'pending'::text, 'dispatched'::text, 'resolved'::text, 'cancelled'::text])))
+);
+
+
+--
+-- Name: migration_system_retry_items_system_retry_id_seq; Type: SEQUENCE; Schema: crawler; Owner: -
+--
+
+CREATE SEQUENCE crawler.migration_system_retry_items_system_retry_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: migration_system_retry_items_system_retry_id_seq; Type: SEQUENCE OWNED BY; Schema: crawler; Owner: -
+--
+
+ALTER SEQUENCE crawler.migration_system_retry_items_system_retry_id_seq OWNED BY crawler.migration_system_retry_items.system_retry_id;
+
+
+--
+-- Name: migration_throughput_samples; Type: TABLE; Schema: crawler; Owner: -
+--
+
+CREATE TABLE crawler.migration_throughput_samples (
+    batch_id text NOT NULL,
+    sampled_at timestamp with time zone DEFAULT now() NOT NULL,
+    active_seconds double precision NOT NULL,
+    counts jsonb NOT NULL,
+    publishing_count integer DEFAULT 0 NOT NULL
 );
 
 
@@ -1845,9 +2271,6 @@ CREATE TABLE crawler.query_dispatch_batches (
     discovered_candidate_count integer DEFAULT 0 NOT NULL,
     accepted_channel_count integer DEFAULT 0 NOT NULL,
     rejected_channel_count integer DEFAULT 0 NOT NULL,
-    failed_channel_count integer DEFAULT 0 NOT NULL,
-    total_channel_count integer DEFAULT 0 NOT NULL,
-    outcome text,
     discovery_closed_at timestamp with time zone,
     validation_closed_at timestamp with time zone,
     agent_tail_flushed_at timestamp with time zone,
@@ -1856,6 +2279,9 @@ CREATE TABLE crawler.query_dispatch_batches (
     finished_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    failed_channel_count integer DEFAULT 0 NOT NULL,
+    total_channel_count integer DEFAULT 0 NOT NULL,
+    outcome text,
     CONSTRAINT query_dispatch_batches_completion_count_check CHECK (((failed_channel_count >= 0) AND (total_channel_count >= 0) AND (accepted_channel_count >= 0) AND (rejected_channel_count >= 0) AND (((accepted_channel_count + rejected_channel_count) + failed_channel_count) <= total_channel_count))),
     CONSTRAINT query_dispatch_batches_outcome_check CHECK (((outcome IS NULL) OR (outcome = ANY (ARRAY['completed'::text, 'completed_with_system_failures'::text])))),
     CONSTRAINT query_dispatch_batches_status_check CHECK ((status = ANY (ARRAY['running'::text, 'discovery_closed'::text, 'validation_closed'::text, 'finishing'::text, 'completed'::text, 'stopped'::text, 'failed'::text])))
@@ -2144,6 +2570,24 @@ ALTER SEQUENCE crawler.raw_objects_raw_object_id_seq OWNED BY crawler.raw_object
 
 
 --
+-- Name: restored_migration_sources; Type: TABLE; Schema: crawler; Owner: -
+--
+
+CREATE TABLE crawler.restored_migration_sources (
+    source_id text NOT NULL,
+    channel_id text NOT NULL,
+    source_candidate_id bigint NOT NULL,
+    priority integer NOT NULL,
+    restoration_id text NOT NULL,
+    snapshot_json jsonb NOT NULL,
+    restored_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT restored_migration_sources_check CHECK (((snapshot_json ->> 'channel_id'::text) = channel_id)),
+    CONSTRAINT restored_migration_sources_check1 CHECK (((snapshot_json ->> 'source_id'::text) = source_id)),
+    CONSTRAINT restored_migration_sources_snapshot_json_check CHECK (((snapshot_json ->> 'source_candidate_status'::text) = 'discovered'::text))
+);
+
+
+--
 -- Name: settings; Type: TABLE; Schema: crawler; Owner: -
 --
 
@@ -2152,11 +2596,6 @@ CREATE TABLE crawler.settings (
     value_json jsonb DEFAULT '{}'::jsonb NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL
 );
-
-INSERT INTO crawler.settings (setting_key,value_json) VALUES
-    ('content_enrich_dispatch', '{"mode":"clock"}'::jsonb),
-    ('content_enrich_dispatch_cursor', '{"channel_id":""}'::jsonb),
-    ('content_enrich_dispatch_mutex', '{"owner":null,"expires_at":null}'::jsonb);
 
 
 --
@@ -2205,15 +2644,15 @@ CREATE TABLE crawler.youtube_api_batches (
     task_ids bigint[] NOT NULL,
     video_ids text[] NOT NULL,
     key_index integer,
-    active_job_id text,
-    active_job_attempt bigint,
     result_json jsonb DEFAULT '{}'::jsonb NOT NULL,
     error_message text,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     started_at timestamp with time zone,
     finished_at timestamp with time zone,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT youtube_api_batches_active_job_check CHECK (((active_job_id IS NULL) AND (active_job_attempt IS NULL)) OR ((active_job_id IS NOT NULL) AND (active_job_attempt IS NOT NULL) AND (active_job_attempt > 0))),
+    active_job_id text,
+    active_job_attempt bigint,
+    CONSTRAINT youtube_api_batches_active_job_check CHECK ((((active_job_id IS NULL) AND (active_job_attempt IS NULL)) OR ((active_job_id IS NOT NULL) AND (active_job_attempt IS NOT NULL) AND (active_job_attempt > 0)))),
     CONSTRAINT youtube_api_batches_status_check CHECK ((status = ANY (ARRAY['queued'::text, 'running'::text, 'done'::text, 'failed'::text])))
 );
 
@@ -2232,6 +2671,28 @@ CREATE TABLE crawler.youtube_api_daily_usage (
     CONSTRAINT youtube_api_daily_usage_request_count_check CHECK ((request_count >= 0)),
     CONSTRAINT youtube_api_daily_usage_requested_channel_count_check CHECK ((requested_channel_count >= 0)),
     CONSTRAINT youtube_api_daily_usage_requested_video_count_check CHECK ((requested_video_count >= 0))
+);
+
+
+--
+-- Name: youtube_api_detail_requests; Type: TABLE; Schema: crawler; Owner: -
+--
+
+CREATE TABLE crawler.youtube_api_detail_requests (
+    request_id text NOT NULL,
+    run_id text NOT NULL,
+    source_content_id text NOT NULL,
+    consumer text NOT NULL,
+    task_id bigint NOT NULL,
+    status text DEFAULT 'pending'::text NOT NULL,
+    detail_json jsonb,
+    partial_detail jsonb DEFAULT '{}'::jsonb NOT NULL,
+    require_comments boolean DEFAULT false NOT NULL,
+    error_message text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    finished_at timestamp with time zone,
+    CONSTRAINT youtube_api_detail_requests_consumer_check CHECK ((consumer = ANY (ARRAY['full'::text, 'incremental'::text]))),
+    CONSTRAINT youtube_api_detail_requests_status_check CHECK ((status = ANY (ARRAY['pending'::text, 'done'::text, 'unavailable'::text, 'failed'::text])))
 );
 
 
@@ -2422,7 +2883,7 @@ CREATE TABLE feature_clock.channel_clock_state (
     CONSTRAINT channel_clock_state_agent_tier_check CHECK (((agent_tier = ANY (ARRAY[1, 3, 7, 14, 30])) OR ((agent_tier >= 60) AND (agent_tier <= 365)))),
     CONSTRAINT channel_clock_state_clock_version_check CHECK ((clock_version > 0)),
     CONSTRAINT channel_clock_state_dispatch_slot_check CHECK ((dispatch_slot >= 0)),
-    CONSTRAINT channel_clock_state_dormant_check CHECK (((lifecycle_status <> 'dormant'::text) OR ((dormant_reason = 'no_published_content_within_90_days'::text) AND (dormant_since IS NOT NULL) AND (dormant_recheck_day IS NOT NULL) AND (dormant_cycle > 0) AND (dormant_source_event_id IS NOT NULL)))),
+    CONSTRAINT channel_clock_state_dormant_check CHECK (((lifecycle_status <> 'dormant'::text) OR ((dormant_reason = ANY (ARRAY['no_published_content_within_90_days'::text, 'uploads_empty'::text])) AND (dormant_since IS NOT NULL) AND (dormant_recheck_day IS NOT NULL) AND (dormant_cycle > 0) AND (dormant_source_event_id IS NOT NULL)))),
     CONSTRAINT channel_clock_state_dormant_cycle_check CHECK ((dormant_cycle >= 0)),
     CONSTRAINT channel_clock_state_estimated_request_cost_check CHECK ((estimated_request_cost >= 0)),
     CONSTRAINT channel_clock_state_feature_state_version_check CHECK ((feature_state_version >= 0)),
@@ -3031,11 +3492,11 @@ CREATE TABLE publication.stream (
     status_changed_by text NOT NULL,
     status_reason text NOT NULL,
     sealed_at timestamp with time zone,
+    CONSTRAINT chk_publication_stream_automatic_onboarding_destination CHECK (((automatic_onboarding_destination IS NULL) OR (btrim(automatic_onboarding_destination) <> ''::text))),
     CONSTRAINT stream_check CHECK (((btrim(created_by) <> ''::text) AND (btrim(created_reason) <> ''::text))),
     CONSTRAINT stream_check1 CHECK (((btrim(status_changed_by) <> ''::text) AND (btrim(status_reason) <> ''::text))),
     CONSTRAINT stream_check2 CHECK (((capture_enabled_at IS NULL) OR (minimum_writer_version IS NOT NULL))),
     CONSTRAINT stream_check3 CHECK ((((status = 'active'::text) AND (sealed_at IS NULL)) OR ((status = 'sealed'::text) AND (sealed_at IS NOT NULL)))),
-    CONSTRAINT chk_publication_stream_automatic_onboarding_destination CHECK (((automatic_onboarding_destination IS NULL) OR (btrim(automatic_onboarding_destination) <> ''::text))),
     CONSTRAINT stream_minimum_writer_version_check CHECK (((minimum_writer_version IS NULL) OR (btrim(minimum_writer_version) <> ''::text))),
     CONSTRAINT stream_source_deployment_key_check CHECK ((btrim(source_deployment_key) <> ''::text)),
     CONSTRAINT stream_source_identity_json_check CHECK ((jsonb_typeof(source_identity_json) = 'object'::text)),
@@ -3083,6 +3544,13 @@ ALTER TABLE ONLY crawler.content_candidates ALTER COLUMN candidate_id SET DEFAUL
 --
 
 ALTER TABLE ONLY crawler.controller_ticks ALTER COLUMN tick_id SET DEFAULT nextval('crawler.controller_ticks_tick_id_seq'::regclass);
+
+
+--
+-- Name: migration_system_retry_items system_retry_id; Type: DEFAULT; Schema: crawler; Owner: -
+--
+
+ALTER TABLE ONLY crawler.migration_system_retry_items ALTER COLUMN system_retry_id SET DEFAULT nextval('crawler.migration_system_retry_items_system_retry_id_seq'::regclass);
 
 
 --
@@ -3487,11 +3955,227 @@ ALTER TABLE ONLY crawler.crawler_outbox
 
 
 --
+-- Name: database_identity database_identity_pkey; Type: CONSTRAINT; Schema: crawler; Owner: -
+--
+
+ALTER TABLE ONLY crawler.database_identity
+    ADD CONSTRAINT database_identity_pkey PRIMARY KEY (singleton);
+
+
+--
+-- Name: finalize_recovery_requests finalize_recovery_requests_pkey; Type: CONSTRAINT; Schema: crawler; Owner: -
+--
+
+ALTER TABLE ONLY crawler.finalize_recovery_requests
+    ADD CONSTRAINT finalize_recovery_requests_pkey PRIMARY KEY (channel_id);
+
+
+--
+-- Name: finalize_recovery_scan finalize_recovery_scan_pkey; Type: CONSTRAINT; Schema: crawler; Owner: -
+--
+
+ALTER TABLE ONLY crawler.finalize_recovery_scan
+    ADD CONSTRAINT finalize_recovery_scan_pkey PRIMARY KEY (scope);
+
+
+--
 -- Name: finalized_profiles finalized_profiles_pkey; Type: CONSTRAINT; Schema: crawler; Owner: -
 --
 
 ALTER TABLE ONLY crawler.finalized_profiles
     ADD CONSTRAINT finalized_profiles_pkey PRIMARY KEY (channel_id);
+
+
+--
+-- Name: incremental_youtubejs_video_batches incremental_youtubejs_video_batches_pkey; Type: CONSTRAINT; Schema: crawler; Owner: -
+--
+
+ALTER TABLE ONLY crawler.incremental_youtubejs_video_batches
+    ADD CONSTRAINT incremental_youtubejs_video_batches_pkey PRIMARY KEY (run_id, cycle_key);
+
+
+--
+-- Name: incremental_youtubejs_video_items incremental_youtubejs_video_i_run_id_cycle_key_phase_ordina_key; Type: CONSTRAINT; Schema: crawler; Owner: -
+--
+
+ALTER TABLE ONLY crawler.incremental_youtubejs_video_items
+    ADD CONSTRAINT incremental_youtubejs_video_i_run_id_cycle_key_phase_ordina_key UNIQUE (run_id, cycle_key, phase, ordinal);
+
+
+--
+-- Name: incremental_youtubejs_video_items incremental_youtubejs_video_items_pkey; Type: CONSTRAINT; Schema: crawler; Owner: -
+--
+
+ALTER TABLE ONLY crawler.incremental_youtubejs_video_items
+    ADD CONSTRAINT incremental_youtubejs_video_items_pkey PRIMARY KEY (run_id, cycle_key, phase, video_id);
+
+
+--
+-- Name: incremental_youtubejs_video_items incremental_youtubejs_video_items_run_id_cycle_key_video_id_key; Type: CONSTRAINT; Schema: crawler; Owner: -
+--
+
+ALTER TABLE ONLY crawler.incremental_youtubejs_video_items
+    ADD CONSTRAINT incremental_youtubejs_video_items_run_id_cycle_key_video_id_key UNIQUE (run_id, cycle_key, video_id);
+
+
+--
+-- Name: migration_channel_intents migration_channel_intents_pkey; Type: CONSTRAINT; Schema: crawler; Owner: -
+--
+
+ALTER TABLE ONLY crawler.migration_channel_intents
+    ADD CONSTRAINT migration_channel_intents_pkey PRIMARY KEY (migration_intent_id);
+
+
+--
+-- Name: migration_channel_intents migration_channel_intents_source_id_channel_id_key; Type: CONSTRAINT; Schema: crawler; Owner: -
+--
+
+ALTER TABLE ONLY crawler.migration_channel_intents
+    ADD CONSTRAINT migration_channel_intents_source_id_channel_id_key UNIQUE (source_id, channel_id);
+
+
+--
+-- Name: migration_channel_intents migration_channel_intents_source_id_source_candidate_id_key; Type: CONSTRAINT; Schema: crawler; Owner: -
+--
+
+ALTER TABLE ONLY crawler.migration_channel_intents
+    ADD CONSTRAINT migration_channel_intents_source_id_source_candidate_id_key UNIQUE (source_id, source_candidate_id);
+
+
+--
+-- Name: migration_channel_intents migration_channel_intents_target_candidate_id_key; Type: CONSTRAINT; Schema: crawler; Owner: -
+--
+
+ALTER TABLE ONLY crawler.migration_channel_intents
+    ADD CONSTRAINT migration_channel_intents_target_candidate_id_key UNIQUE (target_candidate_id);
+
+
+--
+-- Name: migration_channel_inventory migration_channel_inventory_pkey; Type: CONSTRAINT; Schema: crawler; Owner: -
+--
+
+ALTER TABLE ONLY crawler.migration_channel_inventory
+    ADD CONSTRAINT migration_channel_inventory_pkey PRIMARY KEY (source_id, channel_id);
+
+
+--
+-- Name: migration_channel_inventory migration_channel_inventory_source_id_source_candidate_id_key; Type: CONSTRAINT; Schema: crawler; Owner: -
+--
+
+ALTER TABLE ONLY crawler.migration_channel_inventory
+    ADD CONSTRAINT migration_channel_inventory_source_id_source_candidate_id_key UNIQUE (source_id, source_candidate_id);
+
+
+--
+-- Name: migration_channel_inventory_syncs migration_channel_inventory_syncs_pkey; Type: CONSTRAINT; Schema: crawler; Owner: -
+--
+
+ALTER TABLE ONLY crawler.migration_channel_inventory_syncs
+    ADD CONSTRAINT migration_channel_inventory_syncs_pkey PRIMARY KEY (source_id);
+
+
+--
+-- Name: migration_control_batches migration_control_batches_pkey; Type: CONSTRAINT; Schema: crawler; Owner: -
+--
+
+ALTER TABLE ONLY crawler.migration_control_batches
+    ADD CONSTRAINT migration_control_batches_pkey PRIMARY KEY (batch_id);
+
+
+--
+-- Name: migration_control_items migration_control_items_batch_id_ordinal_key; Type: CONSTRAINT; Schema: crawler; Owner: -
+--
+
+ALTER TABLE ONLY crawler.migration_control_items
+    ADD CONSTRAINT migration_control_items_batch_id_ordinal_key UNIQUE (batch_id, ordinal);
+
+
+--
+-- Name: migration_control_items migration_control_items_pkey; Type: CONSTRAINT; Schema: crawler; Owner: -
+--
+
+ALTER TABLE ONLY crawler.migration_control_items
+    ADD CONSTRAINT migration_control_items_pkey PRIMARY KEY (batch_id, channel_id);
+
+
+--
+-- Name: migration_retry_intents migration_retry_intents_candidate_id_dispatch_generation_key; Type: CONSTRAINT; Schema: crawler; Owner: -
+--
+
+ALTER TABLE ONLY crawler.migration_retry_intents
+    ADD CONSTRAINT migration_retry_intents_candidate_id_dispatch_generation_key UNIQUE (candidate_id, dispatch_generation);
+
+
+--
+-- Name: migration_retry_intents migration_retry_intents_new_business_run_id_key; Type: CONSTRAINT; Schema: crawler; Owner: -
+--
+
+ALTER TABLE ONLY crawler.migration_retry_intents
+    ADD CONSTRAINT migration_retry_intents_new_business_run_id_key UNIQUE (new_business_run_id);
+
+
+--
+-- Name: migration_retry_intents migration_retry_intents_new_business_run_key_key; Type: CONSTRAINT; Schema: crawler; Owner: -
+--
+
+ALTER TABLE ONLY crawler.migration_retry_intents
+    ADD CONSTRAINT migration_retry_intents_new_business_run_key_key UNIQUE (new_business_run_key);
+
+
+--
+-- Name: migration_retry_intents migration_retry_intents_new_job_id_key; Type: CONSTRAINT; Schema: crawler; Owner: -
+--
+
+ALTER TABLE ONLY crawler.migration_retry_intents
+    ADD CONSTRAINT migration_retry_intents_new_job_id_key UNIQUE (new_job_id);
+
+
+--
+-- Name: migration_retry_intents migration_retry_intents_pkey; Type: CONSTRAINT; Schema: crawler; Owner: -
+--
+
+ALTER TABLE ONLY crawler.migration_retry_intents
+    ADD CONSTRAINT migration_retry_intents_pkey PRIMARY KEY (retry_intent_id);
+
+
+--
+-- Name: migration_retry_intents migration_retry_intents_request_key_key; Type: CONSTRAINT; Schema: crawler; Owner: -
+--
+
+ALTER TABLE ONLY crawler.migration_retry_intents
+    ADD CONSTRAINT migration_retry_intents_request_key_key UNIQUE (request_key);
+
+
+--
+-- Name: migration_settlement_cursors migration_settlement_cursors_pkey; Type: CONSTRAINT; Schema: crawler; Owner: -
+--
+
+ALTER TABLE ONLY crawler.migration_settlement_cursors
+    ADD CONSTRAINT migration_settlement_cursors_pkey PRIMARY KEY (batch_id);
+
+
+--
+-- Name: migration_system_retry_items migration_system_retry_items_migration_intent_id_failed_dis_key; Type: CONSTRAINT; Schema: crawler; Owner: -
+--
+
+ALTER TABLE ONLY crawler.migration_system_retry_items
+    ADD CONSTRAINT migration_system_retry_items_migration_intent_id_failed_dis_key UNIQUE (migration_intent_id, failed_dispatch_generation, failed_job_id, failed_job_attempt);
+
+
+--
+-- Name: migration_system_retry_items migration_system_retry_items_pkey; Type: CONSTRAINT; Schema: crawler; Owner: -
+--
+
+ALTER TABLE ONLY crawler.migration_system_retry_items
+    ADD CONSTRAINT migration_system_retry_items_pkey PRIMARY KEY (system_retry_id);
+
+
+--
+-- Name: migration_throughput_samples migration_throughput_samples_pkey; Type: CONSTRAINT; Schema: crawler; Owner: -
+--
+
+ALTER TABLE ONLY crawler.migration_throughput_samples
+    ADD CONSTRAINT migration_throughput_samples_pkey PRIMARY KEY (batch_id, sampled_at);
 
 
 --
@@ -3639,6 +4323,22 @@ ALTER TABLE ONLY crawler.raw_objects
 
 
 --
+-- Name: restored_migration_sources restored_migration_sources_pkey; Type: CONSTRAINT; Schema: crawler; Owner: -
+--
+
+ALTER TABLE ONLY crawler.restored_migration_sources
+    ADD CONSTRAINT restored_migration_sources_pkey PRIMARY KEY (source_id, channel_id);
+
+
+--
+-- Name: restored_migration_sources restored_migration_sources_source_id_source_candidate_id_key; Type: CONSTRAINT; Schema: crawler; Owner: -
+--
+
+ALTER TABLE ONLY crawler.restored_migration_sources
+    ADD CONSTRAINT restored_migration_sources_source_id_source_candidate_id_key UNIQUE (source_id, source_candidate_id);
+
+
+--
 -- Name: settings settings_pkey; Type: CONSTRAINT; Schema: crawler; Owner: -
 --
 
@@ -3668,6 +4368,14 @@ ALTER TABLE ONLY crawler.youtube_api_batches
 
 ALTER TABLE ONLY crawler.youtube_api_daily_usage
     ADD CONSTRAINT youtube_api_daily_usage_pkey PRIMARY KEY (usage_date);
+
+
+--
+-- Name: youtube_api_detail_requests youtube_api_detail_requests_pkey; Type: CONSTRAINT; Schema: crawler; Owner: -
+--
+
+ALTER TABLE ONLY crawler.youtube_api_detail_requests
+    ADD CONSTRAINT youtube_api_detail_requests_pkey PRIMARY KEY (request_id);
 
 
 --
@@ -3975,6 +4683,13 @@ ALTER TABLE ONLY publication.stream
 
 
 --
+-- Name: finalize_recovery_requests_due; Type: INDEX; Schema: crawler; Owner: -
+--
+
+CREATE INDEX finalize_recovery_requests_due ON crawler.finalize_recovery_requests USING btree (next_check_at, channel_id) WHERE (requested_generation > handled_generation);
+
+
+--
 -- Name: idx_crawler_about_snapshots_channel_observed; Type: INDEX; Schema: crawler; Owner: -
 --
 
@@ -4185,13 +4900,6 @@ CREATE INDEX idx_crawler_content_enrich_tasks_claim ON crawler.content_enrich_ta
 
 
 --
--- Name: idx_crawler_content_enrich_tasks_retry; Type: INDEX; Schema: crawler; Owner: -
---
-
-CREATE INDEX idx_crawler_content_enrich_tasks_retry ON crawler.content_enrich_tasks USING btree (status, next_retry_at, priority, created_at);
-
-
---
 -- Name: idx_crawler_content_enrich_tasks_dispatch; Type: INDEX; Schema: crawler; Owner: -
 --
 
@@ -4203,6 +4911,13 @@ CREATE INDEX idx_crawler_content_enrich_tasks_dispatch ON crawler.content_enrich
 --
 
 CREATE INDEX idx_crawler_content_enrich_tasks_lease_owner ON crawler.content_enrich_tasks USING btree (lease_owner) WHERE (lease_owner IS NOT NULL);
+
+
+--
+-- Name: idx_crawler_content_enrich_tasks_retry; Type: INDEX; Schema: crawler; Owner: -
+--
+
+CREATE INDEX idx_crawler_content_enrich_tasks_retry ON crawler.content_enrich_tasks USING btree (status, next_retry_at, priority, created_at);
 
 
 --
@@ -4290,6 +5005,48 @@ CREATE INDEX idx_crawler_crawl_observations_created_at ON crawler.crawl_observat
 
 
 --
+-- Name: idx_crawler_incremental_youtubejs_video_batches_channel; Type: INDEX; Schema: crawler; Owner: -
+--
+
+CREATE INDEX idx_crawler_incremental_youtubejs_video_batches_channel ON crawler.incremental_youtubejs_video_batches USING btree (channel_id, created_at DESC);
+
+
+--
+-- Name: idx_crawler_incremental_youtubejs_video_items_claim; Type: INDEX; Schema: crawler; Owner: -
+--
+
+CREATE INDEX idx_crawler_incremental_youtubejs_video_items_claim ON crawler.incremental_youtubejs_video_items USING btree (run_id, cycle_key, phase, ordinal) WHERE (status = ANY (ARRAY['pending'::text, 'claimed'::text]));
+
+
+--
+-- Name: idx_crawler_migration_intents_target; Type: INDEX; Schema: crawler; Owner: -
+--
+
+CREATE INDEX idx_crawler_migration_intents_target ON crawler.migration_channel_intents USING btree (target_candidate_id) WHERE (target_candidate_id IS NOT NULL);
+
+
+--
+-- Name: idx_crawler_migration_inventory_page; Type: INDEX; Schema: crawler; Owner: -
+--
+
+CREATE INDEX idx_crawler_migration_inventory_page ON crawler.migration_channel_inventory USING btree (source_id, priority DESC, source_candidate_id);
+
+
+--
+-- Name: idx_crawler_migration_retry_intents_status; Type: INDEX; Schema: crawler; Owner: -
+--
+
+CREATE INDEX idx_crawler_migration_retry_intents_status ON crawler.migration_retry_intents USING btree (status, requested_at);
+
+
+--
+-- Name: idx_crawler_migration_system_retry_status; Type: INDEX; Schema: crawler; Owner: -
+--
+
+CREATE INDEX idx_crawler_migration_system_retry_status ON crawler.migration_system_retry_items USING btree (status, requested_at, system_retry_id);
+
+
+--
 -- Name: idx_crawler_outbox_created_at; Type: INDEX; Schema: crawler; Owner: -
 --
 
@@ -4308,13 +5065,6 @@ CREATE INDEX idx_crawler_outbox_publish ON crawler.crawler_outbox USING btree (s
 --
 
 CREATE INDEX idx_crawler_proxy_job_dispatch_outbox_pending ON crawler.proxy_job_dispatch_outbox USING btree (status, next_attempt_at, created_at);
-
-
---
--- Name: ux_crawler_proxy_job_dispatch_outbox_channel_snapshot_generation; Type: INDEX; Schema: crawler; Owner: -
---
-
-CREATE UNIQUE INDEX ux_crawler_proxy_job_dispatch_outbox_channel_snapshot_generation ON crawler.proxy_job_dispatch_outbox USING btree (aggregate_id, (((payload_json ->> 'dispatch_generation'::text))::bigint)) WHERE (aggregate_kind = 'channel_snapshot'::text);
 
 
 --
@@ -4416,6 +5166,34 @@ CREATE INDEX idx_crawler_youtube_channel_api_tasks_claim ON crawler.youtube_chan
 
 
 --
+-- Name: idx_youtube_api_detail_requests_pending; Type: INDEX; Schema: crawler; Owner: -
+--
+
+CREATE INDEX idx_youtube_api_detail_requests_pending ON crawler.youtube_api_detail_requests USING btree (task_id) WHERE (status = 'pending'::text);
+
+
+--
+-- Name: migration_control_items_candidate; Type: INDEX; Schema: crawler; Owner: -
+--
+
+CREATE INDEX migration_control_items_candidate ON crawler.migration_control_items USING btree (candidate_id) WHERE (candidate_id IS NOT NULL);
+
+
+--
+-- Name: migration_control_items_state; Type: INDEX; Schema: crawler; Owner: -
+--
+
+CREATE INDEX migration_control_items_state ON crawler.migration_control_items USING btree (batch_id, state, ordinal);
+
+
+--
+-- Name: migration_control_one_active; Type: INDEX; Schema: crawler; Owner: -
+--
+
+CREATE UNIQUE INDEX migration_control_one_active ON crawler.migration_control_batches USING btree ((true)) WHERE (status <> ALL (ARRAY['ended'::text, 'completed'::text]));
+
+
+--
 -- Name: ux_crawler_agent_configs_default; Type: INDEX; Schema: crawler; Owner: -
 --
 
@@ -4497,6 +5275,27 @@ CREATE UNIQUE INDEX ux_crawler_channels_registry_promotion_run ON crawler.channe
 --
 
 CREATE UNIQUE INDEX ux_crawler_contents_channel_source ON crawler.contents USING btree (channel_id, source_content_id);
+
+
+--
+-- Name: ux_crawler_migration_retry_intents_active_candidate; Type: INDEX; Schema: crawler; Owner: -
+--
+
+CREATE UNIQUE INDEX ux_crawler_migration_retry_intents_active_candidate ON crawler.migration_retry_intents USING btree (candidate_id) WHERE (status = ANY (ARRAY['requested'::text, 'dispatched'::text, 'running'::text]));
+
+
+--
+-- Name: ux_crawler_migration_system_retry_active_candidate; Type: INDEX; Schema: crawler; Owner: -
+--
+
+CREATE UNIQUE INDEX ux_crawler_migration_system_retry_active_candidate ON crawler.migration_system_retry_items USING btree (candidate_id) WHERE (status = ANY (ARRAY['retrying'::text, 'pending'::text, 'dispatched'::text]));
+
+
+--
+-- Name: ux_crawler_proxy_job_dispatch_outbox_channel_snapshot_generatio; Type: INDEX; Schema: crawler; Owner: -
+--
+
+CREATE UNIQUE INDEX ux_crawler_proxy_job_dispatch_outbox_channel_snapshot_generatio ON crawler.proxy_job_dispatch_outbox USING btree (aggregate_id, (((payload_json ->> 'dispatch_generation'::text))::bigint)) WHERE (aggregate_kind = 'channel_snapshot'::text);
 
 
 --
@@ -4707,6 +5506,55 @@ CREATE INDEX idx_publication_stream_deployment_status ON publication.stream USIN
 --
 
 CREATE UNIQUE INDEX ux_publication_channel_stream_owned ON publication.channel_stream_state USING btree (channel_id) WHERE (status = 'owned'::text);
+
+
+--
+-- Name: agent_profiles capture_finalize_recovery; Type: TRIGGER; Schema: crawler; Owner: -
+--
+
+CREATE TRIGGER capture_finalize_recovery AFTER INSERT OR DELETE OR UPDATE ON crawler.agent_profiles FOR EACH ROW EXECUTE FUNCTION crawler.capture_finalize_recovery_change();
+
+
+--
+-- Name: channel_runs capture_finalize_recovery; Type: TRIGGER; Schema: crawler; Owner: -
+--
+
+CREATE TRIGGER capture_finalize_recovery AFTER INSERT OR DELETE OR UPDATE ON crawler.channel_runs FOR EACH ROW EXECUTE FUNCTION crawler.capture_finalize_recovery_change();
+
+
+--
+-- Name: channels capture_finalize_recovery; Type: TRIGGER; Schema: crawler; Owner: -
+--
+
+CREATE TRIGGER capture_finalize_recovery AFTER INSERT OR DELETE OR UPDATE ON crawler.channels FOR EACH ROW EXECUTE FUNCTION crawler.capture_finalize_recovery_change();
+
+
+--
+-- Name: content_candidates capture_finalize_recovery; Type: TRIGGER; Schema: crawler; Owner: -
+--
+
+CREATE TRIGGER capture_finalize_recovery AFTER INSERT OR DELETE OR UPDATE ON crawler.content_candidates FOR EACH ROW EXECUTE FUNCTION crawler.capture_finalize_recovery_change();
+
+
+--
+-- Name: contents capture_finalize_recovery; Type: TRIGGER; Schema: crawler; Owner: -
+--
+
+CREATE TRIGGER capture_finalize_recovery AFTER INSERT OR DELETE OR UPDATE ON crawler.contents FOR EACH ROW EXECUTE FUNCTION crawler.capture_finalize_recovery_change();
+
+
+--
+-- Name: crawl_observations capture_finalize_recovery; Type: TRIGGER; Schema: crawler; Owner: -
+--
+
+CREATE TRIGGER capture_finalize_recovery AFTER INSERT OR DELETE OR UPDATE ON crawler.crawl_observations FOR EACH ROW EXECUTE FUNCTION crawler.capture_finalize_recovery_change();
+
+
+--
+-- Name: migration_channel_intents prevent_migration_intent_source_update; Type: TRIGGER; Schema: crawler; Owner: -
+--
+
+CREATE TRIGGER prevent_migration_intent_source_update BEFORE UPDATE ON crawler.migration_channel_intents FOR EACH ROW EXECUTE FUNCTION crawler.prevent_migration_intent_source_update();
 
 
 --
@@ -5165,6 +6013,110 @@ ALTER TABLE ONLY crawler.finalized_profiles
 
 
 --
+-- Name: incremental_youtubejs_video_batches incremental_youtubejs_video_batches_final_observation_id_fkey; Type: FK CONSTRAINT; Schema: crawler; Owner: -
+--
+
+ALTER TABLE ONLY crawler.incremental_youtubejs_video_batches
+    ADD CONSTRAINT incremental_youtubejs_video_batches_final_observation_id_fkey FOREIGN KEY (final_observation_id) REFERENCES crawler.crawl_observations(observation_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: incremental_youtubejs_video_batches incremental_youtubejs_video_batches_run_id_fkey; Type: FK CONSTRAINT; Schema: crawler; Owner: -
+--
+
+ALTER TABLE ONLY crawler.incremental_youtubejs_video_batches
+    ADD CONSTRAINT incremental_youtubejs_video_batches_run_id_fkey FOREIGN KEY (run_id) REFERENCES crawler.channel_runs(run_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: incremental_youtubejs_video_items incremental_youtubejs_video_items_run_id_cycle_key_fkey; Type: FK CONSTRAINT; Schema: crawler; Owner: -
+--
+
+ALTER TABLE ONLY crawler.incremental_youtubejs_video_items
+    ADD CONSTRAINT incremental_youtubejs_video_items_run_id_cycle_key_fkey FOREIGN KEY (run_id, cycle_key) REFERENCES crawler.incremental_youtubejs_video_batches(run_id, cycle_key) ON DELETE RESTRICT;
+
+
+--
+-- Name: migration_channel_intents migration_channel_intents_target_candidate_id_fkey; Type: FK CONSTRAINT; Schema: crawler; Owner: -
+--
+
+ALTER TABLE ONLY crawler.migration_channel_intents
+    ADD CONSTRAINT migration_channel_intents_target_candidate_id_fkey FOREIGN KEY (target_candidate_id) REFERENCES crawler.channel_candidates(candidate_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: migration_channel_inventory migration_channel_inventory_source_id_fkey; Type: FK CONSTRAINT; Schema: crawler; Owner: -
+--
+
+ALTER TABLE ONLY crawler.migration_channel_inventory
+    ADD CONSTRAINT migration_channel_inventory_source_id_fkey FOREIGN KEY (source_id) REFERENCES crawler.migration_channel_inventory_syncs(source_id) ON DELETE CASCADE;
+
+
+--
+-- Name: migration_control_batches migration_control_batches_batch_id_fkey; Type: FK CONSTRAINT; Schema: crawler; Owner: -
+--
+
+ALTER TABLE ONLY crawler.migration_control_batches
+    ADD CONSTRAINT migration_control_batches_batch_id_fkey FOREIGN KEY (batch_id) REFERENCES crawler.query_dispatch_batches(dispatch_batch_id);
+
+
+--
+-- Name: migration_control_items migration_control_items_batch_id_fkey; Type: FK CONSTRAINT; Schema: crawler; Owner: -
+--
+
+ALTER TABLE ONLY crawler.migration_control_items
+    ADD CONSTRAINT migration_control_items_batch_id_fkey FOREIGN KEY (batch_id) REFERENCES crawler.migration_control_batches(batch_id);
+
+
+--
+-- Name: migration_control_items migration_control_items_candidate_id_fkey; Type: FK CONSTRAINT; Schema: crawler; Owner: -
+--
+
+ALTER TABLE ONLY crawler.migration_control_items
+    ADD CONSTRAINT migration_control_items_candidate_id_fkey FOREIGN KEY (candidate_id) REFERENCES crawler.channel_candidates(candidate_id);
+
+
+--
+-- Name: migration_retry_intents migration_retry_intents_candidate_id_fkey; Type: FK CONSTRAINT; Schema: crawler; Owner: -
+--
+
+ALTER TABLE ONLY crawler.migration_retry_intents
+    ADD CONSTRAINT migration_retry_intents_candidate_id_fkey FOREIGN KEY (candidate_id) REFERENCES crawler.channel_candidates(candidate_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: migration_retry_intents migration_retry_intents_previous_business_run_id_fkey; Type: FK CONSTRAINT; Schema: crawler; Owner: -
+--
+
+ALTER TABLE ONLY crawler.migration_retry_intents
+    ADD CONSTRAINT migration_retry_intents_previous_business_run_id_fkey FOREIGN KEY (previous_business_run_id) REFERENCES crawler.business_run_bindings(business_run_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: migration_system_retry_items migration_system_retry_items_candidate_id_fkey; Type: FK CONSTRAINT; Schema: crawler; Owner: -
+--
+
+ALTER TABLE ONLY crawler.migration_system_retry_items
+    ADD CONSTRAINT migration_system_retry_items_candidate_id_fkey FOREIGN KEY (candidate_id) REFERENCES crawler.channel_candidates(candidate_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: migration_system_retry_items migration_system_retry_items_migration_intent_id_fkey; Type: FK CONSTRAINT; Schema: crawler; Owner: -
+--
+
+ALTER TABLE ONLY crawler.migration_system_retry_items
+    ADD CONSTRAINT migration_system_retry_items_migration_intent_id_fkey FOREIGN KEY (migration_intent_id) REFERENCES crawler.migration_channel_intents(migration_intent_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: migration_system_retry_items migration_system_retry_items_recovery_run_id_fkey; Type: FK CONSTRAINT; Schema: crawler; Owner: -
+--
+
+ALTER TABLE ONLY crawler.migration_system_retry_items
+    ADD CONSTRAINT migration_system_retry_items_recovery_run_id_fkey FOREIGN KEY (recovery_run_id) REFERENCES crawler.channel_runs(run_id) ON DELETE RESTRICT;
+
+
+--
 -- Name: observation_raw_objects observation_raw_objects_observation_id_fkey; Type: FK CONSTRAINT; Schema: crawler; Owner: -
 --
 
@@ -5250,6 +6202,30 @@ ALTER TABLE ONLY crawler.query_quality_tasks
 
 ALTER TABLE ONLY crawler.query_terms
     ADD CONSTRAINT query_terms_query_set_id_fkey FOREIGN KEY (query_set_id) REFERENCES crawler.query_sets(query_set_id) ON DELETE SET NULL;
+
+
+--
+-- Name: restored_migration_sources restored_migration_sources_source_id_fkey; Type: FK CONSTRAINT; Schema: crawler; Owner: -
+--
+
+ALTER TABLE ONLY crawler.restored_migration_sources
+    ADD CONSTRAINT restored_migration_sources_source_id_fkey FOREIGN KEY (source_id) REFERENCES crawler.migration_channel_inventory_syncs(source_id);
+
+
+--
+-- Name: youtube_api_detail_requests youtube_api_detail_requests_run_id_fkey; Type: FK CONSTRAINT; Schema: crawler; Owner: -
+--
+
+ALTER TABLE ONLY crawler.youtube_api_detail_requests
+    ADD CONSTRAINT youtube_api_detail_requests_run_id_fkey FOREIGN KEY (run_id) REFERENCES crawler.channel_runs(run_id) ON DELETE CASCADE;
+
+
+--
+-- Name: youtube_api_detail_requests youtube_api_detail_requests_task_id_fkey; Type: FK CONSTRAINT; Schema: crawler; Owner: -
+--
+
+ALTER TABLE ONLY crawler.youtube_api_detail_requests
+    ADD CONSTRAINT youtube_api_detail_requests_task_id_fkey FOREIGN KEY (task_id) REFERENCES crawler.youtube_api_tasks(task_id);
 
 
 --
@@ -5388,143 +6364,18 @@ ALTER TABLE ONLY publication.revision
     ADD CONSTRAINT revision_publication_stream_id_channel_id_fkey FOREIGN KEY (publication_stream_id, channel_id) REFERENCES publication.channel_stream_state(publication_stream_id, channel_id) ON DELETE RESTRICT;
 
 
--- incremental-youtubejs-video-checkpoint-schema:start
-CREATE TABLE IF NOT EXISTS crawler.incremental_youtubejs_video_batches (
-  run_id TEXT NOT NULL
-    REFERENCES crawler.channel_runs(run_id) ON DELETE RESTRICT,
-  cycle_key TEXT NOT NULL,
-  plan_id UUID NOT NULL,
-  channel_id TEXT NOT NULL,
-  status TEXT NOT NULL DEFAULT 'fetching'
-    CHECK (status IN ('fetching', 'ready', 'finalized')),
-  cycle_observed_at TIMESTAMPTZ NOT NULL,
-  started_at TIMESTAMPTZ NOT NULL,
-  scan_json JSONB NOT NULL,
-  anchors_json JSONB NOT NULL DEFAULT '[]'::jsonb,
-  discovery_entries_json JSONB NOT NULL DEFAULT '[]'::jsonb,
-  pending_deferred_video_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
-  sampling_plan_json JSONB NOT NULL DEFAULT '{}'::jsonb,
-  sampling_config_json JSONB NOT NULL DEFAULT '{}'::jsonb,
-  target_hash TEXT NOT NULL,
-  first_seen_checkpoint_status TEXT NOT NULL DEFAULT 'pending'
-    CHECK (first_seen_checkpoint_status IN ('pending', 'complete', 'not_applicable')),
-  first_seen_checkpoints_json JSONB NOT NULL DEFAULT '[]'::jsonb,
-  final_observation_id UUID
-    REFERENCES crawler.crawl_observations(observation_id) ON DELETE RESTRICT,
-  final_result_json JSONB,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  finalized_at TIMESTAMPTZ,
-  PRIMARY KEY (run_id, cycle_key),
-  CHECK (btrim(cycle_key) <> ''),
-  CHECK (jsonb_typeof(scan_json)='object'),
-  CHECK (jsonb_typeof(anchors_json)='array'),
-  CHECK (jsonb_typeof(discovery_entries_json)='array'),
-  CHECK (jsonb_typeof(pending_deferred_video_ids)='array'),
-  CHECK (jsonb_typeof(sampling_plan_json)='object'),
-  CHECK (jsonb_typeof(sampling_config_json)='object'),
-  CHECK (jsonb_typeof(first_seen_checkpoints_json)='array'),
-  CHECK (final_result_json IS NULL OR jsonb_typeof(final_result_json)='object'),
-  CHECK (
-    final_result_json IS NULL
-    OR (
-      final_result_json ? 'observation_id'
-      AND (final_result_json->>'observation_id')
-        IS NOT DISTINCT FROM final_observation_id::text
-    )
-  ),
-  CHECK (
-    (status='finalized'
-      AND final_observation_id IS NOT NULL
-      AND final_result_json IS NOT NULL
-      AND finalized_at IS NOT NULL)
-    OR
-    (status<>'finalized'
-      AND final_observation_id IS NULL
-      AND final_result_json IS NULL
-      AND finalized_at IS NULL)
-  )
-);
+--
+-- PostgreSQL database dump complete
+--
 
-CREATE INDEX IF NOT EXISTS idx_crawler_incremental_youtubejs_video_batches_channel
-ON crawler.incremental_youtubejs_video_batches (channel_id, created_at DESC);
+\unrestrict Hn17jwQMC3o3Sda2kwtDZXUnyNfpkDeZNqtQQgCfV8zKrCk5Scw5vEx1yaSRWtK
 
-CREATE TABLE IF NOT EXISTS crawler.incremental_youtubejs_video_items (
-  run_id TEXT NOT NULL,
-  cycle_key TEXT NOT NULL,
-  phase TEXT NOT NULL CHECK (phase IN ('first_seen', 'recent')),
-  ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
-  video_id TEXT NOT NULL CHECK (btrim(video_id) <> ''),
-  target_json JSONB NOT NULL CHECK (jsonb_typeof(target_json)='object'),
-  status TEXT NOT NULL DEFAULT 'pending'
-    CHECK (status IN ('pending', 'claimed', 'captured', 'settled_error')),
-  claim_token UUID,
-  claim_expires_at TIMESTAMPTZ,
-  detail_json JSONB,
-  field_status_json JSONB,
-  error_json JSONB,
-  attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
-  captured_at TIMESTAMPTZ,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  PRIMARY KEY (run_id, cycle_key, phase, video_id),
-  UNIQUE (run_id, cycle_key, phase, ordinal),
-  UNIQUE (run_id, cycle_key, video_id),
-  FOREIGN KEY (run_id, cycle_key)
-    REFERENCES crawler.incremental_youtubejs_video_batches(run_id, cycle_key)
-    ON DELETE RESTRICT,
-  CHECK (detail_json IS NULL OR jsonb_typeof(detail_json)='object'),
-  CHECK (field_status_json IS NULL OR jsonb_typeof(field_status_json)='object'),
-  CHECK (error_json IS NULL OR jsonb_typeof(error_json)='object'),
-  CHECK (
-    (status='pending'
-      AND claim_token IS NULL
-      AND claim_expires_at IS NULL
-      AND detail_json IS NULL
-      AND field_status_json IS NULL
-      AND error_json IS NULL
-      AND captured_at IS NULL)
-    OR
-    (status='claimed'
-      AND claim_token IS NOT NULL
-      AND claim_expires_at IS NOT NULL
-      AND detail_json IS NULL
-      AND field_status_json IS NULL
-      AND error_json IS NULL
-      AND captured_at IS NULL)
-    OR
-    (status='captured'
-      AND claim_token IS NULL
-      AND claim_expires_at IS NULL
-      AND detail_json IS NOT NULL
-      AND field_status_json IS NOT NULL
-      AND error_json IS NULL
-      AND captured_at IS NOT NULL)
-    OR
-    (status='settled_error'
-      AND claim_token IS NULL
-      AND claim_expires_at IS NULL
-      AND field_status_json IS NOT NULL
-      AND error_json IS NOT NULL
-      AND captured_at IS NOT NULL)
-  )
-);
-
-CREATE INDEX IF NOT EXISTS idx_crawler_incremental_youtubejs_video_items_claim
-ON crawler.incremental_youtubejs_video_items (run_id, cycle_key, phase, ordinal)
-WHERE status IN ('pending', 'claimed');
--- incremental-youtubejs-video-checkpoint-schema:end
-
-
-CREATE TABLE crawler.database_identity (
-    singleton boolean DEFAULT true NOT NULL,
-    database_kind text NOT NULL,
-    database_name text NOT NULL,
-    initialized_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT database_identity_kind_check CHECK ((database_kind = 'crawler'::text)),
-    CONSTRAINT database_identity_singleton_check CHECK (singleton),
-    CONSTRAINT database_identity_pkey PRIMARY KEY (singleton)
-);
+-- Fresh database seed configuration; not exported production rows.
+-- fresh-bootstrap-seeds:start
+INSERT INTO crawler.settings (setting_key,value_json) VALUES
+    ('content_enrich_dispatch', '{"mode":"clock"}'::jsonb),
+    ('content_enrich_dispatch_cursor', '{"channel_id":""}'::jsonb),
+    ('content_enrich_dispatch_mutex', '{"owner":null,"expires_at":null}'::jsonb);
 
 INSERT INTO crawler.database_identity (singleton, database_kind, database_name)
 VALUES (true, 'crawler', current_database());
@@ -5535,227 +6386,4 @@ VALUES (
   '{"status":"stopped","stop_reason":"fresh_migration_bootstrap","updated_by":"bootstrap"}'::jsonb,
   now()
 );
-
-CREATE TABLE crawler.migration_channel_intents (
-    migration_intent_id bigint GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
-    source_id text NOT NULL,
-    source_database text NOT NULL,
-    source_database_oid oid NOT NULL,
-    source_candidate_id bigint NOT NULL,
-    channel_id text NOT NULL,
-    source_snapshot jsonb NOT NULL,
-    snapshot_sha256 text NOT NULL CHECK (snapshot_sha256 ~ '^[a-f0-9]{64}$'),
-    target_candidate_id bigint UNIQUE REFERENCES crawler.channel_candidates(candidate_id) ON DELETE RESTRICT,
-    first_dispatch_batch_id text NOT NULL,
-    dispatch_attempts integer DEFAULT 0 NOT NULL CHECK (dispatch_attempts >= 0),
-    last_dispatch_at timestamp with time zone,
-    last_error text,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    UNIQUE (source_id, channel_id),
-    UNIQUE (source_id, source_candidate_id)
-);
-
-CREATE INDEX idx_crawler_migration_intents_target
-ON crawler.migration_channel_intents (target_candidate_id)
-WHERE target_candidate_id IS NOT NULL;
-
-CREATE TABLE crawler.migration_retry_intents (
-    retry_intent_id text PRIMARY KEY,
-    request_key text NOT NULL UNIQUE,
-    candidate_id bigint NOT NULL REFERENCES crawler.channel_candidates(candidate_id) ON DELETE RESTRICT,
-    previous_business_run_id text NOT NULL REFERENCES crawler.business_run_bindings(business_run_id) ON DELETE RESTRICT,
-    new_business_run_id text NOT NULL UNIQUE,
-    new_business_run_key text NOT NULL UNIQUE,
-    new_job_id text NOT NULL UNIQUE,
-    dispatch_generation bigint NOT NULL CHECK (dispatch_generation > 0),
-    reason text NOT NULL,
-    intent_hash text NOT NULL,
-    job_payload_json jsonb DEFAULT '{}'::jsonb NOT NULL,
-    status text DEFAULT 'requested'::text NOT NULL
-      CHECK (status = ANY (ARRAY['requested'::text,'dispatched'::text,'running'::text,'finished'::text,'failed'::text])),
-    dispatch_status text DEFAULT 'pending'::text NOT NULL
-      CHECK (dispatch_status = ANY (ARRAY['pending'::text,'deferred'::text,'enqueued'::text,'terminal'::text])),
-    requested_at timestamp with time zone DEFAULT now() NOT NULL,
-    dispatched_at timestamp with time zone,
-    finished_at timestamp with time zone,
-    terminal_job_attempt bigint CHECK (terminal_job_attempt > 0),
-    last_error text,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    UNIQUE (candidate_id,dispatch_generation)
-);
-
-CREATE UNIQUE INDEX ux_crawler_migration_retry_intents_active_candidate
-ON crawler.migration_retry_intents (candidate_id)
-WHERE status = ANY (ARRAY['requested'::text,'dispatched'::text,'running'::text]);
-
-CREATE INDEX idx_crawler_migration_retry_intents_status
-ON crawler.migration_retry_intents (status,requested_at);
-
-CREATE TABLE crawler.migration_system_retry_items (
-    system_retry_id bigint GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
-    migration_intent_id bigint NOT NULL REFERENCES crawler.migration_channel_intents(migration_intent_id) ON DELETE RESTRICT,
-    candidate_id bigint NOT NULL REFERENCES crawler.channel_candidates(candidate_id) ON DELETE RESTRICT,
-    failed_dispatch_batch_id text NOT NULL,
-    failed_dispatch_generation bigint NOT NULL CHECK (failed_dispatch_generation > 0),
-    failed_job_id text NOT NULL,
-    failed_job_attempt integer NOT NULL CHECK (failed_job_attempt >= 0),
-    failure_code text NOT NULL,
-    failure_category text NOT NULL,
-    failure_evidence jsonb DEFAULT '{}'::jsonb NOT NULL,
-    status text DEFAULT 'pending'::text NOT NULL
-      CHECK (status = ANY (ARRAY['retrying'::text,'pending'::text,'dispatched'::text,'resolved'::text,'cancelled'::text])),
-    retry_dispatch_generation bigint,
-    recovery_run_id text,
-    recovery_agent_job_epoch bigint DEFAULT 0 NOT NULL,
-    recovery_agent_active_job_id text,
-    recovery_agent_active_job_attempt bigint,
-    resolution text,
-    requested_at timestamp with time zone DEFAULT now() NOT NULL,
-    dispatched_at timestamp with time zone,
-    resolved_at timestamp with time zone,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    UNIQUE (migration_intent_id,failed_dispatch_generation,failed_job_id,failed_job_attempt),
-    CONSTRAINT migration_system_retry_items_recovery_run_id_fkey FOREIGN KEY (recovery_run_id) REFERENCES crawler.channel_runs(run_id) ON DELETE RESTRICT,
-    CONSTRAINT migration_system_retry_items_recovery_agent_active_job_check CHECK (((recovery_agent_job_epoch >= 0) AND (((recovery_agent_active_job_id IS NULL) AND (recovery_agent_active_job_attempt IS NULL)) OR ((recovery_agent_active_job_id IS NOT NULL) AND (recovery_agent_active_job_attempt IS NOT NULL) AND (recovery_agent_active_job_attempt > 0))))),
-    CHECK (retry_dispatch_generation IS NULL OR retry_dispatch_generation > failed_dispatch_generation)
-);
-
-CREATE UNIQUE INDEX ux_crawler_migration_system_retry_active_candidate
-ON crawler.migration_system_retry_items (candidate_id)
-WHERE status = ANY (ARRAY['retrying'::text,'pending'::text,'dispatched'::text]);
-
-CREATE INDEX idx_crawler_migration_system_retry_status
-ON crawler.migration_system_retry_items (status,requested_at,system_retry_id);
-
--- migration-channel-inventory-schema:start
-CREATE TABLE crawler.migration_channel_inventory_syncs (
-    source_id text PRIMARY KEY,
-    source_database text NOT NULL,
-    source_database_oid oid NOT NULL,
-    status text DEFAULT 'syncing'::text NOT NULL,
-    sync_token uuid NOT NULL,
-    eligible_count bigint DEFAULT 0 NOT NULL,
-    started_at timestamp with time zone DEFAULT now() NOT NULL,
-    completed_at timestamp with time zone,
-    last_error text,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT migration_channel_inventory_syncs_eligible_count_check CHECK ((eligible_count >= 0)),
-    CONSTRAINT migration_channel_inventory_syncs_status_check CHECK ((status = ANY (ARRAY['syncing'::text, 'ready'::text, 'failed'::text])))
-);
-
-CREATE TABLE crawler.migration_channel_inventory (
-    source_id text NOT NULL REFERENCES crawler.migration_channel_inventory_syncs(source_id) ON DELETE CASCADE,
-    source_candidate_id bigint NOT NULL,
-    channel_id text NOT NULL,
-    channel_url text NOT NULL,
-    handle text,
-    title text,
-    avatar_url text,
-    search_subscriber_count bigint,
-    priority integer DEFAULT 100 NOT NULL,
-    source_candidate_status text NOT NULL,
-    source_updated_at timestamp with time zone,
-    sync_token uuid NOT NULL,
-    synced_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT migration_channel_inventory_pkey PRIMARY KEY (source_id, channel_id),
-    CONSTRAINT migration_channel_inventory_source_candidate_key UNIQUE (source_id, source_candidate_id),
-    CONSTRAINT migration_channel_inventory_source_status_check CHECK ((source_candidate_status = ANY (ARRAY['discovered'::text, 'queued'::text, 'validating'::text, 'failed'::text])))
-);
-
-CREATE INDEX idx_crawler_migration_inventory_page
-ON crawler.migration_channel_inventory (source_id, priority DESC, source_candidate_id ASC);
-CREATE TABLE IF NOT EXISTS crawler.restored_migration_sources (
-  source_id TEXT NOT NULL REFERENCES crawler.migration_channel_inventory_syncs(source_id),
-  channel_id TEXT NOT NULL,
-  source_candidate_id BIGINT NOT NULL,
-  priority INTEGER NOT NULL,
-  restoration_id TEXT NOT NULL,
-  snapshot_json JSONB NOT NULL,
-  restored_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  PRIMARY KEY(source_id,channel_id),
-  UNIQUE(source_id,source_candidate_id),
-  CHECK(snapshot_json->>'channel_id'=channel_id),
-  CHECK(snapshot_json->>'source_id'=source_id),
-  CHECK(snapshot_json->>'source_candidate_status'='discovered')
-);
--- migration-channel-inventory-schema:end
-
-CREATE FUNCTION crawler.prevent_migration_intent_source_update()
-RETURNS trigger
-LANGUAGE plpgsql
-AS $$
-BEGIN
-  IF ROW(
-    NEW.source_id,
-    NEW.source_database,
-    NEW.source_database_oid,
-    NEW.source_candidate_id,
-    NEW.channel_id,
-    NEW.source_snapshot,
-    NEW.snapshot_sha256,
-    NEW.first_dispatch_batch_id
-  ) IS DISTINCT FROM ROW(
-    OLD.source_id,
-    OLD.source_database,
-    OLD.source_database_oid,
-    OLD.source_candidate_id,
-    OLD.channel_id,
-    OLD.source_snapshot,
-    OLD.snapshot_sha256,
-    OLD.first_dispatch_batch_id
-  ) THEN
-    RAISE EXCEPTION 'Migration intent source identity is immutable';
-  END IF;
-  RETURN NEW;
-END;
-$$;
-
-CREATE TRIGGER prevent_migration_intent_source_update
-BEFORE UPDATE ON crawler.migration_channel_intents
-FOR EACH ROW
-EXECUTE FUNCTION crawler.prevent_migration_intent_source_update();
-
---
--- PostgreSQL database dump complete
---
-
-\unrestrict lJLMm7kerNHrnNnKPrSGNhBVfEqa6y3pntHpQL3Og2IziHLUyFiTXlh9XI747T8
-
--- migration-batch-control-schema:start
-CREATE TABLE IF NOT EXISTS crawler.migration_control_batches (
- batch_id TEXT PRIMARY KEY REFERENCES crawler.query_dispatch_batches(dispatch_batch_id),
- source_id TEXT NOT NULL,
- selection TEXT NOT NULL,
- status TEXT NOT NULL CHECK(status IN ('preparing','running','pausing','paused','stopping','ended','completed')),
- version BIGINT NOT NULL DEFAULT 1,
- total_count INTEGER NOT NULL DEFAULT 0,
- max_in_flight INTEGER NOT NULL DEFAULT 20 CHECK(max_in_flight BETWEEN 1 AND 200),
- frozen_at TIMESTAMPTZ,
- paused_at TIMESTAMPTZ,
- paused_seconds DOUBLE PRECISION NOT NULL DEFAULT 0,
- finished_at TIMESTAMPTZ,
- created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
- updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-CREATE UNIQUE INDEX IF NOT EXISTS migration_control_one_active
- ON crawler.migration_control_batches ((true)) WHERE status NOT IN ('ended','completed');
-CREATE TABLE IF NOT EXISTS crawler.migration_control_items (
- batch_id TEXT NOT NULL REFERENCES crawler.migration_control_batches(batch_id),
- channel_id TEXT NOT NULL,
- source_candidate_id BIGINT NOT NULL,
- snapshot_json JSONB,
- ordinal BIGINT NOT NULL,
- state TEXT NOT NULL DEFAULT 'pending' CHECK(state IN ('pending','started','terminal','released')),
- candidate_id BIGINT REFERENCES crawler.channel_candidates(candidate_id),
- outcome TEXT CHECK(outcome IN ('success','dormant','rejected','failed','existing')),
- error_message TEXT,
- start_failures INTEGER NOT NULL DEFAULT 0,
- started_at TIMESTAMPTZ,
- finished_at TIMESTAMPTZ,
- PRIMARY KEY(batch_id,channel_id),
- UNIQUE(batch_id,ordinal)
-);
-CREATE INDEX IF NOT EXISTS migration_control_items_state ON crawler.migration_control_items(batch_id,state,ordinal);
-CREATE INDEX IF NOT EXISTS migration_control_items_candidate ON crawler.migration_control_items(candidate_id) WHERE candidate_id IS NOT NULL;
--- migration-batch-control-schema:end
+-- fresh-bootstrap-seeds:end

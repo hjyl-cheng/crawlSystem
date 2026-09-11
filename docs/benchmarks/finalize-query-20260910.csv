@@ -1,0 +1,4 @@
+channels,candidates,contents,capture_triggers,prepared_ms,legacy_ms,legacy_error,bounded_page_p50_ms,bounded_page_p95_ms
+50000,150000,150000,True,241672,3920,,30,50
+100000,300000,300000,True,247843,6656,,18,76
+400000,1200000,1200000,True,1539722,48125,,50,227

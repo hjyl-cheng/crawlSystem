@@ -1,3 +1,4 @@
+import { createMigrationProgressReader } from "./migrationThroughput.js";
 import { controlledMigrationGuard } from './controlledMigrationGuard.js';
 import {createMigrationControlBatch,controlMigrationBatch,loadMigrationControlProgress,migrationBatchControlEnabled} from "./migrationBatchControl.js";
 import express from "express";
@@ -313,8 +314,9 @@ app.post("/api/migration/channels/batch", asyncRoute(async (req, res) => {
   res.status(result.status === "preparing" ? 202 : result.created ? 201 : 200).json(result);
 }));
 
+const readSampledMigrationProgress = createMigrationProgressReader(query);
 app.get("/api/migration/batches", asyncRoute(async (_req,res)=>{
-  res.json(migrationBatchControlEnabled()?await loadMigrationControlProgress(query):{ok:true,batches:[],active:null});
+  res.json(migrationBatchControlEnabled()?await (process.env.CONTROLLER_THROUGHPUT_ENABLED === "true" ? readSampledMigrationProgress() : loadMigrationControlProgress(query)):{ok:true,batches:[],active:null});
 }));
 app.post("/api/migration/batches/:batchId/:action", asyncRoute(async(req,res)=>{
   if(!migrationBatchControlEnabled())return res.status(409).json({ok:false,error:"批次控制尚未启用"});
