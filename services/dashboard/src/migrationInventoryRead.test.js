@@ -15,9 +15,9 @@ function limitedSharedMemoryPool() {
       else if (sql === "SET LOCAL max_parallel_workers_per_gather=0") {
         assert.ok(inTransaction);
         parallelWorkers = 0;
-      } else if (sql === "SET LOCAL statement_timeout='20s'") {
+      } else if (sql === "SET LOCAL statement_timeout='60s'") {
         assert.ok(inTransaction);
-        timeout = 20_000;
+        timeout = 60_000;
       } else if (sql === "COMMIT" || sql === "ROLLBACK") {
         inTransaction = false;
         parallelWorkers = 2;
@@ -28,7 +28,7 @@ function limitedSharedMemoryPool() {
         if (parallelWorkers > 0) {
           throw Object.assign(new Error("could not resize shared memory segment: No space left on device"), { code: "53100" });
         }
-        assert.equal(timeout, 20_000);
+        assert.equal(timeout, 60_000);
         if (params?.[0] === "fail") throw Object.assign(new Error("query failed"), { code: "57014" });
         return { rows: [{ total: "400000" }] };
       }
