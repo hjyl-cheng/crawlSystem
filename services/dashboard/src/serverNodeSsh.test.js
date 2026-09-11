@@ -4,14 +4,27 @@ import ssh2 from 'ssh2';
 import { mkdtemp, rm, readdir, readFile, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createNodeSsh } from './serverNodeSsh.js';
+import { createNodeSsh, generateNodeKey } from './serverNodeSsh.js';
+
+test('invalid generated key pairs are rejected before persistence and failure is bounded', () => {
+  const valid = generateNodeKey();
+  let calls = 0;
+  const generated = generateNodeKey('test', () => ++calls === 1 ? { public: 'invalid', private: 'invalid' } : valid);
+  assert.equal(generated, valid);
+  assert.equal(calls, 2);
+  calls = 0;
+  assert.throws(() => generateNodeKey('test', () => { calls++; return { public: 'invalid', private: 'invalid' }; }), /生成校验失败/);
+  assert.equal(calls, 4);
+  const second = generateNodeKey();
+  assert.throws(() => generateNodeKey('test', () => ({ private: valid.private, public: second.public })), /生成校验失败/);
+});
 
 // A real SSH handshake verifies host pinning independently of bootstrap scripts.
 test('SSH pins authenticated host keys and stores only per-node keys with restricted permissions', async t => {
   const stateDir = await mkdtemp(join(tmpdir(), 'qy-ssh-test-'));
   t.after(() => rm(stateDir, { recursive: true, force: true }));
   const password = 'test-only-secret';
-  let hostKey = ssh2.utils.generateKeyPairSync('ed25519').private;
+  let hostKey = generateNodeKey().private;
   async function serve(port = 0) {
     const server = new ssh2.Server({ hostKeys: [hostKey] }, client => {
       client.on('error', () => {});
@@ -34,7 +47,7 @@ test('SSH pins authenticated host keys and stores only per-node keys with restri
     assert.equal((await stat(join(stateDir, file))).mode & 0o777, 0o600);
     assert.ok(!(await readFile(join(stateDir, file), 'utf8')).includes(password));
   }
-  hostKey = ssh2.utils.generateKeyPairSync('ed25519').private;
+  hostKey = generateNodeKey().private;
   server = await serve(port);
   await assert.rejects(() => ssh.connect(node, { password }), /SSH 连接失败/);
 });

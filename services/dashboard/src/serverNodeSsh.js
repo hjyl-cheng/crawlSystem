@@ -7,6 +7,20 @@ import { beszelVersion } from './serverNodeMonitoring.js';
 const quote = value => "'" + String(value).replaceAll("'", "'\\''") + "'";
 const { Client, utils } = ssh2;
 const uuidPattern = /^[a-f0-9-]{36}$/;
+export function generateNodeKey(comment = '', generate = utils.generateKeyPairSync) {
+  // ssh2 1.17 strips ALL leading zero bytes from the Ed25519 DER bit string,
+  // sometimes shortening the 32-byte public key. Reject such newly generated
+  // pairs before persistence. Existing registered keys are never rotated here.
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const key = generate('ed25519', { comment });
+    const parsed = utils.parseKey(key.private);
+    const privateKeys = Array.isArray(parsed) ? parsed : [parsed];
+    const publicKey = utils.parseKey(key.public);
+    if (privateKeys.length === 1 && !(privateKeys[0] instanceof Error) && !(publicKey instanceof Error)
+      && privateKeys[0].getPublicSSH().equals(publicKey.getPublicSSH())) return key;
+  }
+  throw new Error('SSH 密钥生成校验失败，请重试');
+}
 export function validateBootstrapPassword(password) {
   if (typeof password !== 'string' || password.length > 1024 || /[\r\n\0]/.test(password)) {
     throw Object.assign(new Error('密码格式不正确，不支持换行或超过 1024 个字符'), { statusCode: 400 });
@@ -21,7 +35,7 @@ export function createNodeSsh({ stateDir, fetchImpl = fetch }) {
     const file = join(stateDir, `${id}.key`);
     try { return JSON.parse(await readFile(file, 'utf8')); }
     catch (error) { if (error.code !== 'ENOENT') throw error; }
-    const key = utils.generateKeyPairSync('ed25519', { comment: `qy-managed-${id}` });
+    const key = generateNodeKey(`qy-managed-${id}`);
     try { await writeFile(file, JSON.stringify(key), { mode: 0o600, flag: 'wx' }); }
     catch (error) { if (error.code !== 'EEXIST') throw error; }
     return JSON.parse(await readFile(file, 'utf8'));
@@ -52,7 +66,7 @@ export function createNodeSsh({ stateDir, fetchImpl = fetch }) {
     }
     return { client, key, fingerprint };
   }
-  async function exec(connection, command, { input = '', timeout = 20000 } = {}) {
+  async function exec(connection, command, { input = '', timeout = 20000, safeFailureMessages = {} } = {}) {
     return new Promise((resolve, reject) => {
       let output = '';
       let stream;
@@ -64,13 +78,17 @@ export function createNodeSsh({ stateDir, fetchImpl = fetch }) {
         channel.on('data', data => { if (output.length < 8192) output += data.toString(); });
         channel.stderr.resume(); // Never retain remote output that could contain credentials.
         channel.on('error', () => done(new Error('远程操作连接中断')));
-        channel.on('close', code => code === 0 ? done(null, output.trim()) : done(new Error(`远程操作失败（退出码 ${code ?? '未知'}），请检查 sudo 权限、systemd 或安装环境`)));
+        channel.on('close', code => {
+          const failureCode = output.match(/^QY_RUNTIME_ERROR=([a-z_]+)$/m)?.[1];
+          code === 0 ? done(null, output.trim()) : done(new Error(safeFailureMessages[failureCode]
+            || `远程操作失败（退出码 ${code ?? '未知'}），请检查 sudo 权限、systemd 或安装环境`));
+        });
         channel.end(input);
       });
     });
   }
-  async function rootExec(connection, script, password, timeout = 20000) {
-    const command = `timeout 180 sh -c ${quote(script)}`;
+  async function rootExec(connection, script, password, timeout = 20000, remoteTimeout = 180) {
+    const command = `timeout ${remoteTimeout} sh -c ${quote(script)}`;
     if (connection.root) return exec(connection, command, { timeout });
     if (connection.passwordSudo) return exec(connection, `sudo -S -p '' ${command}`, { input: `${password}\n`, timeout });
     return exec(connection, `sudo -n ${command}`, { timeout });
@@ -151,5 +169,91 @@ systemctl restart qy-beszel-agent.service
 systemctl is-active --quiet qy-beszel-agent.service`, password, 190000);
     } finally { await exec(connection, `rm -rf -- ${quote(staging)}`).catch(() => {}); }
   }
-  return { connect, verify, installKey, installMonitoring, close(connection) { connection?.client.end(); } };
+  async function prepareRuntime(connection, node, password, beforeStep, afterStep) {
+    if (!uuidPattern.test(node.id)) throw new Error('节点标识无效');
+    const script = await readFile(new URL('./nodeRuntime/bootstrap.sh', import.meta.url));
+    const digest = createHash('sha256').update(script).digest('hex');
+    const staging = `/tmp/qy-runtime-${randomUUID()}`;
+    const installed = `/opt/qy-node/runtime/bootstrap/${digest}.sh`;
+    const errors = {
+      unsupported_os: '运行环境目前支持 Ubuntu 22.04/24.04 和 Debian 12/13', unsupported_arch: '运行环境需要 x86_64 或 arm64',
+      systemd_required: '服务器需要使用 systemd 管理服务', node_identity_conflict: '该服务器已属于另一个节点登记，请核实服务器地址',
+      existing_runtime_conflict: '服务器已有其他容器运行时，请核实后再准备 Docker 环境',
+      apt_update: '软件源更新失败，请检查节点网络或 apt 锁', apt_prerequisites: 'Docker 安装依赖准备失败',
+      repository_key_download: 'Docker 软件源密钥下载失败', repository_key_invalid: 'Docker 软件源密钥校验失败',
+      docker_install: 'Docker 安装失败，现有软件包未被自动移除', compose_install: 'Docker Compose 安装失败',
+      docker_start: 'Docker 启动失败', docker_enable: 'Docker 开机启动设置失败', docker_unavailable: 'Docker 尚不可用',
+      compose_version: 'Docker Compose 版本不支持', directory_permissions: '节点目录权限校验失败',
+    };
+    const root = async (body, seconds = 60) => {
+      const command = `timeout --signal=TERM --kill-after=10 ${seconds} sh -c ${quote(body)}`;
+      return exec(connection, connection.root ? command : `${connection.passwordSudo ? "sudo -S -p ''" : 'sudo -n'} ${command}`,
+        { input: connection.passwordSudo ? `${password}\n` : '', timeout: (seconds + 20) * 1000, safeFailureMessages: errors });
+    };
+    await beforeStep('check');
+    await exec(connection, `umask 077; mkdir ${quote(staging)}`);
+    try {
+      await new Promise((resolve, reject) => {
+        const timer = setTimeout(() => { connection.client.destroy(); reject(new Error('环境脚本上传超时')); }, 30000);
+        connection.client.sftp((error, session) => {
+          if (error) { clearTimeout(timer); return reject(new Error('环境脚本上传失败')); }
+          const stream = session.createWriteStream(`${staging}/bootstrap.sh`, { mode: 0o600 });
+          stream.on('error', () => { clearTimeout(timer); session.end(); reject(new Error('环境脚本上传失败')); });
+          stream.on('close', () => { clearTimeout(timer); session.end(); resolve(); });
+          stream.end(script);
+        });
+      });
+      await root(`set -eu
+exec 9>/run/lock/qy-node-runtime.lock
+flock -n 9
+install -d -m 755 /opt/qy-node/runtime/bootstrap
+if [ ! -f ${quote(installed)} ]; then
+  install -m 700 ${quote(`${staging}/bootstrap.sh`)} ${quote(installed)}
+fi
+printf '%s  %s\\n' ${quote(digest)} ${quote(installed)} | sha256sum -c - >/dev/null`);
+      let result;
+      for (const step of ['check', 'docker', 'layout', 'verify']) {
+        if (step !== 'check') await beforeStep(step);
+        const output = await root(`sh ${quote(installed)} ${quote(step)} ${quote(node.id)}`, step === 'docker' ? 900 : 60);
+        if (step === 'verify') {
+          try { result = JSON.parse(output); } catch { throw new Error('环境检查结果格式异常'); }
+          if (result.revision !== 1 || result.nodeId !== node.id || !['x86_64', 'aarch64'].includes(result.arch)
+            || !['ubuntu', 'debian'].includes(result.os)
+            || ![result.dockerVersion, result.composeVersion].every(value => typeof value === 'string' && /^[a-zA-Z0-9.+_-]{1,80}$/.test(value))) throw new Error('环境检查结果与节点不匹配');
+          result = { revision: 1, arch: result.arch, os: result.os, dockerVersion: result.dockerVersion, composeVersion: result.composeVersion, scriptSha256: digest };
+        }
+        await afterStep(step);
+      }
+      return result;
+    } finally { await exec(connection, `rm -rf -- ${quote(staging)}`).catch(() => {}); }
+  }
+  async function deployWorkers(connection,node,plan,credentials,password,beforeStep,afterStep){
+    if(!uuidPattern.test(node.id) || plan.nodeId!==node.id)throw new Error('节点标识无效');
+    const script=await readFile(new URL('./nodeRuntime/deployWorkers.py',import.meta.url));
+    const staging=`/tmp/qy-workers-${randomUUID()}`;
+    await exec(connection,`umask 077; mkdir ${quote(staging)}`);
+    try{
+      await new Promise((resolve,reject)=>{
+        const timer=setTimeout(()=>{connection.client.destroy();reject(new Error('部署文件上传超时'));},30000);
+        connection.client.sftp((error,session)=>{
+          if(error){clearTimeout(timer);reject(new Error('部署文件上传失败'));return;}
+          const upload=(name,bytes)=>new Promise((done,fail)=>{
+            const stream=session.createWriteStream(`${staging}/${name}`,{mode:0o600});
+            stream.once('error',fail);stream.once('close',done);stream.end(bytes);
+          });
+          (async()=>{await upload('deploy.py',script);await upload('bundle.json',Buffer.from(JSON.stringify({plan,credentials})));})()
+            .then(resolve,()=>reject(new Error('部署文件上传失败'))).finally(()=>{clearTimeout(timer);session.end();});
+        });
+      });
+      for(const step of ['files','start','verify']){
+        await beforeStep(step);
+        const command=`set -eu\nexec 9>/run/lock/qy-node-runtime.lock\nflock -n 9\npython3 ${quote(`${staging}/deploy.py`)} ${quote(`${staging}/bundle.json`)} ${quote(step)}`;
+        const output=await rootExec(connection,command,password,step==='start'?760000:120000,step==='start'?740:110);
+        const result=JSON.parse(output);
+        if(result.nodeId!==node.id || result.deploymentId!==plan.deploymentId || result.step!==step || result.count!==plan.count)throw new Error('部署检查结果与节点不匹配');
+        await afterStep(step);
+      }
+    }finally{await exec(connection,`rm -rf -- ${quote(staging)}`).catch(()=>{});}
+  }
+  return { connect, verify, installKey, installMonitoring, prepareRuntime, deployWorkers, close(connection) { connection?.client.end(); } };
 }

@@ -63,7 +63,7 @@ function errorFromEvidence(evidence) {
   return error;
 }
 
-function failureDecisions(metrics, attemptError = null) {
+export function failureDecisions(metrics, attemptError = null) {
   const evidence = [...(metrics.failure_evidence || [])];
   if (attemptError) {
     evidence.push({

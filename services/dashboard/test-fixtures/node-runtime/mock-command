@@ -1,0 +1,61 @@
+#!/bin/sh
+# External package installation/service actions are simulated only in this
+# disposable SSH fixture. bootstrap.sh itself and filesystem checks are real.
+set -eu
+name=$(basename "$0")
+printf '%s %s\n' "$name" "$*" >> /test-state/commands
+case "$name" in
+  apt-get)
+    [ ! -f /test-state/fail-apt ] || exit 100
+    case " $* " in *' docker-ce '*) ln -sf /fixture/mock-command /usr/local/bin/docker ;; esac
+    case " $* " in *' docker-compose-plugin '*) touch /test-state/compose ;; esac
+    ;;
+  curl)
+    # A nonsecret dummy key; GPG below simulates the expected fingerprint.
+    case "$*" in *https://download.docker.com/linux/debian/gpg*) ;; *) exit 91 ;; esac
+    while [ "$#" -gt 0 ]; do
+      if [ "$1" = -o ]; then printf 'fixture key' > "$2"; exit 0; fi
+      shift
+    done
+    exit 92 ;;
+  gpg)
+    if [ -f /test-state/bad-key ]; then printf 'fpr:::::::::BAD:\n'; else printf 'fpr:::::::::9DC858229FC7DD38854AE2D88D81803C0EBFCD88:\n'; fi
+    ;;
+  docker)
+    [ "$1" = --host ] && [ "$2" = unix:///var/run/docker.sock ] || exit 93
+    shift 2
+    if [ "${1:-}" = --config ]; then
+      [ -f "$2/config.json" ] || exit 99
+      python3 -c 'import json,os,stat,sys; p=sys.argv[1]; assert stat.S_IMODE(os.stat(p).st_mode)==0o600; d=json.load(open(p)); assert list(d)==["auths"] and len(d["auths"])==1' "$2/config.json"
+      shift 2
+    fi
+    case "$*" in
+      info) test -f /test-state/docker-running ;;
+      'version --format {{.Server.Version}}') printf '28.3.2\n' ;;
+      'compose version --short') test -f /test-state/compose && printf 'v2.39.2\n' ;;
+      'compose -p '* )
+        # Fixed deployment script is real; only the node's Docker daemon is
+        # simulated. Never expose the host socket to this SSH fixture.
+        shift 3
+        [ "$1" = -f ] || exit 97
+        compose_file=$2
+        shift 2
+        case "$*" in
+          'config --quiet') python3 -m json.tool "$compose_file" >/dev/null ;;
+          pull) [ ! -f /test-state/fail-pull ] ;;
+          'up -d --no-recreate --pull never') cp "$compose_file" /test-state/deployed-compose.json ;;
+          'ps --all -q') python3 -c 'import json; print("\n".join(json.load(open("/test-state/deployed-compose.json"))["services"]))' ;;
+          *) exit 98 ;;
+        esac ;;
+      'inspect '* )
+        python3 -c 'import json; p=json.load(open("/test-state/deployed-compose.json")); print(json.dumps([{"State":{"Running":True,"Health":{"Status":"healthy"}}} for _ in p["services"]]))' ;;
+      *) exit 94 ;;
+    esac ;;
+  systemctl)
+    case "$*" in
+      'start docker') touch /test-state/docker-running ;;
+      'enable docker') : ;;
+      *) exit 95 ;;
+    esac ;;
+  *) exit 96 ;;
+esac

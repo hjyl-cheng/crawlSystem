@@ -13,7 +13,7 @@ test("node registration accepts addresses but never credentials, shell commands 
     { username: "ubuntu; id" }, { sshAlias: "-F /tmp/config" }, { port: 0 },
     { password: "should-not-be-stored" }, { privateKey: "should-not-be-stored" },
     { online: true }, { workers: [{ role: "fullcrawl", count: 1, running: true }] },
-    { provisioning: { state: "not_started" } },
+    { provisioning: { state: "not_started" } }, { runtime: { state: "ready" } },
     { workers: [{ role: "toString", count: 1 }] },
     { workers: [{ role: "fullcrawl", count: 1 }, { role: "fullcrawl", count: 2 }] },
     { workers: [{ role: "incremental", count: -1 }] },
@@ -25,12 +25,15 @@ test("controlled migration allows node metadata changes and removal but no deplo
   assert.equal(allowDashboardRequestDuringControlledMigration("PUT", "/api/server-nodes/65e95c15-0311-4079-a90c-bdf887db6604"), true);
   assert.equal(allowDashboardRequestDuringControlledMigration("DELETE", "/api/server-nodes/65e95c15-0311-4079-a90c-bdf887db6604"), true);
   assert.equal(allowDashboardRequestDuringControlledMigration("POST", "/api/server-nodes/65e95c15-0311-4079-a90c-bdf887db6604/initialize"), true);
+  assert.equal(allowDashboardRequestDuringControlledMigration("POST", "/api/server-nodes/65e95c15-0311-4079-a90c-bdf887db6604/prepare-runtime"), true);
   for (const [method, path] of [
     ["POST", "/api/server-nodes/65e95c15-0311-4079-a90c-bdf887db6604/deploy"],
     ["DELETE", "/api/server-nodes/65e95c15-0311-4079-a90c-bdf887db6604/deploy"],
     ["DELETE", "/api/server-nodes"],
     ["DELETE", "/api/server-nodes/65e95c15-0311-4079-a90c-bdf887db6604/initialize"],
     ["POST", "/api/server-nodes/deploy"], ["POST", "/queues/pause"],
+    ["DELETE", "/api/server-nodes/65e95c15-0311-4079-a90c-bdf887db6604/prepare-runtime"],
+    ["POST", "/api/server-nodes/65e95c15-0311-4079-a90c-bdf887db6604/prepare-runtime/deploy"],
   ]) assert.equal(allowDashboardRequestDuringControlledMigration(method, path), false);
 });
 

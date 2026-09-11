@@ -1,0 +1,10 @@
+# Overlay only node management on the exact running Dashboard image. This
+# preserves separately deployed migration fixes outside this worktree.
+ARG QY_DASHBOARD_BASE_IMAGE
+FROM ${QY_DASHBOARD_BASE_IMAGE}
+WORKDIR /app
+COPY services/dashboard/src/serverNode*.js services/dashboard/src/serverNodes.css ./src/
+COPY services/dashboard/src/nodeRuntime ./src/nodeRuntime
+COPY services/dashboard/src/controlledWritePolicy.js ./src/controlledWritePolicy.js
+COPY services/dashboard/scripts/installNodeManagement.mjs /tmp/installNodeManagement.mjs
+RUN node /tmp/installNodeManagement.mjs && rm /tmp/installNodeManagement.mjs

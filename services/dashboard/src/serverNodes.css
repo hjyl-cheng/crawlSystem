@@ -18,3 +18,4 @@
 @media(max-width:1050px){.nodes-journey{gap:12px;padding:17px 14px}.nodes-journey li{gap:8px}.nodes-journey li>b{width:27px;height:27px}}
 @media(max-width:540px){.nodes-journey{grid-template-columns:1fr;gap:17px}.nodes-journey small{font-size:11px}.nodes-card-footer>div{gap:6px}.nodes-initialization-steps li{gap:8px}.nodes-dialog-footer #node-add-initialize{flex-basis:100%}.nodes-deletion-checks li{gap:10px}}
 .nodes-metric:last-child strong{font-size:13px;line-height:2.6;white-space:nowrap}.nodes-metric small{overflow-wrap:anywhere}
+.nodes-card-footer{flex-wrap:wrap}.nodes-card-footer>div{flex-wrap:wrap}.nodes-initialization-steps li>div{min-width:0}

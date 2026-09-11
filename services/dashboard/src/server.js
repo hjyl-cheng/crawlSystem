@@ -1,5 +1,7 @@
 import {migrationBatchPanel} from "./migrationBatchPanel.js";
 import { createServerNodeStore } from "./serverNodes.js";
+import { nodeRuntimeFromEnv } from './serverNodeRuntime.js';
+import { workerDeploymentFromEnv } from './serverNodeWorkerDeployment.js';
 import { serverNodesRoutes } from "./serverNodesRoutes.js";
 import { nodeOnboardingFromEnv } from "./serverNodeOnboarding.js";
 import express from "express";
@@ -4739,7 +4741,7 @@ app.use((req, res, next) => {
 
 app.get("/", (_req, res) => res.redirect("/queries"));
 const serverNodeStore = createServerNodeStore(db);
-app.use(serverNodesRoutes({ store: serverNodeStore, layout, onboarding: nodeOnboardingFromEnv(serverNodeStore) }));
+app.use(serverNodesRoutes({ store: serverNodeStore, layout, onboarding: nodeOnboardingFromEnv(serverNodeStore), runtime: nodeRuntimeFromEnv(serverNodeStore), workerDeployment: workerDeploymentFromEnv(serverNodeStore) }));
 
 app.get("/health", async (_req, res) => {
   try {

@@ -13,8 +13,8 @@ export function renderServerNodesPage() {
       <div class="nodes-stat"><span>计划 Worker</span><strong id="nodes-planned">—</strong><small>已保存，尚未部署</small></div>
       <div class="nodes-stat"><span>实际运行 Worker</span><strong>—</strong><small>等待接入运行状态</small></div>
     </div>
-    <ol class="nodes-journey" aria-label="服务器接入流程"><li class="current"><b>01</b><div><strong>添加服务器</strong><small>地址与登录信息</small></div></li><li><b>02</b><div><strong>初始化与监控</strong><small>验证 SSH · 配置密钥 · 接入 Beszel</small></div></li><li><b>03</b><div><strong>配置 Worker</strong><small>节点就绪后添加</small></div></li></ol>
-    <div class="nodes-stage"><span class="nodes-stage-icon" aria-hidden="true">i</span><div><strong>添加服务器后自动完成连接与监控接入</strong><p>填写登录信息，点击“添加并初始化”。页面会显示各步骤进度，成功后可配置 Worker；也可以仅保存信息，稍后初始化。</p></div></div>
+    <ol class="nodes-journey" aria-label="服务器接入流程"><li class="current"><b>01</b><div><strong>添加并初始化</strong><small>验证 SSH · 配置密钥 · 接入 Beszel</small></div></li><li><b>02</b><div><strong>准备运行环境</strong><small>Docker · Compose · 运行目录</small></div></li><li><b>03</b><div><strong>配置 Worker</strong><small>保存类型与数量计划</small></div></li></ol>
+    <div class="nodes-stage"><span class="nodes-stage-icon" aria-hidden="true">i</span><div><strong>按步骤完成服务器接入</strong><p>添加并初始化后，在服务器卡片点击“准备运行环境”，查看各步骤进度。Worker 类型与数量可以先保存为计划。</p></div></div>
     <div class="nodes-list-heading"><h2>服务器列表 <span id="nodes-count"></span></h2><div class="nodes-filters"><label class="nodes-search"><span class="nodes-sr-only">搜索服务器名称或地址</span><input id="nodes-search" type="search" placeholder="搜索名称或 IP 地址" autocomplete="off"></label><label><span class="nodes-sr-only">筛选节点类型</span><select id="nodes-kind"><option value="all">全部类型</option><option value="center">中心节点</option><option value="execution">执行节点</option></select></label></div></div>
     <div id="nodes-list" class="nodes-list" aria-live="polite"><div class="nodes-empty"><span class="nodes-loading">正在读取服务器列表…</span></div></div>
     <noscript><p class="nodes-stage">请启用 JavaScript 以加载和管理服务器。</p></noscript>
@@ -62,13 +62,31 @@ export function renderServerNodesPage() {
     <p class="nodes-footnote">删除仅移除本页的服务器登记和保存的 Worker 计划，不会卸载远程服务、删除 SSH 密钥或清除已采集的业务数据。已初始化节点的运行校验尚未接入，暂不开放删除。</p>
     <div class="nodes-dialog-footer"><button type="button" class="nodes-button" data-close="node-delete">返回</button><button type="button" id="node-delete-confirm" class="nodes-button danger" disabled>正在检查…</button></div>
   </dialog>
+  <dialog id="node-runtime" class="nodes-dialog" aria-labelledby="node-runtime-title">
+    <div class="nodes-dialog-heading"><div><div class="nodes-eyebrow" id="node-runtime-name"></div><h2 id="node-runtime-title">准备 Worker 运行环境</h2></div><button type="button" class="nodes-icon-button" data-close="node-runtime" aria-label="关闭">×</button></div>
+    <p class="nodes-dialog-intro">自动安装或复用 Docker 与 Compose，准备节点目录并检查环境。完成后再部署 Worker。</p>
+    <label class="nodes-field" id="node-runtime-password-field">sudo 密码（按需填写）<input type="password" id="node-runtime-password" autocomplete="new-password" placeholder="SSH 使用已配置密钥；sudo 免密时留空"></label>
+    <ol class="nodes-initialization-steps" id="node-runtime-steps"><li><b>1</b><div><strong>连接服务器</strong><small>验证专用密钥与 sudo 权限</small></div><span>待执行</span></li><li><b>2</b><div><strong>检查系统</strong><small>核实系统版本、架构与节点身份</small></div><span>待执行</span></li><li><b>3</b><div><strong>准备 Docker 与 Compose</strong><small>已有环境直接复用，首次安装可能需要几分钟</small></div><span>待执行</span></li><li><b>4</b><div><strong>准备运行目录</strong><small>建立配置、凭据与采集结果暂存目录</small></div><span>待执行</span></li><li><b>5</b><div><strong>检查环境可用性</strong><small>检查容器引擎、Compose 与目录权限</small></div><span>待执行</span></li></ol>
+    <p class="nodes-footnote" id="node-runtime-status" role="status"></p>
+    <div class="nodes-dialog-footer"><button type="button" class="nodes-button" data-close="node-runtime">关闭</button><button type="button" class="nodes-button primary" id="node-runtime-start">开始准备</button></div>
+  </dialog>
   <dialog id="node-workers" class="nodes-dialog" aria-labelledby="node-workers-title">
     <form id="node-workers-form"><div class="nodes-dialog-heading"><h2 id="node-workers-title">配置 Worker</h2><button type="button" class="nodes-icon-button" data-close="node-workers" aria-label="关闭">×</button></div>
     <p class="nodes-dialog-intro">保存这台节点的 Worker 类型与计划数量。设为 0 表示不配置该类型。</p>
     <div id="node-workers-fields" class="nodes-form-grid"></div>
-    <p class="nodes-footnote">此处保存部署计划。跨服务器 Worker 部署尚未接入，保存不会启动采集任务。</p>
+    <div class="nodes-auth-choice"><strong id="node-workers-runtime-state">运行环境尚未准备</strong><p>可在服务器卡片上准备运行环境，再进行 Worker 部署。</p><button type="button" class="nodes-button" id="node-workers-deployment-preview">查看已保存计划的部署方案</button><p id="node-workers-deployment-status" role="status" hidden></p></div>
+    <p class="nodes-footnote">此处保存部署计划。保存不会启动容器。在服务器卡片点击“部署 Worker”后，系统下发配置、启动容器并检查中心连接。</p>
     <p id="node-workers-error" class="nodes-form-error" role="alert" hidden></p>
     <div class="nodes-dialog-footer"><button type="button" class="nodes-button" data-close="node-workers">取消</button><button type="submit" class="nodes-button primary">保存配置</button></div></form>
+  </dialog>
+  <dialog id="node-deploy" class="nodes-dialog" aria-labelledby="node-deploy-title">
+    <div class="nodes-dialog-heading"><div><div class="nodes-eyebrow" id="node-deploy-name"></div><h2 id="node-deploy-title">部署增量 Worker</h2></div><button type="button" class="nodes-icon-button" data-close="node-deploy" aria-label="关闭">×</button></div>
+    <p class="nodes-dialog-intro" id="node-deploy-plan"></p>
+    <p class="nodes-footnote">容器启动后先等待中心启用。每个 Worker 一次执行一个频道的原增量计划，使用 YouTubeJS。增加数量会保留已有实例；缩容需先停止派发并完成任务收尾。</p>
+    <label class="nodes-field" id="node-deploy-password-field">sudo 密码（按需填写）<input type="password" id="node-deploy-password" autocomplete="new-password" placeholder="SSH 使用已配置密钥；sudo 免密时留空"></label>
+    <ol id="node-deploy-steps" class="nodes-initialization-steps">${['中心登记与专用凭据','连接服务器','下发配置与准备暂存目录','启动 Worker 容器','检查容器健康','核实中心连接'].map((label,i)=>`<li><b>${i+1}</b><div><strong>${label}</strong></div><span>待执行</span></li>`).join('')}</ol>
+    <p id="node-deploy-status" class="nodes-footnote" role="status"></p>
+    <div class="nodes-dialog-footer"><button type="button" class="nodes-button" data-close="node-deploy">关闭</button><button type="button" class="nodes-button primary" id="node-deploy-start" disabled>部署已保存的计划</button></div>
   </dialog>
   <script type="module" src="/assets/server-nodes.js"></script>`;
 }

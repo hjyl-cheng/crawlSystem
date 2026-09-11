@@ -1,0 +1,74 @@
+# Add to compose.remote-node-center.yml. Rota's original process is untouched.
+services:
+  remote-rota-reader:
+    image: qy-allpachong/remote-rota-reader:20260910
+    container_name: qy-remote-rota-reader
+    restart: unless-stopped
+    env_file: ["${QY_REMOTE_CENTER_RUNTIME}/reader.env"]
+    volumes:
+      - ${QY_REMOTE_CENTER_RUNTIME}/secrets/reader-token:/run/secrets/route-token:ro
+    networks: [crawler, rota]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 128m
+    cpus: 0.5
+    pids_limit: 32
+    healthcheck:
+      test: [CMD, wget, -q, --spider, http://127.0.0.1:3188/healthz]
+      interval: 15s
+      timeout: 4s
+      retries: 3
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: "3"}
+  node-registry:
+    image: ${QY_NODE_REGISTRY_IMAGE:?fixed registry image required}
+    container_name: qy-node-registry
+    restart: unless-stopped
+    environment:
+      REGISTRY_STORAGE_FILESYSTEM_ROOTDIRECTORY: /var/lib/registry
+      REGISTRY_STORAGE_DELETE_ENABLED: "false"
+      REGISTRY_STORAGE_REDIRECT_DISABLE: "true"
+      REGISTRY_HTTP_SECRET: ${QY_NODE_REGISTRY_HTTP_SECRET:?registry secret required}
+    volumes:
+      - ${QY_REMOTE_CENTER_RUNTIME}/registry:/var/lib/registry
+    ports: ["127.0.0.1:35000:5000"]
+    networks: [crawler]
+    mem_limit: 256m
+    cpus: 0.5
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: "3"}
+  remote-center-private:
+    image: nginx:1.29-alpine
+    container_name: qy-remote-center-private
+    restart: unless-stopped
+    volumes:
+      - ./nginx/remote-center-private.conf:/etc/nginx/nginx.conf:ro
+      - ${QY_REMOTE_CENTER_RUNTIME}/tls/server.pem:/run/tls/server.pem:ro
+      - ${QY_REMOTE_CENTER_RUNTIME}/tls/server-key.pem:/run/tls/server-key.pem:ro
+      - ${QY_REMOTE_CENTER_RUNTIME}/secrets/registry.htpasswd:/run/secrets/registry.htpasswd:ro
+    networks: [crawler]
+    read_only: true
+    tmpfs: [/var/cache/nginx, /var/run, /tmp]
+    mem_limit: 64m
+    cpus: 0.25
+    healthcheck:
+      test: [CMD, wget, -q, --spider, http://127.0.0.1:3189/healthz]
+      interval: 15s
+      timeout: 4s
+      retries: 3
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: "3"}
+  remote-node-center:
+    environment:
+      NODE_EXTRA_CA_CERTS: /run/remote-center-ca/ca.pem
+      REMOTE_NODE_ROTA_ROUTE_URL: https://remote-center-private:3443/internal/v1/remote-route
+    volumes:
+      - ${QY_REMOTE_CENTER_RUNTIME}/tls/ca.pem:/run/remote-center-ca/ca.pem:ro
+networks:
+  rota:
+    external: true
+    name: youtube-rota-qy-internal

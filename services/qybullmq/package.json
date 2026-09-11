@@ -4,6 +4,16 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "node-connection": "node scripts/runRemoteNodeConnection.mjs",
+    "test:remote-connections": "node --test --test-concurrency=1 test/remoteWorkerConnection.test.js test/remoteWorkerConnection.postgres.integration.test.js test/remoteNodeProtocol.test.js",
+    "test:remote-connections:docker": "node scripts/testRemoteNodeConnectionDocker.mjs",
+    "node-gateway:isolated": "node scripts/runRemoteNodeGatewayIsolated.mjs",
+    "test:remote-nodes": "node --test --test-concurrency=1 test/remoteNodeProtocol.test.js test/remoteNodeIngestion.postgres.integration.test.js test/remoteChannelPlan.postgres.integration.test.js",
+    "test:remote-rota": "node --test --test-concurrency=1 test/remoteRota.test.js test/remoteRotaSource.test.js test/remoteRota.integration.test.js",
+    "test:remote-network": "node --test --test-concurrency=1 test/remoteChannelNetwork.postgres.integration.test.js",
+    "test:remote-youtube": "node --test --test-concurrency=1 test/remoteYoutubeRuntime.test.js test/remoteChannelNetwork.postgres.integration.test.js",
+    "test:remote-handoffs": "node --test --test-concurrency=1 test/remoteExecutionHandoff.postgres.integration.test.js",
+    "test:remote-fence": "node --test --test-concurrency=1 test/remoteIncrementalFence.postgres.integration.test.js",
     "start": "node src/server.js",
     "worker": "node src/worker.js",
     "controller": "node src/controller.js",
@@ -58,7 +68,12 @@
     "diagnose:business-publication-dsm": "node scripts/diagnoseBusinessPublicationDsm.mjs",
     "soak:business-publication-runtime": "node scripts/soakBusinessPublicationRuntime.mjs",
     "feature-recalc-relay": "node src/runFeatureRecalcRelay.js",
-    "test": "node --test test/*.test.js"
+    "test": "node --test test/*.test.js",
+    "node-incremental": "node scripts/runRemoteNodeIncremental.mjs",
+    "node-center": "node scripts/runRemoteNodeCenter.mjs",
+    "test:remote-deployment": "node --test --test-concurrency=1 test/remoteDeploymentAdmin.postgres.integration.test.js test/remoteWorkerActivation.postgres.integration.test.js test/remoteNodeIncrementalRuntime.test.js",
+    "test:remote-collect:docker": "node scripts/testRemoteNodeConnectionDocker.mjs",
+    "test:remote-center": "node --test --test-concurrency=1 test/remoteCenterEntry.integration.test.js test/remoteCenterSupervisor.postgres.integration.test.js test/remoteExecutionHandoff.postgres.integration.test.js test/remoteWorkerActivation.postgres.integration.test.js test/youtubeApiSettings.test.js"
   },
   "dependencies": {
     "@bull-board/api": "^6.9.2",

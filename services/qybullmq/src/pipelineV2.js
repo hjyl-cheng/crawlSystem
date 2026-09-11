@@ -1,3 +1,4 @@
+import { createYoutubeApiSettingsLoader } from './youtubeApiSettings.js';
 import { createCheckpointYoutubeJsDetail } from "./checkpointYoutubeJsDetail.js";
 import { closeRepairedFullCrawlScan } from "./fullCrawlScanEvidence.js";
 import { nanoid } from "nanoid";
@@ -282,7 +283,6 @@ const defaultContentMaxAgeDays = Number(process.env.YOUTUBE_CONTENT_MAX_AGE_DAYS
 const defaultDetailConcurrency = normalizeDetailConcurrency(process.env.YOUTUBE_DETAIL_CONCURRENCY, 2);
 const channelInlineDetails = String(process.env.YOUTUBE_CHANNEL_INLINE_DETAILS || "true").trim().toLowerCase() !== "false";
 let crawlSettingsCache = { expiresAt: 0, value: null };
-let youtubeApiSettingsCache = { expiresAt: 0, value: null };
 let agentLlmSettingsCache = { expiresAt: 0, key: null, value: null };
 
 function intValue(value, fallback, min, max) {
@@ -590,33 +590,7 @@ export async function getCrawlSettingsV2() {
   }
 }
 
-export async function getYoutubeApiSettingsV2() {
-  const now = Date.now();
-  if (youtubeApiSettingsCache.value && youtubeApiSettingsCache.expiresAt > now) return youtubeApiSettingsCache.value;
-  const fallback = {
-    apiKeys: parseKeys(process.env.YOUTUBE_DATA_API_KEYS || process.env.YOUTUBE_DATA_API_KEY || ""),
-    timeoutMs: 12000,
-    batchSize: 50,
-    dailyRequestLimit: intValue(process.env.YOUTUBE_DATA_API_DAILY_REQUEST_LIMIT, 500, 0, 10000),
-    fallbackMode: process.env.YOUTUBE_DATA_API_FALLBACK_MODE === "disabled" ? "disabled" : "emergency",
-  };
-  try {
-    const rows = await query("SELECT value_json FROM crawler.settings WHERE setting_key = 'youtube_api' LIMIT 1");
-    const value = rows.rows[0]?.value_json ?? {};
-    const settings = {
-      apiKeys: parseKeys(value.api_keys?.length ? value.api_keys : (value.api_key || fallback.apiKeys)),
-      timeoutMs: intValue(value.timeout_ms, fallback.timeoutMs, 1000, 60000),
-      batchSize: intValue(value.batch_size, fallback.batchSize, 1, 50),
-      dailyRequestLimit: intValue(value.daily_request_limit, fallback.dailyRequestLimit, 0, 10000),
-      fallbackMode: value.fallback_mode === "disabled" ? "disabled" : "emergency",
-    };
-    youtubeApiSettingsCache = { expiresAt: now + 30000, value: settings };
-    return settings;
-  } catch {
-    youtubeApiSettingsCache = { expiresAt: now + 30000, value: fallback };
-    return fallback;
-  }
-}
+export const getYoutubeApiSettingsV2 = createYoutubeApiSettingsLoader({ query });
 
 function agentSettingKey(configId) {
   const id = Number(configId);

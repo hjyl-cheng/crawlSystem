@@ -1,0 +1,10 @@
+FROM node:20-bookworm-slim
+WORKDIR /app
+ENV NODE_ENV=production TZ=UTC ROTA_IDENTITY_POLICY_CATALOG_FILE=/app/config/identity-policy-catalog.json
+COPY services/qybullmq/package.json services/qybullmq/package-lock.json ./
+RUN npm ci --omit=dev
+COPY services/qybullmq/src ./src
+COPY services/qybullmq/scripts/runRemoteNodeCenter.mjs services/qybullmq/scripts/checkRemoteNodeCenter.mjs services/qybullmq/scripts/applyRemoteNodeSchema.mjs ./scripts/
+COPY services/rota/core/internal/proxycontrol/identity_policy_catalog.generated.json ./config/identity-policy-catalog.json
+LABEL org.opencontainers.image.title="qy-remote-node-center"
+CMD ["node","scripts/runRemoteNodeCenter.mjs"]

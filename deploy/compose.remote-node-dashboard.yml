@@ -1,0 +1,17 @@
+# Apply only to Dashboard, on top of its full current production configuration.
+# For a deployment with live-only migration fixes, build Dockerfile.node-management
+# using the exact running image as QY_DASHBOARD_BASE_IMAGE first.
+services:
+  dashboard:
+    image: ${QY_REMOTE_DASHBOARD_IMAGE:-qy-allpachong/dashboard:remote-deploy-overlay-20260910}
+    environment:
+      SERVER_NODE_COLLECT_IMAGE: ${QY_REMOTE_COLLECT_IMAGE:?registry image digest required}
+      SERVER_NODE_GATEWAY_URL: https://${QY_DASHBOARD_HOST}/node-execution
+      SERVER_NODE_WORKER_CONTROL_URL: https://remote-center-private:3443
+      SERVER_NODE_WORKER_CONTROL_TOKEN_FILE: /run/remote-deploy/admin-token
+      SERVER_NODE_REGISTRY_CREDENTIALS_FILE: /run/remote-deploy/registry-pull.json
+      NODE_EXTRA_CA_CERTS: /run/remote-deploy/ca.pem
+    volumes:
+      - ${QY_REMOTE_CENTER_RUNTIME}/secrets/admin-token:/run/remote-deploy/admin-token:ro
+      - ${QY_REMOTE_CENTER_RUNTIME}/secrets/registry-pull.json:/run/remote-deploy/registry-pull.json:ro
+      - ${QY_REMOTE_CENTER_RUNTIME}/tls/ca.pem:/run/remote-deploy/ca.pem:ro

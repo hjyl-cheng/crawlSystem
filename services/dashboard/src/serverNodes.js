@@ -9,6 +9,8 @@ export const workerRoles = Object.freeze({
   query_quality: "Query 质量评估",
 });
 export const initializationSteps = ["ssh", "key", "monitoring", "metrics"];
+export const runtimeSteps = ["ssh", "check", "docker", "layout", "verify"];
+export const workerDeploymentSteps = ['center','ssh','files','start','verify','connection'];
 export function nodeReady(node) {
   return node?.provisioning?.state === "ready" && !!node.provisioning.systemId
     && initializationSteps.every(step => node.provisioning.steps?.[step] === "completed");
@@ -90,7 +92,7 @@ export function createServerNodeStore(query) {
     if (previous.version !== version) throw invalid("配置已被更新，请刷新页面后重试；你的输入仍保留在表单中", 409);
     if (id && !previous.nodes.some(item => item.id === id)) throw invalid("服务器不存在", 404);
     const existing = previous.nodes.find(item => item.id === id);
-    if (existing?.provisioning?.state === "running") throw invalid("服务器正在初始化，请完成后再编辑", 409);
+    if (existing?.provisioning?.state === "running" || existing?.runtime?.state === "running" || existing?.deployment?.state === 'running') throw invalid("服务器正在初始化、准备环境或部署，请完成后再编辑", 409);
     if (existing && (existing.kind === "center" || ![undefined, "not_started"].includes(existing.provisioning?.state))
       && ["host", "port", "username", "kind"].some(key => existing[key] !== normalized[key])) {
       throw invalid("已初始化或受保护节点不能修改连接地址、用户名或类型，请登记新的服务器", 409);
@@ -167,6 +169,7 @@ export function createServerNodeStore(query) {
     integer(version, "配置版本", 0, Number.MAX_SAFE_INTEGER);
     return mutateNode(id, (node, registry) => {
       if (registry.version !== version) throw invalid("配置已更新，请刷新后重试", 409);
+      if (node.runtime?.state === 'running') throw invalid('运行环境准备尚未结束', 409);
       if (node.kind !== "execution") throw invalid("中心节点不通过此入口初始化", 409);
       if (nodeReady(node)) throw invalid("服务器已初始化，可直接配置 Worker", 409);
       if (![undefined, "not_started", "failed", "running"].includes(node.provisioning?.state)
@@ -193,5 +196,60 @@ export function createServerNodeStore(query) {
       return node;
     });
   }
-  return { load, save, deletionCheck, remove, beginInitialization, advanceInitialization };
+  async function beginRuntime({ id, version, operationId }) {
+    integer(version, '配置版本', 0, Number.MAX_SAFE_INTEGER);
+    return mutateNode(id, (node, registry) => {
+      if (registry.version !== version) throw invalid('配置已更新，请刷新后重试', 409);
+      if (node.kind !== 'execution' || !nodeReady(node)) throw invalid('请先完成执行节点的 SSH 与监控初始化', 409);
+      if (node.deployment) throw invalid('已有部署记录，须先核实运行状态后再准备环境', 409);
+      if (node.runtime && !['ready', 'failed', 'running'].includes(node.runtime.state)) throw invalid('运行环境状态无法确认', 409);
+      if (node.runtime?.state === 'running' && (!Number.isFinite(Date.parse(node.runtime.deadline))
+        || Date.parse(node.runtime.deadline) > Date.now())) throw invalid('运行环境正在准备，请勿重复提交', 409);
+      if (registry.nodes.filter(item => item.runtime?.state === 'running' && Date.parse(item.runtime.deadline) > Date.now()).length >= 3) throw invalid('已有 3 台服务器正在准备环境，请稍后重试', 409);
+      const now = new Date().toISOString();
+      node.runtime = { state: 'running', operationId, startedAt: now, deadline: new Date(Date.now() + 30 * 60000).toISOString(),
+        remoteChanges: node.runtime?.remoteChanges ?? false, revision: 1, error: null,
+        steps: Object.fromEntries(runtimeSteps.map(step => [step, 'pending'])) };
+      node.updatedAt = now;
+      return node;
+    });
+  }
+  async function advanceRuntime(id, operationId, patch) {
+    return mutateNode(id, node => {
+      if (node.runtime?.operationId !== operationId || node.runtime.state !== 'running'
+        || !Number.isFinite(Date.parse(node.runtime.deadline))
+        || Date.parse(node.runtime.deadline) <= Date.now()) throw invalid('环境准备任务已变化，已停止后续操作', 409);
+      const next = { ...node.runtime, ...patch, steps: { ...node.runtime.steps, ...patch.steps } };
+      if (next.state === 'ready' && !runtimeSteps.every(step => next.steps[step] === 'completed')) throw invalid('环境检查尚未全部完成', 409);
+      node.runtime = next; node.updatedAt = new Date().toISOString();
+      return node;
+    });
+  }
+  async function beginWorkerDeployment({id,version,operationId,plan}){
+    integer(version,'配置版本',0,Number.MAX_SAFE_INTEGER);
+    return mutateNode(id,(node,registry)=>{
+      if(registry.version!==version)throw invalid('配置已更新，请刷新后重试',409);
+      if(node.kind!=='execution' || !nodeReady(node) || node.runtime?.state!=='ready')throw invalid('请先完成节点初始化和运行环境准备',409);
+      const prior=node.deployment;
+      if(prior?.state==='running' && (!Number.isFinite(Date.parse(prior.deadline)) || Date.parse(prior.deadline)>Date.now()))throw invalid('Worker 正在部署，请勿重复提交',409);
+      if(prior && (prior.mode!=='incremental_collect' || prior.deploymentId!==plan.deploymentId || prior.image!==plan.image
+        || plan.count<prior.desiredCount))throw invalid('缩容、更换镜像或替换部署需要先完成停止派发和任务收尾，当前入口仅支持首次部署、重试及增加数量',409);
+      if(node.workers.length!==1 || node.workers[0].role!=='incremental' || node.workers[0].count!==plan.count)throw invalid('部署方案与已保存的增量数量不匹配',409);
+      const now=new Date().toISOString();
+      node.deployment={state:'running',mode:plan.mode,deploymentId:plan.deploymentId,operationId,image:plan.image,
+        desiredCount:plan.count,appliedCount:prior?.appliedCount??0,startedAt:now,deadline:new Date(Date.now()+20*60000).toISOString(),
+        remoteChanges:prior?.remoteChanges??false,error:null,steps:Object.fromEntries(workerDeploymentSteps.map(step=>[step,'pending']))};
+      node.updatedAt=now;return node;
+    });
+  }
+  async function advanceWorkerDeployment(id,operationId,patch){
+    return mutateNode(id,node=>{
+      if(node.deployment?.operationId!==operationId || node.deployment.state!=='running'
+        || Date.parse(node.deployment.deadline)<=Date.now())throw invalid('部署操作已变化，已停止后续步骤',409);
+      const next={...node.deployment,...patch,steps:{...node.deployment.steps,...patch.steps}};
+      if(next.state==='connected' && !workerDeploymentSteps.every(step=>next.steps[step]==='completed'))throw invalid('部署和连接检查尚未完成',409);
+      node.deployment=next;node.updatedAt=new Date().toISOString();return node;
+    });
+  }
+  return { load, save, deletionCheck, remove, beginInitialization, advanceInitialization, beginRuntime, advanceRuntime, beginWorkerDeployment, advanceWorkerDeployment };
 }

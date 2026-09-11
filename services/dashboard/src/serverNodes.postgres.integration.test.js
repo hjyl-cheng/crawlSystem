@@ -13,6 +13,7 @@ test("node registration persists only configuration, survives reload, and reject
   assert.ok(["127.0.0.1", "localhost"].includes(parsed.hostname));
   const pool = new pg.Pool({ connectionString: url });
   t.after(() => pool.end());
+  assert.equal((await pool.query('SELECT current_database() AS name')).rows[0].name, 'server_nodes_dashboard_test');
   await pool.query(`CREATE SCHEMA IF NOT EXISTS crawler;
     CREATE TABLE IF NOT EXISTS crawler.settings(setting_key TEXT PRIMARY KEY,value_json JSONB NOT NULL,updated_at TIMESTAMPTZ DEFAULT now());
     DELETE FROM crawler.settings;
@@ -31,7 +32,7 @@ test("node registration persists only configuration, survives reload, and reject
   const save = (node, version, id) => fetch(base + "/api/server-nodes" + (id ? "/" + id : ""), {
     method: id ? "PUT" : "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ node, version }),
   });
-  assert.deepEqual(await (await fetch(base + "/api/server-nodes")).json(), { version: 0, nodes: [], capabilities: { onboarding: false } });
+  assert.deepEqual(await (await fetch(base + "/api/server-nodes")).json(), { version: 0, nodes: [], capabilities: { onboarding: false, runtime: false, workerDeployment: false } });
   assert.equal((await pool.query("SELECT count(*)::int AS count FROM crawler.settings")).rows[0].count, 1, "reading an empty registry must not seed nodes");
   const concurrent = await Promise.all([save(node, 0), save({ ...node, host: "192.0.2.16" }, 0)]);
   assert.deepEqual(concurrent.map(response => response.status).sort(), [200, 409]);
@@ -118,6 +119,7 @@ test("node registration persists only configuration, survives reload, and reject
   // Durable admission and operation fencing protect metadata, even if a browser
   // retries or the Dashboard restarts while an initialization is outstanding.
   const executionId = otherNode.id;
+  await assert.rejects(() => store.beginRuntime({ id: executionId, version: registry.version, operationId: 'no-onboarding' }), { statusCode: 409 });
   const operationId = 'operation-one';
   registry = await store.beginInitialization({ id: executionId, version: registry.version, operationId });
   assert.equal((await remove(executionId, registry.version)).status, 409);
@@ -136,6 +138,32 @@ test("node registration persists only configuration, survives reload, and reject
   assert.equal(registry.nodes[0].workers[0].count, 3, 'only fully initialized nodes can save worker plans');
   await assert.rejects(() => store.save({ id: executionId, version: registry.version, node: { ...readyNode, host: '192.0.2.99' } }), { statusCode: 409 });
   assert.equal((await remove(executionId, registry.version)).status, 409, 'a ready node still requires runtime deletion checks');
+  const runtimeStart = operationId => store.beginRuntime({ id: executionId, version: registry.version, operationId });
+  const admissions = await Promise.allSettled([runtimeStart('runtime-one'), runtimeStart('runtime-duplicate')]);
+  assert.equal(admissions.filter(result => result.status === 'fulfilled').length, 1);
+  assert.equal(admissions.find(result => result.status === 'rejected').reason.statusCode, 409);
+  registry = await store.load();
+  const runtimeOperation = registry.nodes[0].runtime.operationId;
+  await assert.rejects(() => runtimeStart('runtime-duplicate'), { statusCode: 409 });
+  await assert.rejects(() => store.save({ id: executionId, version: registry.version, node: readyNode }), { statusCode: 409 });
+  assert.equal((await remove(executionId, registry.version)).status, 409);
+  await assert.rejects(() => store.advanceRuntime(executionId, 'stale', { state: 'ready' }), { statusCode: 409 });
+  await assert.rejects(() => store.advanceRuntime(executionId, runtimeOperation, { state: 'ready' }), { statusCode: 409 });
+  registry = await store.advanceRuntime(executionId, runtimeOperation, { state: 'failed', error: 'Installation failed' });
+  registry = await runtimeStart('runtime-retry');
+  await assert.rejects(() => store.advanceRuntime(executionId, runtimeOperation, { state: 'ready' }), { statusCode: 409 });
+  registry.nodes[0].runtime.deadline = new Date(0).toISOString();
+  await persist();
+  await assert.rejects(() => store.advanceRuntime(executionId, 'runtime-retry', { steps: { docker: 'completed' } }), { statusCode: 409 });
+  registry = await runtimeStart('runtime-after-restart');
+  await assert.rejects(() => store.advanceRuntime(executionId, 'runtime-retry', { state: 'ready' }), { statusCode: 409 });
+  registry = await store.advanceRuntime(executionId, 'runtime-after-restart', { state: 'ready', steps: Object.fromEntries(['ssh', 'check', 'docker', 'layout', 'verify'].map(step => [step, 'completed'])) });
+  assert.deepEqual(registry.nodes[0].workers, readyNode.workers);
+  assert.equal(registry.nodes[0].deployment, undefined);
+  assert.equal((await createServerNodeStore(pool.query.bind(pool)).load()).nodes[0].runtime.state, 'ready');
+  registry.nodes[0].deployment = { state: 'unknown' };
+  await persist();
+  await assert.rejects(() => runtimeStart('with-deployment'), { statusCode: 409 });
   assert.deepEqual((await pool.query("SELECT value_json FROM crawler.settings WHERE setting_key='query_scheduler'")).rows[0].value_json, { status: "running" });
   await pool.query("DELETE FROM crawler.settings WHERE setting_key='dashboard_server_nodes_v1'");
 });

@@ -1,0 +1,37 @@
+# Independent project: never runs `up` against the existing crawler services.
+name: qy-remote-center
+services:
+  remote-node-center:
+    image: ${QY_REMOTE_CENTER_IMAGE:?fixed local center image required}
+    container_name: qy-remote-node-center
+    restart: unless-stopped
+    init: true
+    env_file:
+      - ${QY_REMOTE_CENTER_RUNTIME:?private runtime directory required}/center.env
+    environment:
+      REMOTE_NODE_CENTER_BIND: 0.0.0.0
+      REMOTE_NODE_CENTER_PORT: "3187"
+    volumes:
+      - ${QY_REMOTE_CENTER_RUNTIME}/secrets:/run/remote-center-secrets:ro
+    networks: [crawler]
+    read_only: true
+    tmpfs: ["/tmp:size=32m,mode=1777"]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 768m
+    cpus: 1.0
+    pids_limit: 96
+    stop_grace_period: 16m
+    healthcheck:
+      test: [CMD, node, scripts/checkRemoteNodeCenter.mjs]
+      interval: 15s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: "3"}
+networks:
+  crawler:
+    external: true
+    name: ${QY_REMOTE_CENTER_NETWORK:-qy-newcrawler-crawler-runtime}
