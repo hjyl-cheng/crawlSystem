@@ -4,6 +4,7 @@ import {
 } from "./channelLifecycle.js";
 import { recordCrawlerObservation } from "./crawlObservationStore.js";
 import { validateIncrementalJob } from "./incrementalPlan.js";
+import { isVideoExecutionRecoveryPending } from "./videoExecutionRecovery.js";
 
 const DOMAIN_ORDER = ["about", "video", "agent"];
 const COMPLETED_STATES = new Set(["complete", "partial", "queued"]);
@@ -58,6 +59,14 @@ export async function recordIncrementalTerminalFailure({
   markRemoved = markChannelRemoved,
   crawlerVersion = String(process.env.CRAWLER_VERSION || "qy-v16"),
 }) {
+  // A superseded execution no longer owns the Plan. The outer queue failure
+  // callback must not publish a failed Observation for its replacement.
+  if (error?.code === "CONTENT_DETAIL_EXECUTION_FENCE_STALE") {
+    return { recorded: false, reason: "execution_superseded" };
+  }
+  if (isVideoExecutionRecoveryPending(error)) {
+    return { recorded: false, reason: "execution_recovery_pending" };
+  }
   const attemptCount = Math.max(1, Number(attempts) || 1);
   const maximum = Math.max(1, Number(maxAttempts) || 1);
   const terminalChannel = classifyTerminalChannelError(error);

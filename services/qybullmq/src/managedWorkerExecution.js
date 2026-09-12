@@ -3,6 +3,7 @@ import { queuesByRole } from "./queues.js";
 import { withVideoFallbackExecution } from "./videoDetailApiFallback.js";
 import { selectYoutubeFailure } from "./youtubeFailurePolicy.js";
 import { isStaleExecutionFailure } from "./managedWorkerJob.js";
+import { isVideoExecutionRecoveryPending } from "./videoExecutionRecovery.js";
 
 const RETRYABLE_ROUTE_FAILURES = new Set([
   "proxy_transport",
@@ -96,6 +97,7 @@ export function validateWorkerQueueConfiguration({
 
 export function retryableRotaFailure(error) {
   if (error?.code === "VIDEO_API_FALLBACK_UNRESOLVED") return null;
+  if (isVideoExecutionRecoveryPending(error)) return null;
   if (isStaleExecutionFailure(error)) return null;
   const selected = failureSelections(error)
     .filter((selection) => RETRYABLE_ROUTE_FAILURES.has(selection?.decision?.kind))

@@ -1,6 +1,8 @@
 import {MIGRATION_START_JOB,startControlledMigrationChannel,prepareControlledMigrationSnapshot,migrationBatchControlEnabled} from "./migrationBatchControl.js";
 import { Worker } from "bullmq";
 import { gateVideoApiJob, isVideoApiHandoff, runVideoApiResumable } from "./videoApiContinuation.js";
+import { runVideoExecutionResumable } from "./videoExecutionDeferral.js";
+import { isVideoExecutionRecoveryPending } from "./videoExecutionRecovery.js";
 import { nanoid } from "nanoid";
 import { ensureDefaultAgentConfig } from "./agentConfig.js";
 import { ChannelExecutionRuntimeAdapter } from "./channelExecutionRuntimeAdapter.js";
@@ -1344,7 +1346,7 @@ async function processJobInner(job, { resumeMode = "initial", prepared = null } 
       : await runWithProxyIdentity(proxyStart, execute);
   } catch (error) {
     // This is a quiesced route-selection handoff, not a failed crawl.
-    if (error?.code === "UPLOADS_COUNTRY_RECHECK" || isVideoApiHandoff(error)) throw error;
+    if (error?.code === "UPLOADS_COUNTRY_RECHECK" || isVideoApiHandoff(error) || isVideoExecutionRecoveryPending(error)) throw error;
     const failureDecision = retryableSystemFailureDecision(error)
       ?? decideYoutubeFailure({ error });
     error.youtube_failure_decision = failureDecision;
@@ -1615,8 +1617,8 @@ async function processJobWithOwnership(job, token) {
       onDeferred: (event) => console.log(JSON.stringify({ event: "rota_job_deferred", ...event })),
     });
   };
-  const execute = () => runVideoApiResumable({ job, token, execute: executeManaged,
-    executeReplay: () => processJobInner(job, { resumeMode: "api_continuation" }) });
+  const execute = () => runVideoExecutionResumable({ job, token, execute: () => runVideoApiResumable({ job, token, execute: executeManaged,
+    executeReplay: () => processJobInner(job, { resumeMode: "api_continuation" }) }) });
   if (job?.queueName === queuesByRole.channelCrawl && job?.data?.candidate_id) {
     return runChannelCandidateWorkerJobWithDurableSettlement({
       query,

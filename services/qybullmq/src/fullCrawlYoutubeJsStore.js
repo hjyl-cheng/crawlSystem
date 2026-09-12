@@ -749,21 +749,7 @@ export class FullCrawlYoutubeJsStore {
   }
 
   async claimDetailExecution(fence) {
-    return this.withTransaction(async (client) => {
-      const claimed = await claimContentDetailExecution(client, fence);
-      if (!claimed) return null;
-      await client.query(
-        `UPDATE crawler.content_candidates
-         SET detail_status='queued',
-             result_json=result_json || jsonb_build_object(
-               'full_crawl_recovered_at',now()
-             ),
-             updated_at=now()
-         WHERE run_id=$1 AND detail_status='running'`,
-        [fence.runId],
-      );
-      return claimed;
-    });
+    return this.withTransaction(client => claimContentDetailExecution(client, fence, { recoverPending: true }));
   }
 
   async claimNextDetail(fence) {

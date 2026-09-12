@@ -4,6 +4,19 @@ import {
   recordIncrementalTerminalFailure,
 } from "../src/incrementalTerminalFailure.js";
 
+for (const [code, reason] of [
+  ["CONTENT_DETAIL_EXECUTION_FENCE_STALE", "execution_superseded"],
+  ["VIDEO_EXECUTION_RECOVERY_PENDING", "execution_recovery_pending"],
+]) test(`queue terminal callback cannot fail the current Plan for ${code}`, async () => {
+  const result = await recordIncrementalTerminalFailure({
+    job: { id: plan().job_id, name: "channel.incremental.plan", queueName: "youtube-channel-incremental", data: plan() },
+    error: Object.assign(new Error(code), { code }),
+    attempts: 10, maxAttempts: 1, permanent: true,
+    withTransaction: async () => assert.fail("old execution cannot write the current Plan"),
+  });
+  assert.deepEqual(result, { recorded: false, reason });
+});
+
 function plan(overrides = {}) {
   const base = {
     schema_version: 5,

@@ -4,7 +4,6 @@ import { createVideoDetailApiFallback } from "./videoDetailApiFallback.js";
 import { createHash, randomUUID } from "node:crypto";
 import { projectVideoDetail, normalizeVideoViewCount, videoDetailFieldStatus as incrementalYoutubeJsVideoFieldStatus } from "./videoDetailEvidence.js";
 export { incrementalYoutubeJsVideoFieldStatus };
-import { setTimeout as delay } from "node:timers/promises";
 import { currentChannelExecutionAbortSignal } from "./channelExecutionContext.js";
 import { combineAbortSignals, throwIfAborted } from "./abortSignal.js";
 import {
@@ -54,6 +53,8 @@ import {
   buildVideoActivityEvidence,
 } from "./videoActivityLifecycle.js";
 import { refreshVideoPublicationItemHashes } from "./videoPublicationItemStore.js";
+import { claimIncrementalVideoExecution, lockIncrementalVideoExecution } from "./incrementalVideoExecution.js";
+import { VideoExecutionRecoveryPendingError } from "./videoExecutionRecovery.js";
 
 const GAP_ABANDONMENT_STOP_REASON = "gap_abandoned_latest_30";
 const GAP_ABANDONMENT_POLICY_VERSION = "latest-30-on-catchup-limit-v1";
@@ -66,8 +67,6 @@ const PROBE_ROUTE_FAILURE_KINDS = new Set([
   "youtube_rate_limited",
   "youtube_challenge",
 ]);
-const CHECKPOINT_ACTIVE_CLAIM_POLL_MAX_MS = 5_000;
-const CHECKPOINT_ACTIVE_CLAIM_POLL_MIN_MS = 50;
 const SCAN_PUBLICATION_WINS = publicationEvidenceCandidateWinsSql("content", "input");
 const SCAN_PUBLICATION_CONFLICT = publicationEvidenceConflictPatchSql("content", "input");
 
@@ -2477,16 +2476,6 @@ async function checkpointPhaseState(query, { runId, cycleKey, phase }) {
   };
 }
 
-function activeClaimPollMs(state) {
-  return Math.max(
-    CHECKPOINT_ACTIVE_CLAIM_POLL_MIN_MS,
-    Math.min(
-      CHECKPOINT_ACTIVE_CLAIM_POLL_MAX_MS,
-      Math.max(0, Number(state.activeClaimWaitMs) || 0) + 25,
-    ),
-  );
-}
-
 function checkpointReservationFences(batch) {
   return batch.sampling_plan_json.rows
     .map((row) => objectValue(row.checkpoint_content_enrich)?.fence)
@@ -2531,12 +2520,7 @@ export async function captureIncrementalYoutubeJsVideoCheckpointPhase({
       const state = await checkpointPhaseState(query, { runId, cycleKey, phase });
       if (state.settled === state.total) return state;
       if (state.activeClaims > 0) {
-        await delay(
-          activeClaimPollMs(state),
-          undefined,
-          signal ? { signal } : undefined,
-        );
-        continue;
+        throw new VideoExecutionRecoveryPendingError(runId, state.activeClaimWaitMs);
       }
       throw new Error(
         `Incremental YouTubeJS ${phase} Phase has ${state.activeClaims} active Item claim(s)`,
@@ -3633,6 +3617,12 @@ export async function executeIncrementalYoutubeJsVideo({
     throw new TypeError("getChannelSnapshot is required for incremental Video");
   }
   if (typeof now !== "function") throw new TypeError("now must be a function");
+  const transaction = withTransaction;
+  let executionFence = null;
+  withTransaction = action => transaction(async client => {
+    if (executionFence) await lockIncrementalVideoExecution(client, executionFence);
+    return action(client);
+  });
   const config = incrementalVideoPlannerConfig(plan);
   const observedAtValue = new Date(now());
   if (Number.isNaN(observedAtValue.getTime())) throw new TypeError("now must return a valid date");
@@ -3660,6 +3650,7 @@ export async function executeIncrementalYoutubeJsVideo({
   let batch = await withTransaction(async (client) => {
     const current = await loadRunCycle(client, { plan, runId });
     cycleKey = current.cycleKey;
+    executionFence = await claimIncrementalVideoExecution(client, { plan, runId, cycleKey });
     const loaded = await loadCheckpointBatch(client, { plan, runId, cycleKey });
     if (loaded?.status === "finalized") await verifyFinalizedObservation(client, loaded);
     return loaded;

@@ -1,4 +1,5 @@
 import { DelayedError } from 'bullmq';
+import { runVideoExecutionResumable } from '../videoExecutionDeferral.js';
 import { remoteChannelPlan } from './channelPlanContract.js';
 import { remotePlanJob } from './executionContext.js';
 import { runRemoteIncrementalApiReplay } from './incrementalCoordinator.js';
@@ -76,7 +77,7 @@ export function createCenterIncrementalProcessor({ channelStore, runtime, rota, 
               execute:()=>runtime.executePlan(),persistRetryableCheckpoint:async()=>true})}),
           terminateBusinessRun:(current,error)=>terminateExhaustedBusinessRun(withTransaction,current,error),
           deferForSlotPause:deferJobForSlotPause});
-      const result = await runVideoApiResumable({job,token,execute,executeReplay:()=>replay(job),delayMs:apiDelayMs});
+      const result = await runVideoExecutionResumable({job,token,execute:()=>runVideoApiResumable({job,token,execute,executeReplay:()=>replay(job),delayMs:apiDelayMs})});
       await event(job,'completed',{...result,remote_node_id:runtime.nodeId,remote_slot:runtime.slot,duration_ms:Date.now()-started});
       return result;
     } catch (error) {

@@ -1,5 +1,6 @@
 import { normalizeChannelCandidateAttemptFence } from "./channelCandidateAttemptFence.js";
 import { StaleChannelCandidateAttemptError } from "./channelCandidateAttemptMutations.js";
+import { claimVideoExecution, ownsVideoExecution as ownsExecution, videoExecutionScope as activeScope } from "./videoExecutionRecovery.js";
 
 function text(value) {
   return String(value ?? "").trim() || null;
@@ -373,22 +374,6 @@ async function lockScope(locked, fence) {
   });
 }
 
-function ownsExecution(run, fence) {
-  return text(run.detail_active_job_id) === fence.jobId
-    && Number(run.detail_active_job_attempt) === fence.jobAttempt
-    && text(run.detail_active_scope_key) === fence.scopeKey
-    && Number(run.detail_active_job_epoch) === fence.jobEpoch;
-}
-
-function activeScope(run) {
-  try {
-    const parsed = JSON.parse(text(run.detail_active_scope_key) ?? "null");
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
-  } catch {
-    return null;
-  }
-}
-
 function supersedesQueuedOrigin(run, fence) {
   if (!fence.originCandidateAttemptFence) return false;
   const active = activeScope(run);
@@ -399,21 +384,7 @@ function supersedesQueuedOrigin(run, fence) {
     && Number(active.origin_snapshot_job_attempt) < fence.originSnapshotJobAttempt;
 }
 
-function canClaim(run, fence) {
-  if (run.detail_active_job_id == null
-      && run.detail_active_job_attempt == null
-      && run.detail_active_scope_key == null
-      && run.detail_active_job_epoch == null) return true;
-  if (ownsExecution(run, fence)) return true;
-  if (text(run.detail_active_job_id) === fence.jobId
-      && Number(run.detail_active_job_epoch) === fence.jobEpoch
-      && Number(run.detail_active_job_attempt) < fence.jobAttempt) return true;
-  if (Number(run.detail_active_job_epoch) === fence.jobEpoch
-      && supersedesQueuedOrigin(run, fence)) return true;
-  return false;
-}
-
-export async function claimContentDetailExecution(client, fence) {
+export async function claimContentDetailExecution(client, fence, { recoverPending = false } = {}) {
   if (!client || typeof client.query !== "function") {
     throw new TypeError("an active PostgreSQL client is required");
   }
@@ -421,16 +392,12 @@ export async function claimContentDetailExecution(client, fence) {
   if (!locked) return null;
   const { run } = locked;
   const scope = await lockScope(locked, fence);
-  if (!scope || !canClaim(run, fence)) return null;
-  const claimed = await client.query(
-    `UPDATE crawler.channel_runs
-     SET detail_active_job_id=$2,detail_active_job_attempt=$3,
-         detail_active_scope_key=$4,detail_active_job_epoch=$5,updated_at=now()
-     WHERE run_id=$1
-     RETURNING run_id`,
-    [fence.runId, fence.jobId, fence.jobAttempt, fence.scopeKey, fence.jobEpoch],
-  );
-  return claimed.rowCount === 1 ? scope : null;
+  if (!scope) return null;
+  const claimed = await claimVideoExecution(client, run, fence, {
+    supersedesOwner: supersedesQueuedOrigin(run, fence),
+    recovery: recoverPending ? { kind: "full" } : null,
+  });
+  return claimed ? scope : null;
 }
 
 export async function lockContentDetailExecution(client, fence) {

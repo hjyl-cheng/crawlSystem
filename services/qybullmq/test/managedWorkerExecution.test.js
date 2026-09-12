@@ -1,11 +1,18 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { VideoExecutionRecoveryPendingError } from '../src/videoExecutionRecovery.js';
 import { FingerprintGatewayError } from "../src/fingerprintGateway.js";
 import {
   executeManagedWorkerAttempt,
   retryableRotaFailure,
   validateWorkerQueueConfiguration,
 } from "../src/managedWorkerExecution.js";
+
+test('video recovery deferral does not switch route because of earlier network diagnostics', () => {
+  const error = new VideoExecutionRecoveryPendingError('incremental:waiting');
+  error.channel_execution_attempt = { failure_decisions: [{ kind: 'proxy_transport', evidence: { source: 'old_request' } }] };
+  assert.equal(retryableRotaFailure(error),null);
+});
 
 test("stale detail ownership overrides earlier network diagnostics and never switches Route", async () => {
   const error = Object.assign(new Error("Full Crawl Detail execution was superseded"), {

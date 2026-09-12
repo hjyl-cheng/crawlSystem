@@ -1,4 +1,5 @@
 import { isVideoApiHandoff } from "./videoApiContinuation.js";
+import { isVideoExecutionRecoveryPending } from "./videoExecutionRecovery.js";
 import { prepareDormantUploadsProbe, pendingUploadsDormancy, dormantUploadsScan } from "./youtubeUploadsCountry.js";
 import { executeIncrementalAbout } from "./incrementalAbout.js";
 import { enqueueIncrementalAgent } from "./incrementalAgent.js";
@@ -212,7 +213,8 @@ export class IncrementalChannelRunner {
         session_opened: sessionOpened,
       };
     } catch (error) {
-      if (error?.code === "UPLOADS_COUNTRY_RECHECK" || isVideoApiHandoff(error)) throw error;
+      if (error?.code === "UPLOADS_COUNTRY_RECHECK" || error?.code === "CONTENT_DETAIL_EXECUTION_FENCE_STALE"
+        || isVideoApiHandoff(error) || isVideoExecutionRecoveryPending(error)) throw error;
       if (activeDomain) {
         await this.runStore.markDomain(runId, activeDomain, "failed", {
           error: String(error?.message || error).slice(0, 1000),

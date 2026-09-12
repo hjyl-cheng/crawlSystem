@@ -12,7 +12,7 @@ import {
   incrementalYoutubeJsVideoTargetHash,
 } from "../src/incrementalYoutubeJsVideo.js";
 
-test("an active Item claim is awaited without consuming a retry", async () => {
+test("an active Item claim defers execution and resumes without repeating a captured item", async () => {
   const claimToken = "11111111-1111-4111-8111-111111111111";
   let claimCalls = 0;
   let stateCalls = 0;
@@ -68,7 +68,7 @@ test("an active Item claim is awaited without consuming a retry", async () => {
         };
   };
 
-  const result = await captureIncrementalYoutubeJsVideoCheckpointPhase({
+  const options = {
     runId: "run-claim-wait",
     cycleKey: "base",
     phase: "recent",
@@ -82,8 +82,11 @@ test("an active Item claim is awaited without consuming a retry", async () => {
       return detail(videoId);
     },
     signal: null,
-  });
-
+  };
+  await assert.rejects(captureIncrementalYoutubeJsVideoCheckpointPhase(options), { code: "VIDEO_EXECUTION_RECOVERY_PENDING" });
+  assert.equal(detailCalls, 0);
+  assert.equal(claimCalls, 1);
+  const result = await captureIncrementalYoutubeJsVideoCheckpointPhase(options);
   assert.deepEqual(result, {
     total: 1,
     settled: 1,

@@ -3,6 +3,20 @@ import test from "node:test";
 import { IncrementalChannelRunner } from "../src/incrementalChannelRunner.js";
 import { videoApiPendingError } from "../src/videoApiContinuation.js";
 import { incrementalPlanHash, validateIncrementalPlan } from "../src/incrementalPlan.js";
+import { VideoExecutionRecoveryPendingError } from "../src/videoExecutionRecovery.js";
+
+test("waiting recovery and superseded video executions cannot mark the current Plan failed", async () => {
+  for (const error of [new VideoExecutionRecoveryPendingError("run-waiting"),
+    Object.assign(new Error("old execution"), { code: "CONTENT_DETAIL_EXECUTION_FENCE_STALE" })]) {
+    const data = plan({ video: true });
+    const runStore = storeFixture(data);
+    const runner = new IncrementalChannelRunner({ runStore, withTransaction: async action => action({}),
+      query: async () => ({ rows: [] }), video: async () => { throw error; } });
+    await assert.rejects(runner.execute(job(data)), caught => caught === error);
+    assert.deepEqual(runStore.calls, [["domain", "video", "running"]]);
+  }
+});
+
 
 test("API handoff preserves frozen incremental Plan and never marks its video domain failed", async () => {
   const data = plan({ video: true });
