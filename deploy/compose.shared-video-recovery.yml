@@ -1,0 +1,8 @@
+# Apply after existing worker overrides. The live manually created Worker
+# fleet retains its exact environment, networks and intake settings.
+# Center uses QY_REMOTE_CENTER_IMAGE in its separate private compose.env.
+services:
+  worker-channel:
+    image: qy-allpachong/qybullmq:shared-recovery-6228fce-migration
+  worker-incremental:
+    image: qy-allpachong/qybullmq:shared-recovery-6228fce-local
