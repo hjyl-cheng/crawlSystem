@@ -4,6 +4,11 @@ import {
 } from "./channelSnapshotDispatch.js";
 import { migrationSystemRetryDispatchAdmission } from "./migrationSystemRetryAdmission.js";
 import { safeJobId } from "./queues.js";
+import {
+  lockControlledMigrationRetry,
+  lockControlledMigrationRetryItem,
+  reopenControlledMigrationRetryItem,
+} from "./controlledMigrationRetry.js";
 
 export class MigrationSystemRetryError extends Error {
   constructor(message, {
@@ -53,6 +58,16 @@ function retryCandidate(row, generation) {
   };
 }
 
+function releasedAcceptedRetryFence(row) {
+  // Terminal system failures deliberately release the accepted root's owner.
+  // The locked pending record and unchanged Candidate/Intent generations still
+  // identify the failed execution; never reconstruct an old live owner.
+  return row.status === "pending" && row.candidate_status === "accepted"
+    && row.snapshot_active_job_id == null && row.snapshot_active_job_attempt == null
+    && row.failed_dispatch_batch_id === row.dispatch_batch_id
+    && row.snapshot_json?.failed_dispatch_batch_id === row.dispatch_batch_id;
+}
+
 function assertPendingRetryFence(row, failedGeneration) {
   const candidateGeneration = Number(row.snapshot_dispatch_generation);
   const intentGeneration = Number(row.intent_dispatch_attempts);
@@ -61,8 +76,9 @@ function assertPendingRetryFence(row, failedGeneration) {
       || row.snapshot_json?.failure_type !== "retryable_system_failure"
       || candidateGeneration !== failedGeneration
       || intentGeneration !== failedGeneration
-      || String(row.snapshot_active_job_id ?? "") !== String(row.failed_job_id ?? "")
-      || Number(row.snapshot_active_job_attempt) !== failedAttempt) {
+      || (!releasedAcceptedRetryFence(row)
+        && (String(row.snapshot_active_job_id ?? "") !== String(row.failed_job_id ?? "")
+          || Number(row.snapshot_active_job_attempt) !== failedAttempt))) {
     throw new MigrationSystemRetryError("Migration system retry lost its Candidate Fence", {
       code: "migration_system_retry_fence_stale",
       details: {
@@ -271,6 +287,7 @@ export async function listMigrationSystemRetryItems(query, {
 
 export async function retryMigrationSystemFailure({
   systemRetryId,
+  controlledBatchId = null,
   withTransaction,
   minSubscriberCount = 1000,
   allocateOutbox = allocateChannelSnapshotDispatchOutbox,
@@ -294,10 +311,13 @@ export async function retryMigrationSystemFailure({
         code: "migration_system_retry_scheduler_missing",
       });
     }
+    const controlledBatch = controlledBatchId == null ? null
+      : await lockControlledMigrationRetry(client, schedulerRows.rows[0].value_json,
+        requiredText(controlledBatchId, "controlledBatchId"));
     const schedulerAdmission = migrationSystemRetryDispatchAdmission(
       schedulerRows.rows[0].value_json,
     );
-    if (!schedulerAdmission.allowed) {
+    if (!schedulerAdmission.allowed && !controlledBatch) {
       throw new MigrationSystemRetryError(
         "Migration system retry requires a completed Scheduler",
         {
@@ -409,6 +429,7 @@ export async function retryMigrationSystemFailure({
       row,
       failedGeneration,
     );
+    if (controlledBatch) await lockControlledMigrationRetryItem(client, controlledBatch, row);
 
     const candidate = retryCandidate(row, nextGeneration);
     const jobId = jobIdFactory(
@@ -425,8 +446,8 @@ export async function retryMigrationSystemFailure({
     const allocation = await allocateOutbox(client, {
       candidate,
       expectedGeneration: failedGeneration,
-      previousJobId: row.failed_job_id,
-      previousJobAttempt: Number(row.failed_job_attempt),
+      previousJobId: releasedAcceptedRetryFence(row) ? null : row.failed_job_id,
+      previousJobAttempt: releasedAcceptedRetryFence(row) ? null : Number(row.failed_job_attempt),
       migrationIntentId: candidate.migration_intent_id,
       payload,
       jobId,
@@ -480,6 +501,7 @@ export async function retryMigrationSystemFailure({
       }
     }
 
+    if (controlledBatch) await reopenControlledMigrationRetryItem(client, controlledBatch, row);
     return Object.freeze({
       ok: true,
       created: allocation.created === true,

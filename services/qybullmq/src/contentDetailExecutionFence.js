@@ -384,6 +384,20 @@ function supersedesQueuedOrigin(run, fence) {
     && Number(active.origin_snapshot_job_attempt) < fence.originSnapshotJobAttempt;
 }
 
+function supersedesInlineGeneration(run, fence) {
+  if (!fence.candidateAttemptFence) return false;
+  const active = activeScope(run);
+  const generation = Number(active?.dispatch_generation);
+  // lockScope has already locked and verified the current Candidate owner and
+  // recovery record. An older root generation can no longer authorize writes.
+  return active?.kind === "channel_inline"
+    && active.run_id === fence.runId && active.channel_id === fence.channelId
+    && active.pipeline_cycle_id === fence.pipelineCycleId
+    && Number(active.candidate_id) === fence.candidateId
+    && Number.isSafeInteger(generation) && generation > 0
+    && generation < fence.dispatchGeneration;
+}
+
 export async function claimContentDetailExecution(client, fence, { recoverPending = false } = {}) {
   if (!client || typeof client.query !== "function") {
     throw new TypeError("an active PostgreSQL client is required");
@@ -394,7 +408,7 @@ export async function claimContentDetailExecution(client, fence, { recoverPendin
   const scope = await lockScope(locked, fence);
   if (!scope) return null;
   const claimed = await claimVideoExecution(client, run, fence, {
-    supersedesOwner: supersedesQueuedOrigin(run, fence),
+    supersedesOwner: supersedesQueuedOrigin(run, fence) || supersedesInlineGeneration(run, fence),
     recovery: recoverPending ? { kind: "full" } : null,
   });
   return claimed ? scope : null;

@@ -766,4 +766,22 @@ test("inline Content Detail uses the parent Channel Candidate attemptsStarted Fe
       [systemRetryId])).rows[0].status, 'pending', JSON.stringify(patch));
     assert.equal(await transaction(client, tx => lockContentDetailExecution(tx, resumed)), null);
   }
+  // A controlled G+1 root owns the same durable run, while the stored detail
+  // owner can still name G. Taking over must fence G without deleting its data.
+  await client.query(`UPDATE crawler.migration_system_retry_items SET status='dispatched',
+    failed_dispatch_batch_id=$2,failed_dispatch_generation=1,failed_job_id=$3,
+    failed_job_attempt=2,retry_dispatch_generation=2,recovery_run_id=NULL WHERE system_retry_id=$1`,
+    [systemRetryId,batchId,original.id]);
+  const nextJob={...parentJob(1),id:original.id+'-g2',data:{...parentJob(1).data,dispatch_generation:2}};
+  await client.query(`UPDATE crawler.channel_candidates SET snapshot_dispatch_generation=2,
+    snapshot_active_job_id=$2,snapshot_active_job_attempt=1 WHERE candidate_id=$1`,[candidateId,nextJob.id]);
+  const nextFence=contentDetailExecutionFence(nextJob,{executionMode:'channel_inline',
+    candidateAttemptFence:{candidateId,dispatchGeneration:2,jobId:nextJob.id,bullmqAttempt:1}});
+  assert.equal(await transaction(client,tx=>lockContentDetailExecution(tx,resumed)),null);
+  assert.ok(await transaction(client,tx=>claimContentDetailExecution(tx,nextFence,{recoverPending:true})),
+    'G+1 must claim the older generation detail owner after verifying current root and retry');
+  assert.ok(await transaction(client,tx=>lockContentDetailExecution(tx,nextFence)));
+  assert.equal(await transaction(client,tx=>claimContentDetailExecution(tx,resumed)),null,
+    'the old root must not reclaim after G+1');
+
 });

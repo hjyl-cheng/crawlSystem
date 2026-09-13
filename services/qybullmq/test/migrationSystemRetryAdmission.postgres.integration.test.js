@@ -125,6 +125,7 @@ async function initializeScenario(client, { suffix }) {
   return {
     failedBatchId,
     candidateId,
+    channelId,
     systemRetryId: Number(retry.rows[0].system_retry_id),
   };
 }
@@ -358,4 +359,46 @@ test("controlled retry backfills a historical unknown Batch before G+1 dispatch"
     status: "dispatched",
     outbox_dispatch_batch_id: scenario.failedBatchId,
   });
+});
+
+for (const released of [false,true]) for (const initialStatus of ['running', 'completed']) test(`bounded recovery reopens only a failed item (${initialStatus}, released=${released}) and remains idempotent`, {
+  skip: databaseUrl ? false : 'MANAGED_JOB_TEST_DATABASE_URL is not configured', timeout: 60000,
+}, async (t) => {
+  assertDedicatedLocalTestDatabase(databaseUrl);
+  const setup = new Client({connectionString: databaseUrl});
+  await setup.connect();
+  t.after(() => setup.end());
+  const scenario = await initializeScenario(setup, {suffix: randomUUID().replaceAll('-', '')});
+  await setup.query(await readFile(new URL('../src/migrationBatchControlSchema.sql', import.meta.url), 'utf8'));
+  await setup.query(`INSERT INTO crawler.migration_control_batches(batch_id,source_id,selection,status,frozen_at,total_count)
+    VALUES($1,'test','100','running',now(),1)`, [scenario.failedBatchId]);
+  await setup.query(`INSERT INTO crawler.migration_control_items(batch_id,channel_id,source_candidate_id,ordinal,state,candidate_id,outcome,finished_at)
+    VALUES($1,$2,482,1,'terminal',$3,'failed',now())`, [scenario.failedBatchId,scenario.channelId,scenario.candidateId]);
+  await setup.query(`UPDATE crawler.settings SET value_json=jsonb_build_object('status','finishing','stop_reason','controlled_migration_dispatch','pipeline_cycle_id',$1::text)
+    WHERE setting_key='query_scheduler'`, [scenario.failedBatchId]);
+  const withTransaction=async fn=>{await setup.query('BEGIN');try{const result=await fn(setup);await setup.query('COMMIT');return result;}catch(e){await setup.query('ROLLBACK');throw e;}};
+  const retry=(batchId=scenario.failedBatchId)=>retryMigrationSystemFailure({systemRetryId:scenario.systemRetryId,controlledBatchId:batchId,withTransaction});
+  await assert.rejects(retry('foreign-batch'), {code:'migration_controlled_retry_blocked'});
+  await setup.query(`UPDATE crawler.migration_control_batches SET status='paused' WHERE batch_id=$1`,[scenario.failedBatchId]);
+  await assert.rejects(retry(), {code:'migration_controlled_retry_blocked'});
+  await setup.query(`UPDATE crawler.migration_control_batches SET status='running' WHERE batch_id=$1`,[scenario.failedBatchId]);
+  await setup.query(`UPDATE crawler.migration_control_items SET outcome='success' WHERE batch_id=$1`,[scenario.failedBatchId]);
+  await assert.rejects(retry(), {code:'migration_controlled_retry_item_changed'});
+  assert.equal((await setup.query('SELECT count(*)::int n FROM crawler.proxy_job_dispatch_outbox')).rows[0].n,0);
+  await setup.query(`UPDATE crawler.migration_control_items SET outcome='failed' WHERE batch_id=$1`,[scenario.failedBatchId]);
+  if(initialStatus==='completed'){
+    await setup.query(`UPDATE crawler.migration_control_batches SET status='completed' WHERE batch_id=$1`,[scenario.failedBatchId]);
+    await setup.query(`UPDATE crawler.settings SET value_json=value_json||'{"status":"stopped","stop_reason":"pipeline_complete"}'::jsonb WHERE setting_key='query_scheduler'`);
+  }
+  if(released)await setup.query(`UPDATE crawler.channel_candidates SET status='accepted',snapshot_active_job_id=NULL,snapshot_active_job_attempt=NULL, snapshot_json=snapshot_json||jsonb_build_object('failed_dispatch_batch_id',$1::text) WHERE candidate_id=$2`,[scenario.failedBatchId,scenario.candidateId]);
+  if(released){
+    await setup.query(`UPDATE crawler.channel_candidates SET snapshot_active_job_id='new-owner',snapshot_active_job_attempt=1 WHERE candidate_id=$1`,[scenario.candidateId]);
+    await assert.rejects(retry(), {code:'migration_system_retry_fence_stale'});
+    await setup.query(`UPDATE crawler.channel_candidates SET snapshot_active_job_id=NULL,snapshot_active_job_attempt=NULL,snapshot_dispatch_generation=2 WHERE candidate_id=$1`,[scenario.candidateId]);
+    await assert.rejects(retry(), {code:'migration_system_retry_fence_stale'});
+    await setup.query(`UPDATE crawler.channel_candidates SET snapshot_dispatch_generation=1 WHERE candidate_id=$1`,[scenario.candidateId]);
+  }
+  const first=await retry(); const second=await retry();
+  assert.equal(first.dispatch_generation,2); assert.equal(second.outbox.dispatch_id,first.outbox.dispatch_id);
+  assert.deepEqual((await setup.query('SELECT state,outcome,finished_at FROM crawler.migration_control_items WHERE batch_id=$1',[scenario.failedBatchId])).rows[0],{state:'started',outcome:null,finished_at:null});
 });
