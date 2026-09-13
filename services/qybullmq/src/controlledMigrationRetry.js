@@ -32,8 +32,11 @@ export async function lockControlledMigrationRetryItem(client, batch, retry) {
      WHERE batch_id=$1 AND channel_id=$2 AND candidate_id=$3 FOR UPDATE`,
     [batch.batch_id, retry.channel_id, retry.candidate_id],
   )).rows[0];
+  // A durable pending failure can precede the asynchronous batch settlement.
+  // Its Candidate/Intent fence was verified before this lock; it is not live work.
   if (!(item?.state === 'terminal' && item.outcome === 'failed')
-      && !(item?.state === 'started' && retry.status === 'dispatched')) {
+      && !(item?.state === 'started' && item.outcome == null
+        && ['pending', 'dispatched'].includes(retry.status))) {
     throw conflict('migration_controlled_retry_item_changed');
   }
 }

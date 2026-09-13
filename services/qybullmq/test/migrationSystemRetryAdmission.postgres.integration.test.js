@@ -398,6 +398,7 @@ for (const released of [false,true]) for (const initialStatus of ['running', 'co
     await assert.rejects(retry(), {code:'migration_system_retry_fence_stale'});
     await setup.query(`UPDATE crawler.channel_candidates SET snapshot_dispatch_generation=1 WHERE candidate_id=$1`,[scenario.candidateId]);
   }
+  if(released)await setup.query(`UPDATE crawler.migration_control_items SET state='started',outcome=NULL,finished_at=NULL WHERE batch_id=$1`,[scenario.failedBatchId]);
   const first=await retry(); const second=await retry();
   assert.equal(first.dispatch_generation,2); assert.equal(second.outbox.dispatch_id,first.outbox.dispatch_id);
   assert.deepEqual((await setup.query('SELECT state,outcome,finished_at FROM crawler.migration_control_items WHERE batch_id=$1',[scenario.failedBatchId])).rows[0],{state:'started',outcome:null,finished_at:null});
