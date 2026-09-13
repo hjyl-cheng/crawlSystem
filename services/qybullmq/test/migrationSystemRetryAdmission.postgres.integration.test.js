@@ -8,6 +8,8 @@ import { allocateChannelSnapshotDispatchOutbox } from "../src/channelSnapshotDis
 import { prepareManualMigrationBatch } from "../src/manualMigrationDispatch.js";
 import { sourceSnapshotHash } from "../src/migrationSource.js";
 import { retryMigrationSystemFailure } from "../src/migrationSystemRetry.js";
+import { refillMigrationControl } from "../src/migrationBatchControl.js";
+import { restoreControlledMigrationFailures } from "../src/controlledMigrationRetry.js";
 import { crawlerRuntimeSchema } from "../src/publicationCurrentSchema.js";
 
 const { Client, Pool } = pg;
@@ -359,6 +361,62 @@ test("controlled retry backfills a historical unknown Batch before G+1 dispatch"
     status: "dispatched",
     outbox_dispatch_batch_id: scenario.failedBatchId,
   });
+});
+
+for (const released of [false,true]) test(`original batch refills restored failures with a new fenced Job (released=${released})`, {
+  skip: databaseUrl ? false : 'MANAGED_JOB_TEST_DATABASE_URL is not configured', timeout: 60000,
+}, async (t) => {
+  assertDedicatedLocalTestDatabase(databaseUrl);
+  const setup = new Client({connectionString: databaseUrl});
+  await setup.connect(); t.after(() => setup.end());
+  const s = await initializeScenario(setup, {suffix: randomUUID().replaceAll('-', '')});
+  await setup.query(await readFile(new URL('../src/migrationBatchControlSchema.sql', import.meta.url), 'utf8'));
+  await setup.query(`INSERT INTO crawler.migration_control_batches(batch_id,source_id,selection,status,frozen_at,total_count)
+    VALUES($1,'test','all','running',now(),1)`, [s.failedBatchId]);
+  await setup.query(`INSERT INTO crawler.migration_control_items(batch_id,channel_id,source_candidate_id,ordinal,state,candidate_id,outcome)
+    VALUES($1,$2,482,1,'terminal',$3,'failed')`,[s.failedBatchId,s.channelId,s.candidateId]);
+  await setup.query(`UPDATE crawler.migration_system_retry_items SET failure_evidence='{"system_failure":{"message":"test lease failure"}}'::jsonb WHERE system_retry_id=$1`,[s.systemRetryId]);
+  await setup.query(`UPDATE crawler.settings SET value_json=jsonb_build_object('status','finishing','pipeline_cycle_id',$1::text)
+    WHERE setting_key='query_scheduler'`,[s.failedBatchId]);
+  if(released) await setup.query(`UPDATE crawler.channel_candidates SET status='accepted',snapshot_active_job_id=NULL,
+    snapshot_active_job_attempt=NULL WHERE candidate_id=$1`,[s.candidateId]);
+  const withTransaction=async fn=>{await setup.query('BEGIN');try{const result=await fn(setup);await setup.query('COMMIT');return result;}catch(e){await setup.query('ROLLBACK');throw e;}};
+  const restore=()=>restoreControlledMigrationFailures({withTransaction,batchId:s.failedBatchId,
+    systemRetryIds:[s.systemRetryId],failureCode:'LEASE_CONFLICT',failureMessage:'test lease failure'});
+  await setup.query(`UPDATE crawler.migration_control_items SET outcome='success' WHERE batch_id=$1`,[s.failedBatchId]);
+  assert.equal((await restore()).length,0,'successful channels are never restored');
+  await setup.query(`UPDATE crawler.migration_control_items SET outcome='failed' WHERE batch_id=$1`,[s.failedBatchId]);
+  await setup.query(`UPDATE crawler.channel_candidates SET snapshot_dispatch_generation=2 WHERE candidate_id=$1`,[s.candidateId]);
+  assert.equal((await restore()).length,0,'a newer execution is never restored');
+  await setup.query(`UPDATE crawler.channel_candidates SET snapshot_dispatch_generation=1 WHERE candidate_id=$1`,[s.candidateId]);
+  assert.equal((await restore()).length,1);
+  assert.equal((await restore()).length,0,'restoring the same cohort is idempotent');
+  const jobs=new Map(); let active=100;
+  const queue={
+    getJobCounts:async (...types)=>Object.fromEntries(types.map(type=>[type,type==='active'?active:type==='delayed'?500:0])),
+    getJob:async id=>jobs.get(id),
+    add:async(name,data,opts)=>{const job={id:opts.jobId,name,data,opts,getState:async()=> 'waiting'};jobs.set(job.id,job);return job;},
+  };
+  const refill=()=>refillMigrationControl({query:setup.query.bind(setup),withTransaction,queue,
+    sourceLoader:()=>{throw Error('Restored failures must not be fetched again from the legacy source');}});
+  assert.equal((await refill()).dispatched,0,'full runnable buffer blocks new intake');
+  assert.equal(jobs.size,0);
+  active=0;
+  await setup.query(`UPDATE crawler.migration_control_batches SET status='paused' WHERE batch_id=$1`,[s.failedBatchId]);
+  assert.equal((await refill()).dispatched,0,'pause remains authoritative');
+  await setup.query(`UPDATE crawler.migration_control_batches SET status='running' WHERE batch_id=$1`,[s.failedBatchId]);
+  await setup.query(`UPDATE crawler.migration_control_items SET snapshot_json=jsonb_build_object('migration_system_retry_id','999999') WHERE batch_id=$1`,[s.failedBatchId]);
+  await assert.rejects(retryMigrationSystemFailure({systemRetryId:s.systemRetryId,controlledBatchId:s.failedBatchId,withTransaction}),{code:'migration_controlled_retry_item_changed'});
+  await setup.query(`UPDATE crawler.migration_control_items SET snapshot_json=jsonb_build_object('migration_system_retry_id',$2::text) WHERE batch_id=$1`,[s.failedBatchId,String(s.systemRetryId)]);
+  assert.equal((await refill()).dispatched,1,'delayed/downstream work does not block an idle fetch Worker');
+  assert.equal((await refill()).dispatched,0,'next controller tick does not duplicate the Job');
+  assert.equal(jobs.size,1);
+  const job=[...jobs.values()][0];
+  assert.equal(job.data.dispatch_generation,2);
+  assert.equal(job.data.migration_control_start,undefined);
+  assert.equal(job.data.dispatch_batch_id,s.failedBatchId);
+  assert.deepEqual((await setup.query('SELECT state,outcome FROM crawler.migration_control_items WHERE batch_id=$1',[s.failedBatchId])).rows[0],{state:'started',outcome:null});
+  assert.equal((await setup.query('SELECT count(*)::int n FROM crawler.proxy_job_dispatch_outbox')).rows[0].n,1);
 });
 
 for (const released of [false,true]) for (const initialStatus of ['running', 'completed']) test(`bounded recovery reopens only a failed item (${initialStatus}, released=${released}) and remains idempotent`, {

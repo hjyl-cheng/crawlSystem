@@ -3,7 +3,9 @@ import { randomUUID } from "node:crypto";
 import {
   createControlledMigrationScaffold,
   materializeControlledMigrationChannel,
+  deliverExistingChannelSnapshotOutbox,
 } from "./manualMigrationDispatch.js";
+import { retryMigrationSystemFailure } from "./migrationSystemRetry.js";
 import { loadMigrationSourceChannel } from "./migrationSource.js";
 import { channelSnapshotPayload } from "./migrationDispatchPolicy.js";
 import { safeJobId, defaultJobOptions } from "./queues.js";
@@ -461,7 +463,27 @@ export async function refillMigrationControl({
     )
   ).rows;
   let dispatched = 0;
+  let recoverySlots = null;
   for (const item of pending) {
+    const recoveryId = item.snapshot_json?.migration_system_retry_id;
+    if (recoveryId != null) {
+      // Recovery IDs are still members of this frozen batch. Allocate their
+      // next generation through the existing retry fence, rather than treating
+      // an already materialized Candidate as a fresh channel or using its G1 Job.
+      if (recoverySlots == null) {
+        const counts = await queue.getJobCounts('active', 'waiting', 'prioritized');
+        recoverySlots = Math.max(0, slots - Object.values(counts).reduce((n, count) => n + Number(count), 0));
+      }
+      if (recoverySlots <= 0) continue;
+      const allocation = await retryMigrationSystemFailure({
+        systemRetryId: recoveryId, controlledBatchId: id, withTransaction,
+        minSubscriberCount: Number(process.env.MIN_SUBSCRIBER_COUNT || 1000),
+      });
+      await deliverExistingChannelSnapshotOutbox(queue, allocation.outbox, { dbQuery: query });
+      recoverySlots -= 1;
+      dispatched += 1;
+      continue;
+    }
     const jobId = safeJobId("channel-snapshot", id, item.channel_id, "g1");
     // Pending placeholders already queued count toward the same frozen window.
     // Delayed continuations belong to started items and do not fill this window.
