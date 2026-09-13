@@ -3523,9 +3523,6 @@ function migrationChannelListPage(migration) {
 
   const table = migration.available
     ? `
-${statisticsPanel('/api/migration-channels/statistics',{
-  q:filters.search,channel_status:filters.channelStatus,agent_status:filters.agentStatus,final_status:filters.finalStatus,
-})}
 <section class="table-panel mt">
   <div class="table-tools">
     <div class="panel-head">
@@ -3575,6 +3572,9 @@ ${migration.notice ? `<div class="alert alert-good">${h(migration.notice)}</div>
 ${migration.error ? `<div class="alert alert-bad">${h(migration.error)}</div>` : ""}
 ${migrationBatchPanel({pendingCount:migration.stats?.discovered})}
 ${renderMigrationSystemRetries(migration.systemRetries)}
+${statisticsPanel('/api/migration-channels/statistics',{
+  q:filters.search,channel_status:filters.channelStatus,agent_status:filters.agentStatus,final_status:filters.finalStatus,
+})}
 ${table}`,
   });
 }

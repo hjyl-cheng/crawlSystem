@@ -23,3 +23,14 @@ test('short final page has no next link even while statistics are unavailable',a
  const load=loader('channelListData','queryDashboardData',{...helpers,db:()=>{throw Error('statistics unavailable');},channelSummaryRows:async()=>rows.slice(0,1)});
  const page=await load({query:{limit:'2',offset:'10'}});assert.equal(page.hasNext,false);assert.equal(page.channels.length,1);
 });
+
+test('Migration statistics still mount when the list query is unavailable',()=>{
+ const start=source.indexOf('function migrationChannelListPage('),end=source.indexOf('function migrationChannelDetailPage(',start);
+ const render=vm.runInNewContext(source.slice(start,end)+';migrationChannelListPage',{
+   URLSearchParams,MIGRATION_WORK_STATUSES:[],h:String,layout:({body})=>body,
+   statisticsPanel:()=>'<section data-statistics-url="/stats">loading</section>',
+   migrationBatchPanel:()=>'',renderMigrationSystemRetries:()=>'',
+ });
+ const page=render({configured:true,available:false,channels:[],filters:{limit:50,offset:0},error:'list unavailable'});
+ assert.match(page,/data-statistics-url/);assert.match(page,/list unavailable/);
+});
