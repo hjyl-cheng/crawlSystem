@@ -82,7 +82,9 @@ try{
           }
           const counts=await queue.getJobCounts('active','waiting','prioritized','delayed');
           const backlog=Object.values(counts).reduce((n,v)=>n+Number(v),0);
-          if(await queue.isPaused()||state.open.length>=maxOpen||backlog>=maxOpen||postprocessingBacklog>=2000){
+          // BullMQ owns collection capacity. API continuations and publication
+          // may outlive a completed root Job without occupying a Worker.
+          if(await queue.isPaused()||backlog>=maxOpen||postprocessingBacklog>=2000){
             await persist();log({event:'waiting_capacity',cursor:state.cursor,open:state.open.length,backlog,postprocessingBacklog});await sleep(10000);continue;
           }
           const item=manifest.items[state.cursor];
@@ -97,7 +99,10 @@ try{
             const allocation=await retryMigrationSystemFailure({systemRetryId:item.system_retry_id,controlledBatchId:batchId,withTransaction,
               minSubscriberCount:Number(process.env.MIN_SUBSCRIBER_COUNT||1000)});
             await deliverExistingChannelSnapshotOutbox(queue,allocation.outbox,{dbQuery:query});
-            state.open.push(String(item.system_retry_id));state.cursor++;state.submitted++;
+            // Keep a bounded recent audit window; durable outstanding work is
+            // counted above from PostgreSQL, independently of this local file.
+            state.open=[...state.open,String(item.system_retry_id)].slice(-maxOpen);
+            state.cursor++;state.submitted++;
             await appendFile(v.state+'.events',JSON.stringify({id:item.system_retry_id,candidateId:item.candidate_id,generation:allocation.dispatch_generation,at:new Date().toISOString()})+'\n',{mode:0o600});
             await persist();
             if(state.cursor%10===0||state.cursor===limit)log({event:'submitted',cursor:state.cursor,submitted:state.submitted,open:state.open.length});
