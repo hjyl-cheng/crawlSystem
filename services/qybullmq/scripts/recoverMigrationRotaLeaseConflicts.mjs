@@ -53,7 +53,7 @@ try{
       const persist=async()=>{await writeFile(v.state+'.tmp',JSON.stringify(state),{mode:0o600});await rename(v.state+'.tmp',v.state);};
       queue=new Queue('youtube-channel-crawl',{connection:redisOptions,prefix:bullmqPrefix});
       // The launcher holds an OS flock for the durable progress file.
-      let lastCircuitCheck=0;
+      let lastCircuitCheck=0,postprocessingBacklog=0;
       try{
         while(!stopping&&state.cursor<Math.min(limit,manifest.items.length)){
           if(Date.now()-lastCircuitCheck>10000){
@@ -63,16 +63,27 @@ try{
                 AND failure_evidence#>>'{system_failure,message}'=$3) AS found`,
               [manifest.createdAt,batchId,failure])).rows[0].found;
             if(recurrence)throw Error('Rota lease conflict recurred; recovery dispatch stopped');
+            postprocessingBacklog=Number((await query(`SELECT count(*) AS count
+              FROM crawler.migration_system_retry_items WHERE failed_dispatch_batch_id=$1
+                AND status IN ('retrying','dispatched')`,[batchId])).rows[0].count);
             lastCircuitCheck=Date.now();
           }
           if(state.open.length){
-            const rows=(await query('SELECT system_retry_id,status FROM crawler.migration_system_retry_items WHERE system_retry_id=ANY($1::bigint[])',[state.open])).rows;
-            state.open=rows.filter(r=>['retrying','dispatched'].includes(r.status)).map(r=>String(r.system_retry_id));
+            const rows=(await query(`SELECT retry.system_retry_id,retry.status,
+              candidate.snapshot_active_job_id,run.detail_status
+              FROM crawler.migration_system_retry_items retry
+              JOIN crawler.channel_candidates candidate USING(candidate_id)
+              LEFT JOIN LATERAL(SELECT detail_status FROM crawler.channel_runs
+                WHERE candidate_id=retry.candidate_id ORDER BY created_at DESC LIMIT 1) run ON true
+              WHERE retry.system_retry_id=ANY($1::bigint[])`,[state.open])).rows;
+            state.open=rows.filter(r=>['retrying','dispatched'].includes(r.status)
+              && (r.snapshot_active_job_id!=null||!['done','failed'].includes(r.detail_status)))
+              .map(r=>String(r.system_retry_id));
           }
           const counts=await queue.getJobCounts('active','waiting','prioritized','delayed');
           const backlog=Object.values(counts).reduce((n,v)=>n+Number(v),0);
-          if(await queue.isPaused()||state.open.length>=maxOpen||backlog>=maxOpen){
-            await persist();log({event:'waiting_capacity',cursor:state.cursor,open:state.open.length,backlog});await sleep(10000);continue;
+          if(await queue.isPaused()||state.open.length>=maxOpen||backlog>=maxOpen||postprocessingBacklog>=2000){
+            await persist();log({event:'waiting_capacity',cursor:state.cursor,open:state.open.length,backlog,postprocessingBacklog});await sleep(10000);continue;
           }
           const item=manifest.items[state.cursor];
           const current=(await query(`SELECT status,failure_code,failure_evidence#>>'{system_failure,message}' AS message
