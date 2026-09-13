@@ -7,6 +7,32 @@ function normalized(sql) {
   return sql.replace(/\s+/g, " ").trim();
 }
 
+function inventoryFixture(mode) {
+  const calls=[];
+  return {calls,options:{mode,sourceId:'source',expectedSourceDatabase:'legacy',expectedSourceDatabaseOid:'1',
+    filters:{limit:2},read:async(sql,params)=>{
+      calls.push({sql,params});
+      if(sql.includes('inventory_syncs'))return {rows:[{source_database:'legacy',source_database_oid:'1',status:'ready'}]};
+      if(sql.includes('AS filtered_count'))return {rows:[{total:'123',filtered_count:'100'}]};
+      return {rows:[{channel_id:'a'},{channel_id:'b'},{channel_id:'c'}]};
+    }}};
+}
+
+test('Migration page loads independently of full statistics and uses one extra row for pagination',async()=>{
+  const f=inventoryFixture('page');const result=await loadMigrationChannelInventory(f.options);
+  assert.equal(f.calls.length,2);
+  assert.ok(f.calls.every(c=>!c.sql.includes('AS filtered_count')));
+  assert.deepEqual(f.calls[1].params.slice(-2),[3,0]);
+  assert.equal(result.channels.length,2);assert.equal(result.hasNext,true);
+  assert.equal(result.total,null);assert.equal(result.stats,null);
+});
+
+test('Migration statistics omit page details and unused run/recovery joins',async()=>{
+  const f=inventoryFixture('statistics');const result=await loadMigrationChannelInventory(f.options);
+  assert.equal(f.calls.length,2);assert.equal(result.total,100);assert.equal(result.stats.total,123);
+  assert.doesNotMatch(f.calls[1].sql,/crawler\.(contents|channel_runs|migration_system_retry_items)/);
+});
+
 test("Migration list filters, orders, and paginates in the Target database before content counts", async () => {
   const calls = [];
   const read = async (sql, params) => {
@@ -130,7 +156,7 @@ test("Migration list rejects inventory copied from a different pinned Source", a
 
 test("Dashboard Migration list route cannot fall back to Source-side pagination", async () => {
   const server = await readFile(new URL("./server.js", import.meta.url), "utf8");
-  const start = server.indexOf("async function migrationChannelListData(req)");
+  const start = server.indexOf("async function migrationChannelListData(req,");
   const end = server.indexOf("async function migrationChannelDetailData(channelId)", start);
   assert.ok(start >= 0 && end > start);
   const listFunction = server.slice(start, end);

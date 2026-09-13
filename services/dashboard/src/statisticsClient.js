@@ -12,7 +12,7 @@ export const statisticsClientScript=String.raw`<script>
     if(document.hidden){timer=setTimeout(refresh,30000);return;}
     busy=true;button.disabled=true;
     try {
-      const response=await fetch(panel.dataset.statisticsUrl,{headers:{accept:'application/json'},cache:'no-store',signal:AbortSignal.timeout(45000)});
+      const response=await fetch(panel.dataset.statisticsUrl,{headers:{accept:'application/json'},cache:'no-store',signal:AbortSignal.timeout(75000)});
       if(!response.ok)throw Error('statistics unavailable');
       const data=await response.json();
       if(typeof data.html!=='string')throw Error('invalid statistics');

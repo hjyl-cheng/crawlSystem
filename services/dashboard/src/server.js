@@ -173,7 +173,7 @@ async function readStatistics(sql,args=[]) {
   const client=await statisticsPool.connect();
   try {
     await client.query('BEGIN READ ONLY');
-    await client.query("SET LOCAL statement_timeout='20s'");
+    await client.query("SET LOCAL statement_timeout='60s'");
     await client.query('SET LOCAL max_parallel_workers_per_gather=0');
     const result=await client.query(sql,args);
     await client.query('COMMIT');return result;
@@ -1581,7 +1581,7 @@ async function channelSummaryRows({
   return rows.rows;
 }
 
-async function migrationChannelListData(req) {
+async function migrationChannelListData(req, {statistics=false}={}) {
   const limit = intValue(req.query.limit, 50, 1, 50);
   const offset = intValue(req.query.offset, 0, 0, 1_000_000);
   const search = String(req.query.q || "").trim();
@@ -1596,19 +1596,22 @@ async function migrationChannelListData(req) {
   }
 
   try {
-    const [inventory, systemRetries] = await Promise.all([
-      loadMigrationChannelInventory({
+    const loadInventory=()=>loadMigrationChannelInventory({
         read: async (sql, params) => {
           await ensureSchema();
-          return readMigrationInventory(pool, sql, params);
+          return statistics?readStatistics(sql,params):readMigrationInventory(pool, sql, params);
         },
         sourceId: migrationSourceId,
         expectedSourceDatabase: expectedMigrationDatabase,
         expectedSourceDatabaseOid: expectedMigrationDatabaseOid,
         filters,
-      }),
-      loadMigrationSystemRetriesSafely({ read: db }),
-    ]);
+        mode:statistics?'statistics':'page',
+      });
+    if(statistics){
+      const cached=await statisticsCache.get(JSON.stringify(['migration-summary',migrationSourceId,search,channelStatus,agentStatus,finalStatus]),loadInventory);
+      return {configured:true,available:true,...cached.value,generatedAt:cached.generatedAt,stale:cached.stale};
+    }
+    const [inventory,systemRetries]=await Promise.all([loadInventory(),loadMigrationSystemRetriesSafely({ read: db })]);
     return {
       configured: true,
       available: true,
@@ -1813,12 +1816,23 @@ function utcDayOffset(offset = 0, now = new Date()) {
   return day.toISOString().slice(0, 10);
 }
 
-function dailyClockScopeSql() {
+function dailyClockScopeSql({statistics=false}={}) {
+  // Select the day's Plans once for aggregate reads. The list retains its
+  // indexed per-channel lookup so LIMIT can still return the first page early.
+  const selectedPlans=statistics?`, selected_plans AS MATERIALIZED (
+    SELECT DISTINCT ON (candidate.channel_id) candidate.*
+    FROM feature_clock.daily_channel_plans candidate CROSS JOIN bounds
+    WHERE candidate.plan_day=bounds.target_day
+      OR (bounds.target_day=bounds.today_utc
+          AND candidate.status IN ('planned','dispatching','dispatched','running'))
+    ORDER BY candidate.channel_id,(candidate.plan_day=bounds.target_day) DESC,
+             candidate.plan_day DESC,candidate.created_at DESC
+  )`:'';
   return `
     WITH bounds AS (
       SELECT $1::date AS target_day,
              (now() AT TIME ZONE 'UTC')::date AS today_utc
-    ), scope AS (
+    )${selectedPlans}, scope AS (
       SELECT
         clock.channel_id,
         COALESCE(channel.channel_url,'https://www.youtube.com/channel/' || clock.channel_id) AS channel_url,
@@ -1866,7 +1880,7 @@ function dailyClockScopeSql() {
         plan.capacity_version
       FROM feature_clock.channel_clock_state clock
       CROSS JOIN bounds
-      LEFT JOIN LATERAL (
+      ${statistics?'LEFT JOIN selected_plans plan ON plan.channel_id=clock.channel_id':`LEFT JOIN LATERAL (
         SELECT candidate.*
         FROM feature_clock.daily_channel_plans candidate
         WHERE candidate.channel_id=clock.channel_id
@@ -1882,12 +1896,12 @@ function dailyClockScopeSql() {
           candidate.plan_day DESC,
           candidate.created_at DESC
         LIMIT 1
-      ) plan ON true
+      ) plan ON true`}
       LEFT JOIN feature_clock.dispatch_outbox outbox ON outbox.plan_id=plan.plan_id
-      LEFT JOIN crawler.channel_runs run ON run.plan_id=plan.plan_id
+      LEFT JOIN ${statistics?'(SELECT * FROM crawler.channel_runs WHERE plan_id IS NOT NULL)':'crawler.channel_runs'} run ON run.plan_id=plan.plan_id
       LEFT JOIN crawler.channels channel ON channel.channel_id=clock.channel_id
       WHERE clock.lifecycle_status='active'
-        AND COALESCE(channel.status,'active')='active'
+        AND ${statistics?"(channel.status IS NULL OR channel.status='active')":"COALESCE(channel.status,'active')='active'"}
         AND (plan.plan_id IS NOT NULL
          OR (
            (
@@ -1949,7 +1963,7 @@ async function dailyClockListData(req, {statistics=false}={}) {
     where.push(`scope.plan_status=$${args.length}`);
   }
   const whereSql = where.length > 0 ? `WHERE ${where.join(" AND ")}` : "";
-  const scopeSql = dailyClockScopeSql();
+  const scopeSql = dailyClockScopeSql({statistics});
 
   try {
     if(!statistics) {
@@ -3474,6 +3488,14 @@ function channelTableRows(channels, {
   return rows || `<tr><td colspan="${columnCount}" class="muted">${h(emptyText)}</td></tr>`;
 }
 
+function migrationMetricCards(migration) {
+  return `<section class="grid grid-3">
+  <div class="metric metric-blue"><div><div class="metric-label">迁移待办</div><div class="metric-value">${fmtInt(migration.stats.total)}</div></div><div class="metric-foot">待迁移 ${fmtInt(migration.stats.discovered)} · 待收尾 ${fmtInt(migration.stats.finishing)} · 失败待重试 ${fmtInt(migration.stats.failed)} · 当前筛选 ${fmtInt(migration.total)} 条</div></div>
+  <div class="metric"><div><div class="metric-label">迁移完成</div><div class="metric-value">${fmtInt(migration.stats.migration_done)}</div></div><div class="metric-foot">已成功进入爬虫数据库</div></div>
+  <div class="metric"><div><div class="metric-label">Final 完成</div><div class="metric-value">${fmtInt(migration.stats.final_done)}</div></div><div class="metric-foot">ready_auto / ready_partial</div></div>
+</section>`;
+}
+
 function migrationChannelListPage(migration) {
   const { filters } = migration;
   const previous = new URLSearchParams();
@@ -3488,7 +3510,7 @@ function migrationChannelListPage(migration) {
   previous.set("offset", String(Math.max(0, filters.offset - filters.limit)));
   next.set("offset", String(filters.offset + filters.limit));
   const hasPrevious = filters.offset > 0;
-  const hasNext = filters.offset + migration.channels.length < Number(migration.total || 0);
+  const hasNext = migration.hasNext;
   const candidateOptions = [
     ["all", "全部未迁移"],
     ...MIGRATION_WORK_STATUSES.map((status) => [
@@ -3501,15 +3523,13 @@ function migrationChannelListPage(migration) {
 
   const table = migration.available
     ? `
-<section class="grid grid-3">
-  <div class="metric metric-blue"><div><div class="metric-label">迁移待办</div><div class="metric-value">${fmtInt(migration.stats.total)}</div></div><div class="metric-foot">待迁移 ${fmtInt(migration.stats.discovered)} · 待收尾 ${fmtInt(migration.stats.finishing)} · 失败待重试 ${fmtInt(migration.stats.failed)} · 当前筛选 ${fmtInt(migration.total)} 条</div></div>
-  <div class="metric"><div><div class="metric-label">迁移完成</div><div class="metric-value">${fmtInt(migration.stats.migration_done)}</div></div><div class="metric-foot">已成功进入爬虫数据库</div></div>
-  <div class="metric"><div><div class="metric-label">Final 完成</div><div class="metric-value">${fmtInt(migration.stats.final_done)}</div></div><div class="metric-foot">ready_auto / ready_partial</div></div>
-</section>
+${statisticsPanel('/api/migration-channels/statistics',{
+  q:filters.search,channel_status:filters.channelStatus,agent_status:filters.agentStatus,final_status:filters.finalStatus,
+})}
 <section class="table-panel mt">
   <div class="table-tools">
     <div class="panel-head">
-      <div><h2>迁移待办频道</h2><div class="note">待迁移或待收尾共 ${fmtInt(migration.stats.total)} 条 · 当前筛选 ${fmtInt(migration.total)} 条</div></div>
+      <div><h2>迁移待办频道</h2><div class="note">本页 ${fmtInt(migration.channels.length)} 条 · 全量统计独立加载</div></div>
       <div class="toolbar">
         ${hasPrevious ? `<a class="btn small-btn" href="/migration-channels?${h(previous.toString())}">上一页</a>` : ""}
         ${hasNext ? `<a class="btn small-btn" href="/migration-channels?${h(next.toString())}">下一页</a>` : ""}
@@ -4803,6 +4823,12 @@ app.get('/api/daily-clocks/statistics',async(req,res)=>{
   const progress=dailyClockExecutionProgress(data.stats,{day:data.day,now:data.generatedAt});
   return res.json({html:dailyClockMetricCards(data,data.stats,progress),generatedAt:data.generatedAt,
     stale:data.stale,refreshPage:data.day==='today'&&progress.state==='running'});
+});
+app.get('/api/migration-channels/statistics',async(req,res)=>{
+  const data=await migrationChannelListData(req,{statistics:true});
+  res.set('Cache-Control','no-store');
+  if(!data.available)return res.status(503).json({error:'统计暂不可用，列表仍可浏览'});
+  return res.json({html:migrationMetricCards(data),generatedAt:data.generatedAt,stale:data.stale});
 });
 app.get('/api/channels/statistics',async(req,res)=>{
   res.set('Cache-Control','no-store');

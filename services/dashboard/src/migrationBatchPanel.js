@@ -6,7 +6,7 @@ const escape = (value) =>
         c
       ],
   );
-export function migrationBatchPanel({ pendingCount = 0 } = {}) {
+export function migrationBatchPanel({ pendingCount = null } = {}) {
   return `<style>
 .migration-console{margin:20px 0;padding:24px;border:1px solid #dce3ec;border-radius:16px;background:var(--panel,#fff);box-shadow:0 4px 20px #152c4c06}
 .migration-console-head,.migration-controls,.migration-progress-head{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap}
@@ -18,7 +18,7 @@ export function migrationBatchPanel({ pendingCount = 0 } = {}) {
  <div class="migration-console-head"><div><h2>批量迁移</h2><p>选择频道数量，后台按容量持续采集。暂停后可从原批次继续。</p></div><span class="migration-status" id="migration-status">读取批次状态…</span></div>
  <form class="migration-controls" id="migration-start-form" method="post" action="/migration-channels/batch-migrate">
   <label for="batch-migration-selection">迁移数量</label><select id="batch-migration-selection" name="selection">${[100, 200, 500, 1000, 2000].map((n) => `<option value="${n}">${n.toLocaleString()} 个频道</option>`).join("")}<option value="all">All · 全部待迁移</option></select>
-  <button type="submit" class="btn btn-primary" id="migration-start" disabled>开始迁移</button><span class="note">当前列表待迁移约 ${escape(Number(pendingCount).toLocaleString())} 个；实际范围在启动时固定</span>
+  <button type="submit" class="btn btn-primary" id="migration-start" disabled>开始迁移</button><span class="note">${pendingCount==null?'待迁移总量见下方统计':`当前列表待迁移约 ${escape(Number(pendingCount).toLocaleString())} 个`}；实际范围在启动时固定</span>
  </form>
  <div id="migration-batch-progress" hidden></div>
  <div class="migration-controls" id="migration-batch-actions"></div>

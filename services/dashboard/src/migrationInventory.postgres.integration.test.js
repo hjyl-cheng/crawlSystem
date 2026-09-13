@@ -324,6 +324,13 @@ test("PostgreSQL pages 410k Migration inventory rows in Target only", {
   assert.equal(result.stats.migration_done, 292);
   assert.equal(result.stats.finishing, 5);
   assert.ok(elapsedMs < 5000, `Target-only first page took ${elapsedMs.toFixed(1)}ms`);
+  for(const mode of ['page','statistics']){
+    const split=await loadMigrationChannelInventory({mode,read:(sql,params)=>readMigrationInventory(pool,sql,params),
+      sourceId,expectedSourceDatabase:'migration_source_test',expectedSourceDatabaseOid:'16384',filters:{limit:50}});
+    if(mode==='page'){
+      assert.deepEqual(split.channels,result.channels);assert.equal(split.total,null);assert.equal(split.hasNext,true);
+    }else{assert.deepEqual(split.stats,result.stats);assert.equal(split.total,result.total);assert.deepEqual(split.channels,[]);}
+  }
   const pageCall = calls.find(({ sql }) => sql.includes("filtered_page AS"));
   const planResult = await readMigrationInventory(pool,
     `EXPLAIN (ANALYZE, FORMAT JSON) ${pageCall.sql}`,

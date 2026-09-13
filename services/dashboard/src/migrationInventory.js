@@ -42,7 +42,7 @@ function normalizeFilters(filters = {}) {
   };
 }
 
-function inventoryStateCte() {
+function inventoryStateCte({statistics=false}={}) {
   const candidateStatusSql = migrationCandidateStatusSql();
   const displayStatusSql = migrationDisplayStatusSql();
   const migrationIncomplete = migrationIncompleteSql();
@@ -53,7 +53,7 @@ function inventoryStateCte() {
            inventory.search_subscriber_count,inventory.priority,
            inventory.source_candidate_status,inventory.source_updated_at,
            intent.migration_intent_id,intent.target_candidate_id,
-           system_retry.system_retry_id AS active_system_retry_id,
+           ${statistics ? 'NULL' : 'system_retry.system_retry_id'} AS active_system_retry_id,
            candidate.status AS target_candidate_status,
            channel.status AS target_channel_status,
            channel.registry_promotion_candidate_id,
@@ -62,7 +62,7 @@ function inventoryStateCte() {
            channel.latest_run_id,
            COALESCE(finalized.status,'pending') AS final_status,
            COALESCE(finalized.quality_json,'{}'::jsonb) AS quality_json,
-           run.status AS run_status,run.detail_status AS run_detail_status,
+           ${statistics ? 'NULL' : 'run.status'} AS run_status,${statistics ? 'NULL' : 'run.detail_status'} AS run_detail_status,
            ${candidateStatusSql} AS candidate_status,
            ${displayStatusSql} AS status,
            ${migrationIncomplete} AS migration_incomplete,
@@ -79,11 +79,11 @@ function inventoryStateCte() {
      AND intent.channel_id=inventory.channel_id
     LEFT JOIN crawler.channel_candidates candidate
       ON candidate.candidate_id=intent.target_candidate_id
-    LEFT JOIN crawler.migration_system_retry_items system_retry
+    ${statistics ? '' : `LEFT JOIN crawler.migration_system_retry_items system_retry
       ON system_retry.candidate_id=intent.target_candidate_id
-     AND system_retry.status IN ('retrying','pending','dispatched')
+     AND system_retry.status IN ('retrying','pending','dispatched')`}
     LEFT JOIN crawler.channels channel ON channel.channel_id=intent.channel_id
-    LEFT JOIN crawler.channel_runs run ON run.run_id=channel.latest_run_id
+    ${statistics ? '' : 'LEFT JOIN crawler.channel_runs run ON run.run_id=channel.latest_run_id'}
     LEFT JOIN crawler.finalized_profiles finalized ON finalized.channel_id=intent.channel_id
     WHERE inventory.source_id=$1
   )`;
@@ -123,7 +123,7 @@ function inventorySummaryQuery(sourceId, filters) {
   const filterSql = filterClause(args, filters);
   return {
     params: args,
-    sql: `WITH ${inventoryStateCte()}, searched_state AS (
+    sql: `WITH ${inventoryStateCte({statistics:true})}, searched_state AS (
       SELECT state.*
       FROM inventory_state state
       WHERE ${searchSql}
@@ -215,7 +215,9 @@ export async function loadMigrationChannelInventory({
   expectedSourceDatabase,
   expectedSourceDatabaseOid,
   filters = {},
+  mode = 'all',
 } = {}) {
+  if(!['all','page','statistics'].includes(mode))throw new TypeError('Unsupported inventory read mode');
   if (typeof read !== "function") throw new TypeError("Target read is required");
   const normalizedSourceId = requiredText(sourceId, "Migration source_id");
   const normalizedSourceDatabase = requiredText(
@@ -248,16 +250,19 @@ export async function loadMigrationChannelInventory({
   }
 
   const summaryQuery = inventorySummaryQuery(normalizedSourceId, normalizedFilters);
-  const pageQuery = inventoryPageQuery(normalizedSourceId, normalizedFilters);
+  const pageQuery = inventoryPageQuery(normalizedSourceId, {...normalizedFilters,
+    limit:normalizedFilters.limit+(mode==='page'?1:0)});
   const [summaryResult, pageResult] = await Promise.all([
-    read(summaryQuery.sql, summaryQuery.params),
-    read(pageQuery.sql, pageQuery.params),
+    mode==='page'?{rows:[]}:read(summaryQuery.sql, summaryQuery.params),
+    mode==='statistics'?{rows:[]}:read(pageQuery.sql, pageQuery.params),
   ]);
   const summary = summaryResult.rows[0] || {};
   return {
-    channels: pageResult.rows,
-    total: Number(summary.filtered_count || 0),
-    stats: numericStats(summary),
+    channels: pageResult.rows.slice(0,normalizedFilters.limit),
+    hasNext: mode==='page'?pageResult.rows.length>normalizedFilters.limit:
+      normalizedFilters.offset+pageResult.rows.length<Number(summary.filtered_count||0),
+    total: mode==='page'?null:Number(summary.filtered_count || 0),
+    stats: mode==='page'?null:numericStats(summary),
     sync: {
       status: sync.status,
       eligible_count: Number(sync.eligible_count || 0),
