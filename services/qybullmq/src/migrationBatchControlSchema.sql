@@ -32,6 +32,11 @@ CREATE TABLE IF NOT EXISTS crawler.migration_control_items (
  UNIQUE(batch_id,ordinal)
 );
 CREATE INDEX IF NOT EXISTS migration_control_items_state ON crawler.migration_control_items(batch_id,state,ordinal);
+-- Retry admission must distinguish initial inventory from restored failures
+-- without reading every restored snapshot while holding the scheduler lock.
+CREATE INDEX IF NOT EXISTS migration_control_items_initial_pending
+  ON crawler.migration_control_items(batch_id)
+  WHERE state='pending' AND snapshot_json->>'migration_system_retry_id' IS NULL;
 CREATE INDEX IF NOT EXISTS migration_control_items_candidate ON crawler.migration_control_items(candidate_id) WHERE candidate_id IS NOT NULL;
 -- Cover the deduplicated migration detail-completion metric without scanning
 -- wide Run payloads or sorting all historical Runs every 30 seconds.
