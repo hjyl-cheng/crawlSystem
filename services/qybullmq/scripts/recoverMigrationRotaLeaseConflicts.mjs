@@ -10,6 +10,7 @@ import {verifyCrawlerWriterDatabase} from '../src/databaseIdentity.js';
 import {redisOptions,bullmqPrefix} from '../src/queues.js';
 import {retryMigrationSystemFailure} from '../src/migrationSystemRetry.js';
 import {deliverExistingChannelSnapshotOutbox} from '../src/manualMigrationDispatch.js';
+import {MigrationSystemRetryRecoveryReconciler} from '../src/migrationSystemRetryRecovery.js';
 
 const {values:v}=parseArgs({options:{'batch-id':{type:'string'},manifest:{type:'string'},state:{type:'string'},
   snapshot:{type:'boolean'},execute:{type:'boolean'},limit:{type:'string',default:'20'},'max-open':{type:'string',default:'100'}}});
@@ -52,10 +53,44 @@ try{
       if(state.batchId!==batchId)throw Error('State scope mismatch');
       const persist=async()=>{await writeFile(v.state+'.tmp',JSON.stringify(state),{mode:0o600});await rename(v.state+'.tmp',v.state);};
       queue=new Queue('youtube-channel-crawl',{connection:redisOptions,prefix:bullmqPrefix});
+      const recovery=new MigrationSystemRetryRecoveryReconciler({query,withTransaction,queues:{}});
+      const cohortIds=new Set(manifest.items.map(item=>String(item.system_retry_id)));
+      let lastSettlement=0,settlementCursor='0';
+      const settlePublished=async()=>{
+        if(Date.now()-lastSettlement<30000)return;
+        try{
+        // Bound the scan and rotate past rows that are not yet finalizable.
+        // The shared reconciler verifies generation, released ownership,
+        // current publication and source freshness atomically before resolving.
+        const rows=(await withTransaction(client=>client.query(`SELECT retry.system_retry_id,
+          retry.candidate_id,retry.failed_dispatch_generation,retry.retry_dispatch_generation,
+          retry.recovery_run_id,retry.status
+          FROM crawler.migration_system_retry_items retry
+          JOIN crawler.channel_runs run ON run.run_id=retry.recovery_run_id
+          WHERE retry.failed_dispatch_batch_id=$1 AND retry.system_retry_id>$2
+            AND retry.status IN ('retrying','dispatched')
+            AND run.status='done' AND run.detail_status='done'
+            AND run.publication_finalized_status IN ('ready_auto','ready_partial')
+          ORDER BY retry.system_retry_id LIMIT 100`,[batchId,settlementCursor]))).rows;
+        let resolved=0;
+        for(const row of rows){
+          if(stopping)break;
+          if(cohortIds.has(String(row.system_retry_id))&&await recovery.resolveFinalizedOutcome(row))resolved++;
+        }
+        settlementCursor=rows.length===100?String(rows.at(-1).system_retry_id):'0';
+        lastSettlement=Date.now();
+        if(rows.length)log({event:'settled_publications',checked:rows.length,resolved});
+        }catch(e){
+          if(!['55P03','57014','40P01'].includes(e.code))throw e;
+          lastSettlement=Date.now();
+          log({event:'waiting_settlement',code:e.code});
+        }
+      };
       // The launcher holds an OS flock for the durable progress file.
       let lastCircuitCheck=0,postprocessingBacklog=0;
       try{
         while(!stopping&&state.cursor<Math.min(limit,manifest.items.length)){
+          await settlePublished();
           if(Date.now()-lastCircuitCheck>10000){
             const recurrence=(await query(`SELECT EXISTS(SELECT 1 FROM crawler.migration_system_retry_items
               WHERE status IN ('pending','retrying','dispatched') AND requested_at>$1
@@ -112,6 +147,17 @@ try{
             }
             throw e;
           }
+        }
+        // Keep settling this cohort after the final dispatch. A channel result
+        // is complete only after central publication, not after the fetch Job.
+        while(!stopping&&state.cursor>=manifest.items.length){
+          await settlePublished();
+          const active=(await withTransaction(client=>client.query(`SELECT system_retry_id
+            FROM crawler.migration_system_retry_items WHERE failed_dispatch_batch_id=$1
+              AND status IN ('retrying','dispatched')`,[batchId]))).rows
+            .filter(row=>cohortIds.has(String(row.system_retry_id))).length;
+          if(!active)break;
+          log({event:'waiting_publication',active});await sleep(10000);
         }
         await persist();log({event:stopping?'stopped':'dispatch_window_complete',...state,total:manifest.items.length});
       }finally{await persist();}
