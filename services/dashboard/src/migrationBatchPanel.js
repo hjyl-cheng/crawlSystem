@@ -6,6 +6,15 @@ const escape = (value) =>
         c
       ],
   );
+export function migrationBatchTiming(batch, completed) {
+  const stale=Number(batch.statistics_age_seconds)>90;
+  const seconds=Number(batch.sample_active_seconds??batch.active_seconds);
+  const rate=!stale&&Number.isFinite(seconds)&&seconds>60&&completed>=10
+    ?completed*3600/seconds:null;
+  const remaining=Math.max(0,Number(batch.total_count)-completed);
+  return {stale,rate,etaHours:rate&&batch.status==='running'&&Number.isFinite(remaining)?remaining/rate:null};
+}
+
 export function migrationBatchPanel({ pendingCount = null } = {}) {
   return `<style>
 .migration-console{margin:20px 0;padding:24px;border:1px solid #dce3ec;border-radius:16px;background:var(--panel,#fff);box-shadow:0 4px 20px #152c4c06}
@@ -26,9 +35,9 @@ export function migrationBatchPanel({ pendingCount = null } = {}) {
  <details class="migration-history"><summary>最近批次</summary><div id="migration-batch-history">正在读取…</div></details>
 </section>
 <dialog class="migration-confirm" id="migration-stop-confirm"><h3>结束本批迁移？</h3><p id="migration-stop-explanation"></p><p>已完成的数据会保留。结束后不能恢复此批次，但剩余频道可以重新选择迁移。</p><div class="migration-controls"><button class="btn" id="migration-stop-cancel">返回</button><button class="btn migration-danger" id="migration-stop-submit">结束本批</button></div></dialog>
-<script>(${migrationBatchClient.toString()})();</script>`;
+<script>(${migrationBatchClient.toString()})(${migrationBatchTiming.toString()});</script>`;
 }
-function migrationBatchClient() {
+function migrationBatchClient(migrationBatchTiming) {
   const byId = (id) => document.getElementById(id),
     fmt = (n) => Number(n || 0).toLocaleString(),
     esc = (v) =>
@@ -98,19 +107,15 @@ function migrationBatchClient() {
         ["started", "执行 / 恢复中"],
         ["pending", "尚未开始"],
       ];
-      const rate =
-        Number(b.active_seconds) > 60 && done >= 10
-          ? (done / Number(b.active_seconds)) * 3600
-          : null;
-      const eta =
-        rate && active && b.status === "running"
-          ? ` · 预计剩余 ${(total - done) / rate >= 24 ? ((total - done) / rate / 24).toFixed(1) + " 天" : (total - done) / rate >= 1 ? ((total - done) / rate).toFixed(1) + " 小时" : Math.ceil(((total - done) / rate) * 60) + " 分钟"}`
-          : "";
+      const {rate,etaHours,stale}=migrationBatchTiming(b,done);
+      const eta=etaHours!==null
+        ? ` · 预计剩余 ${etaHours>=24?(etaHours/24).toFixed(1)+' 天':etaHours>=1?etaHours.toFixed(1)+' 小时':Math.ceil(etaHours*60)+' 分钟'}`:'';
       const rolling = [15, 60].map(minutes => {
         const value = b.rolling_rates?.[`minutes_${minutes}`];
+        if(stale)return `最近 ${minutes} 分钟：等待统计恢复`;
         return value ? `最近 ${minutes} 分钟结算 ${fmt(value.completed)} 个 · ${fmt(Math.round(value.per_hour))} 个/有效小时${value.fetch_completed != null ? `；抓取完成 ${fmt(value.fetch_completed)} 个` : ""}` : `最近 ${minutes} 分钟：样本积累中`;
       }).join("；");
-      const freshness = Number(b.statistics_age_seconds) > 90 ? ` · 统计延迟 ${Math.floor(b.statistics_age_seconds)} 秒` : "";
+      const freshness = stale ? ` · 统计延迟 ${Math.floor(b.statistics_age_seconds)} 秒，暂不显示速度和预计时间` : "";
       box.innerHTML = `<div class="migration-progress-head"><strong>${b.frozen_at || ["ended", "completed"].includes(b.status) ? `已处理 ${fmt(done)} / ${fmt(total)} 个频道` : "正在固定本批频道清单…"}</strong><span>${percent.toFixed(1)}%</span></div><div class="migration-progress-track" role="progressbar" aria-label="批次进度" aria-valuenow="${percent.toFixed(1)}" aria-valuemin="0" aria-valuemax="100"><div class="migration-progress-fill" style="width:${percent}%"></div></div><div class="migration-metrics">${metrics.map(([k, label]) => `<div class="migration-metric"><strong>${fmt(c[k])}</strong><span>${label}</span></div>`).join("")}</div><p>${Number(b.publishing_count) ? `待发布 ${fmt(b.publishing_count)} 项 · ` : ""}有效运行 ${Math.floor(Number(b.active_seconds) / 60)} 分钟${rate ? ` · 平均每小时 ${fmt(Math.round(rate))} 个` : ""}${eta}</p><p>${b.status === "pausing" ? `等待 ${fmt(c.started)} 个已启动频道及发布任务收尾，随后暂停。` : b.status === "stopping" ? `已停止启动新频道，等待当前频道及发布任务收尾。` : b.status === "paused" ? "现场已保留，点击继续迁移即可恢复。" : b.status === "ended" ? `${fmt(c.released)} 个未开始频道保留在待迁移列表。` : "完成数包含成功、休眠、拒绝和最终失败；重试不重复计数。"}</p><p>${rolling}${freshness}。统计每 30 秒更新；结算数按频道去重，等待恢复和重试不重复计数。</p><p class="migration-message">${b.control_error ? `源数据读取失败，已暂停派发：${esc(b.control_error)}` : ""}</p><div class="note">批次 ${esc(b.batch_id)}</div>`;
     }
     const actions = byId("migration-batch-actions");

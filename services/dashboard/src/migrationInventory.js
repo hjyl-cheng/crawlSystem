@@ -42,12 +42,12 @@ function normalizeFilters(filters = {}) {
   };
 }
 
-function inventoryStateCte({statistics=false}={}) {
+function inventoryStateCte({statistics=false,name='inventory_state',source='crawler.migration_channel_inventory'}={}) {
   const candidateStatusSql = migrationCandidateStatusSql();
   const displayStatusSql = migrationDisplayStatusSql();
   const migrationIncomplete = migrationIncompleteSql();
   const migrationDone = migrationDoneSql();
-  return `inventory_state AS (
+  return `${name} AS (
     SELECT inventory.source_candidate_id,inventory.channel_id,
            inventory.channel_url,inventory.handle,inventory.title,inventory.avatar_url,
            inventory.search_subscriber_count,inventory.priority,
@@ -73,7 +73,7 @@ function inventoryStateCte({statistics=false}={}) {
              COALESCE(candidate.updated_at,intent.updated_at,inventory.source_updated_at,inventory.synced_at),
              COALESCE(channel.updated_at,intent.updated_at,inventory.source_updated_at,inventory.synced_at)
            ) AS updated_at
-    FROM crawler.migration_channel_inventory inventory
+    FROM ${source} inventory
     LEFT JOIN crawler.migration_channel_intents intent
       ON intent.source_id=inventory.source_id
      AND intent.channel_id=inventory.channel_id
@@ -155,16 +155,24 @@ function inventoryPageQuery(sourceId, filters) {
   const offsetParameter = args.length;
   return {
     params: args,
-    sql: `WITH ${inventoryStateCte()}, filtered_page AS (
-      SELECT state.*
-      FROM inventory_state state
+    // Resolve eligibility in a set before fetching display details. A large
+    // completed prefix must not cause hundreds of thousands of random Run and
+    // channel reads merely to find the first pending page.
+    sql: `WITH ${inventoryStateCte({statistics:true,name:'eligibility_state'})}, eligible_ids AS MATERIALIZED (
+      SELECT state.source_candidate_id FROM eligibility_state state
       WHERE ${searchSql} AND ${filterSql}
+    ), page_inventory AS MATERIALIZED (
+      SELECT state.* FROM crawler.migration_channel_inventory state
+      JOIN eligible_ids eligible ON eligible.source_candidate_id=state.source_candidate_id
+      WHERE state.source_id=$1
       ORDER BY state.priority DESC,state.source_candidate_id ASC
       LIMIT $${limitParameter}::int OFFSET $${offsetParameter}::int
+    ), ${inventoryStateCte({statistics:true,source:'page_inventory'})}, filtered_page AS (
+      SELECT * FROM inventory_state
     )
     SELECT page.source_candidate_id::text AS candidate_id,
            page.source_candidate_id::text AS source_candidate_id,
-           page.target_candidate_id,page.migration_intent_id,page.active_system_retry_id,
+           page.target_candidate_id,page.migration_intent_id,system_retry.system_retry_id AS active_system_retry_id,
            page.channel_id,page.channel_url,COALESCE(page.handle,'') AS handle,
            COALESCE(page.title,'') AS title,page.avatar_url,
            page.search_subscriber_count,
@@ -172,7 +180,7 @@ function inventoryPageQuery(sourceId, filters) {
            page.source_candidate_status,page.candidate_status,page.status,
            page.target_reject_reason AS reject_reason,page.agent_status,
            page.latest_run_id,page.final_status,page.quality_json,
-           page.run_status,page.run_detail_status,
+           run.status AS run_status,run.detail_status AS run_detail_status,
            page.target_channel_status IS NULL AS is_candidate_only,
            page.migration_incomplete,
            page.migration_intent_id IS NOT NULL AS migration_started,
@@ -183,6 +191,10 @@ function inventoryPageQuery(sourceId, filters) {
            COALESCE(content_stats.live_count,0)::bigint AS live_count,
            page.updated_at
     FROM filtered_page page
+    LEFT JOIN crawler.channel_runs run ON run.run_id=page.latest_run_id
+    LEFT JOIN crawler.migration_system_retry_items system_retry
+      ON system_retry.candidate_id=page.target_candidate_id
+     AND system_retry.status IN ('retrying','pending','dispatched')
     LEFT JOIN LATERAL (
       SELECT count(*)::bigint AS content_count,
              count(*) FILTER (WHERE content.content_type='video')::bigint AS video_count,

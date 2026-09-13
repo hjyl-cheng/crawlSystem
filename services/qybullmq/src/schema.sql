@@ -4082,6 +4082,16 @@ CREATE TABLE IF NOT EXISTS crawler.migration_control_items (
 );
 CREATE INDEX IF NOT EXISTS migration_control_items_state ON crawler.migration_control_items(batch_id,state,ordinal);
 CREATE INDEX IF NOT EXISTS migration_control_items_candidate ON crawler.migration_control_items(candidate_id) WHERE candidate_id IS NOT NULL;
+-- Cover the deduplicated migration detail-completion metric without scanning
+-- wide Run payloads or sorting all historical Runs every 30 seconds.
+CREATE INDEX IF NOT EXISTS idx_crawler_runs_detail_done_candidate_channel
+  ON crawler.channel_runs(candidate_id,channel_id)
+  WHERE candidate_id IS NOT NULL AND detail_status='done';
+
+CREATE INDEX IF NOT EXISTS migration_control_items_batch_candidate_channel
+  ON crawler.migration_control_items(batch_id,candidate_id,channel_id)
+  WHERE candidate_id IS NOT NULL;
+
 -- migration-batch-control-schema:end
 
 -- throughput-recovery-schema:start

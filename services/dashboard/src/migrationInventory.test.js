@@ -102,7 +102,7 @@ test("Migration list filters, orders, and paginates in the Target database befor
   assert.ok(page);
   assert.match(page.sql, /FROM crawler\.migration_channel_inventory inventory/);
   assert.match(page.sql, /crawler\.migration_system_retry_items/);
-  assert.match(page.sql, /system_retry\.candidate_id=intent\.target_candidate_id/);
+  assert.match(page.sql, /system_retry\.candidate_id=page\.target_candidate_id/);
   assert.match(page.sql, /AS active_system_retry_id/);
   assert.match(page.sql, /WHERE [\s\S]*state\.candidate_status IN/);
   assert.match(
