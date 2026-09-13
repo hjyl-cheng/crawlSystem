@@ -29,3 +29,5 @@ CREATE TABLE IF NOT EXISTS remote_ingestion.network_bindings (
 );
 ALTER TABLE remote_ingestion.network_bindings ADD COLUMN IF NOT EXISTS stop_requested BOOLEAN NOT NULL DEFAULT false;
 ALTER TABLE remote_ingestion.network_bindings ADD COLUMN IF NOT EXISTS youtube_session_required BOOLEAN NOT NULL DEFAULT false;
+CREATE INDEX IF NOT EXISTS remote_network_unretired_slot
+  ON remote_ingestion.network_bindings(node_id,slot) WHERE state<>'retired';

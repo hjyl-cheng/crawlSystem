@@ -1,4 +1,5 @@
 import { createServer } from 'node:http';
+import { createRequestAdmission } from './requestAdmission.js';
 import { MAX_GZIP_BYTES, RemoteProtocolError, uuid } from './protocol.js';
 
 async function body(request, limit) {
@@ -30,26 +31,32 @@ async function json(request, limit = 4096) {
 }
 
 // TLS termination belongs to the deployment. The isolated runner binds loopback only.
-export function createRemoteNodeGateway({ store, channelPlans = null, routes = null, youtubeSessions = null, workerConnections = null, deploymentAdmin = null, maxConcurrentRequests = 8 }) {
-  let active = 0;
+export function createRemoteNodeGateway({ store, channelPlans = null, routes = null, youtubeSessions = null, workerConnections = null, deploymentAdmin = null, transportHealth = null, maxConcurrentRequests = 64, maxControlRequests = 4, maxHeartbeatRequests = 16, maxPendingRequests = 256, queueTimeoutMs = 5000 }) {
+  const admission = Object.fromEntries(Object.entries({collector: maxConcurrentRequests, heartbeat: maxHeartbeatRequests, control: maxControlRequests})
+    .map(([name, concurrency]) => [name, createRequestAdmission({concurrency, maxPending: maxPendingRequests, timeoutMs: queueTimeoutMs})]));
   const server = createServer(async (request, response) => {
     const send = (status, value) => {
+      if (response.destroyed) return;
+      if (status === 503) response.setHeader('retry-after', '1');
       response.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' });
       response.end(JSON.stringify(value));
     };
-    if (active >= maxConcurrentRequests) {
-      request.resume();
-      send(503, { error: 'GATEWAY_BUSY' });
-      return;
-    }
-    active++;
+    const path = new URL(request.url, 'http://gateway.invalid').pathname;
+    const control = deploymentAdmin && request.method === 'POST'
+      && ['/internal/node-deployments/prepare','/internal/node-deployments/status','/internal/node-deployments/execution','/internal/node-deployments/transport-health'].includes(path);
+    const heartbeat = request.method === 'POST' && (path === '/v1/node/heartbeat' || /^\/v1\/work\/[^/]+\/heartbeat$/.test(path));
+    const aborted = new AbortController();
+    const onClose = () => aborted.abort();
+    response.once('close', onClose);
+    let release;
     try {
-      const path = new URL(request.url, 'http://gateway.invalid').pathname;
+      release = await admission[control ? 'control' : heartbeat ? 'heartbeat' : 'collector'].acquire(aborted.signal);
       const token = /^Bearer ([^\s]+)$/.exec(request.headers.authorization || '')?.[1];
-      if(deploymentAdmin && request.method==='POST' && ['/internal/node-deployments/prepare','/internal/node-deployments/status'].includes(path)){
+      if(control){
         deploymentAdmin.authenticate(token);
+        if(path.endsWith('/transport-health')){send(200,transportHealth?await transportHealth():{transport:'http'});return;}
         const value=await json(request,512*1024);
-        send(200,path.endsWith('/prepare')?await deploymentAdmin.prepare(value):await deploymentAdmin.status(value));return;
+        send(200,path.endsWith('/prepare')?await deploymentAdmin.prepare(value):path.endsWith('/execution')?await deploymentAdmin.setExecution(value):await deploymentAdmin.status(value));return;
       }
       const nodeId = await store.authenticate(token);
       if (youtubeSessions && request.method === 'POST' && ['/v1/youtube/session','/v1/youtube/checkpoint'].includes(path)) {
@@ -110,8 +117,9 @@ export function createRemoteNodeGateway({ store, channelPlans = null, routes = n
       request.resume();
       send(error instanceof RemoteProtocolError ? error.status : 503,
         { error: error instanceof RemoteProtocolError ? error.code : 'GATEWAY_UNAVAILABLE' });
-    } finally { active--; }
+    } finally { release?.(); response.removeListener('close', onClose); }
   });
+  server.admissionStats = () => Object.fromEntries(Object.entries(admission).map(([name, lane]) => [name, lane.snapshot()]));
   server.requestTimeout = 30000;
   server.headersTimeout = 10000;
   server.keepAliveTimeout = 5000;

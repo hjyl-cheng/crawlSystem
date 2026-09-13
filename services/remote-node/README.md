@@ -2,7 +2,7 @@
 
 提供两个独立镜像。`connect_only` 用于连接验收；`incremental_collect` 包含原 YouTubeJS 增量采集执行器、Python 指纹请求服务及本机 Go relay。完整镜像不安装 yt-dlp。节点通过 HTTPS 接入中心，不需要配置中心 PostgreSQL、Redis、MinIO 或 Rota 管理凭据。
 
-**当前尚未启用生产采集。** 页面手动部署、中心登记、节点连接和启用门禁已经实现并在隔离环境验证；独立中心 BullMQ 执行入口已接通并通过隔离队列验证，必须显式配置执行开关和节点名单才启动消费者。默认不生成 Clock、不自动启用节点。详细进度见 [远程接入说明](../../docs/REMOTE_NODE_INGESTION_20260910.md)。
+**2026-09-11 当前状态：已启用生产远程增量采集。** 页面支持部署、开始接任务和暂停接任务；新 Worker 默认待命。中心使用原增量队列，部署或开始时自动补足 Rota 网络名额。配置与实测结果见 [自动网络扩容](../../docs/REMOTE_NODE_AUTO_CAPACITY_20260911.md) 和 [节点接任务控制](../../docs/SERVER_NODE_EXECUTION_CONTROL_20260911.md)。下文保留各阶段部署说明，早期未启用描述属于历史记录。
 
 ## 构建
 
@@ -40,7 +40,7 @@ Dashboard 重启后仍能展示数据库中的阶段记录；后台操作不会�
 
 凭据必须为容器用户可读的 600 普通文件，不接受符号链接。部署文件放在节点 `/etc/qy-node/runtime/deployments/<deploymentId>/`，暂存数据按 slot 放在 `/var/lib/qy-node/spool/incremental-N`。容器使用只读根文件系统、受限 tmpfs、CPU/内存/日志上限，不挂 Docker socket、不使用 host network、不发布端口。
 
-Go relay 只监听容器本机。中心预先登记部署 ID 和配置 SHA256；心跳必须匹配精确的实例、relay 启动标识及运行时版本。连接成功不等于允许采集，Docker healthy 可表示“已连接，待启用”。中心停止派发后拒绝新领取，原领取仍可恢复确认；SIGTERM 先停止领取，等待当前工作结束，再关闭 relay。完整镜像退出宽限为 16 分钟。
+Go relay 只监听容器本机。中心预先登记部署 ID 和配置 SHA256；心跳必须匹配精确的实例、relay 启动标识及运行时版本。连接成功不等于允许采集。节点镜像和部署模板禁用 Docker 定时健康检查；部署先检查容器运行及槽位身份，再由中心已有的注册、有效心跳确认连接，启用接单仍需通过就绪检查。运行期间由既有心跳、任务续租和超时机制判断在线及任务状态，不为检查状态重复加载采集程序。中心停止派发后拒绝新领取，原领取仍可恢复确认；SIGTERM 先停止领取，等待当前工作结束，再关闭 relay。完整镜像退出宽限为 16 分钟。
 
 节点断线时停止新领取，健康检查失败并重连。重复实例不能替换仍然存活的实例；旧实例的频道或网络绑定尚未收尾时，即使连接已过期，也不能由新实例抢占。替换后的实例必须重新通过中心启用校验。
 
@@ -50,7 +50,8 @@ Go relay 只监听容器本机。中心预先登记部署 ID 和配置 SHA256；
 
 需要明确设置：
 
-- `REMOTE_NODE_DATABASE_URL`：中心数据库连接。
+- `REMOTE_NODE_DATABASE_URL`：中心直连数据库，供执行锁和 `LISTEN` 专用会话使用，不能指向事务连接池。
+- `REMOTE_NODE_TRANSACTION_DATABASE_URL`：可选的中心事务连接池（例如现有 PgBouncer），供 gateway、心跳和结果事务复用连接；未配置时沿用直连地址。每个事务自行设置发布写入版本，不能依赖连接池保留会话设置。
 - `REMOTE_NODE_ROUTE_PRIVATE_KEY_FILE`：路由签名私钥。
 - `REMOTE_NODE_ENCRYPTION_KEY_FILE`：64 位十六进制的加密密钥。
 - `REMOTE_NODE_ADMIN_TOKEN_FILE`：仅供 Dashboard 使用的部署控制凭据。
@@ -107,3 +108,9 @@ docker exec qy-remote-node-center node scripts/checkRemoteNodeCenter.mjs
 后续维护新服务时需要同时带 `deploy/compose.remote-node-services.yml`，以保留中心的内部 TLS 与 Rota 路由地址。Dashboard 的生产接线使用 `SERVER_NODE_REGISTRY_CREDENTIALS_FILE` 读取匹配镜像主机的私有拉取凭据；节点只在下载期间创建临时 Docker config。公网 `/v2/` 仅允许经认证的 GET/HEAD，管理员通过中心回环端口 35000 上传。
 
 2026-09-10 的 Dashboard 基于原线上镜像叠加节点功能，使用 `services/dashboard/Dockerfile.node-management` 保留当时尚未合入的迁移列表修复。2026-09-11 已归并 `agent/bugfix-optimization`，统一源码现已同时包含节点管理与这些迁移修复，后续可使用普通 Dashboard Dockerfile 构建。叠加构建文件保留作历史部署记录，不需要为本次源码归并重启正在迁移的服务。详细部署、测试与回退记录见 [第十五阶段](../../docs/REMOTE_NODE_INGESTION_20260910.md#第十五阶段生产路由读取私有仓库与页面部署接线)。
+
+## 整频道执行版本
+
+页面新增节点及扩容通过 NATS 部署时，安装包显式设置 `REMOTE_NODE_WHOLE_CHANNEL=true`，并检查容器实际采用该模式。中心需先完成 `--nats --whole-channel --apply` 显式数据库升级并启用同名开关。新旧模式仍使用共享 YouTubeJS/Rota 采集策略；API-batch 和发布留在中心。详见 [生产验证](../../docs/WHOLE_CHANNEL_PRODUCTION_ROLLOUT_20260913.md)。
+
+升级已有节点必须先排空其正在执行的任务，再同步中心 `REMOTE_NODE_COLLECT_IMAGE`、Dashboard `SERVER_NODE_COLLECT_IMAGE`、中心部署登记和页面节点登记的镜像摘要。不能仅更新页面默认镜像，否则现有部署的身份校验会拒绝扩容。保持原有允许接任务数量和凭据。

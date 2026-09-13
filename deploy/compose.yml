@@ -97,6 +97,7 @@ x-qybullmq-worker: &qybullmq-worker
 services:
   crawler-postgres:
     image: postgres:16-alpine
+    shm_size: 200m
     restart: unless-stopped
     command: ["postgres", "-c", "timezone=UTC"]
     environment:

@@ -25,7 +25,7 @@ function storedDomainResult(run, domain) {
   return result?.domains?.[domain] ?? null;
 }
 
-function domainResult(result, domain) {
+export function incrementalDomainResult(result, domain) {
   return {
     outcome: result?.outcome ?? (result?.queued ? "queued" : "complete"),
     observation_id: result?.observation_id ?? null,
@@ -172,7 +172,7 @@ export class IncrementalChannelRunner {
         if (domain === "video") {
           lifecycleStatus = normalizeLifecycleStatus(result?.lifecycle_status);
         }
-        await this.runStore.markDomain(runId, domain, outcome, domainResult(result, domain));
+        await this.runStore.markDomain(runId, domain, outcome, incrementalDomainResult(result, domain));
       }
 
       if (plan.task_mask.agent && !completed(incrementalDomainState(run, "agent"))) {
@@ -198,7 +198,7 @@ export class IncrementalChannelRunner {
           runId,
           "agent",
           result?.queued === false ? "skipped" : "queued",
-          domainResult(result, "agent"),
+          incrementalDomainResult(result, "agent"),
         );
       }
       const waitingForAgent = plan.task_mask.agent && results.agent?.queued !== false;

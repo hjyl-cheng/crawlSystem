@@ -1527,6 +1527,11 @@ func assertProxyUsernameGone(t *testing.T, pool *pgxpool.Pool, username string) 
 }
 
 const proxyControlTestSchema = `
+CREATE TABLE proxy_control_capacity_targets (
+ workload_scope TEXT NOT NULL, role TEXT NOT NULL CHECK(role='channel'),
+ minimum_slots INTEGER NOT NULL CHECK(minimum_slots BETWEEN 1 AND 500),
+ updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), PRIMARY KEY(workload_scope,role)
+);
 CREATE TABLE proxies (
   id SERIAL PRIMARY KEY,
   address TEXT NOT NULL,

@@ -30,6 +30,9 @@ case "$name" in
       shift 2
     fi
     case "$*" in
+      'ps -aq') [ ! -f /test-state/docker-unavailable ] || exit 99; if [ -f /test-state/has-containers ]; then printf 'fixture-container\n'; fi ;;
+      'ps -a --filter label=qy.node.id='*)
+        if [ -f /test-state/deployed-compose.json ]; then python3 -c 'import json; print("\n".join(json.load(open("/test-state/deployed-compose.json"))["services"]))'; fi ;;
       info) test -f /test-state/docker-running ;;
       'version --format {{.Server.Version}}') printf '28.3.2\n' ;;
       'compose version --short') test -f /test-state/compose && printf 'v2.39.2\n' ;;
@@ -48,13 +51,16 @@ case "$name" in
           *) exit 98 ;;
         esac ;;
       'inspect '* )
-        python3 -c 'import json; p=json.load(open("/test-state/deployed-compose.json")); print(json.dumps([{"State":{"Running":True,"Health":{"Status":"healthy"}}} for _ in p["services"]]))' ;;
+        python3 -c 'import json; p=json.load(open("/test-state/deployed-compose.json")); print(json.dumps([{"Config":{"Image":s["image"],"Labels":s["labels"],"Env":[k+"="+v for k,v in s.get("environment",{}).items()]},"State":{"Running":True,"Paused":False,"Restarting":False}} for s in p["services"].values()]))' ;;
       *) exit 94 ;;
     esac ;;
   systemctl)
     case "$*" in
       'start docker') touch /test-state/docker-running ;;
       'enable docker') : ;;
+      'disable --now qy-beszel-agent.service') rm -f /test-state/monitoring-active ;;
+      'is-active --quiet qy-beszel-agent.service') test -f /test-state/monitoring-active ;;
+      'daemon-reload') : ;;
       *) exit 95 ;;
     esac ;;
   *) exit 96 ;;

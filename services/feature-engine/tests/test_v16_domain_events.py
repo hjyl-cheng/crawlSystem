@@ -249,6 +249,31 @@ def extended_agent_payload() -> dict:
 
 
 class V16DomainEventTests(unittest.TestCase):
+    def test_accepts_and_preserves_empty_uploads_discovery_evidence(self) -> None:
+        for reason, country in [("no_country", None), ("country_checked", "BR"),
+                                ("no_country_reserve", "BR"), ("country_recheck_exhausted", "BR")]:
+            with self.subTest(reason=reason):
+                discovery = discovery_payload()
+                discovery.update(items=0, anchor_matched=False, stop_reason="list_end",
+                                 first_seen=[], first_seen_count=0, detail_success_count=0,
+                                 detail_failure_count=0, empty_uploads={
+                                     "version": 1, "outcome": "dormant", "reason": reason, "country": country})
+                source = event("video", video_payload(discovery=discovery))
+                parsed = CrawlerObservationRecorded.from_mapping(source)
+                self.assertEqual(parsed.payload.discovery.empty_uploads, discovery["empty_uploads"])
+                self.assertEqual(parsed.payload_hash, source["payload_hash"])
+
+    def test_rejects_malformed_empty_uploads_evidence(self) -> None:
+        valid = {"version": 1, "outcome": "dormant", "reason": "country_checked", "country": "BR"}
+        for evidence in [None, {}, {**valid, "extra": True}, {**valid, "country": "br"},
+                         {**valid, "version": 2}, {**valid, "reason": "network_error"},
+                         {**valid, "country": None}, {**valid, "reason": "no_country"}]:
+            with self.subTest(evidence=evidence):
+                discovery = discovery_payload()
+                discovery["empty_uploads"] = evidence
+                with self.assertRaises(EventValidationError):
+                    CrawlerObservationRecorded.from_mapping(event("video", video_payload(discovery=discovery)))
+
     def test_accepts_empty_uploads_dormancy_without_claiming_no_recent_content(self) -> None:
         payload = video_payload()
         payload["activity"] = {

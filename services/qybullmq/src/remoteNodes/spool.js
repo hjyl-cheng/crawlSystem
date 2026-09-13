@@ -1,4 +1,4 @@
-import { mkdir, open, readdir, readFile, rename, stat, unlink } from 'node:fs/promises';
+import { mkdir, open, readdir, readFile, rename, lstat, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { MAX_GZIP_BYTES } from './protocol.js';
@@ -27,9 +27,13 @@ export class RemoteResultSpool {
   }
 
   async usageUnlocked() {
-    const names = await readdir(this.directory);
-    const sizes = await Promise.all(names.map(async (name) => (await stat(join(this.directory, name))).size));
-    return sizes.reduce((total, size) => total + size, 0);
+    const size = async path => {
+      const info = await lstat(path);
+      if (!info.isDirectory()) return info.size;
+      const sizes = await Promise.all((await readdir(path)).map(name => size(join(path, name))));
+      return sizes.reduce((total, value) => total + value, 0);
+    };
+    return size(this.directory);
   }
 
   usage() { return this.exclusive(() => this.usageUnlocked()); }
@@ -40,7 +44,7 @@ export class RemoteResultSpool {
   }
 
   async save(name, bytes) {
-    if (!['claim.json', 'pending.json', 'network.json', 'youtube-session.json'].includes(name)) throw new TypeError('invalid spool file');
+    if (!['claim.json', 'pending.json', 'network.json', 'youtube-session.json', 'whole-pending.json'].includes(name)) throw new TypeError('invalid spool file');
     return this.exclusive(async () => {
       if ((await this.usageUnlocked()) + bytes.length > this.maxBytes) throw new Error('SPOOL_FULL');
       const temporary = join(this.directory, `${randomUUID()}.tmp`);
@@ -70,11 +74,12 @@ export class RemoteResultSpool {
     });
   }
 
-  async archiveStaleResult() {
+  async archiveStaleResult(name = 'pending.json') {
+    if (!['pending.json', 'whole-pending.json'].includes(name)) throw new TypeError('invalid pending spool file');
     return this.exclusive(async () => {
       // Keep the exact bytes for inspection. They still count toward the disk
       // cap, but a conclusively expired execution must not disable this Worker.
-      await rename(join(this.directory, 'pending.json'), join(this.directory, `${randomUUID()}.stale`));
+      await rename(join(this.directory, name), join(this.directory, `${randomUUID()}.stale`));
       await this.syncDirectory();
     });
   }

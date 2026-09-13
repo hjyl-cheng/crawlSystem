@@ -3,6 +3,10 @@ import { Worker } from "bullmq";
 import { gateVideoApiJob, isVideoApiHandoff, runVideoApiResumable } from "./videoApiContinuation.js";
 import { runVideoExecutionResumable } from "./videoExecutionDeferral.js";
 import { isVideoExecutionRecoveryPending } from "./videoExecutionRecovery.js";
+import { localIntakeSignalsFromEnv } from './remoteNodes/localIntakeSignals.js';
+import { createTransportSignals } from './remoteNodes/transportSignals.js';
+import { LocalIncrementalIntake } from './localIncrementalIntake.js';
+import { intakeWorkerName } from './workerIntakeTelemetry.js';
 import { nanoid } from "nanoid";
 import { ensureDefaultAgentConfig } from "./agentConfig.js";
 import { ChannelExecutionRuntimeAdapter } from "./channelExecutionRuntimeAdapter.js";
@@ -1661,6 +1665,8 @@ const workerQueueConfiguration = validateWorkerQueueConfiguration({
 });
 
 let workers = [];
+let localIntake = null;
+let localIntakeSignals = null;
 let shutdownPromise = null;
 
 async function shutdownStep(stage, action) {
@@ -1681,6 +1687,8 @@ function shutdown(signal) {
   shutdownPromise = (async () => {
     console.log(`received ${signal}, shutting down workers`);
     await shutdownStep("bullmq_intake", () => Promise.all(workers.map((worker) => worker.pause(true))));
+    if(localIntake)await shutdownStep('local_intake',()=>localIntake.stop());
+    if(localIntakeSignals)await shutdownStep('local_intake_notifications',()=>localIntakeSignals.close());
     if (rotaSlot) await shutdownStep("rota_slot", () => rotaSlot.close());
     await shutdownStep("bullmq_workers", () => Promise.all(workers.map((worker) => worker.close())));
     await shutdownStep("full_crawl_youtubejs_queues", closeFullCrawlYoutubeJsQueues);
@@ -1730,12 +1738,17 @@ async function startWorkerRuntime() {
   }
   if (shuttingDown) return;
 
+  const localControl=process.env.LOCAL_INCREMENTAL_INTAKE_CONTROL==='true';
+  if(localControl && (enabledQueues.length!==1 || enabledQueues[0]!==queuesByRole.channelIncremental || concurrencyFor(enabledQueues[0])!==1)) {
+    throw new Error('Local intake control requires one incremental Worker with concurrency 1');
+  }
   workers = enabledQueues.map((queueName) => {
-    const worker = new Worker(queueName, processJob, {
+    const worker = new Worker(queueName, (job,token)=>localControl?localIntake.process(job,token,()=>processJob(job,token)):processJob(job,token), {
       connection: redisOptions,
       concurrency: process.env.FULL_CRAWL_CANARY_WORKER === "true" ? 1 : concurrencyFor(queueName),
       ...bullmqWorkerTimingOptions(),
       ...(intakePrefix ? { prefix: intakePrefix } : {}),
+      ...(localControl?{autorun:false,name:intakeWorkerName('local',proxyWorkerId)}:{}),
     });
 
     worker.on("completed", async (job) => {
@@ -1967,6 +1980,18 @@ async function startWorkerRuntime() {
     console.log(`worker started queue=${queueName} concurrency=${worker.opts.concurrency}`);
     return worker;
   });
+  if(localControl){
+    if(process.env.LOCAL_INCREMENTAL_INTAKE_NOTIFICATIONS==='true'){
+      if(process.env.LOCAL_INCREMENTAL_NATS_URL){
+        localIntakeSignals=await localIntakeSignalsFromEnv(proxyWorkerId);
+      }else{
+        if(!process.env.LOCAL_INCREMENTAL_NOTIFY_DATABASE_URL)throw new Error('DIRECT_NOTIFICATION_DATABASE_REQUIRED');
+        localIntakeSignals=await createTransportSignals({connectionString:process.env.LOCAL_INCREMENTAL_NOTIFY_DATABASE_URL});
+      }
+    }
+    localIntake=new LocalIncrementalIntake({worker:workers[0],query,signals:localIntakeSignals,workerId:proxyWorkerId,report:value=>console.log(JSON.stringify(value))});
+    await localIntake.start();
+  }
 }
 
 try {

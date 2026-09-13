@@ -24,7 +24,8 @@ COPY services/qybullmq/scripts/fingerprint_gateway.py services/qybullmq/scripts/
 ARG QY_VCS_REF=uncommitted
 LABEL org.opencontainers.image.title="qy-remote-node-incremental" \
       org.opencontainers.image.revision="${QY_VCS_REF}" qy.remote.mode="incremental_collect" \
-      qy.remote.runtime="youtubejs-incremental-v1"
+      qy.remote.runtimes="youtubejs-incremental-v1,youtubejs-incremental-whole-v1"
 USER 1000:1000
-HEALTHCHECK --interval=10s --timeout=5s --start-period=30s --retries=3 CMD ["node","scripts/runRemoteNodeIncremental.mjs","--healthcheck"]
+# Center heartbeats and task leases provide liveness without spawning collectors.
+HEALTHCHECK NONE
 CMD ["node","scripts/runRemoteNodeIncremental.mjs"]

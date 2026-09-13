@@ -336,6 +336,7 @@ func (s *Server) setupRoutes() {
 			r.Post("/report", s.proxyControlHandler.Report)
 			r.Post("/release", s.proxyControlHandler.Release)
 			r.Get("/capacity", s.proxyControlHandler.Capacity)
+			r.Post("/capacity/ensure", s.proxyControlHandler.EnsureCapacity)
 			r.Get("/business-runs/{businessRunID}/budget", s.proxyControlHandler.BusinessRunBudget)
 		})
 	}

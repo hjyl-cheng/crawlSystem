@@ -23,6 +23,8 @@ import { createVideoDetailApiFallback } from '../src/videoDetailApiFallback.js';
 import { waitForVideoApiDetail } from '../src/videoApiBatchRequests.js';
 import { incrementalPlanHash, INCREMENTAL_JOB_NAME, INCREMENTAL_QUEUE } from '../src/incrementalPlan.js';
 import { PUBLICATION_WRITER_VERSION } from '../src/publicationWriterVersion.js';
+import { IncrementalRunStore } from '../src/incrementalRunStore.js';
+import { BrowserProfileStore } from '../src/browserProfileStore.js';
 
 const url = process.env.REMOTE_NODE_TEST_DATABASE_URL;
 
@@ -68,6 +70,9 @@ test('one existing clock Plan per remote channel owner', { skip: !url, timeout: 
   t.after(() => new Promise((resolve) => { server.close(resolve); server.closeAllConnections(); }));
   const endpoint = `http://127.0.0.1:${server.address().port}`;
   const contexts = new Map();
+  const runStore = new IncrementalRunStore({ withTransaction: action => store.transaction(action) });
+  const profiles = new BrowserProfileStore({ queryFn: pool.query.bind(pool),
+    transactionFn: action => store.transaction(action), secret: randomBytes(32).toString('hex') });
   const assertBusinessFence = async (_client, task) => {
     if (contexts.get(task.task_id) !== task.context.execution_attempt_id
       || incrementalPlanHash(task.input.plan) !== task.context.plan_hash) throw new RemoteProtocolError('BUSINESS_FENCE_STALE');
@@ -86,6 +91,17 @@ test('one existing clock Plan per remote channel owner', { skip: !url, timeout: 
   }
   async function enqueue(value) {
     const result = await channelStore.enqueue(value, { executionAttemptId: `attempt:${value.data.plan_id}` });
+    if (result.taskId && value.data.task_mask.video && !contexts.has(result.taskId)) {
+      // Transport fixtures still need a real original execution record: video
+      // recovery deliberately refuses synthetic identities with no PG attempt.
+      await runStore.claim(value.data);
+      const group = await profiles.loadOrCreate({ identityPolicyId: 'qy-br-channel-anonymous-v1', identityPolicyVersion: 1,
+        networkIdentityKey: `fixture:${value.data.plan_id}`, profileEpoch: 0, language: 'pt', country: 'BR', timezone: 'America/Sao_Paulo' });
+      const attemptId = await profiles.beginAttempt({ channelId: value.data.channel_id, runId: `incremental:${value.data.plan_id}`,
+        queueName: value.queueName, jobId: value.id, jobAttempt: 0, dispatchGeneration: value.data.dispatch_generation,
+        workerId: 'transport-fixture', proxy: { slot_name: 'fixture' }, profileGroup: group });
+      await pool.query('UPDATE crawler.channel_execution_attempts SET attempt_id=$2 WHERE attempt_id=$1', [attemptId, `attempt:${value.data.plan_id}`]);
+    }
     if (result.taskId) contexts.set(result.taskId, `attempt:${value.data.plan_id}`);
     return result;
   }

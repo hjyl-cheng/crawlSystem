@@ -102,3 +102,25 @@ test("incremental Job cannot arrive on the full-crawl queue", () => {
     data,
   }).plan_id, data.plan_id);
 });
+
+test("country recheck metadata survives retries without changing the frozen Plan", () => {
+  const frozen = fixture();
+  for (const status of ["requested", "checked", "unavailable"]) {
+    const data = { ...frozen, uploads_country_recheck: { country: "BR", status },
+      video_api_continuation: { request_id: "pending-detail" } };
+    const validated = validateIncrementalPlan(data);
+    assert.deepEqual(validated, validateIncrementalPlan(frozen));
+    assert.equal(incrementalPlanHash(validated), incrementalPlanHash(frozen));
+    assert.equal(data.uploads_country_recheck.status, status);
+    assert.throws(() => validateIncrementalPlan({ ...data, unexpected: true }), /payload keys differ/);
+  }
+});
+
+test("country recheck metadata is strictly validated", () => {
+  for (const metadata of [null, undefined, "BR", [], {},
+    { country: "br", status: "checked" }, { country: "BRA", status: "checked" },
+    { country: "BR", status: "success" }, { country: "BR", status: "checked", bypass: true }]) {
+    assert.throws(() => validateIncrementalPlan({ ...fixture(), uploads_country_recheck: metadata }),
+      IncrementalPlanContractError);
+  }
+});

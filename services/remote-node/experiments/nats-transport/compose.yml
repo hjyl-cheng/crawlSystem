@@ -1,0 +1,31 @@
+# Isolated experiment: no production networks, credentials or database volumes.
+services:
+  broker:
+    image: nats:2.12-alpine@sha256:b270f5e2428354c0335612694d7dd2fb588148e567a5757fdff325ef9c9332e6
+    command: ["-c", "/etc/nats/probe.conf"]
+    volumes:
+      - ./nats.conf:/etc/nats/probe.conf:ro
+      - broker-data:/data
+    ports: ["127.0.0.1:${PROBE_NATS_PORT:-0}:4222"]
+    mem_limit: 256m
+    cpus: 0.5
+    networks: [probe]
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: remote_node_ingestion_test
+      POSTGRES_USER: probe
+      POSTGRES_PASSWORD: isolated-probe-only
+    ports: ["127.0.0.1::5432"]
+    mem_limit: 256m
+    cpus: 0.5
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U probe -d remote_node_ingestion_test"]
+      interval: 1s
+      timeout: 2s
+      retries: 30
+    networks: [probe]
+networks:
+  probe: {}
+volumes:
+  broker-data:

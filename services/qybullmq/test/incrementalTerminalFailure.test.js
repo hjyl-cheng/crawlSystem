@@ -41,6 +41,7 @@ test("terminal incremental failure emits one failed Observation for the active d
   const removals = [];
   const client = {
     async query(statement) {
+      if (/FROM crawler\.crawl_observation_keys/.test(statement)) return { rows: [] };
       assert.match(statement, /FROM crawler\.channel_runs/);
       return {
         rows: [{
@@ -62,7 +63,7 @@ test("terminal incremental failure emits one failed Observation for the active d
       id: plan().job_id,
       name: "channel.incremental.plan",
       queueName: "youtube-channel-incremental",
-      data: plan(),
+      data: plan({ uploads_country_recheck: { country: "BR", status: "checked" } }),
     },
     error: new Error("This channel was removed because it violated our Community Guidelines."),
     attempts: 3,

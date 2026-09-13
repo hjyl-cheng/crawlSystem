@@ -1,0 +1,9 @@
+# Apply only to the corresponding existing service/project, using --no-deps.
+# These patch images retain the running base and replace only the affected module.
+services:
+  worker-incremental:
+    image: qy-allpachong/qybullmq:api-wait-capacity-20260911
+  feature-dispatch:
+    image: qy-allpachong/feature-dispatch:api-wait-capacity-20260911
+  remote-node-center:
+    image: qy-allpachong/remote-node-center:api-wait-capacity-20260911

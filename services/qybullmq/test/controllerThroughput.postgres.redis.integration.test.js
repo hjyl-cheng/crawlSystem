@@ -31,7 +31,7 @@ test('40 concurrent real consumers keep receiving frozen migration jobs during a
     catch (error) { await c.query('ROLLBACK'); throw error; }
     finally { c.release(); }
   };
-  const connection = { host: '127.0.0.1', port, maxRetriesPerRequest: null };
+  const connection = { host: '127.0.0.1', port, password: process.env.THROUGHPUT_TEST_REDIS_PASSWORD, maxRetriesPerRequest: null };
   const prefix = `controller-throughput-${Date.now()}`;
   const queue = new Queue('crawl', { connection, prefix });
   const blocker = new pg.Client({ connectionString: url });
@@ -112,7 +112,7 @@ test('40 concurrent real consumers keep receiving frozen migration jobs during a
       cwd: new URL('..', import.meta.url),
       env: { ...process.env, DATABASE_URL: url, DATABASE_URL_FILE: '', EXPECTED_CRAWLER_DATABASE: 'throughput_controller_test',
         FORBIDDEN_CRAWLER_DATABASE: 'forbidden', SKIP_SCHEMA_MIGRATION: 'true', POSTGRES_POOL_MIN: '0',
-        REDIS_HOST: '127.0.0.1', REDIS_PORT: String(port), REDIS_PASSWORD: '', BULLMQ_PREFIX: prefix,
+        REDIS_HOST: '127.0.0.1', REDIS_PORT: String(port), REDIS_PASSWORD: process.env.THROUGHPUT_TEST_REDIS_PASSWORD || '', BULLMQ_PREFIX: prefix,
         ROTA_WORKLOAD_SCOPE_EXPECTED: 'qy-production', ROTA_PROXY_CONTROL_URL: '', ROTA_PROXY_CONTROL_TOKEN: '',
         QUERY_METADATA_AUTO_CYCLE_ENABLED: 'false', CHANNEL_CANDIDATE_DISPATCH_ENABLED: 'false',
         CONTENT_ENRICH_DISPATCH_ENABLED: 'false', MIGRATION_BATCH_CONTROL_ENABLED: 'true',
@@ -125,7 +125,7 @@ test('40 concurrent real consumers keep receiving frozen migration jobs during a
     child.stderr.on('data', data => { output += data; });
     const exited = new Promise(resolve => child.once('exit', (code, signal) => resolve({ code, signal })));
     try {
-      await until(() => ['migration_metrics', 'migration_intake', 'migration_settlement', 'video_api', 'finalize_scan', 'finalize_changes']
+      await until(() => ['migration_metrics', 'migration_intake', 'migration_settlement', 'video_api', 'finalize_scan', 'finalize_changes', 'agent_dispatch', 'batch_counts']
         .every(name => output.includes(`"name":"${name}"`)));
       assert.doesNotMatch(output, /controller_work_cycle_failed/);
     } catch (error) { throw new Error(`${error.message}\n${output.slice(-8000)}`); }

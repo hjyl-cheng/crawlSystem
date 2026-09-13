@@ -1,0 +1,5 @@
+# Append to the Dashboard stack. Existing remote containers require a drained
+# recreation with the generated healthcheck.disable=true Compose setting.
+services:
+  dashboard:
+    image: qy-allpachong/dashboard:node-heartbeat-health-20260912

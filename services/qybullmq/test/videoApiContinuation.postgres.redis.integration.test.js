@@ -82,11 +82,27 @@ test("real workers release the channel slot, survive restart, and consume late s
   assert.deepEqual(errors, []);
   assert.equal((await queue.getJob("full")).attemptsMade, 0);
   await worker.close();
+  const retryAt = new Date(Date.now() + 1800);
+  await query("UPDATE crawler.youtube_api_tasks SET next_retry_at=$1", [retryAt]);
   worker = startWorker();
+  const redisClient = await queue.client;
+  await until(async () => (await Promise.all(["full", "incremental"].map(async id => {
+    const score = await redisClient.zscore(queue.toKey("delayed"), id);
+    return score != null && Math.floor(Number(score) / 4096) >= retryAt.getTime();
+  }))).every(Boolean));
+  const starts = await Promise.all(["full", "incremental"].map(async id => (await queue.getJob(id)).attemptsStarted));
+  await delay(200);
+  assert.deepEqual(await Promise.all(["full", "incremental"].map(async id => (await queue.getJob(id)).attemptsStarted)),
+    starts, "future API retry must not repeatedly wake a real Worker");
   await delay(holdMs);
   assert.equal(fetches, 6, "pending polling after restart never repeats YouTubeJS");
   assert.equal(networkTasks, 3, "pending polling never acquires another network Task");
   assert.deepEqual(results, ["next-channel"], "pending channels are neither completed nor failed");
+  await queue.add("ordinary", {}, { jobId: "during-api-wait", attempts: 1 });
+  await until(() => results.includes("during-api-wait"));
+  assert.equal(networkTasks, 4, "the released Worker can collect another channel during quota wait");
+  // A completed API result is replayed on the scheduled wakeup without rescraping.
+  await query("UPDATE crawler.youtube_api_tasks SET next_retry_at=now()");
   await dispatchVideoApiRequests({ query, withTransaction, queue: apiQueue });
   const tasks = (await query("SELECT task_id FROM crawler.youtube_api_tasks")).rows;
   assert.equal(tasks.length, 1, "full and incremental share one batch API task");
@@ -94,10 +110,10 @@ test("real workers release the channel slot, survive restart, and consume late s
     title: "API result", published_at: "2026-09-01T00:00:00Z", view_count_text: "123",
     duration_seconds: 60, privacy_status: "public", comments_disabled: true,
   }, true));
-  await until(() => results.length === 3);
+  await until(() => results.length === 4);
   assert.deepEqual(errors, []);
   assert.equal(fetches, 6);
-  assert.equal(networkTasks, 3, "API evidence consumption must work even when network budget is exhausted");
+  assert.equal(networkTasks, 4, "API evidence consumption must work even when network budget is exhausted");
   for (const id of ["full", "incremental"]) {
     const job = await queue.getJob(id);
     assert.equal(await job.getState(), "completed");

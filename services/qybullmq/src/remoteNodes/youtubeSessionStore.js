@@ -53,7 +53,7 @@ export class RemoteYoutubeSessionStore {
     uuid(nodeId); uuid(request.task_id); uuid(request.route_id); generation(request.generation);
     if (typeof request.slot !== 'string' || !/^[a-zA-Z0-9_.-]{1,100}$/.test(request.slot)
       || !/^[a-f0-9]{48}$/.test(request.boot_id) || !Number.isSafeInteger(request.epoch)) fail('INVALID_YOUTUBE_SESSION_REQUEST');
-    const node = (await client.query('SELECT state FROM remote_ingestion.nodes WHERE node_id=$1 FOR NO KEY UPDATE', [nodeId])).rows[0];
+    const node = (await client.query('SELECT state FROM remote_ingestion.nodes WHERE node_id=$1 FOR SHARE', [nodeId])).rows[0];
     if (!node || node.state === 'disabled') throw new RemoteProtocolError('UNAUTHORIZED', 401);
     const task = (await client.query('SELECT *,lease_until>clock_timestamp() AS alive FROM remote_ingestion.tasks WHERE task_id=$1 FOR UPDATE', [request.task_id])).rows[0];
     if (!task || task.node_id !== nodeId || task.generation !== request.generation

@@ -1,0 +1,7 @@
+# Include for the Dashboard stack on every deployment of remote collectors.
+# Keep the public address in deployment configuration, independent of image tags.
+services:
+  dashboard:
+    image: qy-allpachong/dashboard:node-nats-required-20260912
+    environment:
+      SERVER_NODE_NATS_URL: ${QY_REMOTE_NODE_NATS_URL:?public WSS or TLS NATS endpoint required}

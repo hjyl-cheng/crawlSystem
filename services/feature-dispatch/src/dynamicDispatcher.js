@@ -72,7 +72,15 @@ export function insideUtcDispatchWindow(value) {
 
 export function queuePressure(counts = {}) {
   return QUEUE_PRESSURE_STATES.reduce(
-    (total, state) => total + Math.max(0, Number(counts[state] ?? 0)),
+    (total, state) => {
+      const count = Math.max(0, Number(counts[state] ?? 0));
+      // Older probes remain conservative. Due retries still reserve capacity;
+      // future retries have released their Worker and must not starve new work.
+      const ready = state === "delayed" && Number.isFinite(counts.delayed_ready)
+        ? Math.min(count, Math.max(0, counts.delayed_ready))
+        : count;
+      return total + ready;
+    },
     0,
   );
 }
@@ -146,13 +154,30 @@ export function computeDispatchBudget(telemetry, {
   };
 }
 
-async function queueSnapshot(queue) {
+export async function incrementalWorkerCapacity(queue) {
+  const workers=await queue.getWorkers();
+  const names=workers.map(w=>w.rawname?.match(/:w:(intake-.+)$/)?.[1]).filter(Boolean);
+  if(!names.length)return workers.length;
+  const admitted=await (await queue.client).mget(...names.map(name=>queue.toKey(`intake:${name}`)));
+  return workers.length-names.length+admitted.filter(value=>value==='1').length;
+}
+
+async function queueSnapshot(queue, { countReadyDelays = false } = {}) {
   const [counts, workers, globalConcurrency, paused] = await Promise.all([
     queue.getJobCounts(...QUEUE_PRESSURE_STATES),
-    queue.getWorkersCount(),
+    countReadyDelays ? incrementalWorkerCapacity(queue) : queue.getWorkersCount(),
     queue.getGlobalConcurrency(),
     queue.isPaused(),
   ]);
+  if (countReadyDelays) {
+    // BullMQ stores delayed deadlines as milliseconds * 4096 plus tie bits.
+    // ZCOUNT uses that index directly: no fetching/scanning every delayed job.
+    counts.delayed_ready = Number(counts.delayed) > 0
+      ? Number(await (await queue.client).zcount(
+        queue.toKey("delayed"), "-inf", Date.now() * 4096 + 4095,
+      ))
+      : 0;
+  }
   return {
     name: queue.name,
     counts,
@@ -207,7 +232,7 @@ export class BullMqCapacityProbe {
 
   async sample() {
     const [incremental, channelCrawl, agentIncremental, proxyChannelReady] = await Promise.all([
-      queueSnapshot(this.incrementalQueue),
+      queueSnapshot(this.incrementalQueue, { countReadyDelays: true }),
       queueSnapshot(this.channelCrawlQueue),
       queueSnapshot(this.agentIncrementalQueue),
       this.proxyChannelReady(),

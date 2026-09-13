@@ -5,6 +5,12 @@ import {createHash} from 'node:crypto';
 // image gains a durable spool and the original fingerprint runtime's resources.
 export function buildNodeCollectDeployment(args) {
   const plan=buildNodeConnectionDeployment(args);
+  if(args.natsUrl){
+    const endpoint=new URL(args.natsUrl);
+    if(!['tls:','wss:'].includes(endpoint.protocol)||endpoint.username||endpoint.password||endpoint.search||endpoint.hash||(endpoint.protocol==='wss:'?endpoint.pathname!=='/node-messages':!['','/'].includes(endpoint.pathname)))throw new Error('NATS 节点接入地址必须使用 TLS');
+    plan.natsUrl=endpoint.href.replace(/\/$/,'');
+    plan.wholeChannel=true;
+  }
   plan.mode='incremental_collect';plan.memoryLimitMiB=plan.count*768;
   for(const [slot,service] of Object.entries(plan.compose.services)){
     const config=JSON.parse(plan.files[`${slot}.json`]);config.mode=plan.mode;
@@ -12,6 +18,7 @@ export function buildNodeCollectDeployment(args) {
     Object.assign(plan.registrations.find(item=>item.slot===slot),{mode:plan.mode,
       configHash:createHash('sha256').update(plan.files[`${slot}.json`]).digest('hex')});
     service.labels['qy.remote.mode']=plan.mode;
+    if(plan.natsUrl)service.environment={REMOTE_NODE_NATS_URL:plan.natsUrl,REMOTE_NODE_WHOLE_CHANNEL:'true'};
     service.mem_limit='768m';service.pids_limit=128;service.stop_grace_period='16m';
     service.tmpfs=['/tmp:rw,noexec,nosuid,size=64m,uid=1000,gid=1000','/run/qy-node:rw,noexec,nosuid,size=1m,uid=1000,gid=1000'];
     service.volumes.push({type:'bind',source:`/var/lib/qy-node/spool/${slot}`,target:'/var/lib/qy-node/spool',read_only:false,bind:{create_host_path:false}});
@@ -22,7 +29,8 @@ export function buildNodeCollectDeployment(args) {
 
 export function collectDeploymentPreview(node,env=process.env){
   if(!env.SERVER_NODE_COLLECT_IMAGE || !env.SERVER_NODE_GATEWAY_URL)return {available:false,reason:'中心尚未配置完整采集镜像和 HTTPS 网关。'};
-  try{return {available:true,...buildNodeCollectDeployment({node,image:env.SERVER_NODE_COLLECT_IMAGE,gatewayUrl:env.SERVER_NODE_GATEWAY_URL,
+  if(!env.SERVER_NODE_NATS_URL)return {available:false,reason:'中心尚未配置 NATS 节点接入地址，不能部署采集 Worker。'};
+  try{return {available:true,...buildNodeCollectDeployment({node,image:env.SERVER_NODE_COLLECT_IMAGE,gatewayUrl:env.SERVER_NODE_GATEWAY_URL,natsUrl:env.SERVER_NODE_NATS_URL,
     ...(node.deployment?.deploymentId?{deploymentId:node.deployment.deploymentId}:{})})};}
   catch(error){return {available:false,reason:error.message};}
 }

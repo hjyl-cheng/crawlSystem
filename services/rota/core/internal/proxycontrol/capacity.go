@@ -9,9 +9,13 @@ func (m *Manager) Capacity(ctx context.Context) (Capacity, error) {
 	if err := m.requireEnabled(); err != nil {
 		return Capacity{}, err
 	}
+	channelSlots, err := m.channelSlotMinimum(ctx, m.db.Pool)
+	if err != nil {
+		return Capacity{}, fmt.Errorf("load channel capacity: %w", err)
+	}
 	roles := map[string]RoleCapacity{
 		RoleDiscover:     {Desired: m.options.DiscoverSlots},
-		RoleChannel:      {Desired: m.options.ChannelSlots},
+		RoleChannel:      {Desired: channelSlots},
 		RoleQueryQuality: {Desired: m.options.QueryQualitySlots},
 		RoleDetail:       {Desired: m.options.DetailSlots},
 	}

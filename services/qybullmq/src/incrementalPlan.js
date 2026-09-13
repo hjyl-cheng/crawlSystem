@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { uploadsCountryCode } from "./youtubeUploadsCountry.js";
 
 export const INCREMENTAL_QUEUE = "youtube-channel-incremental";
 export const INCREMENTAL_JOB_NAME = "channel.incremental.plan";
@@ -113,6 +114,16 @@ export function incrementalRunId(planId) {
 
 export function validateIncrementalPlan(value) {
   // Execution metadata is durable on the Job, but is not part of the frozen Plan/hash.
+  if (Object.prototype.hasOwnProperty.call(value ?? {}, "uploads_country_recheck")) {
+    const recheck = value.uploads_country_recheck;
+    exactKeys(recheck, ["country", "status"], "uploads_country_recheck");
+    if (typeof recheck.country !== "string" || uploadsCountryCode(recheck.country) !== recheck.country
+        || !["requested", "checked", "unavailable"].includes(recheck.status)) {
+      throw new IncrementalPlanContractError("uploads_country_recheck country or status is invalid");
+    }
+    const { uploads_country_recheck, ...payload } = value;
+    value = payload;
+  }
   if (Object.prototype.hasOwnProperty.call(value ?? {}, "video_api_continuation")) {
     exactKeys(value.video_api_continuation, ["request_id"], "video_api_continuation");
     requiredText(value.video_api_continuation.request_id, "video_api_continuation.request_id");

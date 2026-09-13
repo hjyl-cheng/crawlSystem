@@ -13,6 +13,8 @@ services:
       REMOTE_NODE_CENTER_PORT: "3187"
     volumes:
       - ${QY_REMOTE_CENTER_RUNTIME}/secrets:/run/remote-center-secrets:ro
+      - ${QY_REMOTE_CENTER_RUNTIME}/nats/auth:/run/nats-auth
+      - ${QY_REMOTE_CENTER_RUNTIME}/nats/secrets:/run/nats-secrets:ro
     networks: [crawler]
     read_only: true
     tmpfs: ["/tmp:size=32m,mode=1777"]

@@ -3,6 +3,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { planFromTask, assertChannelOperation } from './channelPlanContract.js';
 import { channelSnapshotWire, toChannelWire } from './channelWire.js';
 import { decodeResult, encodeResult, RemoteProtocolError } from './protocol.js';
+import { executeWholeChannelCommand, recoverWholeChannel } from './wholeChannelNode.js';
 
 // One process/session/lease owns a whole channel Plan. Commands are its internal
 // network operations, never separately configured or distributed to other nodes.
@@ -45,6 +46,7 @@ export class RemoteChannelPlanExecutor {
     this.busy = true;
     try {
       await this.spool.init();
+      await recoverWholeChannel({ client: this.client, spool: this.spool });
       let recoveryError;
       try { await this.networkSession?.recover(); } catch (error) { recoveryError = error; }
       // Receipt replay must remain possible while a retired session waits for
@@ -116,6 +118,11 @@ export class RemoteChannelPlanExecutor {
             }
             for (const command of commands) {
               executionSignal.throwIfAborted();
+              if (command.operation === 'collect_channel') {
+                await executeWholeChannelCommand({ client: this.client, spool: this.spool, lease, command,
+                  youtube: this.youtube, signal: executionSignal });
+                continue;
+              }
               let result;
               try {
                 assertChannelOperation(plan, command.operation, command.input);
@@ -140,7 +147,7 @@ export class RemoteChannelPlanExecutor {
               await this.spool.save('pending.json', Buffer.from(JSON.stringify({ task_id: lease.task_id, payload: bytes.toString('base64') })));
               await this.flush();
             }
-            if (!commands.length) await delay(this.pollMs, null, { signal: executionSignal });
+            if (!commands.length && this.client.transport !== 'nats') await delay(this.pollMs, null, { signal: executionSignal });
           }
         });
       } finally {

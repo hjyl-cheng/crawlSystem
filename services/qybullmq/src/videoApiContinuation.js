@@ -43,12 +43,18 @@ export async function deferVideoApiJob({ job, token, requestId, delayMs = 15000 
 export async function gateVideoApiJob({ query, job, token, delayMs = 15000 }) {
   const requestId = job.data?.video_api_continuation?.request_id;
   if (!requestId) return;
-  const row = (await query(`SELECT status,run_id FROM crawler.youtube_api_detail_requests
-    WHERE request_id=$1`, [requestId])).rows[0];
+  const row = (await query(`SELECT request.status,request.run_id,task.next_retry_at
+    FROM crawler.youtube_api_detail_requests request
+    JOIN crawler.youtube_api_tasks task ON task.task_id=request.task_id
+    WHERE request.request_id=$1`, [requestId])).rows[0];
   const runId = job.data.run_id ?? (job.data.plan_id ? `incremental:${job.data.plan_id}` : null);
   if (!row || row.run_id !== runId) throw new Error("Video API continuation identity conflicts");
   if (row.status === "pending") {
-    await job.moveToDelayed(Date.now() + delayMs, token);
+    // Quota/backoff waits already have a durable deadline. Poll only requests
+    // that can run now; waking every 15 seconds cannot accelerate tomorrow's API.
+    const retryAt = new Date(row.next_retry_at).getTime();
+    const wakeAt = Math.max(Date.now() + delayMs, Number.isFinite(retryAt) ? retryAt : 0);
+    await job.moveToDelayed(wakeAt, token);
     throw new DelayedError();
   }
 }
@@ -60,6 +66,12 @@ export async function runVideoApiResumable({ job, token, execute, executeReplay,
         return await withVideoApiReplay(executeReplay);
       } catch (error) {
         if (error?.code !== "VIDEO_API_NETWORK_REQUIRED") throw error;
+        // The checkpoint now needs a new managed network attempt. Persist that
+        // transition before starting it, so redelivery cannot reuse an older
+        // remote API handoff after its transport lease has ended.
+        const { video_api_continuation, ...data } = job.data;
+        await job.updateData(data);
+        job.data = data;
       }
     }
     const result = await execute();

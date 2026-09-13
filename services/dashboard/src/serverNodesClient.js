@@ -15,19 +15,17 @@ let deletion = null;
 let onboardingAvailable = false;
 let initializeId = null;
 let closeInitializationOnSuccess = false;
-let workerEditor = null;
 let workerDeploymentAvailable = false;
-let deploymentNodeId = null;
-let closeDeploymentOnSuccess = false;
 let runtimeAvailable = false;
 let runtimeId = null;
 let closeRuntimeOnSuccess = false;
 const observations = new Map();
+const executionStates = new Map();
+const executionActions = new Set();
 const isReady = node => node?.provisioning?.state === "ready";
 const isRunning = node => node?.provisioning?.state === "running" && Date.parse(node.provisioning.deadline) > Date.now();
 const runtimeRunning = node => node?.runtime?.state === "running" && Date.parse(node.runtime.deadline) > Date.now();
 const deploymentRunning = node => node?.deployment?.state === 'running' && Date.parse(node.deployment.deadline) > Date.now();
-const deploymentState = node => deploymentRunning(node) ? '正在部署' : node?.deployment?.state === 'connected' ? '部署和连接检查通过' : node?.deployment ? '部署未完成，可查看或重试' : '尚未部署';
 const runtimeState = node => node?.runtime?.state === "ready" ? "运行环境就绪" : runtimeRunning(node) ? "运行环境准备中" : node?.runtime?.state === "failed" ? "环境准备失败，可重试" : node?.runtime?.state === "running" ? "环境准备中断，可重试" : "运行环境尚未准备";
 const nodeState = node => isReady(node) ? "已初始化" : isRunning(node) ? "初始化中" : node.provisioning?.state === "failed" ? "初始化失败" : node.provisioning?.state === "running" ? "初始化中断，可重试" : "待初始化";
 
@@ -39,7 +37,7 @@ function announce(message, error = false) {
 }
 
 async function request(path, options = {}, expectRegistry = true) {
-  const response = await fetch(path, { ...options, headers: { "Accept": "application/json", ...options.headers }, signal: AbortSignal.timeout(15000) });
+  const response = await fetch(path, { ...options, headers: { "Accept": "application/json", ...options.headers }, signal: AbortSignal.timeout(options.method === "DELETE" ? 240000 : 15000) });
   if (response.redirected || !response.headers.get("content-type")?.includes("application/json")) throw new Error("读取失败或登录已过期，请刷新页面后重试");
   const result = await response.json();
   if (!response.ok) throw new Error(result.error || "保存失败，请稍后重试");
@@ -61,23 +59,169 @@ function metrics(node) {
   return `<div class="nodes-metrics">${values.map(([label, value, help]) => `<div class="nodes-metric"><span>${label}</span><strong>${escapeHtml(value)}</strong><small>${escapeHtml(help)}</small></div>`).join("")}</div>`;
 }
 
+let workerManager = null;
+const lastIntakeCounts=new Map();
+function rememberIntake(id,count){
+  if(!Number.isInteger(count)||count<1||lastIntakeCounts.get(id)===count)return;
+  lastIntakeCounts.set(id,count);
+  try{localStorage.setItem('qy-worker-intake-'+id,String(count));}catch{}
+}
+function resumeIntakeCount(id,installed){
+  let remembered=lastIntakeCounts.get(id);
+  if(!remembered){try{remembered=Number(localStorage.getItem('qy-worker-intake-'+id));}catch{}}
+  return Math.min(installed,Number.isInteger(remembered)&&remembered>0?remembered:installed);
+}
+const installedCount = node => executionStates.get(node.id)?.counts?.deployed ?? node.deployment?.appliedCount ?? 0;
+function executionPanel(node) {
+  if (!node.deployment && !node.localIntake) return '<p class="nodes-worker-gate">尚未部署 Worker</p>';
+  const state = executionStates.get(node.id), known = state?.counts;
+  const counts = state?.counts, allowed = state?.allowedCount ?? 0;
+  const label = !known ? state?.error ? '接任务状态暂不可用' : '正在读取接任务状态'
+    : counts.draining ? '正在调整，当前频道完成后待命'
+    : allowed ? counts.ready ? '正在接任务' : '正在准备接任务' : '已暂停接单';
+  return `<div class="nodes-execution"><div><strong>${label}${known && state.error ? '（上次状态）' : ''}</strong>${known ? `<small>已部署 ${counts.deployed} · 允许接任务 ${allowed} · 已连接 ${counts.connected}</small><small>执行 ${counts.running ?? counts.active} · 空闲 ${counts.idle} · 收尾 ${counts.draining} · 待命 ${counts.standby}</small>` : ''}${known && state.error ? '<small>状态更新失败，正在重试；以上为上次读取结果。</small>' : ''}</div></div>`;
+}
+function workerActions(node) {
+  const state=executionStates.get(node.id);
+  const enabled=node.localIntake || (isReady(node) && node.runtime?.state==='ready');
+  if(state&&!state.error)rememberIntake(node.id,state.allowedCount);
+  const installed=installedCount(node),pause=state?.allowedCount>0,busy=executionActions.has(node.id);
+  const toggle=installed?`<button type="button" class="nodes-button" data-toggle-intake="${escapeHtml(node.id)}" title="${pause?'停止接新任务，已领取频道继续收尾':`允许 ${resumeIntakeCount(node.id,installed)} 个 Worker 接任务，可在管理窗口调整`}"
+    ${busy||!state||state.error||!state.executionAvailable?'disabled':''}>${busy?'正在切换…':pause?'暂停接任务':'开始接任务'}</button>`:'';
+  return `<button type="button" class="nodes-button primary" data-manage="${escapeHtml(node.id)}" ${enabled?'':'disabled'}>${node.localIntake || installed>0 || node.deployment?'管理 Worker':'部署 Worker'}</button>${toggle}`;
+}
+function deploymentNotice(node) {
+  const d=node.deployment;
+  if(!d)return '';
+  if(deploymentRunning(node))return `<p class="nodes-deployment-notice">正在部署至 ${d.desiredCount} 个 · 已确认部署 ${installedCount(node)} 个</p>`;
+  if(d.state==='failed'||d.state==='running')return `<p class="nodes-deployment-notice error">本次部署未完成 · 已确认部署 ${installedCount(node)} 个。请在管理 Worker 中查看原因或重试。</p>`;
+  if(d.intakeSync?.state==='failed')return '<p class="nodes-deployment-notice error">部署已完成，接单数量未自动同步，请在管理 Worker 中核实。</p>';
+  return '';
+}
+function openWorkerManager(id) {
+  const node=registry.nodes.find(n=>n.id===id);if(!node)return;
+  $('node-detail').close();
+  workerManager={id,version:registry.version,expectedInstalledCount:installedCount(node),deploymentDirty:false,intakeDirty:false,lastOperation:null,lastState:null};
+  $('worker-deployment-count').value=1;
+  $('worker-deployment-role').value='incremental';
+  $('worker-intake-count').value=executionStates.get(id)?.allowedCount??0;
+  $('worker-sync-intake').checked=!node.deployment;
+  $('worker-deployment-password').value='';
+  for(const name of ['worker-deployment-error','worker-intake-error']){$(name).hidden=true;$(name).textContent='';}
+  $('worker-intake-result').textContent='';
+  $('worker-deployment-history').open=false;
+  renderWorkerManager();$('node-worker-manager').showModal();$('node-worker-manager').scrollTop=0;
+}
+function renderWorkerManager() {
+  if(!workerManager)return;
+  const node=registry.nodes.find(n=>n.id===workerManager.id);if(!node){$('node-worker-manager').close();return;}
+  const state=executionStates.get(node.id),counts=state?.counts,known=!!counts&&!state.error;
+  const d=node.deployment,running=deploymentRunning(node),busy=!!$('node-worker-manager').dataset.saving;
+  const installed=installedCount(node);
+  $('worker-manager-name').textContent=node.name;
+  $('worker-manager-summary').innerHTML=executionPanel(node);
+  $('worker-deployment-section').hidden=!!node.localIntake;
+  $('worker-center-note').hidden=!node.localIntake;
+  $('worker-installed-label').textContent=`已确认部署 ${installed} 个`;
+  if(!workerManager.deploymentDirty){
+    workerManager.version=registry.version;
+    workerManager.expectedInstalledCount=installed;
+  }
+  const additional=Number($('worker-deployment-count').value),target=workerManager.expectedInstalledCount+additional;
+  const valid=Number.isSafeInteger(additional)&&additional>0&&Number.isSafeInteger(target);
+  $('worker-deployment-count').removeAttribute('max');
+  $('worker-deployment-count').disabled=busy||running;
+  $('worker-deployment-role').disabled=busy||running;
+  $('worker-sync-intake').disabled=busy||running||!!d&&(!known||!state.executionAvailable);
+  $('worker-deployment-password-field').hidden=running;
+  $('worker-deployment-impact').textContent=running?`正在部署至 ${d.desiredCount} 个。已确认部署 ${installed} 个，进度会自动更新。`
+    :valid?`已有 ${workerManager.expectedInstalledCount} 个增量 Worker ＋ 本次新增 ${additional} 个 ＝ 新增后共 ${target} 个。现有 Worker 继续运行。`
+    :'请输入有效的新增数量（正整数）。';
+  const memoryRequired=(target*256+1536)/1024,memoryTotal=observations.get(node.id)?.metrics?.memoryTotalGiB;
+  $('worker-deployment-memory').textContent=valid
+    ?`内存参考：按每个 Worker 256 MiB ＋ 系统预留 1.5 GiB 估算，${target} 个约需 ${memoryRequired.toFixed(2)} GiB。${Number.isFinite(memoryTotal)?` 本机总内存约 ${Number(memoryTotal).toFixed(2)} GiB。`:''}仅供参考，不限制新增数量，请按实际运行情况自行安排。`:'';
+  $('worker-deployment-save').disabled=busy||running||!workerDeploymentAvailable||node.runtime?.state!=='ready'||!valid
+    ||$('worker-sync-intake').checked&&!!d&&(!known||!state.executionAvailable);
+  $('worker-deployment-save').textContent=running?'正在新增…':`新增 ${Number.isInteger(additional)&&additional>0?additional:'—'} 个增量 Worker`;
+  if(!workerManager.intakeDirty&&known){$('worker-intake-count').value=state.allowedCount;workerManager.expectedAllowedCount=state.allowedCount;}
+  $('worker-intake-count').max=installed;
+  $('worker-intake-count').disabled=busy||!known||!state.executionAvailable||!installed;
+  $('worker-allowed-label').textContent=known?`当前允许 ${state.allowedCount} 个 · 可设 0–${installed}`:'等待接单状态';
+  $('worker-intake-save').disabled=busy||!known||!state.executionAvailable||!installed;
+  const history=$('worker-deployment-history');history.hidden=!d||!!node.localIntake;
+  if(d){
+    const changed=workerManager.lastOperation!==d.operationId||workerManager.lastState!==d.state;
+    if(changed)history.open=d.state!=='connected'||d.intakeSync?.state==='failed';
+    workerManager.lastOperation=d.operationId;workerManager.lastState=d.state;
+    $('worker-deployment-history-title').textContent=running?`部署进度 · 目标 ${d.desiredCount} 个`:d.state==='connected'?'最近部署记录 · 已完成':'最近部署记录 · 未完成';
+    $('worker-deployment-status').textContent=d.error||d.intakeSync?.error||(running?'部署在后台执行，可以关闭窗口。':d.state==='connected'?`已确认部署 ${d.appliedCount} 个 Worker。${d.intakeSync?.state==='completed'?'接单数量已同步。':''}`:'上次部署未完成，可重试。');
+    const steps=[['ssh','连接与资源检查'],['center','准备中心接入'],['files','准备部署文件'],['start','启动 Worker'],['verify','检查运行状态'],['connection','确认连接中心']];
+    if(d.intakeSync)steps.push(['intake','同步接单数量']);
+    $('worker-deployment-steps').innerHTML=steps.map(([key,label],i)=>{const status=key==='intake'?d.intakeSync.state:d.steps?.[key]??'pending';return `<li data-state="${escapeHtml(status)}"><b>${i+1}</b><div><strong>${label}</strong></div><span>${({pending:'待执行',running:'执行中',completed:'已完成',failed:'未完成'})[status]??'待执行'}</span></li>`;}).join('');
+  }
+}
+async function saveIntake(id,allowedCount,expectedAllowedCount) {
+  if(executionActions.has(id))return;
+  executionActions.add(id);
+  render();
+  try{
+    const result=await request(`/api/server-nodes/${encodeURIComponent(id)}/execution`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({version:registry.version,allowedCount,expectedAllowedCount})},false);
+    executionStates.set(id,result);return result;
+  }finally{executionActions.delete(id);render();}
+}
+$('worker-deployment-count').addEventListener('input',()=>{if(workerManager){workerManager.deploymentDirty=true;renderWorkerManager();}});
+$('worker-intake-count').addEventListener('input',()=>{if(workerManager)workerManager.intakeDirty=true;});
+$('worker-deployment-form').addEventListener('submit',async event=>{
+  event.preventDefault();if(!workerManager||$('worker-deployment-save').disabled)return;
+  const manager=workerManager,dialog=$('node-worker-manager'),node=registry.nodes.find(n=>n.id===manager.id);
+  let password=$('worker-deployment-password').value;$('worker-deployment-password').value='';
+  const syncIntake=$('worker-sync-intake').checked;
+  const expectedAllowedCount=node.deployment?executionStates.get(node.id)?.allowedCount:0;
+  dialog.dataset.saving='true';$('worker-deployment-error').hidden=true;renderWorkerManager();
+  try{
+    registry=await request(`/api/server-nodes/${encodeURIComponent(manager.id)}/deploy-workers`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({version:manager.version,additionalCount:Number($('worker-deployment-count').value),role:$('worker-deployment-role').value,expectedInstalledCount:manager.expectedInstalledCount,password,syncIntake,...(syncIntake?{expectedAllowedCount}:{})})});
+    manager.deploymentDirty=false;$('worker-deployment-count').value=1;announce('新增 Worker 已开始，完成并核实连接后才更新已部署数量。');
+  }catch(error){$('worker-deployment-error').textContent=error.message;$('worker-deployment-error').hidden=false;}
+  finally{password=undefined;delete dialog.dataset.saving;render();renderWorkerManager();void refresh(true);}
+});
+$('worker-intake-form').addEventListener('submit',async event=>{
+  event.preventDefault();if(!workerManager||$('worker-intake-save').disabled)return;
+  const manager=workerManager,dialog=$('node-worker-manager');
+  dialog.dataset.saving='true';$('worker-intake-error').hidden=true;renderWorkerManager();
+  try{
+    const count=Number($('worker-intake-count').value);
+    await saveIntake(manager.id,count,manager.expectedAllowedCount);
+    manager.intakeDirty=false;$('worker-intake-result').textContent=`允许接任务数量已保存为 ${count} 个。正在执行的频道会先完成，运行状态自动更新。`;
+  }catch(error){$('worker-intake-error').textContent=error.message;$('worker-intake-error').hidden=false;}
+  finally{delete dialog.dataset.saving;renderWorkerManager();void refresh(true);}
+});
+async function toggleIntake(id){
+  const state=executionStates.get(id);if(!state||state.error)return;
+  const pause=state.allowedCount>0;
+  if(pause)rememberIntake(id,state.allowedCount);
+  const count=pause?0:resumeIntakeCount(id,state.counts.deployed);
+  try{await saveIntake(id,count,state.allowedCount);announce(pause?'已暂停接新任务，正在执行的频道完成后待命。':`已允许 ${count} 个 Worker 接任务，正在准备接单。`);}
+  catch(error){announce(error.message,true);}
+  void refresh(true);
+}
+
 function card(node) {
-  const total = node.workers.reduce((sum, worker) => sum + worker.count, 0);
-  const environmentAction = isReady(node) && node.kind === "execution";
-  const runtimeButton = `<button type="button" class="nodes-button primary" data-runtime="${escapeHtml(node.id)}">${runtimeRunning(node) ? "环境准备详情" : node.runtime?.state === "ready" ? "检查运行环境" : "准备运行环境"}</button>`;
-  return `<article class="nodes-card">
-    <div class="nodes-card-main"><div class="nodes-card-top"><div class="nodes-card-icon">${serverIcon}</div><div class="nodes-card-title"><h3>${escapeHtml(node.name)}</h3><div class="nodes-address">${escapeHtml(node.host)} · ${node.port}</div></div><details class="nodes-card-menu"><summary aria-label="${escapeHtml(node.name)}的更多操作">⋯</summary><div><button type="button" data-edit="${escapeHtml(node.id)}">编辑服务器</button><button type="button" class="danger" data-delete="${escapeHtml(node.id)}">删除服务器</button></div></details></div>
-      <div class="nodes-card-tags"><span class="nodes-badge ${node.kind === "center" ? "center" : ""}">${node.kind === "center" ? "中心节点" : "执行节点"}</span><span class="nodes-badge ${isReady(node) ? "center" : "pending"}">${nodeState(node)}</span>${observations.has(node.id) ? `<span class="nodes-badge">${observations.get(node.id).online ? "监控在线" : "监控暂无新数据"}</span>` : ""}</div>
-      ${metrics(node)}<div class="nodes-card-workers"><span>Worker 计划</span><strong>${total ? total + " 个" : "未配置"}</strong>${total ? `<span class="nodes-badge pending">${deploymentState(node)}</span>` : ""}</div><p class="nodes-worker-gate">${environmentAction ? `${runtimeState(node)}。可保存 Worker 计划。` : node.provisioning?.error ? escapeHtml(node.provisioning.error) : "完成 SSH 与监控接入后，可配置 Worker。"}</p>
-    </div><div class="nodes-card-footer"><button type="button" class="nodes-text-button" data-detail="${escapeHtml(node.id)}">查看详情</button><div><button type="button" class="nodes-button" data-workers="${escapeHtml(node.id)}" ${isReady(node) && !runtimeRunning(node) ? "" : "disabled"}>配置 Worker</button>${environmentAction && node.runtime?.state === 'ready' && total ? `<button type="button" class="nodes-button primary" data-deploy="${escapeHtml(node.id)}">${node.deployment ? 'Worker 部署详情' : '部署 Worker'}</button>` : ''}${environmentAction ? runtimeButton : `<button type="button" class="nodes-button primary" data-initialize="${escapeHtml(node.id)}">${isReady(node) || isRunning(node) ? "初始化详情" : node.provisioning?.state === "failed" ? "重试初始化" : "初始化"}</button>`}</div></div>
-  </article>`;
+  if(node.localIntake)return `<article class="nodes-card"><div class="nodes-card-main"><div class="nodes-card-top"><div class="nodes-card-icon">${serverIcon}</div><div class="nodes-card-title"><h3>中心服务器</h3><div class="nodes-address">${escapeHtml(node.host)}</div></div></div><div class="nodes-card-tags"><span class="nodes-badge center">中心节点</span><span class="nodes-badge">增量采集</span></div>${executionPanel(node)}<p class="nodes-worker-gate">管理本机现有增量 Worker 的接单数量。</p></div><div class="nodes-card-footer">${workerActions(node)}</div></article>`;
+  const ready=isReady(node),environmentAction=ready&&node.kind==='execution';
+  const runtimeButton=`<button type="button" class="nodes-button primary" data-runtime="${escapeHtml(node.id)}">${runtimeRunning(node)?'查看环境准备进度':'准备运行环境'}</button>`;
+  return `<article class="nodes-card"><div class="nodes-card-main"><div class="nodes-card-top"><div class="nodes-card-icon">${serverIcon}</div><div class="nodes-card-title"><h3>${escapeHtml(node.name)}</h3><div class="nodes-address">${escapeHtml(node.host)} · ${node.port}</div></div><details class="nodes-card-menu"><summary aria-label="${escapeHtml(node.name)}的更多操作">⋯</summary><div><button type="button" data-detail="${escapeHtml(node.id)}">服务器详情</button><button type="button" data-edit="${escapeHtml(node.id)}">编辑服务器</button><button type="button" class="danger" data-delete="${escapeHtml(node.id)}">删除服务器</button></div></details></div>
+    <div class="nodes-card-tags"><span class="nodes-badge ${node.kind==='center'?'center':''}">${node.kind==='center'?'中心节点':'执行节点'}</span><span class="nodes-badge ${ready?'center':'pending'}">${nodeState(node)}</span>${observations.has(node.id)?`<span class="nodes-badge">${observations.get(node.id).online?'监控在线':'监控暂无新数据'}</span>`:''}</div>
+    ${metrics(node)}${executionPanel(node)}${deploymentNotice(node)}${!ready?`<p class="nodes-worker-gate">${escapeHtml(node.provisioning?.error||'完成初始化后，准备环境并部署 Worker。')}</p>`:node.runtime?.state!=='ready'?`<p class="nodes-worker-gate">${runtimeState(node)}</p>`:''}
+    </div><div class="nodes-card-footer">${environmentAction?node.runtime?.state==='ready'?workerActions(node):runtimeButton:`<button type="button" class="nodes-button primary" data-initialize="${escapeHtml(node.id)}">${isRunning(node)?'查看初始化进度':node.provisioning?.state==='failed'?'重试初始化':'初始化服务器'}</button>`}</div></article>`;
 }
 
 function render() {
   if (!registry) return;
   $("nodes-total").textContent = registry.nodes.length;
-  $("nodes-online").textContent = [...observations.values()].filter(value => value.online).length;
-  $("nodes-planned").textContent = registry.nodes.reduce((sum, node) => sum + node.workers.reduce((n, worker) => n + worker.count, 0), 0);
+  const states=[...executionStates.values()].filter(state=>state.counts&&!state.error);
+  $('nodes-planned').textContent=states.length?states.reduce((sum,s)=>sum+s.counts.deployed,0):'—';
+  $('nodes-allowed').textContent=states.length?states.reduce((sum,s)=>sum+s.allowedCount,0):'—';
+  $('nodes-active').textContent=states.length?states.reduce((sum,s)=>sum+s.counts.active,0):'—';
   $("nodes-add").disabled = false;
   const search = $("nodes-search").value.trim().toLowerCase();
   const kind = $("nodes-kind").value;
@@ -93,7 +237,7 @@ function render() {
 }
 
 async function refresh(quiet = false) {
-  if (refreshing || (quiet && (document.querySelector('.nodes-card-menu[open], .nodes-dialog[data-saving="true"]') || [...document.querySelectorAll('.nodes-dialog[open]')].some(dialog => !["node-initialize", "node-runtime", "node-deploy"].includes(dialog.id))))) return;
+  if (refreshing || (quiet && (document.querySelector('.nodes-card-menu[open], .nodes-dialog[data-saving="true"]') || [...document.querySelectorAll('.nodes-dialog[open]')].some(dialog => !["node-initialize", "node-runtime", "node-worker-manager", "node-detail"].includes(dialog.id))))) return;
   refreshing = true;
   $("nodes-refresh").disabled = true;
   $("nodes-refresh").textContent = "刷新中…";
@@ -106,14 +250,19 @@ async function refresh(quiet = false) {
     render();
     if ($("node-initialize").open) renderInitialization();
     if ($("node-runtime").open) renderRuntime();
-    if ($("node-deploy").open) renderDeployment();
     for (const id of observations.keys()) if (!registry.nodes.some(node => node.id === id)) observations.delete(id);
-    await Promise.allSettled(registry.nodes.filter(node => node.provisioning?.systemId).map(async node => {
+    for (const id of executionStates.keys()) if (!registry.nodes.some(node => node.id === id)) executionStates.delete(id);
+    await Promise.allSettled([...registry.nodes.filter(node => node.provisioning?.systemId).map(async node => {
       try { observations.set(node.id, await request(`/api/server-nodes/${encodeURIComponent(node.id)}/monitoring`, {}, false)); }
       catch { const last = observations.get(node.id); observations.set(node.id, { ...last, online: false }); }
-    }));
+    }), ...registry.nodes.filter(node => node.deployment || node.localIntake).map(async node => {
+      try { executionStates.set(node.id, await request(`/api/server-nodes/${encodeURIComponent(node.id)}/execution`, {}, false)); }
+      catch { executionStates.set(node.id, { ...executionStates.get(node.id), error:true }); }
+    })]);
     // Avoid replacing an open card menu during a background refresh.
     if (!document.querySelector(".nodes-card-menu[open]")) render();
+    if ($("node-detail").open) renderDetail();
+    if ($("node-worker-manager").open) renderWorkerManager();
   }
   catch (error) {
     if (!quiet) announce(error.message, true);
@@ -145,21 +294,21 @@ function openEditor(node = null) {
 }
 
 function openDetail(id) {
-  const node = registry.nodes.find(item => item.id === id);
-  if (!node) return;
+  if (!registry.nodes.some(item => item.id === id)) return;
   detailId = id;
+  renderDetail();
+  $("node-detail").showModal();
+}
+
+function renderDetail() {
+  const node = registry.nodes.find(item => item.id === detailId);
+  if (!node) { $("node-detail").close(); return; }
   $("node-detail-title").textContent = node.name;
   const fields = [["节点类型", node.kind === "center" ? "中心节点" : "执行节点"], ["服务器地址", node.host], ["SSH 用户名", node.username], ["SSH 端口", node.port], ["SSH 配置引用", node.sshAlias || "初始化时自动配置"], ["配置更新时间", new Date(node.updatedAt).toLocaleString("zh-CN")]];
   $("node-detail-content").innerHTML = `<div class="nodes-detail-section"><dl class="nodes-detail-meta">${fields.map(([key, value]) => `<div><dt>${key}</dt><dd>${escapeHtml(value)}</dd></div>`).join("")}</dl>${node.notes ? `<p class="nodes-detail-notes">${escapeHtml(node.notes)}</p>` : ""}</div>
     <section class="nodes-detail-section"><h3>资源监控 <span class="nodes-badge">${observations.get(node.id)?.online ? "在线" : "暂无新数据"}</span></h3>${metrics(node)}<p class="nodes-footnote">${observations.get(node.id)?.sampleAt ? `最近数据：${escapeHtml(new Date(observations.get(node.id).sampleAt).toLocaleString("zh-CN"))}` : "等待接入 Beszel 监控"}</p></section>
-    <section class="nodes-detail-section"><h3>Worker 配置</h3>${node.workers.length ? node.workers.map(worker => `<div class="nodes-worker-summary"><span>${escapeHtml(roles[worker.role]?.[0] ?? worker.role)}</span><span><strong>计划 ${worker.count} 个</strong><span class="nodes-badge pending">尚未部署</span></span></div>`).join("") : '<p class="nodes-footnote">尚未配置 Worker。</p>'}<p class="nodes-worker-gate">请先完成初始化并接入监控，再配置 Worker。已有计划保留，当前不可调整。</p><button type="button" class="nodes-button" disabled>配置 Worker · 节点尚未就绪</button></section>
-    <p class="nodes-footnote">初始化状态：${nodeState(node)}。实际 Worker 部署和运行记录尚未接入。</p>`;
-  if (isReady(node)) {
-    const section = $("node-detail-content").querySelectorAll(".nodes-detail-section")[2];
-    section.querySelector(".nodes-worker-gate").textContent = "初始化已完成，可以保存 Worker 计划。";
-    const button = section.querySelector("button"); button.disabled = false; button.textContent = "配置 Worker"; button.dataset.workers = node.id;
-  }
-  $("node-detail").showModal();
+    <p class="nodes-footnote">初始化状态：${nodeState(node)}。${runtimeState(node)}。</p>`;
+  $('node-detail-initialize').textContent=isReady(node)?'初始化记录':'初始化服务器';
 }
 
 function openInitialize(id) {
@@ -265,23 +414,13 @@ async function startRuntime() {
   finally { password = ""; delete dialog.dataset.saving; render(); renderRuntime(); }
 }
 
-function openWorkers(id) {
-  const node = registry.nodes.find(item => item.id === id);
-  if (!isReady(node)) return;
-  workerEditor = { node, version: registry.version };
-  $("node-detail").close();
-  $("node-workers-runtime-state").textContent = runtimeState(node);
-  $("node-workers-deployment-status").hidden = true;
-  $("node-workers-fields").innerHTML = Object.entries(roles).map(([role, [label]]) => `<label class="nodes-field">${label}<input type="number" name="${role}" min="0" max="100" required value="${node.workers.find(worker => worker.role === role)?.count ?? 0}"></label>`).join("");
-  $("node-workers-error").hidden = true;
-  $("node-workers").showModal();
-}
-
 async function openDelete(id) {
   const node = registry.nodes.find(item => item.id === id);
   if (!node) return;
   const current = { id };
   deletion = current;
+  $("node-delete-password").value = "";
+  $("node-delete-password-field").hidden = true;
   $("node-delete-name").textContent = node.name;
   $("node-delete-reason").textContent = "正在检查登记与初始化状态…";
   $("node-delete-checks").hidden = true;
@@ -293,6 +432,7 @@ async function openDelete(id) {
     if (deletion !== current || !$("node-delete").open) return;
     if (check.id !== id || !Number.isInteger(check.version) || typeof check.allowed !== "boolean") throw new Error("删除条件返回异常，请重新打开窗口检查");
     Object.assign(current, check);
+    $("node-delete-password-field").hidden = !check.requiresRemoteCheck;
     $("node-delete-reason").textContent = check.reason;
     $("node-delete-checks").hidden = check.allowed || node.kind === "center";
     $("node-delete-confirm").disabled = !check.allowed;
@@ -314,7 +454,7 @@ async function confirmDelete() {
   $("node-delete-confirm").textContent = "正在删除…";
   try {
     registry = await request(`/api/server-nodes/${encodeURIComponent(current.id)}`, {
-      method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ version: current.version }),
+      method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ version: current.version, password: $("node-delete-password").value }),
     });
     render();
     dialog.close();
@@ -324,6 +464,7 @@ async function confirmDelete() {
     $("node-delete-reason").textContent = `${error.message}。请关闭窗口、刷新列表后重新确认。`;
     $("node-delete-confirm").textContent = "请重新检查";
   } finally {
+    $("node-delete-password").value = "";
     controls.forEach(control => { control.disabled = control.id === "node-delete-confirm"; });
     delete dialog.dataset.saving;
   }
@@ -372,23 +513,19 @@ $("node-form").addEventListener("submit", async event => {
   }
   password = "";
 });
-$("node-workers-form").addEventListener("submit", event => {
-  event.preventDefault();
-  if (!workerEditor || $("node-workers").dataset.saving) return;
-  const node = Object.fromEntries(["name", "host", "port", "username", "kind", "notes", "sshAlias"].map(key => [key, workerEditor.node[key]]));
-  node.workers = Object.keys(roles).map(role => ({ role, count: Number(event.currentTarget.elements[role].value) })).filter(worker => worker.count > 0);
-  void saveForm({ form: event.currentTarget, dialog: $("node-workers"), errorId: "node-workers-error", edit: workerEditor, node, message: "Worker 计划已保存，尚未部署。" });
-});
 document.addEventListener("click", event => {
+  for (const menu of document.querySelectorAll('.nodes-card-menu[open]')) {
+    if (!menu.contains(event.target)) menu.removeAttribute('open');
+  }
   const target = event.target.closest("button");
   if (!target || target.disabled) return;
+  if (target.hasAttribute("data-manage")) openWorkerManager(target.dataset.manage);
+  if (target.hasAttribute("data-toggle-intake")) void toggleIntake(target.dataset.toggleIntake);
   if (target.hasAttribute("data-close") && !$(target.dataset.close).dataset.saving) $(target.dataset.close).close();
   if (target.hasAttribute("data-add")) openEditor();
   if (target.hasAttribute("data-detail")) openDetail(target.dataset.detail);
   if (target.hasAttribute("data-initialize")) openInitialize(target.dataset.initialize);
-  if (target.hasAttribute("data-deploy")) openDeployment(target.dataset.deploy);
   if (target.hasAttribute("data-runtime")) openRuntime(target.dataset.runtime);
-  if (target.hasAttribute("data-workers")) openWorkers(target.dataset.workers);
   if (target.hasAttribute("data-edit")) openEditor(registry.nodes.find(node => node.id === target.dataset.edit));
   if (target.hasAttribute("data-delete")) openDelete(target.dataset.delete);
   target.closest(".nodes-card-menu")?.removeAttribute("open");
@@ -401,6 +538,9 @@ for (const dialog of document.querySelectorAll(".nodes-dialog")) {
   dialog.addEventListener("click", event => { if (dialog.dataset.saving && event.target === dialog) event.stopPropagation(); });
 }
 $("nodes-add").addEventListener("click", () => openEditor());
+document.addEventListener('keydown', event => {
+  if (event.key === 'Escape') for (const menu of document.querySelectorAll('.nodes-card-menu[open]')) menu.removeAttribute('open');
+});
 $("nodes-refresh").addEventListener("click", () => void refresh());
 $("nodes-search").addEventListener("input", render);
 $("nodes-kind").addEventListener("change", render);
@@ -411,59 +551,5 @@ $("node-delete").addEventListener("close", () => { deletion = null; });
 $("node-delete-confirm").addEventListener("click", () => void confirmDelete());
 $("node-initialize-start").addEventListener("click", () => void startInitialization());
 $("node-runtime-start").addEventListener("click", () => void startRuntime());
-$("node-workers-deployment-preview").addEventListener("click", async () => {
-  if (!workerEditor) return;
-  const current = workerEditor;
-  const button = $("node-workers-deployment-preview");
-  const status = $("node-workers-deployment-status");
-  button.disabled = true; status.hidden = false; status.textContent = "正在检查已保存的部署计划…";
-  try {
-    const preview = await request(`/api/server-nodes/${encodeURIComponent(current.node.id)}/worker-deployment`, {}, false);
-    if (workerEditor !== current || !$("node-workers").open) return;
-    status.textContent = preview.available
-      ? `已保存 ${preview.count} 个增量 Worker 计划，${preview.mode === 'incremental_collect' ? '完整采集' : '接入验证'}容器内存上限合计 ${preview.memoryLimitMiB} MiB。部署后先核实中心连接，中心启用后才接收任务。当前仅查看方案，尚未执行部署。`
-      : preview.reason;
-  } catch (error) { if (workerEditor === current) status.textContent = error.message; }
-  finally { button.disabled = false; }
-});
 setInterval(() => { if (!document.hidden) void refresh(true); }, 5000);
 void refresh();
-
-function openDeployment(id) {
-  const node = registry.nodes.find(row => row.id === id); if (!node) return;
-  deploymentNodeId = id; closeDeploymentOnSuccess = deploymentRunning(node);
-  $("node-deploy-password").value = ""; $("node-deploy").showModal(); renderDeployment();
-}
-function renderDeployment() {
-  const node = registry.nodes.find(row => row.id === deploymentNodeId); if (!node) return;
-  const running = deploymentRunning(node); const count = node.workers.find(row => row.role === 'incremental')?.count ?? 0;
-  $("node-deploy-name").textContent = node.name;
-  $("node-deploy-plan").textContent = `使用已保存计划：${count} 个增量 Worker。每个容器内存上限 768 MiB，合计 ${count * 768} MiB。`;
-  const steps = ['center','ssh','files','start','verify','connection'];
-  [...$("node-deploy-steps").children].forEach((element,index) => {
-    const state = node.deployment?.steps?.[steps[index]] ?? 'pending'; element.dataset.state = state;
-    element.querySelector('span').textContent = ({pending:'待执行',running:'执行中',completed:'已完成',failed:'失败'})[state] ?? '待执行';
-  });
-  $("node-deploy-start").disabled = !workerDeploymentAvailable || running || !!$("node-deploy").dataset.saving || !count;
-  $("node-deploy-start").textContent = running ? '正在部署…' : node.deployment ? '部署 / 重试已保存计划' : '部署已保存的计划';
-  $("node-deploy-password-field").hidden = running;
-  $("node-deploy-status").textContent = !workerDeploymentAvailable ? '中心尚未配置 Worker 部署服务；保存的计划已保留。' : node.deployment?.error || (node.deployment?.state === 'connected' ? `已完成 ${node.deployment.appliedCount} 个 Worker 的部署和连接检查。中心启用后自动接收任务。` : running ? '正在后台部署，可关闭窗口，稍后重新查看。' : '点击后将实际下发配置、启动容器并检查连接。');
-  if (closeDeploymentOnSuccess && node.deployment?.state === 'connected' && $("node-deploy").open) {
-    closeDeploymentOnSuccess = false; $("node-deploy").close(); announce(`${node.name}：Worker 部署和连接检查完成。`);
-  }
-}
-$("node-deploy-start").addEventListener('click', async () => {
-  if (!deploymentNodeId || $("node-deploy").dataset.saving) return;
-  const dialog = $("node-deploy"); dialog.dataset.saving = 'true'; $("node-deploy-start").disabled = true;
-  let password = $("node-deploy-password").value; $("node-deploy-password").value = '';
-  let accepted = false;
-  try {
-    registry = await request(`/api/server-nodes/${encodeURIComponent(deploymentNodeId)}/deploy-workers`, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({version:registry.version,password})});
-    accepted = true; closeDeploymentOnSuccess = true; render();
-  } catch (error) { $("node-deploy-status").textContent = error.message; closeDeploymentOnSuccess = false; }
-  finally {
-    password = undefined; delete dialog.dataset.saving;
-    if (accepted) renderDeployment();
-    else $("node-deploy-start").disabled = !workerDeploymentAvailable || deploymentRunning(registry.nodes.find(row => row.id === deploymentNodeId));
-  }
-});

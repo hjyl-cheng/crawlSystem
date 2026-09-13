@@ -13,7 +13,7 @@ export function createRemoteYoutubeCheckpointConsumer({ sessions, profileSecret 
       const apply = async client => {
         const binding = (await client.query('SELECT * FROM remote_ingestion.network_bindings WHERE binding_id=$1', [uuid(bindingId)])).rows[0];
         if (!binding) throw new RemoteProtocolError('NETWORK_BINDING_MISSING');
-        const node = (await client.query('SELECT state FROM remote_ingestion.nodes WHERE node_id=$1 FOR NO KEY UPDATE', [binding.node_id])).rows[0];
+        const node = (await client.query('SELECT state FROM remote_ingestion.nodes WHERE node_id=$1 FOR SHARE', [binding.node_id])).rows[0];
         if (!node || node.state === 'disabled') throw new RemoteProtocolError('UNAUTHORIZED', 401);
         const task = (await client.query('SELECT * FROM remote_ingestion.tasks WHERE task_id=$1 FOR UPDATE', [binding.task_id])).rows[0];
         if (!task || task.node_id !== binding.node_id || task.worker_slot !== binding.slot || task.generation !== binding.generation) {

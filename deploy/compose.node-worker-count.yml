@@ -1,0 +1,4 @@
+# Dashboard stack override; apply after the remote center and schema upgrade.
+services:
+  dashboard:
+    image: qy-allpachong/dashboard:node-worker-count-20260912

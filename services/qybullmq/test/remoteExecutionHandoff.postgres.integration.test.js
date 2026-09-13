@@ -42,9 +42,14 @@ import { waitForVideoApiDetail } from '../src/videoApiBatchRequests.js';
 import { runVideoApiResumable, gateVideoApiJob } from '../src/videoApiContinuation.js';
 import { PUBLICATION_WRITER_VERSION } from '../src/publicationWriterVersion.js';
 import { encodeResult, decodeResult } from '../src/remoteNodes/protocol.js';
+import { WholeChannelStore } from '../src/remoteNodes/wholeChannelStore.js';
+import { startRemoteNatsCenter } from '../src/remoteNodes/natsCenter.js';
+import { createRemoteNatsClient } from '../src/remoteNodes/natsClient.js';
+import { createTransportSignals } from '../src/remoteNodes/transportSignals.js';
 
 const url = process.env.REMOTE_NODE_TEST_DATABASE_URL;
 const binary = process.env.REMOTE_NODE_ROTA_TEST_BINARY;
+const wholeModes = process.env.REMOTE_NATS_TEST_URL ? [false, true] : [false];
 const resolvedPolicy = resolveWorkerIdentityPolicy({ role: 'channel', policyId: 'qy-br-channel-anonymous-v1', expectedWorkloadScope: 'qy-production', environment: {} });
 
 function detail(id) {
@@ -62,6 +67,9 @@ function detail(id) {
 
 test('original Rota and API lifecycle carry one remote Plan across execution generations', { skip: !url || !binary, timeout: 300000 }, async t => {
   const pool = new pg.Pool({ connectionString: url, max: 8, options: `-c publication.writer_version=${PUBLICATION_WRITER_VERSION}` });
+  const transactionPool=process.env.REMOTE_NODE_TEST_TRANSACTION_DATABASE_URL
+    ?new pg.Pool({connectionString:process.env.REMOTE_NODE_TEST_TRANSACTION_DATABASE_URL,max:12}):pool;
+  t.after(async()=>{if(transactionPool!==pool)await transactionPool.end();});
   const guard = await pool.connect(); t.after(async () => { guard.release(); await pool.end(); });
   await assertIsolatedRemoteDatabase(pool); await guard.query('SELECT pg_advisory_lock(781137981)');
   for (const file of ['../src/schema.sql','../../feature-engine/sql/schema.sql','../src/remoteNodes/schema.sql','../src/remoteNodes/routeSchema.sql','../src/remoteNodes/youtubeSessionSchema.sql','../src/remoteNodes/workerConnectionSchema.sql','../src/remoteNodes/workerActivationSchema.sql']) {
@@ -70,11 +78,12 @@ test('original Rota and API lifecycle carry one remote Plan across execution gen
   const previousMode = process.env.YOUTUBEJS_EXTRACTOR_MODE; process.env.YOUTUBEJS_EXTRACTOR_MODE = 'full';
   t.after(() => { if (previousMode === undefined) delete process.env.YOUTUBEJS_EXTRACTOR_MODE; else process.env.YOUTUBEJS_EXTRACTOR_MODE = previousMode; });
 
-  async function fixture(tt, { kind = 'country', reserve = true, api = false, remainingVideo = false, supervised = false, startNode = true, startSupervisor = true } = {}) {
+  async function fixture(tt, { kind = 'country', reserve = true, api = false, remainingVideo = false, supervised = false, startNode = true, startSupervisor = true, whole = false } = {}) {
     await pool.query('TRUNCATE remote_ingestion.nodes,remote_ingestion.tasks CASCADE');
-    const store = new RemoteNodeStore({ pool }); const channelStore = new RemoteChannelPlanStore({ store });
+    const store = new RemoteNodeStore({ pool:transactionPool }); const channelStore = new RemoteChannelPlanStore({ store });
     const query = pool.query.bind(pool); const transaction = action => store.transaction(action);
-    const nodeId = randomUUID(); const token = randomBytes(32).toString('hex'); const keypair = generateKeyPairSync('ed25519');
+    const nodeId = whole ? process.env.REMOTE_NATS_TEST_NODE_ID : randomUUID();
+    const token = whole ? process.env.REMOTE_NATS_TEST_TOKEN : randomBytes(32).toString('hex'); const keypair = generateKeyPairSync('ed25519');
     async function createJob({ about = ['network','about'].includes(kind), video = !['network','about'].includes(kind) } = {}) {
       const channelId = `UC${randomUUID().replaceAll('-','').slice(0,22)}`;
       await query(`INSERT INTO crawler.channels(channel_id,channel_url,title,status,country,country_code,country_source,total_video_count)
@@ -108,12 +117,12 @@ test('original Rota and API lifecycle carry one remote Plan across execution gen
       incrementalRunStore: new IncrementalRunStore({ withTransaction: transaction }) });
     const workerId = `remote-${nodeId}`; const sources = new Map(); const calls = []; const visits = []; const receipts = []; const checkpoints = [];
     let routeGeneration = 1; const attemptNumbers = new Map(); let activeCountry = kind === 'country' ? 'US' : 'BR'; let activeProfile;
-    const leaseId = randomUUID();
+    const leaseId = randomUUID(); const fixtureIdentity = randomUUID();
     let workerInstanceId='instance-1';
     const assignment = () => ({ ok: true, ready: true, protocol_version: 2, control_state: 'leased_idle', role: 'channel', workload_scope: 'qy-production',
       worker_id: workerId, worker_instance_id: workerInstanceId, slot_name: `rota-${nodeId}`, proxy_user: `worker-g${routeGeneration}`,
       lease_id: leaseId, lease_remaining_ms: 60000, server_time: new Date().toISOString(), route_generation: routeGeneration,
-      credential_generation: routeGeneration, network_identity_key: `network-${nodeId}-${routeGeneration}`, profile_epoch: routeGeneration - 1,
+      credential_generation: routeGeneration, network_identity_key: `network-${fixtureIdentity}-${routeGeneration}`, profile_epoch: routeGeneration - 1,
       identity_policy_id: resolvedPolicy.policy.id, identity_policy_version: resolvedPolicy.policy.version, identity_policy_hash: resolvedPolicy.policy.hash,
       identity_action: routeGeneration === 1 ? 'keep' : 'rotate_profile', egress_country: activeCountry });
     const routes = new RemoteChannelRouteStore({ channelStore, assertBusinessFence: assertRemoteIncrementalBusinessFence,
@@ -130,7 +139,17 @@ test('original Rota and API lifecycle carry one remote Plan across execution gen
     if(supervised)await activation.register({nodeId,slot:'worker-1',deploymentId:nodeConfig.deployment_id,configHash:nodeConfig.config_hash});
     const gateway = createRemoteNodeGateway({ store, channelPlans: channelStore, routes, youtubeSessions: sessions, ...(activation?{workerConnections:activation}:{}) });
     gateway.listen(0, '127.0.0.1'); await once(gateway, 'listening');
-    const client = createRemoteNodeClient({ url: `http://127.0.0.1:${gateway.address().port}`, token, allowLoopbackHttp: true });
+    let client = createRemoteNodeClient({ url: `http://127.0.0.1:${gateway.address().port}`, token, allowLoopbackHttp: true });
+    let wholeChannels, natsCenter, signals;
+    if (whole) {
+      for (const file of ['wholeChannelSchema.sql','natsSchema.sql']) await pool.query(await readFile(new URL(`../src/remoteNodes/${file}`,import.meta.url),'utf8'));
+      wholeChannels = new WholeChannelStore({channelPlans:channelStore,assertBusinessFence:assertRemoteIncrementalBusinessFence});
+      signals = await createTransportSignals({connectionString:url}); channelStore.transportSignals=signals;
+      const tls={caFile:process.env.REMOTE_NATS_TEST_CA};
+      natsCenter=await startRemoteNatsCenter({url:process.env.REMOTE_NATS_TEST_URL,password:process.env.REMOTE_NATS_TEST_PASSWORD,tls,
+        store,channelPlans:channelStore,wholeChannels,routes,youtubeSessions:sessions,workerConnections:activation,signals,resultMaxBytes:32*1024*1024});
+      client=await createRemoteNatsClient({url:process.env.REMOTE_NATS_TEST_URL,token,nodeId,slot:'worker-1',tls});
+    }
     const directory = await mkdtemp(join(tmpdir(), 'remote-handoff-'));
     await writeFile(join(directory,'public.pem'), keypair.publicKey.export({ type:'spki',format:'pem' }), { mode:0o600 });
     await writeFile(join(directory,'token'), token, { mode:0o600 });
@@ -142,7 +161,8 @@ test('original Rota and API lifecycle carry one remote Plan across execution gen
     const createApiFallback = api ? ({ query,withTransaction }) => createVideoDetailApiFallback({ query,withTransaction,
       loadSettings: async () => ({ fallbackMode:'enabled',apiKeys:['fixture'],dailyRequestLimit:100 }), wait:waitForVideoApiDetail }) : null;
     const central = new RemoteManagedIncrementalRuntime({ channelStore, routes, youtubeSessions:sessions, nodeId, slot:'worker-1',
-      profileSecret:randomBytes(32).toString('hex'), createApiFallback, pollMs:5, claimTimeoutMs:10000, stopTimeoutMs:7000 });
+      profileSecret:randomBytes(32).toString('hex'), createApiFallback, wholeChannels,
+      loadWholeApiPolicy:async()=>({enabled:api,available:api,dailyRequestLimit:100}), pollMs:5, claimTimeoutMs:10000, stopTimeoutMs:7000 });
     const rota = new RotaSlotAdapter({ role:'channel',workerId,workerInstanceId:'instance-1',resolvedPolicy,
       proxyBaseUrl:'http://unused-center.invalid:8000',proxyPassword:'never-sent',identityRuntime:central, renewIntervalMs:60000,
       client: {
@@ -182,21 +202,22 @@ test('original Rota and API lifecycle carry one remote Plan across execution gen
           subscriber_count_text:'1,234 subscribers',subscriber_count_source:'youtube_about',view_count_text:'98,765 views',view_count_source:'youtube_about',
           video_count_text:'1 video',video_count_source:'youtube_about',keywords:[],external_links:[],external_links_status:'observed',available_tabs:['videos'] },raw:{ engine:'fixture' },
           scanUploads:async () => ({ ...(kind==='country'?{ empty_uploads:emptyUploadsDecision('BR') }:{}),
-            entries:api?(remainingVideo?[videoId,secondVideoId]:[videoId]).map((id,index)=>({ id,title:'Discovered',position:index+1,published_at:new Date().toISOString(),published_day:new Date().toISOString().slice(0,10),
+            entries:(api||kind==='captured')?(remainingVideo?[videoId,secondVideoId]:[videoId]).map((id,index)=>({ id,title:'Discovered',position:index+1,published_at:new Date().toISOString(),published_day:new Date().toISOString().slice(0,10),
               published_at_status:'exact',published_at_precision:'date_only',published_at_source:'youtubejs_feed' })):[],
-            complete:true,pages:1,item_count:api?(remainingVideo?2:1):0,parse_gap_count:0,anchor_matched:false,stop_reason:'list_end',terminal_reason:'list_end',raw:{engine:'fixture'} }) };
+            complete:true,pages:1,item_count:(api||kind==='captured')?(remainingVideo?2:1):0,parse_gap_count:0,anchor_matched:false,stop_reason:'list_end',terminal_reason:'list_end',raw:{engine:'fixture'} }) };
       },
-      fetchDetail:async id => { detailAttempts++; if (id===secondVideoId) return detail(id); throw Object.assign(new Error('required view_count missing'),
+      fetchDetail:async id => { detailAttempts++; if (id===secondVideoId || kind==='captured') return detail(id); throw Object.assign(new Error('required view_count missing'),
         { name:'YoutubeJsRequiredSurfaceError',required_surface:'player',partial_detail:{ id:videoId,like_count:12 } }); },
     };
     const spool=new RemoteResultSpool({directory:join(directory,'spool')});
     let resolveGrantStarted; const grantStarted=new Promise(resolve=>{resolveGrantStarted=resolve;});
     const nodeClient={ ...client, grantRoute:request=>{resolveGrantStarted();return client.grantRoute(request);}, uploadCommand:async (lease,bytes) => { receipts.push({lease,bytes}); return client.uploadCommand(lease,bytes); },
+      ...(whole ? {uploadWholeChannel:async (lease,bytes)=>{receipts.push({lease,bytes});return client.uploadWholeChannel(lease,bytes);}} : {}),
       youtubeCheckpoint:async value => { checkpoints.push(value); return client.youtubeCheckpoint(value); } };
     const workerOptions={client:nodeClient,localRota,slot:'worker-1',spool,youtube,pollMs:5,renewMs:100,timeoutMs:15000,
       gateway:{ prepare:async ({profileGroup}) => {activeProfile=profileGroup.profile_group_id;},snapshot:async()=>({cookies:[]}),close:async()=>{},fetch:()=>assert.fail('fixture does not access YouTube') } };
     const nodeAbort=new AbortController();const workerErrors=[];
-    const worker=supervised?new RemoteIncrementalProcess({...workerOptions,config:nodeConfig,intervalMs:50,
+    const worker=supervised?new RemoteIncrementalProcess({...workerOptions,config:nodeConfig,intervalMs:50,wholeChannel:whole,
       createWorker:args=>createRemoteIncrementalWorker({...workerOptions,...args})}):createRemoteIncrementalWorker(workerOptions);
     const pump=startNode?worker.run({signal:nodeAbort.signal,pollMs:5,onStatus:status=>{
       if(status.status==='retrying')workerErrors.push(status);
@@ -208,6 +229,7 @@ test('original Rota and API lifecycle carry one remote Plan across execution gen
       finally {
         relay.kill('SIGTERM');await relayExit;
         await new Promise(resolve=>{gateway.close(resolve);gateway.closeAllConnections();});
+        if(whole){await client.close();await signals.close();await natsCenter.close();}
         await rm(directory,{recursive:true,force:true});
       }
     });
@@ -220,7 +242,7 @@ test('original Rota and API lifecycle carry one remote Plan across execution gen
       queue=new Queue(INCREMENTAL_QUEUE,{connection:redis,prefix});queueEvents=new QueueEvents(INCREMENTAL_QUEUE,{connection:redis,prefix});
       await queueEvents.waitUntilReady();
       tt.after(async()=>{await supervisor?.stop();await queueEvents.close();await queue.obliterate({force:true});await queue.close();await guardPool.end();});
-      supervisorArgs={store,channelStore,routes,youtubeSessions:sessions,activation,guardPool,connection:redis,prefix,allowedNodeIds:[nodeId],resolvedPolicy,
+      supervisorArgs={store,channelStore,routes,youtubeSessions:sessions,activation,guardPool,connection:redis,prefix,allowedNodeIds:[nodeId],resolvedPolicy,wholeChannels,
         profileSecret:central.executions.profileSecret,rotaClient:rota.client,proxyBaseUrl:'http://unused-center.invalid:8000',proxyPassword:'fixture',intervalMs:50,
         createApiFallback,createRuntime:args=>{central.executions.assertAdmission=async client=>{const ok=await args.assertAdmission(client);if(!ok){const e=[...supervisor.entries.values()][0];tt.diagnostic(JSON.stringify({admission:false,owned:e?.owned,closing:e?.closing,aborting:e?.aborting,redis:e?.redis?.status,rota:e?.rota.status(),entries:supervisor.entries.size}));}return ok;};central.assertAdmission=central.executions.assertAdmission;return central;},
         createRota:args=>{workerInstanceId=args.workerInstanceId;rota.workerInstanceId=workerInstanceId;return rota;},
@@ -235,9 +257,10 @@ test('original Rota and API lifecycle carry one remote Plan across execution gen
       detailAttempts:()=>detailAttempts,workerErrors,query,createJob,secondVideoId,grantStarted,supervisor,supervisorArgs,activation,queue,queueEvents};
   }
 
-  for(const stage of ['pending','active','committed']) await t.test(`SIGKILL center recovers the same BullMQ Plan without resetting attempts (stage=${stage})`, {skip:!process.env.REMOTE_NODE_TEST_REDIS_PORT}, async tt => {
-    const hasNetwork=stage!=='pending';const activeNetwork=stage==='active';
-    const f=await fixture(tt,{kind:'about',startNode:hasNetwork});
+  for(const stage of ['pending','active','committed',...(process.env.REMOTE_NATS_TEST_URL?['whole_received','whole_video_received']:[])]) await t.test(`SIGKILL center recovers the same BullMQ Plan without resetting attempts (stage=${stage})`, {skip:!process.env.REMOTE_NODE_TEST_REDIS_PORT}, async tt => {
+    const whole=stage.startsWith('whole_');const video=stage==='whole_video_received';
+    const hasNetwork=stage!=='pending';const activeNetwork=stage==='active'||whole;
+    const f=await fixture(tt,{kind:video?'captured':'about',startNode:hasNetwork,whole});
     const row={node_id:f.nodeId,slot:f.slot,rota_worker_id:f.assignment().worker_id};
     const prepared=await f.preparer.prepareChannel(remotePlanJob(f.job));
     const task=await f.rota.client.beginTask({business_run_id:prepared.businessRunId,job_execution_id:'crash-test'});
@@ -265,6 +288,11 @@ test('original Rota and API lifecycle carry one remote Plan across execution gen
         const barrier=new Promise(resolve=>{release=resolve;});tt.after(()=>release());
         const originalRelease=f.nodeClient.releaseRoute;
         f.nodeClient.releaseRoute=async receipt=>{await barrier;return originalRelease(receipt);};
+        if(whole){
+          const completion=once(child,'message',{signal:AbortSignal.timeout(15000)});
+          child.send({lease,whole:true,pauseAfterReceipt:true});
+          assert.equal((await completion)[0].received,true);
+        }
       }else{
         const completion=once(child,'message',{signal:AbortSignal.timeout(10000)});child.send({lease});
         assert.equal((await completion)[0].completed?.status,'done');
@@ -307,7 +335,11 @@ test('original Rota and API lifecycle carry one remote Plan across execution gen
     assert.equal(f.calls.filter(c=>c.event==='begin').length,attempts);
     assert.equal((await f.query('SELECT max(attempt_number)::int AS n FROM crawler.channel_execution_attempts WHERE channel_id=$1',[f.plan.channel_id])).rows[0].n,attempts);
     assert.equal((await f.query('SELECT count(*)::int AS n FROM crawler.channel_runs WHERE plan_id=$1',[f.plan.plan_id])).rows[0].n,1);
-    assert.equal((await f.query("SELECT count(*)::int AS n FROM crawler.crawl_observations WHERE channel_id=$1 AND observation_kind='about'",[f.plan.channel_id])).rows[0].n,1);
+    assert.equal((await f.query('SELECT count(*)::int AS n FROM crawler.crawl_observations WHERE channel_id=$1 AND observation_kind=$2',[f.plan.channel_id,video?'video':'about'])).rows[0].n,1);
+    if(whole){
+      assert.equal(f.visits.length,1,'received About/scan evidence must survive a killed center without recollection');
+      assert.equal(f.detailAttempts(),video?1:0,'new owner reuses the received detail under its own fence');
+    }
   });
 
   await t.test('replacement supervisor automatically settles killed admission and resumes real queue intake', {skip:!process.env.REMOTE_NODE_TEST_REDIS_PORT}, async tt=>{
@@ -327,14 +359,25 @@ test('original Rota and API lifecycle carry one remote Plan across execution gen
     f.supervisor.start();
     // Production BullMQ uses its default stalled interval; this assertion does
     // not manually move/retry the old job or edit any transport state.
-    assert.equal((await queued.waitUntilFinished(f.queueEvents,45000)).status,'done');
+    // A replacement may first mark the abandoned job as a stall candidate,
+    // then recover it on the next default 30-second check.
+    let finished;
+    try { finished = await queued.waitUntilFinished(f.queueEvents,75000); }
+    catch(error){
+      tt.diagnostic(JSON.stringify({jobState:await queued.getState(),workerFatal:f.worker.fatal?.message,
+        connection:f.worker.connection,entries:[...f.supervisor.entries.values()].map(e=>({owned:e.owned,blocked:e.blocked,
+          closing:e.closing,recovered:e.recovered,queueReady:e.queueReady,processing:e.processing,paused:e.worker?.isPaused()})),
+        connections:(await f.query('SELECT enabled,activation_requested,accepting,runtime_revision,connected_until>now() AS alive FROM remote_ingestion.worker_connections')).rows}));
+      throw error;
+    }
+    assert.equal(finished.status,'done');
     assert.equal((await f.query('SELECT status FROM crawler.channel_execution_attempts WHERE attempt_id=$1',[started.admission.attemptId])).rows[0].status,'aborted');
     assert.equal(f.calls.filter(c=>c.event==='begin').length,2);
     assert.equal(f.visits.length,1);
   });
 
-  for(const reserve of [true,false]) await t.test(`US empty list uses the original country handoff (Brazil reserve=${reserve})`,async tt=>{
-    const f=await fixture(tt,{reserve});const result=await f.execute();assert.equal(result.status,'done');
+  for(const whole of wholeModes) for(const reserve of [true,false]) await t.test(`US empty list uses the original country handoff (Brazil reserve=${reserve}, whole=${whole})`,async tt=>{
+    const f=await fixture(tt,{reserve,whole});const result=await f.execute();assert.equal(result.status,'done');
     assert.deepEqual(f.visits.map(v=>v.country),reserve?['US','BR']:['US']);
     assert.equal(f.calls.filter(c=>c.event==='begin').length,2);
     assert.equal(f.calls.filter(c=>c.event==='observe').length,0);
@@ -374,24 +417,25 @@ test('original Rota and API lifecycle carry one remote Plan across execution gen
     assert.equal(f.detailAttempts(),3,'no repeated YouTube detail request');
   });
 
-  await t.test('network failure settles its node, switches through original Rota, and retains one run and budget',async tt=>{
-    const f=await fixture(tt,{kind:'network'});const result=await f.execute();assert.equal(result.status,'done');
+  for(const whole of wholeModes) await t.test(`network failure settles its node, switches through original Rota, and retains one run and budget (whole=${whole})`,async tt=>{
+    const f=await fixture(tt,{kind:'network',whole});const result=await f.execute();assert.equal(result.status,'done');
     assert.equal(f.calls.filter(c=>c.event==='observe').length,1);assert.equal(f.calls.find(c=>c.event==='observe').kind,'proxy_transport');
     assert.equal(f.calls.filter(c=>c.event==='begin').length,2);assert.equal(new Set(f.calls.filter(c=>c.event==='begin').map(c=>c.business_run_id)).size,1);
     assert.notEqual(f.visits[0].profile,f.visits[1].profile);
     const attempts=(await f.query('SELECT status FROM crawler.channel_execution_attempts WHERE channel_id=$1 ORDER BY attempt_number',[f.plan.channel_id])).rows;
     assert.deepEqual(attempts.map(v=>v.status),['failed','success']);
     const first=f.receipts.find(r=>r.lease.generation===1);
-    assert.equal((await f.client.uploadCommand(first.lease,first.bytes)).durable,true);
+    const upload=whole?f.client.uploadWholeChannel:f.client.uploadCommand;
+    assert.equal((await upload(first.lease,first.bytes)).durable,true);
     const {value}=await decodeResult(first.bytes);
-    await assert.rejects(f.client.uploadCommand(first.lease,await encodeResult({...value,batch_id:randomUUID()})),{code:'BATCH_CONFLICT'});
+    await assert.rejects(upload(first.lease,await encodeResult({...value,batch_id:randomUUID()})),{code:whole?'INVALID_WHOLE_CHANNEL_FRAME':'BATCH_CONFLICT'});
     assert.equal((await f.client.youtubeCheckpoint(f.checkpoints[0])).durable,true);
     await assert.rejects(f.client.pollCommands(first.lease),{code:'STALE_LEASE'});
     assert.equal((await f.query('SELECT count(*)::int AS n FROM crawler.crawl_observations WHERE run_id=$1',[`incremental:${f.plan.plan_id}`])).rows[0].n,1);
   });
 
-  await t.test('API waits release the Worker; stored API replay finishes without another Rota task or YouTube request',async tt=>{
-    const f=await fixture(tt,{kind:'api',api:true});
+  for(const whole of wholeModes) await t.test(`API waits release the Worker; stored API replay finishes without another Rota task or YouTube request (whole=${whole})`,async tt=>{
+    const f=await fixture(tt,{kind:'api',api:true,whole});
     await assert.rejects(runVideoApiResumable({job:f.job,token:'fixture',execute:f.execute,executeReplay:()=>assert.fail('no continuation yet')}),{name:'DelayedError'});
     assert.equal(f.detailAttempts(),3);assert.equal(f.calls.filter(c=>c.event==='begin').length,1);
     const transport=(await f.query('SELECT * FROM remote_ingestion.tasks')).rows[0];assert.equal(transport.state,'received');
@@ -413,8 +457,8 @@ test('original Rota and API lifecycle carry one remote Plan across execution gen
     assert.deepEqual(Object.values(stored).map(Number),[321,12,0]);
   });
 
-  await t.test('API evidence followed by an untouched video resumes through the original Rota budget',async tt=>{
-    const f=await fixture(tt,{kind:'api',api:true,remainingVideo:true});
+  for(const whole of wholeModes) await t.test(`API evidence followed by an untouched video resumes through the original Rota budget (whole=${whole})`,async tt=>{
+    const f=await fixture(tt,{kind:'api',api:true,remainingVideo:true,whole});
     await assert.rejects(runVideoApiResumable({job:f.job,token:'fixture',execute:f.execute,executeReplay:()=>assert.fail('no continuation yet')}),{name:'DelayedError'});
     const transport=(await f.query('SELECT * FROM remote_ingestion.tasks')).rows[0];
     const requestId=f.job.data.video_api_continuation.request_id;
@@ -484,8 +528,8 @@ test('original Rota and API lifecycle carry one remote Plan across execution gen
   });
 
   async function eventually(check,timeout=15000){const end=Date.now()+timeout;while(Date.now()<end){if(await check())return;await delay(25);}assert.fail('expected supervised state did not arrive');}
-  await t.test('real BullMQ consumer runs original Clock through supervised remote process',{skip:!process.env.REMOTE_NODE_TEST_REDIS_PORT},async tt=>{
-    const f=await fixture(tt,{kind:'about',supervised:true});
+  for(const whole of wholeModes) await t.test(`real BullMQ consumer runs original Clock through supervised remote process (whole=${whole})`,{skip:!process.env.REMOTE_NODE_TEST_REDIS_PORT},async tt=>{
+    const f=await fixture(tt,{kind:'about',supervised:true,whole});
     const job=await f.queue.add(f.job.name,f.plan,{jobId:f.job.id,attempts:1});
     const result=await job.waitUntilFinished(f.queueEvents,25000);assert.equal(result.status,'done');
     assert.equal(await job.getState(),'completed');assert.equal(f.visits.length,1);
@@ -494,13 +538,13 @@ test('original Rota and API lifecycle carry one remote Plan across execution gen
     const rival=new RemoteCenterExecutionSupervisor({...f.supervisorArgs,createRota:()=>assert.fail('duplicate center must not allocate Rota')});
     await rival.tick();assert.equal(rival.entries.size,0);await rival.stop();
     await f.activation.drain(f.nodeId,f.slot);
-    await eventually(()=>[...f.supervisor.entries.values()][0]?.worker.isPaused());
+    await eventually(()=>[...f.supervisor.entries.values()].every(entry=>!entry.worker || entry.worker.isPaused()));
     const second=await f.createJob({about:true,video:false});const pending=await f.queue.add(second.job.name,second.plan,{jobId:second.job.id});
     await delay(250);assert.ok(['waiting','delayed'].includes(await pending.getState()));assert.equal(f.visits.length,1);
     await f.supervisor.stop();assert.equal((await f.query('SELECT enabled FROM remote_ingestion.worker_connections WHERE node_id=$1',[f.nodeId])).rows[0].enabled,false);
   });
-  await t.test('real BullMQ API wait releases slot for another channel and replays stored result',{skip:!process.env.REMOTE_NODE_TEST_REDIS_PORT},async tt=>{
-    const f=await fixture(tt,{kind:'api',api:true,supervised:true});
+  for(const whole of wholeModes) await t.test(`real BullMQ API wait releases slot for another channel and replays stored result (whole=${whole})`,{skip:!process.env.REMOTE_NODE_TEST_REDIS_PORT},async tt=>{
+    const f=await fixture(tt,{kind:'api',api:true,supervised:true,whole});
     const first=await f.queue.add(f.job.name,f.plan,{jobId:f.job.id,attempts:1});
     await eventually(async()=>!!(await f.query('SELECT request_id FROM crawler.youtube_api_detail_requests WHERE run_id=$1',[`incremental:${f.plan.plan_id}`])).rows[0]);
     const other=await f.createJob({about:true,video:false});const next=await f.queue.add(other.job.name,other.plan,{jobId:other.job.id,attempts:1});
@@ -519,8 +563,8 @@ test('original Rota and API lifecycle carry one remote Plan across execution gen
     const data=(await f.query('SELECT view_count,like_count,comment_count FROM crawler.contents WHERE channel_id=$1 AND source_content_id=$2',[f.plan.channel_id,f.videoId])).rows[0];
     assert.deepEqual(Object.values(data).map(Number),[321,12,0]);
   });
-  await t.test('real BullMQ country handoff preserves the same Plan and finishes before graceful shutdown',{skip:!process.env.REMOTE_NODE_TEST_REDIS_PORT},async tt=>{
-    const f=await fixture(tt,{supervised:true});const job=await f.queue.add(f.job.name,f.plan,{jobId:f.job.id,attempts:1});
+  for(const whole of wholeModes) await t.test(`real BullMQ country handoff preserves the same Plan and finishes before graceful shutdown (whole=${whole})`,{skip:!process.env.REMOTE_NODE_TEST_REDIS_PORT},async tt=>{
+    const f=await fixture(tt,{supervised:true,whole});const job=await f.queue.add(f.job.name,f.plan,{jobId:f.job.id,attempts:1});
     await eventually(()=>f.visits.length>0);
     const stop=f.supervisor.stop();
     assert.equal((await job.waitUntilFinished(f.queueEvents,25000)).status,'done');await stop;

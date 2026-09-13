@@ -100,7 +100,7 @@ test('runtime script over real SSH, key login, SFTP and sudo in disposable fixtu
   });
   const deploymentId=randomUUID();
   const plan=count=>buildNodeCollectDeployment({node:{...node,kind:'execution',provisioning:{state:'ready'},runtime:{state:'ready'},workers:[{role:'incremental',count}]},
-    image:'fixture.example/collect@sha256:'+'a'.repeat(64),gatewayUrl:'https://fixture.example',deploymentId});
+    image:'fixture.example/collect@sha256:'+'a'.repeat(64),gatewayUrl:'https://fixture.example',natsUrl:'wss://fixture.example/node-messages',deploymentId});
   const credentials={nodeId:node.id,deploymentId,nodeToken:randomBytes(32).toString('hex'),
     publicKey:generateKeyPairSync('ed25519').publicKey.export({type:'spki',format:'pem'}),
     relayTokens:{'incremental-1':randomBytes(32).toString('hex'),'incremental-2':randomBytes(32).toString('hex')}};
@@ -140,6 +140,7 @@ test('runtime script over real SSH, key login, SFTP and sudo in disposable fixtu
     await root('touch /test-state/fail-pull');
     await assert.rejects(deploy(plan(2)));
     await root('rm /test-state/fail-pull');await deploy(plan(2));
+    await assert.rejects(deploy(plan(1)),/远程操作失败/,'a smaller failed target must not orphan existing containers');
     assert.equal(await root('cat /var/lib/qy-node/spool/incremental-1/result'),'retained');
   });
   await t.test('wrong identity, altered config and hostile volume are rejected before Docker start',async()=>{

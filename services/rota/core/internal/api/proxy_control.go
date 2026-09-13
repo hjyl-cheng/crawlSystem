@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
@@ -124,6 +125,22 @@ func (h *ProxyControlHandler) Capacity(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeControlJSON(w, http.StatusOK, result)
+}
+
+func (h *ProxyControlHandler) EnsureCapacity(w http.ResponseWriter, r *http.Request) {
+	h.command(w, r, func() (any, error) {
+		var request proxycontrol.EnsureCapacityRequest
+		if err := decodeControlJSON(r, &request); err != nil {
+			return nil, err
+		}
+		control, ok := h.control.(interface {
+			EnsureCapacity(context.Context, proxycontrol.EnsureCapacityRequest) (proxycontrol.EnsureCapacityResult, error)
+		})
+		if !ok {
+			return nil, proxycontrol.ErrDisabled
+		}
+		return control.EnsureCapacity(r.Context(), request)
+	})
 }
 
 func (h *ProxyControlHandler) BusinessRunBudget(w http.ResponseWriter, r *http.Request) {

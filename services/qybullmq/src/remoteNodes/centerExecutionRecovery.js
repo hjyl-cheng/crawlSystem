@@ -4,13 +4,24 @@ import { RemoteProtocolError } from './protocol.js';
 
 export const supervisionLockKey = row => `remote-incremental-supervisor:${row.node_id}/${row.slot}`;
 
+// Older writers renewed the coordinator after applying a result. A completed,
+// identity-matched attempt is authoritative even when that obsolete timestamp
+// remains. This never waives the separate unfinished-attempt/network checks.
+const completedHistory = `COALESCE((t.state='applied' AND a.finished_at IS NOT NULL
+  AND a.status IN ('success','failed','aborted')
+  AND a.channel_id=t.input#>>'{plan,channel_id}'
+  AND a.business_run_id='incremental:'||(t.input#>>'{plan,plan_id}')
+  AND a.dispatch_generation::text=t.input#>>'{plan,dispatch_generation}'
+  AND t.applied_result->>'run_id'=a.business_run_id
+  AND a.worker_id=(SELECT rota_worker_id FROM remote_ingestion.network_slots WHERE node_id=$1 AND slot=$2)),false)`;
+
 export async function remoteSlotUnsettled(queryable, row) {
   return (await queryable.query(`SELECT 1 WHERE EXISTS(
     SELECT 1 FROM remote_ingestion.tasks t LEFT JOIN crawler.channel_execution_attempts a
       ON a.attempt_id=t.context->>'execution_attempt_id'
     WHERE t.target_node_id=$1 AND t.target_worker_slot=$2
       AND (t.state IN ('pending','leased') OR (a.status='running' AND a.finished_at IS NULL)
-        OR t.coordinator_until IS NOT NULL))
+        OR (t.coordinator_until IS NOT NULL AND NOT ${completedHistory})))
     OR EXISTS(SELECT 1 FROM remote_ingestion.network_bindings WHERE node_id=$1 AND slot=$2 AND state<>'retired')`,
   [row.node_id,row.slot])).rowCount>0;
 }
@@ -27,14 +38,14 @@ export async function recoverRemoteSlot({ guard, row, lockKey, profileSecret, ch
     if(!owns.rowCount)throw new RemoteProtocolError('REMOTE_RECOVERY_NOT_OWNER');
     await guard.query("SET LOCAL lock_timeout='2s'");
     await guard.query("SET LOCAL statement_timeout='5s'");
-    await guard.query('SELECT node_id FROM remote_ingestion.nodes WHERE node_id=$1 FOR NO KEY UPDATE',[row.node_id]);
+    await guard.query('SELECT node_id FROM remote_ingestion.nodes WHERE node_id=$1 FOR SHARE',[row.node_id]);
     const slot=(await guard.query('SELECT rota_worker_id FROM remote_ingestion.network_slots WHERE node_id=$1 AND slot=$2',[row.node_id,row.slot])).rows[0];
     if(slot?.rota_worker_id!==row.rota_worker_id)throw new RemoteProtocolError('NETWORK_SLOT_CONFLICT');
     const tasks=(await guard.query(`SELECT t.* FROM remote_ingestion.tasks t
       LEFT JOIN crawler.channel_execution_attempts a ON a.attempt_id=t.context->>'execution_attempt_id'
       WHERE t.target_node_id=$1 AND t.target_worker_slot=$2 AND t.capability=$3
         AND (t.state IN ('pending','leased') OR (a.status='running' AND a.finished_at IS NULL)
-          OR t.coordinator_until IS NOT NULL OR EXISTS(SELECT 1 FROM remote_ingestion.network_bindings b
+          OR (t.coordinator_until IS NOT NULL AND NOT ${completedHistory}) OR EXISTS(SELECT 1 FROM remote_ingestion.network_bindings b
             WHERE b.task_id=t.task_id AND b.state<>'retired'))
       ORDER BY t.created_at LIMIT 32 FOR UPDATE OF t`,[row.node_id,row.slot,CHANNEL_PLAN_CAPABILITY])).rows;
     let closed=0;

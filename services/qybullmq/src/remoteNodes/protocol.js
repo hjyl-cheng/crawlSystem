@@ -31,8 +31,17 @@ export function hash(value) {
   return createHash('sha256').update(value).digest('hex');
 }
 
+// DOMException uses numeric codes (TimeoutError=23, AbortError=20). Keep
+// their native evidence while giving every transport the same string code.
+function normalizeResultError(value) {
+  if (value?.outcome !== 'failure' || !Number.isFinite(value.error?.code)) return value;
+  const error = value.error;
+  return { ...value, error: { ...error, native_code: error.code,
+    code: typeof error.name === 'string' && error.name ? error.name : String(error.code) } };
+}
+
 export async function encodeResult(value) {
-  const bytes = Buffer.from(JSON.stringify(value));
+  const bytes = Buffer.from(JSON.stringify(normalizeResultError(value)));
   if (bytes.length > MAX_JSON_BYTES) throw new RemoteProtocolError('RESULT_TOO_LARGE', 413);
   const compressed = await compress(bytes);
   if (compressed.length > MAX_GZIP_BYTES) throw new RemoteProtocolError('RESULT_TOO_LARGE', 413);
@@ -49,6 +58,9 @@ export async function decodeResult(compressed) {
   } catch {
     throw new RemoteProtocolError('INVALID_COMPRESSED_RESULT', 400);
   }
+  // Also read already-persisted results from older nodes. Hash the original
+  // bytes below so a lost acknowledgement never changes receipt identity.
+  value = normalizeResultError(value);
   if (value?.version !== 1 || !['success', 'failure'].includes(value?.outcome)
     || (value.outcome === 'success' && (!value.data || typeof value.data !== 'object'))
     || (value.outcome === 'failure' && typeof value.error?.code !== 'string')) {

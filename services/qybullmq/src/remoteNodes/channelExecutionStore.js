@@ -49,7 +49,7 @@ export class RemoteChannelExecutionStore {
       uploads_country_recheck: job.data.uploads_country_recheck ?? null, resume_mode: resumeMode ?? 'initial' });
     const context = { plan_hash: contract.planHash, execution_attempt_id: attemptId, execution_options: executionOptions };
     return this.store.transaction(async client => {
-      const node = (await client.query('SELECT state FROM remote_ingestion.nodes WHERE node_id=$1 FOR NO KEY UPDATE', [nodeId])).rows[0];
+      const node = (await client.query('SELECT state FROM remote_ingestion.nodes WHERE node_id=$1 FOR SHARE', [nodeId])).rows[0];
       if (node?.state !== 'active') fail('REMOTE_NODE_NOT_ACTIVE');
       if (this.assertAdmission && await this.assertAdmission(client,nodeId,slot)!==true) fail('REMOTE_SUPERVISOR_NOT_READY');
       let transport = (await client.query('SELECT * FROM remote_ingestion.tasks WHERE work_key=$1 FOR UPDATE', [contract.workKey])).rows[0];
@@ -115,11 +115,14 @@ export class RemoteChannelExecutionStore {
   async waitClaim(admission, { nodeId, slot, signal, pollMs = 100 }) {
     for (;;) {
       signal.throwIfAborted();
-      const task = (await this.store.pool.query('SELECT *,lease_until>clock_timestamp() AS alive FROM remote_ingestion.tasks WHERE task_id=$1', [admission.taskId])).rows[0];
-      if (task?.context.execution_attempt_id !== admission.attemptId) fail('REMOTE_EXECUTION_REPLACED');
-      if (task.state === 'leased' && task.alive && task.node_id === nodeId && task.worker_slot === slot) return this.store.lease(task);
-      if (task.state !== 'pending') fail('REMOTE_EXECUTION_NOT_AVAILABLE');
-      await delay(pollMs, null, { signal });
+      const notification=this.channelStore.transportSignals?.watch(`task:${admission.taskId}`,{timeoutMs:5000,signal});
+      try {
+        const task = (await this.store.pool.query('SELECT *,lease_until>clock_timestamp() AS alive FROM remote_ingestion.tasks WHERE task_id=$1', [admission.taskId])).rows[0];
+        if (task?.context.execution_attempt_id !== admission.attemptId) fail('REMOTE_EXECUTION_REPLACED');
+        if (task.state === 'leased' && task.alive && task.node_id === nodeId && task.worker_slot === slot) return this.store.lease(task);
+        if (task.state !== 'pending') fail('REMOTE_EXECUTION_NOT_AVAILABLE');
+        if(notification)await notification.wait;else await delay(pollMs,null,{signal});
+      } finally { notification?.cancel(); }
     }
   }
 

@@ -1,0 +1,20 @@
+# Use with the existing project configuration; update only the named services.
+services:
+  worker-incremental:
+    image: qy-allpachong/qybullmq:incremental-control-20260912
+    environment:
+      LOCAL_INCREMENTAL_INTAKE_CONTROL: 'true'
+  remote-node-center:
+    image: qy-allpachong/remote-node-center:throughput-20260912
+    environment:
+      LOCAL_INCREMENTAL_INTAKE_CONTROL: 'true'
+  feature-dispatch:
+    image: qy-allpachong/feature-dispatch:intake-count-20260911
+  dashboard:
+    image: qy-allpachong/dashboard:worker-memory-manual-20260912
+    environment:
+      SERVER_NODE_LOCAL_INTAKE_CONTROL: 'true'
+      SERVER_NODE_LOCAL_HOST: '137.175.93.199'
+
+  feature-ingest:
+    image: qy-allpachong/feature-engine:country-plan-20260911

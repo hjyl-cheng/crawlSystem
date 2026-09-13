@@ -17,7 +17,7 @@ test('Dashboard registration is atomic, encrypted, repeatable and supports addit
    for(const table of ['node_deployments','worker_connections','network_slots','nodes'])await pool.query(`DELETE FROM remote_ingestion.${table} WHERE node_id=$1`,[nodeId]);
    guard.release();await pool.end();});
  await assertIsolatedRemoteDatabase(pool);await guard.query('SELECT pg_advisory_lock(781137981)');
- for(const file of ['schema.sql','routeSchema.sql','workerConnectionSchema.sql','workerActivationSchema.sql'])await pool.query(await readFile(new URL(`../src/remoteNodes/${file}`,import.meta.url),'utf8'));
+ for(const file of ['schema.sql','routeSchema.sql','workerConnectionSchema.sql','workerActivationSchema.sql','workerCountSchema.sql'])await pool.query(await readFile(new URL(`../src/remoteNodes/${file}`,import.meta.url),'utf8'));
  const store=new RemoteNodeStore({pool});const routes=new RemoteChannelRouteStore({channelStore:new RemoteChannelPlanStore({store}),
    readRotaRoute:()=>assert.fail('deployment must not allocate routes'),assertBusinessFence:()=>assert.fail('deployment must not execute channels'),
    secretKey:randomBytes(32),privateKey:generateKeyPairSync('ed25519').privateKey});
@@ -35,13 +35,38 @@ test('Dashboard registration is atomic, encrypted, repeatable and supports addit
  assert.equal((await post(plan(1),first.nodeToken)).status,401);
  const expanded=await (await post(plan(2))).json();assert.equal(expanded.nodeToken,first.nodeToken);
  assert.equal(expanded.relayTokens['incremental-1'],first.relayTokens['incremental-1']);assert.equal(Object.keys(expanded.relayTokens).length,2);
- assert.equal((await post(plan(1))).status,409);
+ assert.equal((await post(plan(1))).status,200,'unused registrations from a failed expansion may stay reserved');
+ assert.equal((await pool.query('SELECT worker_count FROM remote_ingestion.node_deployments WHERE node_id=$1',[nodeId])).rows[0].worker_count,2);
+ assert.equal((await pool.query('SELECT count(*)::int AS n FROM remote_ingestion.worker_connections WHERE node_id=$1',[nodeId])).rows[0].n,2,'no registration is removed');
+ for(const field of ['activation_requested','enabled']){
+   await pool.query(`UPDATE remote_ingestion.worker_connections SET ${field}=true WHERE node_id=$1 AND slot='incremental-2'`,[nodeId]);
+   assert.equal((await post(plan(1))).status,409,'admitted or draining slots cannot be excluded');
+   await pool.query(`UPDATE remote_ingestion.worker_connections SET ${field}=false WHERE node_id=$1 AND slot='incremental-2'`,[nodeId]);
+ }
+ await pool.query("UPDATE remote_ingestion.worker_connections SET connected_until=clock_timestamp()+interval '1 minute' WHERE node_id=$1 AND slot='incremental-2'",[nodeId]);
+ assert.equal((await post(plan(1))).status,409,'connected slots cannot be excluded');
+ await pool.query("UPDATE remote_ingestion.worker_connections SET connected_until='-infinity' WHERE node_id=$1 AND slot='incremental-2'",[nodeId]);
  assert.equal((await post({...plan(2),image:'registry.example/other@sha256:'+'b'.repeat(64)})).status,400);
  const bad=plan(3);bad.files['incremental-1.json']=bad.files['incremental-1.json'].replace('https://center.example/remote','https://wrong.example');
  assert.notEqual((await post(bad)).status,200);
  assert.equal((await pool.query('SELECT max_leases FROM remote_ingestion.nodes WHERE node_id=$1',[nodeId])).rows[0].max_leases,2);
  const persisted=(await pool.query('SELECT * FROM remote_ingestion.node_deployments WHERE node_id=$1',[nodeId])).rows[0];
  assert.ok(Buffer.isBuffer(persisted.credentials_cipher));assert.equal(persisted.credentials_cipher.includes(Buffer.from(first.nodeToken)),false);
+ const executionPost=(auth,enabled)=>fetch(endpoint+'/internal/node-deployments/execution',{method:'POST',headers:{authorization:`Bearer ${auth}`,'content-type':'application/json'},body:JSON.stringify({nodeId,deploymentId,workerCount:2,enabled,expectedRequested:false})});
+ assert.equal((await executionPost(first.nodeToken,true)).status,401,'node credentials cannot authorize execution');
+ assert.equal((await executionPost(token,true)).status,409,'disabled center cannot accept a start request');
+ assert.equal((await executionPost(token,false)).status,200,'operator can retain pause without an execution supervisor');
  const status=await admin.status({nodeId,deploymentId});assert.equal(status.workers.length,2);assert.ok(status.workers.every(w=>!w.connected&&!w.readyForTasks));
+ const beyond=await post(plan(150));assert.equal(beyond.status,200);const many=await beyond.json();
+ assert.equal(many.relayTokens['incremental-1'],first.relayTokens['incremental-1']);
+ assert.equal((await pool.query('SELECT worker_count FROM remote_ingestion.node_deployments WHERE node_id=$1',[nodeId])).rows[0].worker_count,150);
+ assert.equal((await pool.query('SELECT max_leases FROM remote_ingestion.nodes WHERE node_id=$1',[nodeId])).rows[0].max_leases,150);
+ await pool.query("UPDATE remote_ingestion.worker_connections SET connected_until=clock_timestamp()+interval '1 minute',accepting=true WHERE node_id=$1",[nodeId]);
+ const control=createRemoteDeploymentAdmin({store,routes,image,token,gatewayUrl,execution:{allowsNode:()=>true,isProcessing:()=>false}});
+ const set=(allowedCount,expectedAllowedCount)=>control.setExecution({nodeId,deploymentId,workerCount:150,allowedCount,expectedAllowedCount});
+ assert.equal((await set(150,0)).allowedCount,150);
+ assert.equal((await set(50,150)).allowedCount,50);
+ await assert.rejects(set(151,50),{code:'INVALID_EXECUTION_COUNT'});
+ assert.equal((await set(0,50)).allowedCount,0);
  assert.deepEqual((await pool.query('SELECT task_id,state,generation FROM remote_ingestion.tasks ORDER BY task_id')).rows,before);
 });

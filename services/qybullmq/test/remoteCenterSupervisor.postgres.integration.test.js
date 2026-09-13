@@ -6,13 +6,13 @@ import {setTimeout as delay} from 'node:timers/promises';
 import pg from 'pg';
 import {RemoteNodeStore} from '../src/remoteNodes/store.js';
 import {RemoteCenterExecutionSupervisor} from '../src/remoteNodes/centerExecutionSupervisor.js';
-import {RemoteWorkerActivationStore,REMOTE_RUNTIME_REVISION} from '../src/remoteNodes/workerActivationStore.js';
+import {RemoteWorkerActivationStore,REMOTE_RUNTIME_REVISION,WHOLE_CHANNEL_RUNTIME_REVISION} from '../src/remoteNodes/workerActivationStore.js';
 import {assertIsolatedRemoteDatabase} from '../src/remoteNodes/isolation.js';
 const url=process.env.REMOTE_NODE_TEST_DATABASE_URL;
 const port=Number(process.env.REMOTE_NODE_TEST_REDIS_PORT);
 async function until(check){for(let i=0;i<200;i++){if(await check())return;await delay(20);}assert.fail('supervisor fixture timed out');}
 
-test('central ownership, heartbeat expiry and operator intent gate real queue consumers',{skip:!url||!port,timeout:30000},async t=>{
+for(const revision of [REMOTE_RUNTIME_REVISION,WHOLE_CHANNEL_RUNTIME_REVISION]) test(`central ownership, heartbeat expiry and operator intent gate real queue consumers (${revision})`,{skip:!url||!port,timeout:30000},async t=>{
   const pool=new pg.Pool({connectionString:url,max:6});const guardPool=new pg.Pool({connectionString:url,max:4});
   const guard=await pool.connect();const supervisors=[];const nodeId=randomUUID();
   t.after(async()=>{for(const s of supervisors)await s.stop();await pool.query('DELETE FROM remote_ingestion.tasks WHERE target_node_id=$1',[nodeId]);
@@ -28,11 +28,11 @@ test('central ownership, heartbeat expiry and operator intent gate real queue co
   const slot='incremental-1';await pool.query('INSERT INTO remote_ingestion.network_slots(node_id,slot,rota_worker_id) VALUES($1,$2,$3)',[nodeId,slot,'test-'+nodeId]);
   const reg={nodeId,slot,deploymentId:randomUUID(),configHash:randomBytes(32).toString('hex')};await activation.register(reg);
   const heartbeat={version:1,mode:'incremental_collect',node_id:nodeId,slot,deployment_id:reg.deploymentId,config_hash:reg.configHash,
-    instance_id:randomUUID(),relay_boot_id:randomBytes(24).toString('hex'),runtime_revision:REMOTE_RUNTIME_REVISION,accepting:true};
+    instance_id:randomUUID(),relay_boot_id:randomBytes(24).toString('hex'),runtime_revision:revision,accepting:true};
   await activation.heartbeat(nodeId,heartbeat);let allocated=0;let admission;
   const args={store,channelStore:{store},activation,guardPool,connection:{host:'127.0.0.1',port,password:'remote-center-fixture-only',maxRetriesPerRequest:null},
-    prefix:'remote-supervisor-guard-test-'+randomUUID(),allowedNodeIds:[nodeId],intervalMs:50,
-    createRuntime:value=>{admission=value.assertAdmission;return value;},createProcessor:()=>async()=>assert.fail('no fixture jobs exist'),
+    prefix:'remote-supervisor-guard-test-'+randomUUID(),allowedNodeIds:[nodeId],intervalMs:50,wholeChannels:{fixture:true},
+    createRuntime:value=>{assert.deepEqual(value.wholeChannels,revision===WHOLE_CHANNEL_RUNTIME_REVISION?{fixture:true}:null);admission=value.assertAdmission;return value;},createProcessor:()=>async()=>assert.fail('no fixture jobs exist'),
     createRota:options=>{allocated++;let started=false;let closing=false;return {workerId:options.workerId,workerInstanceId:options.workerInstanceId,
       start:async()=>{started=true;},close:async()=>{closing=true;},status:()=>({started,closing,assignment:{ready:true},active_job:false})};}};
   const make=()=>{const s=new RemoteCenterExecutionSupervisor(args);supervisors.push(s);return s;};
@@ -67,6 +67,8 @@ test('central ownership, heartbeat expiry and operator intent gate real queue co
   assert.equal((await activation.heartbeat(nodeId,heartbeat)).ready_for_tasks,false);
   assert.equal((await pool.query('SELECT state FROM remote_ingestion.tasks WHERE task_id=$1',[task])).rows[0].state,'pending');
   await pool.query("UPDATE remote_ingestion.tasks SET state='failed' WHERE task_id=$1",[task]);
-  await active.tick();await active.tick();await until(async()=>(await activation.heartbeat(nodeId,heartbeat)).ready_for_tasks);
+  // Drive the actual repeated reconciliation contract while recovery and
+  // guard release finish asynchronously. Two ticks are not a completion barrier.
+  await until(async()=>{await active.tick();return (await activation.heartbeat(nodeId,heartbeat)).ready_for_tasks;});
   assert.equal(allocated,3);
 });

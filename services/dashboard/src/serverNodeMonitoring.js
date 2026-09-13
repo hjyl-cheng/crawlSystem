@@ -48,6 +48,29 @@ export function createNodeMonitoring({ url, credentialsFile, publicUrl, fetchImp
     const info = await api('/api/beszel/info');
     return { systemId: id, token, key: info.key, hubUrl: publicUrl };
   }
+  async function remove(node) {
+    const id = monitoringSystemId(node.id);
+    if (node.provisioning?.systemId !== id) throw new Error('监控归属不匹配，已保留节点');
+    let system;
+    try { system = await api(`/api/collections/systems/records/${id}`); }
+    catch (error) { if (error.status !== 404) throw error; }
+    if (system && system.host !== `qy-node-${node.id}`) throw new Error('监控归属不匹配，已保留节点');
+    // Revoke registration tokens explicitly, including retry after system removal.
+    const records = await api(`/api/collections/fingerprints/records?filter=${encodeURIComponent(`system="${id}"`)}&perPage=100`);
+    if (records.totalPages > 1) throw new Error('监控登记数量异常，已保留节点');
+    for (const row of records.items) {
+      // Beszel fingerprints use short IDs (9 characters in 0.19), unlike
+      // our 15-character system IDs. Validate ownership and safe path syntax.
+      if (row.system !== id || typeof row.id !== 'string' || !/^[a-z0-9]{1,64}$/.test(row.id)) throw new Error('监控登记归属不匹配');
+      try { await api(`/api/collections/fingerprints/records/${row.id}`, { method: 'DELETE' }); }
+      catch (error) { if (error.status !== 404) throw error; }
+    }
+    if (system) {
+      try { await api(`/api/collections/systems/records/${id}`, { method: 'DELETE' }); }
+      catch (error) { if (error.status !== 404) throw error; }
+    }
+    cache.delete(id);
+  }
   async function observe(systemId, { fresh = false } = {}) {
     if (!/^[a-z0-9]{15}$/.test(systemId)) throw new Error('监控节点标识无效');
     const cached = cache.get(systemId);
@@ -69,5 +92,5 @@ export function createNodeMonitoring({ url, credentialsFile, publicUrl, fetchImp
     cache.set(systemId, { time: Date.now(), value });
     return value;
   }
-  return { prepare, observe, async available() { await login(); await api('/api/beszel/info'); } };
+  return { prepare, observe, remove, async available() { await login(); await api('/api/beszel/info'); } };
 }

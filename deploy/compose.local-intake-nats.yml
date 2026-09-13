@@ -1,0 +1,12 @@
+# Use instead of compose.local-intake-notifications.yml after the center relay
+# and its read-only local-intake principal are deployed. SQL admission is unchanged.
+services:
+  worker-incremental:
+    image: ${QY_LOCAL_INCREMENTAL_IMAGE:?verified NATS-capable local Worker image required}
+    environment:
+      LOCAL_INCREMENTAL_INTAKE_CONTROL: 'true'
+      LOCAL_INCREMENTAL_INTAKE_NOTIFICATIONS: 'true'
+      LOCAL_INCREMENTAL_NATS_URL: ${QY_LOCAL_INTAKE_NATS_URL:?TLS NATS endpoint required}
+      LOCAL_INCREMENTAL_NATS_PASSWORD_FILE: /run/local-intake-nats/password
+    volumes:
+      - ${QY_REMOTE_CENTER_RUNTIME}/nats/secrets/local-intake-password:/run/local-intake-nats/password:ro

@@ -1,0 +1,40 @@
+# Opt-in addition to the remote center Compose files. Review TLS and credentials
+# before enabling. This file does not change or restart any existing collector.
+services:
+  remote-nats:
+    image: nats:2.12-alpine@sha256:b270f5e2428354c0335612694d7dd2fb588148e567a5757fdff325ef9c9332e6
+    container_name: qy-remote-nats
+    entrypoint: [/bin/sh, /etc/nats/start.sh]
+    restart: unless-stopped
+    ports: ['127.0.0.1:4222:4222']
+    volumes:
+      - ./nats/server.conf:/etc/nats/server.conf:ro
+      - ./nats/start.sh:/etc/nats/start.sh:ro
+      - ${QY_REMOTE_CENTER_RUNTIME}/nats/auth:/run/nats-auth:ro
+      - ${QY_REMOTE_CENTER_RUNTIME}/nats/tls:/run/nats-tls:ro
+      - ${QY_REMOTE_CENTER_RUNTIME}/nats/data:/data
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 384m
+    cpus: 1
+    networks: [crawler]
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: '3'}
+  remote-node-center:
+    environment:
+      REMOTE_NODE_NATS_URL: ${QY_REMOTE_NATS_URL:?TLS endpoint required}
+      REMOTE_NODE_NATS_PASSWORD_FILE: /run/nats-secrets/center-password
+      LOCAL_INCREMENTAL_NATS_PASSWORD_FILE: /run/nats-secrets/local-intake-password
+      REMOTE_NODE_NATS_AUTH_FILE: /run/nats-auth/users.conf
+      REMOTE_NODE_NATS_RESULT_CONCURRENCY: '8'
+      REMOTE_NODE_NATS_MAX_BYTES: '1073741824'
+      REMOTE_NODE_NATS_REPLICAS: '1'
+    volumes:
+      - ${QY_REMOTE_CENTER_RUNTIME}/nats/auth:/run/nats-auth
+      - ${QY_REMOTE_CENTER_RUNTIME}/nats/secrets:/run/nats-secrets:ro
+# Set SERVER_NODE_NATS_URL=wss://<dashboard-host>/node-messages on Dashboard
+# after the matching node image is ready. Port 9222 stays inside Docker; the
+# existing HTTPS gateway upgrades /node-messages to a persistent NATS socket.

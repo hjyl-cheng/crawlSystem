@@ -44,6 +44,7 @@ export async function runNodeProcess({ files = nodeConnectionFiles, healthFile =
     relay.once('exit', code => { abort.abort(new Error('NODE_RELAY_EXITED')); resolve(code); });
     relay.once('error', () => { abort.abort(new Error('NODE_RELAY_START_FAILED')); resolve(-1); });
   });
+  let client;
   try {
     let output = '';
     await new Promise((resolve, reject) => {
@@ -70,11 +71,15 @@ export async function runNodeProcess({ files = nodeConnectionFiles, healthFile =
       });
       if (executionSignal.aborted) stopped();
     });
-    const client = createRemoteNodeClient({ url: config.gateway_url, token: nodeToken });
+    client = process.env.REMOTE_NODE_NATS_URL
+      ? await (await import('./natsClient.js')).createRemoteNatsClient({url:process.env.REMOTE_NODE_NATS_URL,token:nodeToken,nodeId:config.node_id,slot:config.slot})
+      : createRemoteNodeClient({ url: config.gateway_url, token: nodeToken });
+    onStatus({state:'transport_connected',ready_for_tasks:false,transport:client.transport??'https'});
     const localRota = createLocalRotaClient({ controlUrl: 'http://127.0.0.1:8001', proxyUrl: 'http://127.0.0.1:8000', token: relayToken, nodeId: config.node_id });
     await runWorker({ config, client, localRota, report, signal: executionSignal });
     if (abort.signal.aborted && !signal.aborted) throw new Error('NODE_RELAY_EXITED');
   } finally {
+    await client?.close?.();
     if (relay.exitCode === null) relay.kill('SIGTERM');
     const timer = setTimeout(() => relay.kill('SIGKILL'), 6000);
     await exited; clearTimeout(timer);

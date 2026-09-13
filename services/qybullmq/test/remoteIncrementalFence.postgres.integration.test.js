@@ -1,3 +1,12 @@
+import { wholeChannelParts, decodeWholeChannelParts } from '../src/remoteNodes/wholeChannelProtocol.js';
+import { encodeResult, hash } from '../src/remoteNodes/protocol.js';
+import { createIncrementalVideoDispatchSnapshot, executeIncrementalYoutubeJsVideo, fetchIncrementalYoutubeJsVideoDetail } from '../src/incrementalYoutubeJsVideo.js';
+import { planIncrementalVideoSnapshot } from '../src/incrementalVideoSnapshot.js';
+import { runWithChannelExecution } from '../src/channelExecutionContext.js';
+import { createVideoDetailApiFallback } from '../src/videoDetailApiFallback.js';
+import { withVideoApiReplay } from '../src/videoApiContinuation.js';
+import { completeVideoApiRequests } from '../src/videoApiBatchRequests.js';
+import { WholeChannelStore } from '../src/remoteNodes/wholeChannelStore.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { generateKeyPairSync, randomBytes, randomUUID } from 'node:crypto';
@@ -6,6 +15,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { once } from 'node:events';
 import pg from 'pg';
+import {startRemoteNatsCenter} from '../src/remoteNodes/natsCenter.js';
+import {createRemoteNatsClient} from '../src/remoteNodes/natsClient.js';
+import {createTransportSignals} from '../src/remoteNodes/transportSignals.js';
 import { RemoteNodeStore } from '../src/remoteNodes/store.js';
 import { RemoteChannelPlanStore } from '../src/remoteNodes/channelPlanStore.js';
 import { assertIsolatedRemoteDatabase } from '../src/remoteNodes/isolation.js';
@@ -25,6 +37,57 @@ import { CHANNEL_PLAN_CAPABILITY } from '../src/remoteNodes/channelPlanContract.
 import { RemoteChannelRouteStore } from '../src/remoteNodes/channelRouteStore.js';
 import { RemoteYoutubeSessionStore } from '../src/remoteNodes/youtubeSessionStore.js';
 import { createRemoteYoutubeCheckpointConsumer } from '../src/remoteNodes/youtubeProfileCheckpoint.js';
+
+function publicDetail(videoId) {
+  return {
+    id: videoId,
+    title: `YouTubeJS ${videoId}`,
+    thumbnail_url: "https://i.ytimg.com/vi/checkpoint/default.jpg",
+    published_at: "2026-09-02T12:00:00.000Z",
+    published_at_status: "exact",
+    published_at_precision: "second",
+    published_at_source: "youtubejs_player",
+    duration_seconds: 90,
+    duration_source: "youtubejs_player",
+    view_count: 321,
+    view_count_text: "321",
+    view_count_source: "youtubejs_player",
+    like_count: 12,
+    like_count_source: "youtubejs_player",
+    comment_count: 0,
+    comment_count_status: "exact",
+    comment_count_source: "youtubejs_comments",
+    comments_disabled: false,
+    comments_first_page: {
+      version: 1,
+      total_count: 0,
+      returned_count: 0,
+      comments: [],
+    },
+    description: "Captured once",
+    description_status: "exact",
+    description_source: "youtubejs_player",
+    description_observed: true,
+    hashtags: ["checkpoint"],
+    hashtags_observed: true,
+    keywords: ["youtubejs"],
+    keywords_observed: true,
+    availability: "public",
+    access_status: "public",
+    access_status_source: "youtubejs_player",
+    content_type_signals: {
+      source: "youtubei_player",
+      canonical_url: `https://www.youtube.com/watch?v=${videoId}`,
+      is_shorts_eligible: false,
+      is_live_content: false,
+      is_live: false,
+      is_upcoming: false,
+      is_live_now: false,
+    },
+    extractor_version: "youtubei.js@test",
+    source: "youtubejs_get_info",
+  };
+}
 
 const url = process.env.REMOTE_NODE_TEST_DATABASE_URL;
 test('remote work checks original Clock, managed run and execution records', { skip: !url, timeout: 120000 }, async t => {
@@ -119,6 +182,33 @@ test('remote work checks original Clock, managed run and execution records', { s
     return { ...f, lease, binding, sessions, finish, readCookies, consumer: createRemoteYoutubeCheckpointConsumer({ sessions, profileSecret }) };
   }
 
+  await t.test('completed transaction releases coordinator instead of renewing a terminal task', async () => {
+    const f = await checkpointFixture();
+    const { coordinatorId } = await channelStore.coordinate(f.lease);
+    await channelStore.transaction(f.lease, coordinatorId, assertRemoteIncrementalBusinessFence,
+      client => channelStore.complete(client, f.lease, { status: 'done', run_id: f.prepared.businessRunId }));
+    const row=(await query('SELECT state,coordinator_id,coordinator_until FROM remote_ingestion.tasks WHERE task_id=$1',[f.lease.task_id])).rows[0];
+    assert.equal(row.state,'applied');assert.equal(row.coordinator_until,null);assert.equal(row.coordinator_id,null);
+  });
+
+  await t.test('finished historical coordinator does not block slot but unfinished and mismatched evidence does', async () => {
+    const {remoteSlotUnsettled}=await import('../src/remoteNodes/centerExecutionRecovery.js');
+    const f=await checkpointFixture();await f.finish();await profiles.finishAttempt(f.executionAttemptId,{status:'success'});
+    const binding=(await query('SELECT node_id,slot FROM remote_ingestion.network_bindings WHERE binding_id=$1',[f.binding.binding_id])).rows[0];
+    await query(`UPDATE remote_ingestion.tasks SET target_node_id=$2,target_worker_slot=$3,
+      coordinator_id=$4,coordinator_until=now()+interval '60 seconds' WHERE task_id=$1`,[f.lease.task_id,binding.node_id,binding.slot,randomUUID()]);
+    assert.equal(await remoteSlotUnsettled(pool,binding),false,'terminal history is not running work, even before old TTL expires');
+    await profiles.beginAttempt({...f.attemptInput,task:{...f.attemptInput.task,task_id:randomUUID(),attempt_number:2}});
+    assert.equal(await remoteSlotUnsettled(pool,binding),false,'a newer attempt must not trap an already finished historical record');
+    await query("UPDATE remote_ingestion.network_bindings SET state='active' WHERE binding_id=$1",[f.binding.binding_id]);
+    assert.equal(await remoteSlotUnsettled(pool,binding),true,'network still needs a quiescence receipt');
+    await query("UPDATE remote_ingestion.network_bindings SET state='retired' WHERE binding_id=$1",[f.binding.binding_id]);
+    await query("UPDATE crawler.channel_execution_attempts SET status='running',finished_at=NULL WHERE attempt_id=$1",[f.executionAttemptId]);
+    assert.equal(await remoteSlotUnsettled(pool,binding),true,'applied result is not a finished execution');
+    await query("UPDATE crawler.channel_execution_attempts SET status='success',finished_at=now(),business_run_id='mismatch' WHERE attempt_id=$1",[f.executionAttemptId]);
+    assert.equal(await remoteSlotUnsettled(pool,binding),true,'mismatched evidence remains quarantined');
+  });
+
   await t.test('browser checkpoint uses original encryption and applies once after our own run completion', async () => {
     const f = await checkpointFixture(undefined, { verifyProfileGuard: true });
     assert.equal((await f.consumer.apply(f.binding.binding_id)).applied, false, 'receipt cannot preempt Plan completion');
@@ -208,14 +298,33 @@ test('remote work checks original Clock, managed run and execution records', { s
     await assert.rejects(enqueueRemoteIncrementalJob(channelStore, f.job, f), { code: 'INCREMENTAL_BUSINESS_FENCE_STALE' });
   });
 
-  await t.test('whole About Plan writes with the real business fence even if Feature completes before final run cleanup', async tt => {
+  async function transportClient(tt,nodeId,token,transport){
+    if(transport.startsWith('nats')){
+      let wholeChannels = null;
+      if (transport === 'nats_whole') {
+        await pool.query(await readFile(new URL('../src/remoteNodes/wholeChannelSchema.sql',import.meta.url),'utf8'));
+        wholeChannels = new WholeChannelStore({channelPlans:channelStore,assertBusinessFence:assertRemoteIncrementalBusinessFence});
+      }
+      channelStore.testWholeChannels = wholeChannels;
+      await pool.query(await readFile(new URL('../src/remoteNodes/natsSchema.sql',import.meta.url),'utf8'));
+      const signals=await createTransportSignals({connectionString:url});channelStore.transportSignals=signals;
+      const tls={caFile:process.env.REMOTE_NATS_TEST_CA};
+      let center,client;
+      tt.after(async()=>{await client?.close();await signals.close();await center?.close();delete channelStore.transportSignals;});
+      center=await startRemoteNatsCenter({url:process.env.REMOTE_NATS_TEST_URL,password:process.env.REMOTE_NATS_TEST_PASSWORD,tls,
+        store,channelPlans:channelStore,wholeChannels,signals,resultMaxBytes:32*1024*1024});
+      client=await createRemoteNatsClient({url:process.env.REMOTE_NATS_TEST_URL,token,nodeId,slot:'incremental-1',tls});
+      return client;
+    }
+    const gateway=createRemoteNodeGateway({store,channelPlans:channelStore});gateway.listen(0,'127.0.0.1');await once(gateway,'listening');
+    tt.after(()=>new Promise(resolve=>{gateway.close(resolve);gateway.closeAllConnections();}));
+    return createRemoteNodeClient({url:`http://127.0.0.1:${gateway.address().port}`,token,allowLoopbackHttp:true});
+  }
+  for(const transport of process.env.REMOTE_NATS_TEST_URL?['http','nats','nats_whole']:['http']) await t.test(`whole About Plan writes with the real business fence even if Feature completes before final run cleanup (${transport})`, async tt => {
     const f = await fixture(); await enqueueRemoteIncrementalJob(channelStore, f.job, f);
-    const nodeId = randomUUID(); const token = randomBytes(32).toString('hex');
+    const nodeId = transport.startsWith('nats')?process.env.REMOTE_NATS_TEST_NODE_ID:randomUUID(); const token = transport.startsWith('nats')?process.env.REMOTE_NATS_TEST_TOKEN:randomBytes(32).toString('hex');
     await store.registerNode({ nodeId, token, capabilities: [CHANNEL_PLAN_CAPABILITY] });
-    const gateway = createRemoteNodeGateway({ store, channelPlans: channelStore });
-    gateway.listen(0, '127.0.0.1'); await once(gateway, 'listening');
-    tt.after(() => new Promise(resolve => { gateway.close(resolve); gateway.closeAllConnections(); }));
-    const client = createRemoteNodeClient({ url: `http://127.0.0.1:${gateway.address().port}`, token, allowLoopbackHttp: true });
+    const client = await transportClient(tt,nodeId,token,transport);
     const claimId = randomUUID(); const lease = await client.claim(claimId);
     const directory = await mkdtemp(join(tmpdir(), 'remote-fence-')); tt.after(() => rm(directory, { recursive: true, force: true }));
     const spool = new RemoteResultSpool({ directory });
@@ -235,11 +344,163 @@ test('remote work checks original Clock, managed run and execution records', { s
       return assertRemoteIncrementalBusinessFence(sqlClient, task);
     };
     const results = await Promise.allSettled([
-      runRemoteIncrementalPlan({ channelStore, lease, assertBusinessFence: fence, pollMs: 5, signal: AbortSignal.timeout(15000) }), worker.runOnce(),
+      runRemoteIncrementalPlan({ channelStore, lease, wholeChannels: transport === 'nats_whole' ? channelStore.testWholeChannels : null, assertBusinessFence: fence, pollMs: 5, signal: AbortSignal.timeout(15000) }), worker.runOnce(),
     ]);
     for (const result of results) if (result.status === 'rejected') throw result.reason;
     assert.equal(results[1].value, 'applied');
     assert.equal((await query('SELECT status FROM crawler.channel_runs WHERE run_id=$1', [f.prepared.businessRunId])).rows[0].status, 'done');
     assert.equal((await query('SELECT title FROM crawler.channels WHERE channel_id=$1', [f.channelId])).rows[0].title, 'Fenced About result');
   });
+  for(const empty of [true,false]) for(const transport of process.env.REMOTE_NATS_TEST_URL?['http','nats','nats_whole']:['http']) await t.test(`Video completion remains writable when Feature observes its finalized checkpoint before Run cleanup (${transport}, empty=${empty})`, async tt => {
+    const f = await fixture({ about: false, video: true, agent: false }); await enqueueRemoteIncrementalJob(channelStore, f.job, f);
+    const nodeId = transport.startsWith('nats')?process.env.REMOTE_NATS_TEST_NODE_ID:randomUUID(); const token = transport.startsWith('nats')?process.env.REMOTE_NATS_TEST_TOKEN:randomBytes(32).toString('hex');
+    await store.registerNode({ nodeId, token, capabilities: [CHANNEL_PLAN_CAPABILITY] });
+    const client = await transportClient(tt,nodeId,token,transport);
+    const claimId = randomUUID(); const lease = await client.claim(claimId);
+    const directory = await mkdtemp(join(tmpdir(), 'remote-fence-')); tt.after(() => rm(directory, { recursive: true, force: true }));
+    const spool = new RemoteResultSpool({ directory });
+    const worker = new RemoteChannelPlanExecutor({ client: { ...client, claim: () => client.claim(claimId) }, spool,
+      withSession: (_lease, _options, invoke) => invoke(), pollMs: 5, timeoutMs: 15000,
+      youtube: { openChannel: async id => ({ scanUploads: async () => ({
+        channel_id:id,playlist_id:'uploads',entries:empty?[]:[{id:'natsVideo01',video_id:'natsVideo01',position:1,title:'Captured once',published_at:'2026-09-02T12:00:00.000Z',published_at_status:'exact'}],pages:1,item_count:empty?0:1,parse_gap_count:0,
+        first_page_item_count:empty?0:1,catch_up_item_count:0,anchor_matched:false,matched_anchor_id:null,
+        crossed_anchor_ids:[],stop_reason:'list_end',terminal_reason:'list_end',complete:true,
+        ...(empty?{empty_uploads:{version:1,outcome:'dormant',reason:'no_country',country:null}}:{})
+      }) }), fetchDetail: id => {assert.equal(empty,false);return publicDetail(id);} } });
+    const fence = async (sqlClient, task) => {
+      // Simulate Feature consuming the actual committed Video Observation before
+      // the next runner transaction. This must not fence its own completion.
+      await sqlClient.query(`UPDATE feature_clock.daily_channel_plans p SET status='succeeded'
+        WHERE p.plan_id=$1 AND EXISTS(SELECT 1 FROM crawler.crawl_observations o
+          WHERE o.plan_id=p.plan_id AND o.observation_kind='video' AND o.outcome='complete')`, [f.plan.plan_id]);
+      return assertRemoteIncrementalBusinessFence(sqlClient, task);
+    };
+    const results = await Promise.allSettled([
+      runRemoteIncrementalPlan({ channelStore, lease, wholeChannels: transport === 'nats_whole' ? channelStore.testWholeChannels : null, assertBusinessFence: fence, pollMs: 5, signal: AbortSignal.timeout(15000) }), worker.runOnce(),
+    ]);
+    for (const result of results) if (result.status === 'rejected') throw result.reason;
+    assert.equal(results[1].value, 'applied');
+    if(!empty){const video=(await query('SELECT view_count,like_count,comment_count FROM crawler.contents WHERE channel_id=$1 AND source_content_id=$2',[f.channelId,'natsVideo01'])).rows[0];assert.deepEqual(Object.fromEntries(Object.entries(video).map(([k,v])=>[k,Number(v)])),{view_count:321,like_count:12,comment_count:0});}
+    assert.equal((await query('SELECT status FROM crawler.channel_runs WHERE run_id=$1', [f.prepared.businessRunId])).rows[0].status, 'done');
+    assert.equal((await query('SELECT status FROM feature_clock.daily_channel_plans WHERE plan_id=$1', [f.plan.plan_id])).rows[0].status, 'succeeded');
+  });
+  await t.test('dispatch snapshot includes feed-dated stored videos and reserves original pending repairs', async () => {
+    const f = await fixture({about:false,video:true,agent:false});
+    for (const id of ['undated','repair']) await query(`INSERT INTO crawler.contents(content_key,channel_id,source_content_id,content_type,published_at)
+      VALUES($1,$2,$3,'video',$4)`, [`${f.channelId}:video:${id}`,f.channelId,id,id==='repair'?new Date():null]);
+    await query(`INSERT INTO crawler.content_enrich_tasks(task_id,content_key,channel_id,job_type,status,next_retry_at)
+      VALUES($1,$2,$3,'player-refresh','queued',now())`, [`repair:${f.plan.plan_id}`,`${f.channelId}:video:repair`,f.channelId]);
+    const snapshot = await runWithChannelExecution({attempt_id:f.executionAttemptId}, () => store.transaction(client =>
+      createIncrementalVideoDispatchSnapshot({client,plan:f.plan,runId:f.prepared.businessRunId}), {repeatableRead:true}));
+    assert.ok(snapshot.knownVideoIds.includes('undated'));
+    assert.equal(snapshot.recentRows.find(row=>row.source_content_id==='repair').checkpoint_content_enrich.fence.dispatch_generation,1);
+    const scan={complete:true,entries:[{id:'undated',published_at:new Date().toISOString(),published_at_status:'exact',published_at_source:'youtubejs_feed'}, {id:'new',position:2}]};
+    const targets=await planIncrementalVideoSnapshot(snapshot,scan);
+    assert.ok(targets.items.some(item=>item.phase==='recent'&&item.video_id==='undated'));
+    assert.ok(targets.items.some(item=>item.phase==='recent'&&item.video_id==='repair'));
+    assert.deepEqual(targets.items.filter(item=>item.phase==='first_seen').map(item=>item.video_id),['new']);
+  });
+
+  if(process.env.REMOTE_NATS_TEST_URL) await t.test('30 video results use one channel command and a bounded number of fenced center transactions', async tt => {
+    const f = await fixture({about:false,video:true,agent:false}); await enqueueRemoteIncrementalJob(channelStore,f.job,f);
+    const nodeId=process.env.REMOTE_NATS_TEST_NODE_ID,token=process.env.REMOTE_NATS_TEST_TOKEN;
+    await store.registerNode({nodeId,token,capabilities:[CHANNEL_PLAN_CAPABILITY]});
+    const client=await transportClient(tt,nodeId,token,'nats_whole');
+    const claimId=randomUUID(),lease=await client.claim(claimId);
+    const directory=await mkdtemp(join(tmpdir(),'whole-many-'));tt.after(()=>rm(directory,{recursive:true,force:true}));
+    const ids=Array.from({length:30},(_,i)=>`video${String(i).padStart(6,'0')}`);
+    let inputReads=0,uploads=0,received=false,replayFences=0;
+    const wholeChannels=channelStore.testWholeChannels;
+    const load=wholeChannels.result.bind(wholeChannels);
+    wholeChannels.result=async (...args)=>{const result=await load(...args);received=true;return result;};
+    const worker=new RemoteChannelPlanExecutor({client:{...client,claim:()=>client.claim(claimId),
+      wholeChannelInput:async(...args)=>{inputReads++;return client.wholeChannelInput(...args);},
+      uploadWholeChannel:async(...args)=>{uploads++;return client.uploadWholeChannel(...args);}},spool:new RemoteResultSpool({directory}),
+      withSession:(_lease,_options,invoke)=>invoke(),pollMs:5,timeoutMs:30000,
+      youtube:{openChannel:async()=>({scanUploads:async()=>({entries:ids.map((id,i)=>({id,position:i+1})),complete:true,pages:1,stop_reason:'list_end',terminal_reason:'list_end'})}),
+        fetchDetail:async id=>{assert.equal(inputReads,1);assert.equal(uploads,0);return publicDetail(id);}}});
+    const results=await Promise.allSettled([runRemoteIncrementalPlan({channelStore,lease,wholeChannels,
+      assertBusinessFence:async(c,task)=>{if(received)replayFences++;return assertRemoteIncrementalBusinessFence(c,task);},
+      pollMs:5,signal:AbortSignal.timeout(30000)}),worker.runOnce()]);
+    for(const result of results)if(result.status==='rejected')throw result.reason;
+    assert.equal(results[1].value,'applied');
+    assert.equal((await query('SELECT count(*)::int AS n FROM crawler.contents WHERE channel_id=$1',[f.channelId])).rows[0].n,30);
+    assert.deepEqual((await query('SELECT operation FROM remote_ingestion.channel_commands WHERE task_id=$1',[lease.task_id])).rows,[{operation:'collect_channel'}]);
+    assert.ok(replayFences<=10,`expected channel-level fences; got ${replayFences}`);
+    tt.diagnostic(`30 videos: ${inputReads} input transfer, ${uploads} result transfer, ${replayFences} fenced transactions after receipt`);
+  });
+
+  if(process.env.REMOTE_NATS_TEST_URL) await t.test('autonomous API handoff persists shared API work and releases node before fallback completes', async tt => {
+    const f=await fixture({about:false,video:true,agent:false}); await enqueueRemoteIncrementalJob(channelStore,f.job,f);
+    const nodeId=process.env.REMOTE_NATS_TEST_NODE_ID,token=process.env.REMOTE_NATS_TEST_TOKEN;
+    await store.registerNode({nodeId,token,capabilities:[CHANNEL_PLAN_CAPABILITY]});
+    const client=await transportClient(tt,nodeId,token,'nats_whole');
+    const claimId=randomUUID(),lease=await client.claim(claimId);
+    const directory=await mkdtemp(join(tmpdir(),'whole-api-'));tt.after(()=>rm(directory,{recursive:true,force:true}));
+    let details=0;
+    const worker=new RemoteChannelPlanExecutor({client:{...client,claim:()=>client.claim(claimId)},spool:new RemoteResultSpool({directory}),
+      withSession:(_lease,_options,invoke)=>invoke(),pollMs:5,timeoutMs:15000,
+      youtube:{openChannel:async()=>({scanUploads:async()=>({entries:[{id:'missingViews',position:1},{id:'remaining',position:2}],complete:true,pages:1,stop_reason:'list_end',terminal_reason:'list_end'})}),
+      fetchDetail:async()=>{details++;throw Object.assign(new Error('required view_count missing'),{name:'YoutubeJsRequiredSurfaceError',required_surface:'player',partial_detail:{id:'missingViews',like_count:12}});}}});
+    const createApiFallback=options=>createVideoDetailApiFallback({...options,loadSettings:async()=>({fallbackMode:'emergency',apiKeys:['fixture'],dailyRequestLimit:100})});
+    const results=await Promise.allSettled([runRemoteIncrementalPlan({channelStore,lease,wholeChannels:channelStore.testWholeChannels,
+      loadWholeApiPolicy:async()=>({enabled:true,available:true,dailyRequestLimit:100}),createApiFallback,
+      assertBusinessFence:assertRemoteIncrementalBusinessFence,pollMs:5,signal:AbortSignal.timeout(15000)}),worker.runOnce()]);
+    assert.equal(results[0].status,'rejected');assert.equal(results[0].reason.code,'VIDEO_API_PENDING');
+    assert.equal(results[1].status,'fulfilled');assert.equal(results[1].value,'waiting_central');
+    assert.equal(details,3);
+    const requests=(await query('SELECT * FROM crawler.youtube_api_detail_requests WHERE run_id=$1',[f.prepared.businessRunId])).rows;
+    assert.equal(requests.length,1);assert.equal(requests[0].source_content_id,'missingViews');assert.equal(requests[0].status,'pending');
+    assert.equal((await query("SELECT count(*)::int AS n FROM crawler.incremental_youtubejs_video_items WHERE run_id=$1 AND status='claimed'",[f.prepared.businessRunId])).rows[0].n,0);
+    await query("UPDATE crawler.channel_execution_attempts SET status='failed',finished_at=now() WHERE attempt_id=$1",[f.executionAttemptId]);
+    await transaction(c=>completeVideoApiRequests(c,requests[0].task_id,publicDetail('missingViews'),true));
+    const replay=()=>executeIncrementalYoutubeJsVideo({plan:f.plan,runId:f.prepared.businessRunId,query,withTransaction:transaction,startedAt:new Date(),
+      getChannelSnapshot:async()=>assert.fail('frozen scan must be reused'),
+      fetchDetail:(id,options)=>fetchIncrementalYoutubeJsVideoDetail(id,{...options,videoApiFallback:createApiFallback({query,withTransaction:transaction}),fetchYoutubeJs:async()=>assert.fail('API replay must not call YouTube')})});
+    await assert.rejects(withVideoApiReplay(()=>runWithChannelExecution({attempt_id:f.executionAttemptId},replay)),{code:'VIDEO_API_NETWORK_REQUIRED'});
+    assert.equal((await query('SELECT status FROM crawler.incremental_youtubejs_video_items WHERE run_id=$1 AND video_id=$2',[f.prepared.businessRunId,'missingViews'])).rows[0].status,'captured');
+    assert.equal(details,3);
+  });
+
+  if(process.env.REMOTE_NATS_TEST_URL) await t.test('whole-channel multipart delivery uses durable SQL receipts and rejects changed bytes after generation handoff', async tt => {
+    const f=await fixture();await enqueueRemoteIncrementalJob(channelStore,f.job,f);
+    const nodeId=process.env.REMOTE_NATS_TEST_NODE_ID,token=process.env.REMOTE_NATS_TEST_TOKEN;
+    await store.registerNode({nodeId,token,capabilities:[CHANNEL_PLAN_CAPABILITY]});
+    const client=await transportClient(tt,nodeId,token,'nats_whole');
+    const lease=await client.claim(randomUUID());
+    const input={version:1,plan:f.plan,generation:lease.generation};
+    const commandId=await transaction(async c=>{
+      const task=await channelStore.lock(c,lease);await assertRemoteIncrementalBusinessFence(c,task);
+      return channelStore.testWholeChannels.prepare(c,task,input);
+    });
+    const incoming=await client.wholeChannelInput(lease,commandId,0);
+    assert.deepEqual(decodeWholeChannelParts(incoming.manifest,[incoming.chunk]),input);
+    const result={version:1,plan_id:f.plan.plan_id,channel_id:f.channelId,generation:lease.generation,
+      input_sha256:incoming.manifest.sha256,about:{raw:{body:'多字节'.repeat(300000)}},items:[]};
+    const {manifest,parts}=wholeChannelParts(result);assert.ok(manifest.bytes>2*1024*1024);
+    const frame=chunk=>encodeResult({version:1,generation:lease.generation,batch_id:commandId,command_id:commandId,
+      outcome:'success',data:{input_sha256:incoming.manifest.sha256,manifest,chunk}});
+    const first=await frame(parts.at(-1));
+    assert.equal((await client.uploadWholeChannel(lease,first)).complete,false);
+    assert.equal((await query('SELECT received_at FROM remote_ingestion.whole_channel_inputs WHERE command_id=$1',[commandId])).rows[0].received_at,null);
+    assert.equal((await client.uploadWholeChannel(lease,first)).complete,false);
+    for (const part of parts.slice(0,-1)) await client.uploadWholeChannel(lease,await frame(part));
+    const restored=new WholeChannelStore({channelPlans:channelStore,assertBusinessFence:assertRemoteIncrementalBusinessFence});
+    const received=await transaction(c=>restored.result(c,commandId));assert.deepEqual(received.result,result);
+    assert.equal((await query('SELECT count(*)::int AS n FROM remote_ingestion.whole_channel_chunks WHERE command_id=$1',[commandId])).rows[0].n,parts.length);
+    await query("UPDATE remote_ingestion.tasks SET state='pending',node_id=NULL,generation=generation+1 WHERE task_id=$1",[lease.task_id]);
+    assert.equal((await restored.receive(nodeId,{task_id:lease.task_id},first)).complete,true);
+    const bytes=Buffer.from(parts[0].data,'base64');bytes[0]^=1;
+    await assert.rejects(restored.receive(nodeId,{task_id:lease.task_id},await frame({...parts[0],data:bytes.toString('base64'),sha256:hash(bytes)})),{code:'WHOLE_CHANNEL_RESULT_CONFLICT'});
+    assert.equal(await restored.pruneApplied(),0,'pending recovery retains its full payload');
+    await query("UPDATE remote_ingestion.tasks SET state='applied',applied_at=now() WHERE task_id=$1",[lease.task_id]);
+    assert.equal(await restored.pruneApplied(),0,'recently applied evidence remains available');
+    await query("UPDATE remote_ingestion.tasks SET applied_at=now()-interval '8 days' WHERE task_id=$1",[lease.task_id]);
+    assert.equal(await restored.pruneApplied(),1);
+    assert.equal((await query('SELECT count(*)::int AS n FROM remote_ingestion.whole_channel_chunks WHERE command_id=$1 AND payload IS NOT NULL',[commandId])).rows[0].n,0);
+    assert.equal((await restored.receive(nodeId,{task_id:lease.task_id},first)).complete,true,'hash receipts survive payload cleanup');
+    await assert.rejects(transaction(c=>restored.result(c,commandId)),{code:'WHOLE_CHANNEL_RESULT_ARCHIVED'});
+    assert.equal(await restored.pruneApplied(),0,'payload cleanup is idempotent');
+  });
+
 });

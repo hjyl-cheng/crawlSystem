@@ -44,6 +44,37 @@ test("pending gate only reads durable state, while ready and failed results re-e
   await assert.rejects(gateVideoApiJob({ job, query: async () => ({ rows: [{ run_id: "other" }] }) }), /identity conflicts/);
 });
 
+test("API quota deferral sleeps until the durable retry time for full and incremental jobs", async () => {
+  const retryAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
+  for (const data of [{ run_id: "full-run" }, { plan_id: "plan" }]) {
+    const job = jobFixture();
+    job.data = { ...data, video_api_continuation: { request_id: "request" } };
+    await assert.rejects(gateVideoApiJob({ job, token: "lock", query: async () => ({ rows: [{
+      status: "pending", run_id: data.run_id ?? "incremental:plan", next_retry_at: retryAt,
+    }] }) }), DelayedError);
+    assert.equal(job.delayed.time, retryAt.getTime(), "must not poll tomorrow's API request every 15 seconds");
+    assert.equal(job.delayed.token, "lock");
+    assert.equal(job.attemptsMade, 2);
+  }
+});
+
+test("ready API evidence ignores old retry dates; due or unscheduled requests retain short polling", async () => {
+  const job = jobFixture();
+  job.data.video_api_continuation = { request_id: "request" };
+  for (const next_retry_at of [null, new Date(Date.now() - 1000)]) {
+    const before = Date.now();
+    await assert.rejects(gateVideoApiJob({ job, token: "lock", query: async () => ({ rows: [{
+      status: "pending", run_id: "run", next_retry_at,
+    }] }) }), DelayedError);
+    assert.ok(job.delayed.time >= before + 15000 && job.delayed.time <= Date.now() + 15000);
+  }
+  job.delayed = null;
+  await gateVideoApiJob({ job, query: async () => ({ rows: [{
+    status: "done", run_id: "run", next_retry_at: new Date(Date.now() + 86400000),
+  }] }) });
+  assert.equal(job.delayed, null);
+});
+
 test("API completion replays without another network Task even with exhausted network budget", async () => {
   const job = jobFixture();
   job.data.video_api_continuation = { request_id: "request" };
@@ -62,6 +93,20 @@ test("remaining network work must leave API replay and enter managed execution",
     execute: async () => { managed++; assertVideoApiNetworkAllowed(); return "managed"; } });
   assert.equal(result, "managed");
   assert.equal(managed, 1);
+  assert.equal(job.data.video_api_continuation, undefined, "a network retry must not replay an old API transport");
+});
+
+test("network reentry durably clears the API marker before a failed attempt is redelivered", async () => {
+  const job = jobFixture();
+  job.data.video_api_continuation = { request_id: "old-request" };
+  let saved;
+  job.updateData = async data => { saved = structuredClone(data); };
+  await assert.rejects(runVideoApiResumable({ job,
+    executeReplay: () => assertVideoApiNetworkAllowed(),
+    execute: async () => { assert.equal(saved.video_api_continuation, undefined); throw new Error("network failed"); } }), /network failed/);
+  job.data = saved;
+  assert.equal(await runVideoApiResumable({ job,
+    executeReplay: () => assert.fail("old API replay must not be called"), execute: async () => "resumed" }), "resumed");
 });
 
 test("another pending video remains resumable; terminal API results and stale ownership still fail", async () => {

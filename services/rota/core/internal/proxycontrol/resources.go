@@ -17,18 +17,18 @@ type slotSpec struct {
 	Number int
 }
 
-func (m *Manager) slotSpecs() []slotSpec {
+func (m *Manager) slotSpecs(channelSlots int) []slotSpec {
 	counts := []struct {
 		role  string
 		count int
 	}{
 		{RoleDiscover, m.options.DiscoverSlots},
-		{RoleChannel, m.options.ChannelSlots},
+		{RoleChannel, channelSlots},
 		{RoleQueryQuality, m.options.QueryQualitySlots},
 		{RoleDetail, m.options.DetailSlots},
 	}
 	specs := make([]slotSpec, 0,
-		m.options.DiscoverSlots+m.options.ChannelSlots+m.options.QueryQualitySlots+m.options.DetailSlots)
+		m.options.DiscoverSlots+channelSlots+m.options.QueryQualitySlots+m.options.DetailSlots)
 	for _, item := range counts {
 		for number := 1; number <= item.count; number++ {
 			specs = append(specs, slotSpec{
@@ -42,6 +42,10 @@ func (m *Manager) slotSpecs() []slotSpec {
 }
 
 func (m *Manager) syncResources(ctx context.Context) error {
+	return m.syncResourcesMinimum(ctx, 0)
+}
+
+func (m *Manager) syncResourcesMinimum(ctx context.Context, minimum int) error {
 	if err := m.requireEnabled(); err != nil {
 		return err
 	}
@@ -54,11 +58,48 @@ func (m *Manager) syncResources(ctx context.Context) error {
 		return fmt.Errorf("lock resource sync: %w", err)
 	}
 
-	specs := m.slotSpecs()
+	if minimum > 0 {
+		if _, err := tx.Exec(ctx, `INSERT INTO proxy_control_capacity_targets(workload_scope,role,minimum_slots)
+			VALUES($1,'channel',$2) ON CONFLICT(workload_scope,role) DO UPDATE
+			SET minimum_slots=GREATEST(proxy_control_capacity_targets.minimum_slots,EXCLUDED.minimum_slots),updated_at=NOW()`,
+			m.options.WorkloadScope, minimum); err != nil {
+			return fmt.Errorf("persist channel capacity: %w", err)
+		}
+	}
+	channelSlots, err := m.channelSlotMinimum(ctx, tx)
+	if err != nil {
+		return fmt.Errorf("load channel capacity: %w", err)
+	}
+	specs := m.slotSpecs(channelSlots)
+	existing := make(map[string]bool)
+	if minimum > 0 {
+		rows, err := tx.Query(ctx, `SELECT slot_name FROM proxy_running_slots`)
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			var name string
+			if err := rows.Scan(&name); err != nil {
+				rows.Close()
+				return err
+			}
+			existing[name] = true
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return err
+		}
+		rows.Close()
+	}
 	desiredNames := make([]string, 0, len(specs))
 	changedUsers := make([]string, 0)
 	for _, spec := range specs {
 		desiredNames = append(desiredNames, spec.Name)
+		// Online capacity growth only creates missing resources. Existing users,
+		// credentials, pools, active tasks and route generations are untouched.
+		if minimum > 0 && existing[spec.Name] {
+			continue
+		}
 		poolID, err := ensureManagedPool(ctx, tx, spec)
 		if err != nil {
 			return err
@@ -79,6 +120,15 @@ func (m *Manager) syncResources(ctx context.Context) error {
 		`, spec.Name, spec.Role, spec.Number, poolID, userID); err != nil {
 			return fmt.Errorf("upsert running slot %s: %w", spec.Name, err)
 		}
+	}
+	if minimum > 0 {
+		if err := tx.Commit(ctx); err != nil {
+			return fmt.Errorf("commit capacity growth: %w", err)
+		}
+		for _, username := range changedUsers {
+			m.invalidateUser(username)
+		}
+		return nil
 	}
 
 	rows, err := tx.Query(ctx, `

@@ -1535,3 +1535,24 @@ for (const reserve of [true, false]) {
     } finally { await fixture.adapter.close(); }
   });
 }
+
+test('failed quiescence blocks the next channel and renew recovers the original task before reopening',async()=>{
+ let renew;const {adapter,calls}=createFixture({adapterOverrides:{setTimeoutImpl:fn=>{renew=fn;return {unref(){}};},clearTimeoutImpl(){}}});
+ let allowCleanup=false;const original=adapter.identityRuntime.quiesce;
+ adapter.identityRuntime.quiesce=async(...args)=>{if(!allowCleanup)throw Object.assign(Error('cleanup lock timeout'),{code:'55P03'});return original(...args);};
+ const execute={prepare:async()=>prepared(),executeAttempt:async()=>({kind:'managed_work_complete',businessState:'terminal'})};
+ await adapter.start();
+ try{
+  await assert.rejects(adapter.executeJob(job(),execute),{code:'55P03'});
+  assert.equal(adapter.status().assignment.ready,false,'uncertain cleanup must stop intake');
+  await assert.rejects(adapter.executeJob(job({id:'next'}),execute),e=>e instanceof RotaSlotDeferredError);
+  assert.equal(calls.filter(c=>c.command==='begin').length,1);
+  allowCleanup=true;renew();
+  for(let i=0;i<100&&!adapter.status().assignment.ready;i++)await new Promise(r=>setTimeout(r,5));
+  assert.equal(adapter.status().assignment.ready,true);
+  assert.equal(adapter.status().active_task_id,null);
+  assert.equal(calls.filter(c=>c.command==='complete').length,1);
+  await adapter.executeJob(job({id:'next'}),execute);
+  assert.equal(calls.filter(c=>c.command==='begin').length,2);
+ }finally{allowCleanup=true;await adapter.close();}
+});

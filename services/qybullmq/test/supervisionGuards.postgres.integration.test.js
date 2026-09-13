@@ -1,0 +1,43 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {randomUUID} from 'node:crypto';
+import {setTimeout as delay} from 'node:timers/promises';
+import pg from 'pg';
+import {SupervisionGuards} from '../src/remoteNodes/supervisionGuards.js';
+import {assertIsolatedRemoteDatabase} from '../src/remoteNodes/isolation.js';
+const url=process.env.REMOTE_NODE_TEST_DATABASE_URL;
+
+test('shared sessions isolate ownership, recovery transactions and one-group disconnect',{skip:!url,timeout:20000},async t=>{
+  const pool=new pg.Pool({connectionString:url,max:4});
+  const otherPool=new pg.Pool({connectionString:url,max:4});
+  const sql=new pg.Pool({connectionString:url,max:2});
+  const guards=new SupervisionGuards({pool});const rival=new SupervisionGuards({pool:otherPool});
+  t.after(async()=>{await guards.close();await rival.close();await pool.end();await otherPool.end();await sql.end();});
+  await assertIsolatedRemoteDatabase(sql);
+  const prefix=randomUUID();const keys=Array.from({length:40},(_,i)=>prefix+i);
+  const lost=new Set();const leases=await Promise.all(keys.map(key=>guards.acquire(key,()=>lost.add(key))));
+  assert.equal(new Set(leases.map(l=>l.backendPid)).size,4);
+  assert.equal(await guards.acquire(keys[0],()=>{}),null,'same-session reentrant lock must not create a second lease');
+  assert.equal(await rival.acquire(keys[0],()=>{}),null,'another center cannot own the slot');
+  const sibling=keys.findIndex((k,i)=>i>0&&guards.groupFor(k)===guards.groupFor(keys[0]));
+  await leases[0].release();
+  assert.equal(leases[sibling].alive,true);
+  assert.equal(await rival.acquire(keys[sibling],()=>{}),null,'releasing one key retains sibling locks');
+  const stolen=await rival.acquire(keys[0],()=>{});assert.ok(stolen);await stolen.release();
+  leases[0]=await guards.acquire(keys[0],()=>lost.add(keys[0]));
+  const events=[];let enter;const entered=new Promise(resolve=>{enter=resolve;});let finish;const gate=new Promise(resolve=>{finish=resolve;});
+  const recovery=leases[0].withSession(async client=>{
+    await client.query('BEGIN');await client.query("SET LOCAL application_name='uncommitted-recovery'");events.push('begin');enter();await gate;
+    throw new Error('fixture recovery failed');
+  });
+  await entered;
+  const second=leases[sibling].withSession(async client=>{events.push('second');assert.notEqual((await client.query('SHOW application_name')).rows[0].application_name,'uncommitted-recovery');});
+  await delay(30);assert.deepEqual(events,['begin'],'another recovery cannot enter the same transaction');
+  assert.equal(guards.canAcquire(keys[sibling]),false);
+  finish();await assert.rejects(recovery,/fixture recovery failed/);await second;
+  const pid=leases[0].backendPid;await sql.query('SELECT pg_terminate_backend($1)',[pid]);
+  for(let i=0;i<100&&!lost.has(keys[0]);i++)await delay(10);
+  for(let i=0;i<keys.length;i++)assert.equal(leases[i].alive,leases[i].backendPid!==pid,'only the disconnected group loses ownership');
+  await assert.rejects(leases[0].withSession(()=>assert.fail('stale execution')),/SESSION_LOST/);
+  const replacement=await rival.acquire(keys[0],()=>{});assert.ok(replacement);assert.notEqual(replacement.backendPid,pid);
+});

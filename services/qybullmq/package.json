@@ -78,6 +78,8 @@
   "dependencies": {
     "@bull-board/api": "^6.9.2",
     "@bull-board/express": "^6.9.2",
+    "@nats-io/jetstream": "3.4.0",
+    "@nats-io/transport-node": "3.4.0",
     "bullmq": "^5.58.9",
     "express": "^4.21.2",
     "ioredis": "^5.7.0",

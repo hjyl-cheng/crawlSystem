@@ -58,7 +58,9 @@ def deploy(bundle_file, step):
     node, deployment = plan['nodeId'], plan['deploymentId']
     require(re.fullmatch(r'[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}', node))
     require(re.fullmatch(r'[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}', deployment))
-    require(plan['mode'] == 'incremental_collect' and 1 <= plan['count'] <= 32)
+    require(plan['mode'] == 'incremental_collect' and type(plan['count']) is int and plan['count'] >= 1)
+    require(type(plan.get('wholeChannel', False)) is bool)
+    require(not plan.get('wholeChannel') or plan.get('natsUrl'))
     require(re.fullmatch(r'[a-z0-9][a-z0-9./:_-]*@sha256:[a-f0-9]{64}', plan['image']))
     require(credentials['nodeId'] == node and credentials['deploymentId'] == deployment)
     root = Path('/etc/qy-node/runtime/deployments') / deployment
@@ -69,7 +71,16 @@ def deploy(bundle_file, step):
     for slot, service in compose['services'].items():
         require(service['image'] == plan['image'] and service['user'] == '1000:1000' and service['read_only'] is True)
         require(service['cap_drop'] == ['ALL'] and service['security_opt'] == ['no-new-privileges:true'])
-        require(set(service) == {'image','init','restart','user','read_only','cap_drop','security_opt','pids_limit','mem_limit','cpus','stop_grace_period','tmpfs','volumes','logging','labels'})
+        require(set(service) - ({'environment'} if plan.get('natsUrl') else set()) == {'image','init','restart','healthcheck','user','read_only','cap_drop','security_opt','pids_limit','mem_limit','cpus','stop_grace_period','tmpfs','volumes','logging','labels'})
+        require(service['healthcheck'] == {'disable': True})
+        if plan.get('natsUrl'):
+            from urllib.parse import urlparse
+            endpoint = urlparse(plan['natsUrl'])
+            require(endpoint.scheme in ['tls', 'wss'] and endpoint.hostname and not endpoint.username and not endpoint.password and not endpoint.query and not endpoint.fragment and (endpoint.path == '/node-messages' if endpoint.scheme == 'wss' else endpoint.path in ['', '/']))
+            expected_env = {'REMOTE_NODE_NATS_URL': plan['natsUrl']}
+            if plan.get('wholeChannel'):
+                expected_env['REMOTE_NODE_WHOLE_CHANNEL'] = 'true'
+            require(service.get('environment') == expected_env)
         require(service['mem_limit'] == '768m' and service['cpus'] == 0.5 and service['pids_limit'] == 128)
         require(service['labels'] == {'qy.node.id':node,'qy.node.slot':slot,'qy.deployment.id':deployment,'qy.remote.mode':'incremental_collect'})
         expected = {('/run/secrets/node-config.json', str(root / (slot + '.json')), True),
@@ -85,8 +96,10 @@ def deploy(bundle_file, step):
     require(Path('/etc/qy-node/runtime/node-id').read_text().strip() == node)
     command = ['docker','compose','-p',project,'-f',str(root / 'compose.json')]
     if step == 'files':
-        memory_kib = int(next(line.split()[1] for line in Path('/proc/meminfo').read_text().splitlines() if line.startswith('MemTotal:')))
-        require(memory_kib >= (plan['count'] * 768 + 512) * 1024)
+        existing = run(['docker', 'ps', '-a', '--filter', 'label=qy.node.id=' + node,
+                        '--format', '{{.Label "qy.node.slot"}}'], 30).splitlines()
+        # Retrying a smaller failed target must never orphan an existing container.
+        require(all(slot in slots for slot in existing))
         directory(root)
         immutable(root / 'node-token', credentials['nodeToken'])
         immutable(root / 'route-public.pem', credentials['publicKey'])
@@ -120,7 +133,22 @@ def deploy(bundle_file, step):
         while True:
             ids = run(command + ['ps','--all','-q'], 30).split()
             containers = json.loads(run(['docker','inspect',*ids], 30)) if ids else []
-            if len(containers) == len(slots) and all(c['State']['Running'] and c['State'].get('Health',{}).get('Status') == 'healthy' for c in containers):
+            # This step verifies the container layer only. The dashboard then
+            # checks every registered slot's live center heartbeat before it
+            # records deployment success or enables intake. Docker Health is
+            # deliberately unused, including for older reused containers.
+            actual_slots = [c.get('Config', {}).get('Labels', {}).get('qy.node.slot') for c in containers]
+            if (len(containers) == len(slots) and set(actual_slots) == set(slots)
+                    and all(c['State']['Running'] and not c['State'].get('Paused')
+                            and not c['State'].get('Restarting')
+                            and c['Config']['Image'] == plan['image']
+                            and dict(item.split('=', 1) for item in c['Config'].get('Env', [])
+                                     if '=' in item).get('REMOTE_NODE_NATS_URL', '') == plan.get('natsUrl', '')
+                            and (dict(item.split('=', 1) for item in c['Config'].get('Env', [])
+                                      if '=' in item).get('REMOTE_NODE_WHOLE_CHANNEL') == 'true') == bool(plan.get('wholeChannel'))
+                            and all(c['Config']['Labels'].get(key) == value
+                                    for key, value in compose['services'][slot]['labels'].items())
+                            for c, slot in zip(containers, actual_slots))):
                 break
             require(time.monotonic() < deadline)
             time.sleep(1)

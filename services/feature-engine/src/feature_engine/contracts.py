@@ -203,6 +203,26 @@ class _VideoGapAbandonmentContract(_ContractModel):
         return self
 
 
+class _EmptyUploadsContract(_ContractModel):
+    version: Literal[1]
+    outcome: Literal["dormant"]
+    reason: Literal["no_country", "country_checked", "no_country_reserve", "country_recheck_exhausted"]
+    country: Annotated[str, StringConstraints(pattern=r"^[A-Z]{2}$")] | None
+
+    @model_validator(mode="after")
+    def validate_country_reason(self) -> Self:
+        if (self.country is None) != (self.reason == "no_country"):
+            raise ValueError("empty_uploads country disagrees with reason")
+        return self
+
+
+def validate_empty_uploads_evidence(source: Any) -> dict[str, Any]:
+    try:
+        return _EmptyUploadsContract.model_validate(source, strict=True).model_dump()
+    except ValidationError as error:
+        raise ContractValidationError(str(error)) from error
+
+
 class _VideoDiscoveryPayloadContract(_ContractModel):
     pages: NonNegativeInt | None
     items: NonNegativeInt
@@ -260,6 +280,7 @@ class _VideoDiscoveryPayloadContract(_ContractModel):
     catch_up_item_count: NonNegativeInt | None = None
     unclosed_video_ids: list[NonEmptyText] | None = None
     gap_abandonment: _VideoGapAbandonmentContract | None = None
+    empty_uploads: _EmptyUploadsContract | None = None
 
     @model_validator(mode="after")
     def validate_publication_scan_proof(self) -> Self:

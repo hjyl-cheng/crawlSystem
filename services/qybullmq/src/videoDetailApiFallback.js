@@ -36,6 +36,10 @@ function estimateMissingReplayViews(detail, partial, api) {
   };
 }
 
+export async function currentVideoFallbackBudget() {
+  return await execution.getStore()?.getBudget?.() ?? null;
+}
+
 export function withVideoFallbackExecution(context, action) {
   return execution.run(context, action);
 }

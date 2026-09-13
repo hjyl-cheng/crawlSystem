@@ -255,5 +255,17 @@ printf '%s  %s\\n' ${quote(digest)} ${quote(installed)} | sha256sum -c - >/dev/n
       }
     }finally{await exec(connection,`rm -rf -- ${quote(staging)}`).catch(()=>{});}
   }
-  return { connect, verify, installKey, installMonitoring, prepareRuntime, deployWorkers, close(connection) { connection?.client.end(); } };
+  async function removeUnusedNode(connection, node, password, mode = 'check') {
+    if (!uuidPattern.test(node.id) || !['check','cleanup'].includes(mode)) throw new Error('节点删除参数无效');
+    const script = await readFile(new URL('./nodeRuntime/removeUnusedNode.sh', import.meta.url), 'utf8');
+    const output = await rootExec(connection, `sh -c ${quote(script)} -- ${quote(node.id)} ${quote(mode)}`, password, 65000, 55);
+    const blocked = output.match(/^QY_DELETE_BLOCK=([a-z_]+)$/m)?.[1];
+    const reasons = { operation: '远程服务器还有进行中的环境操作', identity: '远程服务器属于另一个节点',
+      deployment: '远程服务器还有部署文件或采集暂存数据', docker: '无法读取 Docker 容器状态',
+      containers: '远程服务器仍有容器（包括已停止的容器），请先核实并清理部署',
+      processes: '远程服务器仍有 Worker 进程或无法核实进程状态', monitoring: '无法确认或停止本系统的监控服务' };
+    if (blocked) throw Object.assign(new Error(`${reasons[blocked] ?? '远程状态无法核实'}，节点登记已保留`), { deletionSafe: true });
+    if (output !== 'QY_DELETE_OK') throw new Error('远程删除检查结果不完整');
+  }
+  return { connect, verify, installKey, installMonitoring, prepareRuntime, deployWorkers, removeUnusedNode, close(connection) { connection?.client.end(); } };
 }

@@ -1156,6 +1156,14 @@ export async function materializeControlledMigrationChannel(client,{snapshot,bat
   if(!intent) return null;
   const candidate=await createTargetCandidate(client,snapshot,batchId,'discovered');
   await attachIntentAndSource(client,{intentId:intent.migration_intent_id,candidate,snapshot,batchId});
-  await refreshBatchCounts(client,batchId);
+  // This admission holds the scheduler lock. Count only the newly inserted
+  // candidate here; the controller reconciles full status totals separately.
+  // Replays return above, and transaction rollback also rolls back these deltas.
+  await client.query(`UPDATE crawler.query_dispatch_batches
+    SET discovered_candidate_count=discovered_candidate_count+1,
+        total_channel_count=total_channel_count+1,updated_at=now()
+    WHERE dispatch_batch_id=$1`, [batchId]);
+  await client.query(`UPDATE crawler.query_pages
+    SET candidate_count=candidate_count+1,updated_at=now() WHERE page_id=$1`, [manualPageId(batchId)]);
   return candidate;
 }

@@ -1,0 +1,5 @@
+# Append after the existing Rota image/config overrides. Capacity targets are
+# persisted by migration 1015; ROTA_CHANNEL_SLOTS remains the configured floor.
+services:
+  rota-core:
+    image: qy-allpachong/rota-core:auto-capacity-20260911

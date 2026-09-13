@@ -11,8 +11,8 @@ import { createRemoteYoutubeCheckpointConsumer } from './youtubeProfileCheckpoin
 // This adapter replaces where requests run, never their retry/country policy.
 export class RemoteManagedIncrementalRuntime {
   constructor({ channelStore, routes, youtubeSessions, nodeId, slot, profileSecret,
-    createApiFallback = null, assertAdmission = null, pollMs = 100, claimTimeoutMs = 30000, stopTimeoutMs = 45000 }) {
-    Object.assign(this, { channelStore, routes, youtubeSessions, nodeId, slot, createApiFallback, assertAdmission, pollMs, claimTimeoutMs, stopTimeoutMs });
+    createApiFallback = null, wholeChannels = null, loadWholeApiPolicy = null, assertAdmission = null, pollMs = 100, claimTimeoutMs = 30000, stopTimeoutMs = 45000 }) {
+    Object.assign(this, { channelStore, routes, youtubeSessions, nodeId, slot, createApiFallback, wholeChannels, loadWholeApiPolicy, assertAdmission, pollMs, claimTimeoutMs, stopTimeoutMs });
     this.executions = new RemoteChannelExecutionStore({ channelStore, profileSecret, assertAdmission });
     this.checkpoints = createRemoteYoutubeCheckpointConsumer({ sessions: youtubeSessions, profileSecret });
     this.active = null;
@@ -54,7 +54,7 @@ export class RemoteManagedIncrementalRuntime {
             const error=new Error('REMOTE_SUPERVISOR_NOT_READY');error.code='REMOTE_SUPERVISOR_NOT_READY';throw error;
           }
           return assertRemoteIncrementalBusinessFence(client,task);
-        }, createApiFallback: this.createApiFallback,
+        }, createApiFallback: this.createApiFallback, wholeChannels: this.wholeChannels, loadWholeApiPolicy: this.loadWholeApiPolicy,
         pollMs: this.pollMs, signal: handle.args.abortSignal });
     } catch (error) {
       handle.error = error;

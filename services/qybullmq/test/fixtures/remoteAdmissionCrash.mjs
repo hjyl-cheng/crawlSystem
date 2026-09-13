@@ -9,6 +9,7 @@ import { runRemoteIncrementalPlan } from '../../src/remoteNodes/incrementalCoord
 import { assertRemoteIncrementalBusinessFence } from '../../src/remoteNodes/incrementalBusinessFence.js';
 import { Worker } from 'bullmq';
 import { INCREMENTAL_QUEUE } from '../../src/incrementalPlan.js';
+import { WholeChannelStore } from '../../src/remoteNodes/wholeChannelStore.js';
 
 process.once('message', async config => {
   try {
@@ -23,9 +24,14 @@ process.once('message', async config => {
     const worker=new Worker(INCREMENTAL_QUEUE,async job=>{
       const admission = await executions.prepare({...config.args,job});
       process.send({ admission });
-      process.once('message', async ({lease}) => {
+      process.once('message', async ({lease,whole=false,pauseAfterReceipt=false}) => {
         try {
-          const result=await runRemoteIncrementalPlan({channelStore,lease,assertBusinessFence:assertRemoteIncrementalBusinessFence,pollMs:5});
+          const wholeChannels=whole?new WholeChannelStore({channelPlans:channelStore,assertBusinessFence:assertRemoteIncrementalBusinessFence}):null;
+          if(pauseAfterReceipt){
+            const read=wholeChannels.result.bind(wholeChannels);
+            wholeChannels.result=async(...args)=>{const received=await read(...args);process.send({received:true});await new Promise(()=>{});return received;};
+          }
+          const result=await runRemoteIncrementalPlan({channelStore,lease,wholeChannels,assertBusinessFence:assertRemoteIncrementalBusinessFence,pollMs:5});
           process.send({completed:result});
         }catch(error){process.send({error:error.code||error.message});}
       });

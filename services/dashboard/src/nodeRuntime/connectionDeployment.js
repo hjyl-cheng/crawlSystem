@@ -11,7 +11,11 @@ export function buildNodeConnectionDeployment({ node, gatewayUrl, image, deploym
   const workers = node.workers ?? [];
   if (workers.some(worker => worker.role !== 'incremental' && worker.count > 0)) throw new Error('当前接入包只支持增量节点，其他 Worker 计划请保留到对应入口接通后部署');
   const count = workers.find(worker => worker.role === 'incremental')?.count ?? 0;
-  if (!Number.isInteger(count) || count < 1 || count > 32) throw new Error('请先保存 1～32 个增量 Worker 的计划');
+  if (!Number.isSafeInteger(count) || count < 1) throw new Error('请先保存增量 Worker 数量（正整数）');
+  // Every service/config exceeds this lower bound. Reject an impossible
+  // installer payload before allocating its arrays; the existing wire limit
+  // remains 1 MiB, independent of a per-node Worker limit.
+  if (count * 128 > 1024 * 1024) throw new Error('部署配置超过单次传输大小限制');
   const root = `/etc/qy-node/runtime/deployments/${deploymentId}`;
   const services = {}; const files = {}; const registrations = [];
   for (let index = 1; index <= count; index++) {
@@ -20,7 +24,7 @@ export function buildNodeConnectionDeployment({ node, gatewayUrl, image, deploym
     const bytes = JSON.stringify(config) + '\n';
     files[`${slot}.json`] = bytes;
     registrations.push({ nodeId: node.id, slot, deploymentId, role: 'incremental', configHash: createHash('sha256').update(bytes).digest('hex') });
-    services[slot] = { image, init: true, restart: 'unless-stopped', user: '1000:1000', read_only: true,
+    services[slot] = { image, init: true, restart: 'unless-stopped', healthcheck: { disable: true }, user: '1000:1000', read_only: true,
       cap_drop: ['ALL'], security_opt: ['no-new-privileges:true'], pids_limit: 64, mem_limit: '256m', cpus: 0.5,
       stop_grace_period: '25s', tmpfs: ['/tmp:rw,noexec,nosuid,size=16m,uid=1000,gid=1000', '/run/qy-node:rw,noexec,nosuid,size=1m,uid=1000,gid=1000'],
       volumes: [

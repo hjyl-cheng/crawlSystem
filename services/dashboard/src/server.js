@@ -1,6 +1,10 @@
+import {statisticsClientScript} from './statisticsClient.js';
+import {createStatisticsCache} from './statisticsCache.js';
 import {migrationBatchPanel} from "./migrationBatchPanel.js";
 import { createServerNodeStore } from "./serverNodes.js";
+import { nodeDeletionFromEnv } from './serverNodeDeletion.js';
 import { nodeRuntimeFromEnv } from './serverNodeRuntime.js';
+import { deploymentControlFromEnv } from './nodeRuntime/deploymentControlClient.js';
 import { workerDeploymentFromEnv } from './serverNodeWorkerDeployment.js';
 import { serverNodesRoutes } from "./serverNodesRoutes.js";
 import { nodeOnboardingFromEnv } from "./serverNodeOnboarding.js";
@@ -160,6 +164,22 @@ const pool = new Pool({
   ].join(""),
   max: Number(process.env.POSTGRES_POOL_MAX || 8),
 });
+
+// Statistics cannot consume the list page's connection slots.
+const statisticsPool=new Pool({...pool.options,max:1,idleTimeoutMillis:10000,connectionTimeoutMillis:5000});
+statisticsPool.on('error',error=>console.error('statistics connection error',error?.code||error?.name));
+const statisticsCache=createStatisticsCache();
+async function readStatistics(sql,args=[]) {
+  const client=await statisticsPool.connect();
+  try {
+    await client.query('BEGIN READ ONLY');
+    await client.query("SET LOCAL statement_timeout='20s'");
+    await client.query('SET LOCAL max_parallel_workers_per_gather=0');
+    const result=await client.query(sql,args);
+    await client.query('COMMIT');return result;
+  } catch(error) {await client.query('ROLLBACK').catch(()=>{});throw error;}
+  finally {client.release();}
+}
 
 const expectedCrawlerDatabase = String(process.env.EXPECTED_CRAWLER_DATABASE || "").trim();
 const forbiddenCrawlerDatabase = String(
@@ -1476,6 +1496,13 @@ async function channelSummaryRows({
   }
   const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
   const rows = await db(`
+    WITH page AS MATERIALIZED (
+      SELECT c.* FROM crawler.channels c
+      LEFT JOIN crawler.finalized_profiles fp ON fp.channel_id=c.channel_id
+      ${whereSql}
+      ORDER BY c.created_at DESC,c.channel_id
+      LIMIT $${args.length+1} OFFSET $${args.length+2}
+    )
     SELECT
       c.channel_id,
       c.channel_url,
@@ -1525,7 +1552,7 @@ async function channelSummaryRows({
       (SELECT count(*) FROM crawler.contents ct WHERE ct.channel_id = c.channel_id AND ct.content_type = 'video')::bigint AS video_count,
       (SELECT count(*) FROM crawler.contents ct WHERE ct.channel_id = c.channel_id AND ct.content_type = 'short')::bigint AS short_count,
       (SELECT count(*) FROM crawler.contents ct WHERE ct.channel_id = c.channel_id AND ct.content_type = 'live')::bigint AS live_count
-    FROM crawler.channels c
+    FROM page c
     LEFT JOIN LATERAL (
       SELECT COALESCE(
                NULLIF(candidate.snapshot_json #>> '{channel_header,avatar_url}', ''),
@@ -1549,9 +1576,7 @@ async function channelSummaryRows({
     LEFT JOIN feature_clock.daily_channel_plans active_clock_plan
       ON active_clock_plan.channel_id = c.channel_id
      AND active_clock_plan.status IN ('planned', 'dispatching', 'dispatched', 'running')
-    ${whereSql}
-    ORDER BY c.created_at DESC
-    LIMIT $${args.length + 1} OFFSET $${args.length + 2}
+    ORDER BY c.created_at DESC,c.channel_id
   `, [...args, limit, offset]);
   return rows.rows;
 }
@@ -1885,9 +1910,10 @@ function dailyClockScopeSql() {
     )`;
 }
 
-async function dailyClockListData(req) {
+async function dailyClockListData(req, {statistics=false}={}) {
   const day = req.query.day === "tomorrow" ? "tomorrow" : "today";
-  const targetDay = utcDayOffset(day === "tomorrow" ? 1 : 0);
+  const targetDay = statistics && /^\d{4}-\d{2}-\d{2}$/.test(req.query.target_day||"")
+    ?req.query.target_day:utcDayOffset(day === "tomorrow" ? 1 : 0);
   const limit = intValue(req.query.limit, 100, 1, 500);
   const offset = intValue(req.query.offset, 0, 0, 1_000_000);
   const search = String(req.query.q || "").trim();
@@ -1926,8 +1952,15 @@ async function dailyClockListData(req) {
   const scopeSql = dailyClockScopeSql();
 
   try {
-    const [stats, total, rows] = await Promise.all([
-      pool.query(`${scopeSql}
+    if(!statistics) {
+      const rows=await pool.query(`${scopeSql} SELECT * FROM scope ${whereSql}
+        ORDER BY due_day,dispatch_slot,channel_id LIMIT $${args.length+1} OFFSET $${args.length+2}`,
+        [...args,limit+1,offset]);
+      return {available:true,day,targetDay,generatedAt:new Date().toISOString(),channels:rows.rows.slice(0,limit),
+        hasNext:rows.rows.length>limit,total:null,stats:null,filters:{limit,offset,search,clock,status}};
+    }
+    const summary=await statisticsCache.get(JSON.stringify(['clock-summary',targetDay]),async()=> {
+      const result=await readStatistics(`${scopeSql}
         SELECT
           count(*)::int AS total,
           count(*) FILTER (WHERE plan_id IS NOT NULL)::int AS frozen,
@@ -1960,43 +1993,20 @@ async function dailyClockListData(req) {
               GREATEST(0,EXTRACT(EPOCH FROM (now() - min(crawler_started_at))))
             )
           END AS recent_window_seconds
-        FROM scope`, [targetDay]),
-      pool.query(`${scopeSql} SELECT count(*)::int AS total FROM scope ${whereSql}`, args),
-      pool.query(`${scopeSql}
-        SELECT * FROM scope
-        ${whereSql}
-        ORDER BY
-          due_day,dispatch_slot,channel_id
-        LIMIT $${args.length + 1} OFFSET $${args.length + 2}`,
-      [...args, limit, offset]),
-    ]);
-    return {
-      available: true,
-      day,
-      targetDay,
-      generatedAt: new Date().toISOString(),
-      channels: rows.rows,
-      total: total.rows[0]?.total ?? 0,
-      stats: stats.rows[0] || {},
-      filters: { limit, offset, search, clock, status },
-    };
-  } catch (error) {
-    console.error("daily clock database read failed", error?.message || String(error));
-    return {
-      available: false,
-      day,
-      targetDay,
-      generatedAt: new Date().toISOString(),
-      channels: [],
-      total: 0,
-      stats: {},
-      filters: { limit, offset, search, clock, status },
-      error: "每日 Clock 数据当前不可用",
-    };
+        FROM scope`, [targetDay]);return result.rows[0]||{};
+    });
+    const count=whereSql?await statisticsCache.get(JSON.stringify(['clock-count',targetDay,search,clock,status]),
+      async()=> (await readStatistics(`${scopeSql} SELECT count(*)::int AS total FROM scope ${whereSql}`,args)).rows[0].total):null;
+    return {available:true,day,targetDay,generatedAt:summary.generatedAt,stale:summary.stale||!!count?.stale,
+      total:count?count.value:summary.value.total,stats:summary.value,filters:{limit,offset,search,clock,status}};
+  } catch(error) {
+    console.error('daily clock database read failed',error?.message||String(error));
+    return {available:false,day,targetDay,generatedAt:new Date().toISOString(),channels:[],hasNext:false,total:null,stats:null,
+      filters:{limit,offset,search,clock,status},error:statistics?'统计暂不可用，列表仍可浏览':'每日 Clock 数据当前不可用'};
   }
 }
 
-async function channelListData(req) {
+async function channelListData(req, {statistics=false}={}) {
   const limit = intValue(req.query.limit, 100, 1, 500);
   const offset = intValue(req.query.offset, 0, 0, 1_000_000);
   const search = String(req.query.q || "").trim();
@@ -2032,13 +2042,13 @@ async function channelListData(req) {
   }
   const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
 
-  const total = await db(`
-    SELECT count(*)::int AS total
-    FROM crawler.channels c
-    LEFT JOIN crawler.finalized_profiles fp ON fp.channel_id = c.channel_id
-    ${whereSql}
-  `, args);
-  const stats = await db(`
+  const filters={limit,offset,search,channelStatus,agentStatus,finalStatus};
+  if(!statistics) {
+    const rows=await channelSummaryRows({...filters,limit:limit+1});
+    return {channels:rows.slice(0,limit),hasNext:rows.length>limit,total:null,stats:null,filters,notice:req.query.notice||'',error:req.query.error||''};
+  }
+  const summary=await statisticsCache.get('channel-summary',async()=>{
+    const result=await readStatistics(`
     SELECT
       count(*)::bigint AS total,
       count(*) FILTER (
@@ -2062,16 +2072,17 @@ async function channelListData(req) {
       count(*) FILTER (WHERE fp.status = 'ready_auto')::bigint AS final_done
     FROM crawler.channels c
     LEFT JOIN crawler.finalized_profiles fp ON fp.channel_id = c.channel_id
-  `);
-
-  return {
-    channels: await channelSummaryRows({ limit, offset, search, channelStatus, agentStatus, finalStatus }),
-    total: total.rows[0]?.total ?? 0,
-    stats: stats.rows[0] || { total: 0, agent_done: 0, final_done: 0 },
-    filters: { limit, offset, search, channelStatus, agentStatus, finalStatus },
-    notice: req.query.notice || "",
-    error: req.query.error || "",
-  };
+  `);return result.rows[0]||{};
+  });
+  const count=await statisticsCache.get(JSON.stringify(['channel-count',search,channelStatus,agentStatus,finalStatus]),async()=>{
+    const result=await readStatistics(`
+    SELECT count(*)::int AS total
+    FROM crawler.channels c
+    LEFT JOIN crawler.finalized_profiles fp ON fp.channel_id = c.channel_id
+    ${whereSql}
+  `, args);return result.rows[0]?.total??0;
+  });
+  return {stats:summary.value,total:count.value,filters,generatedAt:summary.generatedAt,stale:summary.stale||count.stale};
 }
 
 async function queryDashboardData(req) {
@@ -3235,7 +3246,7 @@ function dailyClockListPage(data) {
   previous.set("offset", String(Math.max(0, filters.offset - filters.limit)));
   next.set("offset", String(filters.offset + filters.limit));
   const hasPrevious = filters.offset > 0;
-  const hasNext = filters.offset + data.channels.length < Number(data.total || 0);
+  const hasNext = data.hasNext;
   const clockOptions = [
     ["all", "全部 Clock"],
     ...CLOCK_KINDS,
@@ -3282,14 +3293,9 @@ function dailyClockListPage(data) {
     </tr>`;
   }).join("");
 
-  const progress = dailyClockExecutionProgress(stats, {
-    day: data.day,
-    now: data.generatedAt,
+  const metricCards=statisticsPanel('/api/daily-clocks/statistics',{
+    day:data.day,target_day:data.targetDay,q:filters.search,clock:filters.clock,status:filters.status,
   });
-  const metricCards = dailyClockMetricCards(data, stats, progress);
-  const autoRefresh = data.available && progress.state === "running"
-    ? `<script>window.setTimeout(() => window.location.reload(), 30000);</script>`
-    : "";
 
   const table = data.available
     ? `${metricCards}
@@ -3336,8 +3342,7 @@ function dailyClockListPage(data) {
     <a class="btn" href="/daily-clocks?day=${h(data.day)}">刷新</a>
   </div>
 </div>
-${table}
-${autoRefresh}`,
+${table}`,
   });
 }
 
@@ -3620,6 +3625,23 @@ function migrationChannelDetailPage(data) {
   });
 }
 
+function statisticsPanel(path,parameters) {
+  const params=new URLSearchParams(parameters);
+  return `<section data-statistics-url="${h(path+'?'+params.toString())}" aria-label="列表统计">
+    <div data-statistics-content aria-live="polite"><div class="note">统计加载中…</div></div>
+    <div class="toolbar mt"><span class="note" data-statistics-note></span><button class="btn small-btn" type="button">刷新统计</button></div>
+  </section>${statisticsClientScript}`;
+}
+
+function channelMetricCards(data) {
+  const {stats}=data;
+  return `<section class="grid grid-3">
+  <div class="metric metric-blue"><div><div class="metric-label">正常频道</div><div class="metric-value">${fmtInt(stats.active)}</div></div><div class="metric-foot">迁移待收尾 ${fmtInt(stats.migration_pending)} · 休眠 ${fmtInt(stats.dormant)} · 不符合条件 ${fmtInt(stats.rejected)} · 移除 ${fmtInt(stats.removed)} · 当前筛选 ${fmtInt(data.total)} 条</div></div>
+  <div class="metric"><div><div class="metric-label">Agent 完成</div><div class="metric-value">${fmtInt(stats.agent_done)}</div></div><div class="metric-foot">crawler.channels.agent_status = done</div></div>
+  <div class="metric"><div><div class="metric-label">Final 完成</div><div class="metric-value">${fmtInt(stats.final_done)}</div></div><div class="metric-foot">crawler.finalized_profiles.status = done</div></div>
+</section>`;
+}
+
 function channelListPage(data) {
   const { channels, filters, stats } = data;
   const prev = new URLSearchParams();
@@ -3662,11 +3684,7 @@ function channelListPage(data) {
 ${data.notice ? `<div class="alert alert-good">${h(data.notice)}</div>` : ""}
 ${data.error ? `<div class="alert alert-bad">${h(data.error)}</div>` : ""}
 
-<section class="grid grid-3">
-  <div class="metric metric-blue"><div><div class="metric-label">正常频道</div><div class="metric-value">${fmtInt(stats.active)}</div></div><div class="metric-foot">迁移待收尾 ${fmtInt(stats.migration_pending)} · 休眠 ${fmtInt(stats.dormant)} · 不符合条件 ${fmtInt(stats.rejected)} · 移除 ${fmtInt(stats.removed)} · 当前筛选 ${fmtInt(data.total)} 条</div></div>
-  <div class="metric"><div><div class="metric-label">Agent 完成</div><div class="metric-value">${fmtInt(stats.agent_done)}</div></div><div class="metric-foot">crawler.channels.agent_status = done</div></div>
-  <div class="metric"><div><div class="metric-label">Final 完成</div><div class="metric-value">${fmtInt(stats.final_done)}</div></div><div class="metric-foot">crawler.finalized_profiles.status = done</div></div>
-</section>
+${statisticsPanel('/api/channels/statistics',{q:filters.search,channel_status:filters.channelStatus,agent_status:filters.agentStatus,final_status:filters.finalStatus})}
 
 <section class="table-panel mt">
   <div class="table-tools">
@@ -3674,8 +3692,8 @@ ${data.error ? `<div class="alert alert-bad">${h(data.error)}</div>` : ""}
       <div><h2>频道审核</h2><div class="note">字段来源：crawler.channels、crawler.contents、crawler.agent_profiles、crawler.finalized_profiles、crawler.raw_objects、feature_clock.channel_clock_state</div></div>
       <div class="toolbar">
         <button id="publication-compare-button" class="btn btn-primary small-btn" type="submit" form="publication-compare-form" disabled title="一次最多比对 ${PUBLICATION_COMPARISON_MAX_CHANNELS} 个频道">批量比对</button>
-        <a class="btn small-btn" href="/channels?${h(prev.toString())}">上一页</a>
-        <a class="btn small-btn" href="/channels?${h(next.toString())}">下一页</a>
+        ${filters.offset>0?`<a class="btn small-btn" href="/channels?${h(prev.toString())}">上一页</a>`:""}
+        ${data.hasNext?`<a class="btn small-btn" href="/channels?${h(next.toString())}">下一页</a>`:""}
       </div>
     </div>
     <form method="get" action="/channels" class="filters">
@@ -4745,7 +4763,7 @@ app.use((req, res, next) => {
 
 app.get("/", (_req, res) => res.redirect("/queries"));
 const serverNodeStore = createServerNodeStore(db);
-app.use(serverNodesRoutes({ store: serverNodeStore, layout, onboarding: nodeOnboardingFromEnv(serverNodeStore), runtime: nodeRuntimeFromEnv(serverNodeStore), workerDeployment: workerDeploymentFromEnv(serverNodeStore) }));
+app.use(serverNodesRoutes({ store: serverNodeStore, executionControl: deploymentControlFromEnv(), deletion: nodeDeletionFromEnv(serverNodeStore, db), layout, onboarding: nodeOnboardingFromEnv(serverNodeStore), runtime: nodeRuntimeFromEnv(serverNodeStore), workerDeployment: workerDeploymentFromEnv(serverNodeStore) }));
 
 app.get("/health", async (_req, res) => {
   try {
@@ -4775,6 +4793,25 @@ app.get("/queries", async (req, res, next) => {
     res.type("html").send(queryPage(await queryDashboardData(req)));
   } catch (error) {
     next(error);
+  }
+});
+
+app.get('/api/daily-clocks/statistics',async(req,res)=>{
+  const data=await dailyClockListData(req,{statistics:true});
+  res.set('Cache-Control','no-store');
+  if(!data.available)return res.status(503).json({error:'统计暂不可用，列表仍可浏览'});
+  const progress=dailyClockExecutionProgress(data.stats,{day:data.day,now:data.generatedAt});
+  return res.json({html:dailyClockMetricCards(data,data.stats,progress),generatedAt:data.generatedAt,
+    stale:data.stale,refreshPage:data.day==='today'&&progress.state==='running'});
+});
+app.get('/api/channels/statistics',async(req,res)=>{
+  res.set('Cache-Control','no-store');
+  try {
+    const data=await channelListData(req,{statistics:true});
+    res.json({html:channelMetricCards(data),generatedAt:data.generatedAt,stale:data.stale});
+  }catch(error){
+    console.error('channel statistics read failed',error?.message||String(error));
+    res.status(503).json({error:'统计暂不可用，列表仍可浏览'});
   }
 });
 
@@ -6284,6 +6321,7 @@ async function shutdown(signal) {
   await Promise.all(Object.values(queues).map((queue) => queue.close()));
   await Promise.all([
     pool.end(),
+    statisticsPool.end(),
     migrationPool ? migrationPool.end() : Promise.resolve(),
     businessAuditPool ? businessAuditPool.end() : Promise.resolve(),
   ]);

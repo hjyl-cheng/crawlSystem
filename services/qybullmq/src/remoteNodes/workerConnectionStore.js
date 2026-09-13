@@ -35,7 +35,7 @@ export class RemoteWorkerConnectionStore {
     }
     uuid(value.deployment_id); uuid(value.instance_id);
     return this.store.transaction(async client => {
-      const node = (await client.query('SELECT state FROM remote_ingestion.nodes WHERE node_id=$1 FOR NO KEY UPDATE', [uuid(nodeId)])).rows[0];
+      const node = (await client.query('SELECT state FROM remote_ingestion.nodes WHERE node_id=$1 FOR SHARE', [uuid(nodeId)])).rows[0];
       if (!node || node.state === 'disabled') throw new RemoteProtocolError('UNAUTHORIZED', 401);
       const row = (await client.query(`SELECT *, connected_until > clock_timestamp() AS alive
         FROM remote_ingestion.worker_connections WHERE node_id=$1 AND slot=$2 FOR UPDATE`, [nodeId, value.slot])).rows[0];

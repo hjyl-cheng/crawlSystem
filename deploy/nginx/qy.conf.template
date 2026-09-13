@@ -23,6 +23,10 @@ upstream qy_remote_center {
     zone qy_remote_center 64k;
     server remote-node-center:3187 resolve;
 }
+upstream qy_remote_messages {
+    zone qy_remote_messages 64k;
+    server remote-nats:9222 resolve;
+}
 upstream qy_node_registry {
     zone qy_node_registry 64k;
     server remote-center-private:3189 resolve;
@@ -60,6 +64,19 @@ server {
         proxy_set_header X-Forwarded-Proto $original_proto;
         proxy_buffering off;
         proxy_read_timeout 120s;
+        access_log off;
+    }
+
+    # NATS authenticates each node and authorizes its subjects after upgrade.
+    location = /node-messages {
+        proxy_pass http://qy_remote_messages;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+        proxy_set_header Host $host;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+        proxy_buffering off;
         access_log off;
     }
 

@@ -11,7 +11,7 @@ import { isFullCrawlCanaryBatch } from "./fullCrawlCanary.js";
 import { createHash } from "node:crypto";
 import { ensureDefaultAgentConfig, listEnabledAgentConfigs } from "./agentConfig.js";
 import { automaticLocalAgentConfigs } from "./agentExecutionPolicy.js";
-import { agentConcurrencyLimit, buildAgentDispatchPlan } from "./agentDispatchPolicy.js";
+import { createAgentBatchDispatch } from "./agentBatchDispatch.js";
 import {
   discoveryPressureReason,
   discoveryPressureRecoveredForReason,
@@ -748,175 +748,6 @@ async function refreshDispatchValidationState(dispatchBatchId) {
     closeValidation: true,
   });
   return Boolean(state?.validation_closed_at) && state.open === 0;
-}
-
-async function syncAgentGlobalConcurrency(actions, agentConfigs) {
-  const agentQueue = queues[queuesByRole.agentBatch];
-  const registeredWorkers = await agentQueue.getWorkersCount();
-  const concurrency = agentConcurrencyLimit(agentConfigs, registeredWorkers);
-  if (concurrency > 0) {
-    const previous = await agentQueue.getGlobalConcurrency();
-    if (previous !== concurrency) {
-      await agentQueue.setGlobalConcurrency(concurrency);
-      actions.push({
-        action: "set-global-concurrency",
-        queue: queuesByRole.agentBatch,
-        concurrency,
-        previous,
-        registered_workers: registeredWorkers,
-        configured_capacity: agentConfigs.reduce((total, config) => total + Number(config.max_workers ?? 1), 0),
-      });
-    }
-  }
-  return { registeredWorkers, concurrency };
-}
-
-async function maybeCreateAgentBatch(actions, agentConfigs, agentCapacity, queryScheduler) {
-  if (!queryScheduler.pipeline_cycle_id) return;
-  const dispatchBatchId = queryScheduler.pipeline_cycle_id;
-  const allowPartialFlush = await refreshDispatchValidationState(dispatchBatchId);
-  const agentQueue = queues[queuesByRole.agentBatch];
-  const jobs = await agentQueue.getJobs(
-    ["waiting", "active", "delayed", "prioritized", "paused", "waiting-children"],
-    0,
-    9999,
-    true,
-  );
-  const outstandingByConfig = new Map();
-  for (const job of jobs) {
-    const configId = Number(job.data?.agent_config_id);
-    if (!Number.isFinite(configId) || configId <= 0) continue;
-    outstandingByConfig.set(configId, (outstandingByConfig.get(configId) ?? 0) + 1);
-  }
-  const dispatchPlan = buildAgentDispatchPlan({
-    configs: agentConfigs,
-    outstandingByConfig,
-    outstandingTotal: jobs.length,
-    workerCapacity: agentCapacity.concurrency,
-    maxBatches: agentMaxBatchesPerTick,
-  });
-  for (const agentConfig of dispatchPlan) {
-    const batchSize = Math.max(1, Math.min(50, Number(agentConfig?.batch_size ?? agentBatchSize)));
-    const rows = await query(
-      `WITH candidates AS MATERIALIZED (
-         SELECT c.channel_id,c.channel_url
-         FROM crawler.channels c
-         JOIN crawler.channel_runs current_run ON current_run.run_id=c.latest_run_id
-         WHERE c.ready_for_agent=true
-           AND c.agent_status IN ('pending','failed')
-           AND NOT EXISTS (
-             SELECT 1 FROM crawler.agent_refresh_requests refresh
-             WHERE refresh.channel_id=c.channel_id
-               AND (
-                 refresh.status IN ('pending','queued','running')
-                 OR (refresh.status='failed' AND isfinite(refresh.next_retry_at))
-               )
-           )
-           AND (c.agent_next_retry_at IS NULL OR c.agent_next_retry_at<=now())
-           AND c.status='active'
-           AND c.subscriber_count IS NOT NULL
-           AND NULLIF(btrim(c.title),'') IS NOT NULL
-           AND COALESCE(current_run.result_json->>'dispatch_batch_id',current_run.result_json->>'pipeline_cycle_id')=$3
-           AND NOT EXISTS (
-             SELECT 1
-             FROM crawler.migration_system_retry_items retry
-             WHERE retry.candidate_id=current_run.candidate_id
-               AND retry.status IN ('retrying','pending','dispatched')
-           )
-         ORDER BY c.priority DESC,c.created_at ASC
-         LIMIT $1
-         FOR UPDATE SKIP LOCKED
-       ), candidate_count AS (
-         SELECT count(*)::int AS count FROM candidates
-       ), picked AS (
-         SELECT channel_id,channel_url FROM candidates
-         WHERE (SELECT count FROM candidate_count)>=$1 OR $2::boolean=true
-       ), updated AS (
-         UPDATE crawler.channels channel
-         SET agent_status='queued',updated_at=now()
-         FROM picked
-         WHERE channel.channel_id=picked.channel_id
-         RETURNING channel.channel_id,channel.channel_url
-       )
-       SELECT updated.*,(SELECT count FROM candidate_count) AS eligible_count FROM updated`,
-      [batchSize, allowPartialFlush, dispatchBatchId],
-    );
-    if (rows.rows.length === 0) continue;
-    const channelIds = rows.rows.map((row) => row.channel_id);
-    const batchId = `agent-batch:${dispatchBatchId}:${Date.now()}:${nanoid(8)}`;
-    try {
-      await queues[queuesByRole.agentBatch].add(
-        "agent-profile-batch",
-        {
-          batch_id: batchId,
-          channel_ids: channelIds,
-          agent_mode: "basic",
-          agent_config_id: agentConfig.config_id,
-          pipeline_cycle_id: queryScheduler.pipeline_cycle_id,
-          dispatch_batch_id: dispatchBatchId,
-        },
-        { jobId: safeJobId("agent-batch", batchId) },
-      );
-    } catch (error) {
-      await query(
-        `UPDATE crawler.channels
-         SET agent_status='pending',agent_error_message=$2,updated_at=now()
-         WHERE channel_id=ANY($1::text[]) AND agent_status='queued'`,
-        [channelIds, error?.message || String(error)],
-      );
-      throw error;
-    }
-    actions.push({
-      action: "enqueue-agent-batch",
-      queue: queuesByRole.agentBatch,
-      count: channelIds.length,
-      batch_size: batchSize,
-      agent_config_id: agentConfig.config_id,
-      agent_config_name: agentConfig.name,
-      config_max_workers: Number(agentConfig.max_workers ?? 1),
-      registered_agent_workers: agentCapacity.registeredWorkers,
-      agent_global_concurrency: agentCapacity.concurrency,
-      partial_flush: channelIds.length < batchSize,
-      batch_id: batchId,
-      dispatch_batch_id: dispatchBatchId,
-    });
-    if (rows.rows.length < batchSize) break;
-  }
-  if (allowPartialFlush) {
-    const remaining = await query(
-      `SELECT count(*)::int AS count
-       FROM crawler.channels channel
-       JOIN crawler.channel_runs run ON run.run_id=channel.latest_run_id
-       WHERE channel.ready_for_agent=true
-         AND channel.agent_status IN ('pending','failed')
-         AND NOT EXISTS (
-           SELECT 1 FROM crawler.agent_refresh_requests refresh
-           WHERE refresh.channel_id=channel.channel_id
-             AND (
-               refresh.status IN ('pending','queued','running')
-               OR (refresh.status='failed' AND isfinite(refresh.next_retry_at))
-             )
-         )
-         AND channel.subscriber_count IS NOT NULL
-         AND NULLIF(btrim(channel.title),'') IS NOT NULL
-         AND COALESCE(run.result_json->>'dispatch_batch_id',run.result_json->>'pipeline_cycle_id')=$1
-         AND NOT EXISTS (
-           SELECT 1
-           FROM crawler.migration_system_retry_items retry
-           WHERE retry.candidate_id=run.candidate_id
-             AND retry.status IN ('retrying','pending','dispatched')
-         )`,
-      [dispatchBatchId],
-    );
-    if (Number(remaining.rows[0]?.count ?? 0) === 0) {
-      await query(
-        `UPDATE crawler.query_dispatch_batches
-         SET agent_tail_flushed_at=COALESCE(agent_tail_flushed_at,now()),updated_at=now()
-         WHERE dispatch_batch_id=$1`,
-        [dispatchBatchId],
-      );
-    }
-  }
 }
 
 async function maybeCreateIncrementalAgentBatch(actions) {
@@ -3024,8 +2855,11 @@ async function tick() {
     actions.push({ action: "dispatch-video-api-fallback", ...dispatched });
   }
 
-  const agentConfigs = automaticLocalAgentConfigs(await listEnabledAgentConfigs());
-  const agentCapacity = await syncAgentGlobalConcurrency(actions, agentConfigs);
+  const agentDispatch = !independentRecoveryEnabled ? createAgentBatchDispatch({
+    query, agentQueue: queues[queuesByRole.agentBatch], agentBatchSize, agentMaxBatchesPerTick,
+  }) : null;
+  const agentConfigs = agentDispatch ? automaticLocalAgentConfigs(await listEnabledAgentConfigs()) : [];
+  const agentCapacity = agentDispatch ? await agentDispatch.syncCapacity(actions, agentConfigs) : null;
   const migrationSystemRecovery = await migrationSystemRetryRecoveryReconciler
     .reconcileAvailable({ limit: 100 });
   const migrationSystemRecoveryQueueDemand = new Set(
@@ -3083,8 +2917,9 @@ async function tick() {
       pending: apiPendingCount,
     });
   }
-  if (pipelineProducerActive(queryScheduler)) {
-    await maybeCreateAgentBatch(actions, agentConfigs, agentCapacity, queryScheduler);
+  if (agentDispatch && pipelineProducerActive(queryScheduler)) {
+    await refreshDispatchValidationState(queryScheduler.pipeline_cycle_id);
+    await agentDispatch.dispatch(actions, agentConfigs, agentCapacity, queryScheduler);
   }
   const discoverProxyReady = roleReady(proxyCapacity, "discover");
   const channelProxyReady = roleReady(proxyCapacity, "channel");
@@ -3338,9 +3173,27 @@ if (independentRecoveryEnabled) {
   const scanDb = database("finalize-scan");
   const changeDb = database("finalize-changes");
   const metricsDb = database("migration-metrics", { statementTimeoutMs: 30000 });
+  const agentDb = database("agent-dispatch", { statementTimeoutMs: 15000 });
+  const countsDb = database("batch-counts", { statementTimeoutMs: 30000 });
+  const agentDispatch = createAgentBatchDispatch({ query: agentDb.query,
+    agentQueue: queues[queuesByRole.agentBatch], agentBatchSize, agentMaxBatchesPerTick });
   const channelQueue = queues[queuesByRole.channelCrawl];
   const finalizeQueue = queues[queuesByRole.finalize];
   const tasks = {
+    agent_dispatch: { intervalMs: 2000, run: async () => {
+      const scheduler = await getQueryScheduler(agentDb.query);
+      if (!pipelineProducerActive(scheduler)) return { inactive: true };
+      const actions = [];
+      const configs = automaticLocalAgentConfigs(await listEnabledAgentConfigs(agentDb.query));
+      const capacity = await agentDispatch.syncCapacity(actions, configs);
+      await agentDispatch.dispatch(actions, configs, capacity, scheduler);
+      return { dispatched: actions.filter(a => a.action === 'enqueue-agent-batch').length, actions };
+    } },
+    batch_counts: { intervalMs: 30000, run: async () => {
+      const scheduler = await getQueryScheduler(countsDb.query);
+      if (!pipelineProducerActive(scheduler) || !scheduler.pipeline_cycle_id) return null;
+      return reconcileDispatchBatchCandidateState(countsDb.query, scheduler.pipeline_cycle_id, { closeValidation: true });
+    } },
     migration_metrics: { intervalMs: 30000, run: () => migrationBatchControlEnabled() ? sampleMigrationThroughput(metricsDb.query) : null },
     migration_intake: {
       intervalMs: intEnv("MIGRATION_REFILL_INTERVAL_MS", 2000, 500, 30000),

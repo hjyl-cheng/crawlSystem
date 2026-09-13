@@ -1702,6 +1702,18 @@ var migrations = []Migration{
 			  AND value->'allowed_protocols' ? 'hysteria2';
 		`,
 	},
+	{
+		Version:     1015,
+		Description: "Persist monotonic proxy control capacity targets",
+		Up: `CREATE TABLE IF NOT EXISTS proxy_control_capacity_targets (
+			workload_scope TEXT NOT NULL,
+			role TEXT NOT NULL CHECK(role='channel'),
+			minimum_slots INTEGER NOT NULL CHECK(minimum_slots BETWEEN 1 AND 500),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			PRIMARY KEY(workload_scope,role)
+		);`,
+		Down: `DROP TABLE IF EXISTS proxy_control_capacity_targets;`,
+	},
 }
 
 // Migrate runs all pending migrations

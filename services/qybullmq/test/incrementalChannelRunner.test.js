@@ -3,6 +3,8 @@ import test from "node:test";
 import { IncrementalChannelRunner } from "../src/incrementalChannelRunner.js";
 import { videoApiPendingError } from "../src/videoApiContinuation.js";
 import { incrementalPlanHash, validateIncrementalPlan } from "../src/incrementalPlan.js";
+import { executeManagedWorkerAttempt } from "../src/managedWorkerExecution.js";
+import { emptyUploadsDecision } from "../src/youtubeUploadsCountry.js";
 import { VideoExecutionRecoveryPendingError } from "../src/videoExecutionRecovery.js";
 
 test("waiting recovery and superseded video executions cannot mark the current Plan failed", async () => {
@@ -17,6 +19,44 @@ test("waiting recovery and superseded video executions cannot mark the current P
   }
 });
 
+test("local country handoff re-enters the real runner and can finish or record a later failure", async () => {
+  for (const laterFailure of [false, true]) {
+    const data = plan({ video: true });
+    const frozenHash = incrementalPlanHash(data);
+    const currentJob = { ...job(data), async updateData(value) { this.data = value; } };
+    const runStore = storeFixture(data);
+    const originalClaim = runStore.claim;
+    runStore.claim = async input => {
+      assert.equal(incrementalPlanHash(validateIncrementalPlan(input)), frozenHash);
+      return originalClaim(input);
+    };
+    let executions = 0;
+    const runner = new IncrementalChannelRunner({ runStore, query: async () => ({ rows: [] }),
+      withTransaction: async action => action({}), video: async () => {
+        executions += 1;
+        emptyUploadsDecision("BR");
+        if (laterFailure) throw new Error("subsequent detail failure");
+        return { outcome: "complete", lifecycle_status: "dormant" };
+      } });
+    const execute = country => executeManagedWorkerAttempt({ job: currentJob,
+      attempt: { egressCountry: country }, execute: () => runner.execute(currentJob),
+      persistRetryableCheckpoint: async () => { throw new Error("unexpected network retry"); } });
+    assert.deepEqual(await execute("US"), { kind: "country_recheck", country: "BR" });
+    assert.equal(currentJob.data.uploads_country_recheck.status, "requested");
+    assert.ok(!runStore.calls.some(call => call[0] === "fail"));
+    await currentJob.updateData({ ...currentJob.data,
+      uploads_country_recheck: { country: "BR", status: "checked" } });
+    if (laterFailure) {
+      await assert.rejects(execute("BR"), /subsequent detail failure/);
+      assert.deepEqual(runStore.calls.slice(-2), [["domain", "video", "failed"], ["fail"]]);
+    } else {
+      const result = await execute("BR");
+      assert.equal(result.kind, "managed_work_complete");
+      assert.equal(result.result.status, "done");
+    }
+    assert.equal(executions, 2);
+  }
+});
 
 test("API handoff preserves frozen incremental Plan and never marks its video domain failed", async () => {
   const data = plan({ video: true });

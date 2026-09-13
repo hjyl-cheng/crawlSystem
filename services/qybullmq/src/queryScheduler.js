@@ -33,8 +33,8 @@ export function normalizeQueryScheduler(value = {}) {
   };
 }
 
-export async function getQueryScheduler() {
-  const row = await query(
+export async function getQueryScheduler(dbQuery = query) {
+  const row = await dbQuery(
     "SELECT value_json FROM crawler.settings WHERE setting_key = $1 LIMIT 1",
     [QUERY_SCHEDULER_KEY],
   );

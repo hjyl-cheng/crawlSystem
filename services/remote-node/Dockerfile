@@ -21,5 +21,5 @@ LABEL org.opencontainers.image.title="qy-remote-node-connection" \
       org.opencontainers.image.revision="${QY_VCS_REF}" \
       qy.remote.mode="connect_only"
 USER 1000:1000
-HEALTHCHECK --interval=10s --timeout=5s --start-period=30s --retries=3 CMD ["node", "scripts/runRemoteNodeConnection.mjs", "--healthcheck"]
+HEALTHCHECK NONE
 CMD ["node", "scripts/runRemoteNodeConnection.mjs"]

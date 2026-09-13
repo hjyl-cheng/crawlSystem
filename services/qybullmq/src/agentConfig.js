@@ -199,8 +199,8 @@ async function selectActiveAgentConfig() {
   };
 }
 
-export async function listEnabledAgentConfigs() {
-  const rows = await query(
+export async function listEnabledAgentConfigs(dbQuery = query) {
+  const rows = await dbQuery(
     `SELECT c.*, t.name AS prompt_name, t.version AS prompt_version,
             t.template_text, t.output_schema_json, t.status AS prompt_status,
             NULL AS prompt_hash

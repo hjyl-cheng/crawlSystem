@@ -7,7 +7,9 @@ const client=await pool.connect();
 try{
   const row=(await client.query('SELECT current_database() AS name')).rows[0];
   if(row.name!==expected)throw new Error('database identity mismatch');
-  const files=['schema.sql','routeSchema.sql','youtubeSessionSchema.sql','workerConnectionSchema.sql','workerActivationSchema.sql'];
+  const files=['schema.sql','routeSchema.sql','youtubeSessionSchema.sql','workerConnectionSchema.sql','workerActivationSchema.sql','workerCountSchema.sql','localIntakeSchema.sql'];
+  if(process.argv.includes('--nats'))files.push('natsSchema.sql');
+  if(process.argv.includes('--whole-channel'))files.push('wholeChannelSchema.sql');
   if(process.argv.includes('--apply')){
     await client.query('BEGIN');
     await client.query("SET LOCAL lock_timeout='3s'");

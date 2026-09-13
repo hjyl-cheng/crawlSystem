@@ -1,0 +1,9 @@
+# Append to the existing crawler Compose stack when deploying this fix.
+# Drain channel-crawl before replacing workers; keep existing identity/queue env.
+services:
+  worker-channel:
+    image: qy-allpachong/qybullmq:migration-admission-20260912
+  controller:
+    image: qy-allpachong/qybullmq:migration-agent-dispatch-20260912
+    environment:
+      CONTROLLER_THROUGHPUT_ENABLED: "true"

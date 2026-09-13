@@ -1,0 +1,4 @@
+# Independent remote-center stack override; requires workerCountSchema.sql.
+services:
+  remote-node-center:
+    image: qy-allpachong/remote-node-center:node-worker-count-20260912

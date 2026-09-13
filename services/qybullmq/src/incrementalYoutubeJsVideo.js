@@ -1,3 +1,5 @@
+import { planIncrementalVideoSnapshot } from './incrementalVideoSnapshot.js';
+import { checkpointItems, scannedVideoDispositionWork, prepareIncrementalVideoBatch, projectDueVideoDispositionEntries, uploadsPublishedFacts } from './incrementalVideoBatchPlan.js';
 import { assertVideoApiNetworkAllowed, isVideoApiReplay, isVideoApiHandoff } from "./videoApiContinuation.js";
 import { upsertDiscoveredVideoContent, refreshVideoContent } from "./videoContentStore.js";
 import { createVideoDetailApiFallback } from "./videoDetailApiFallback.js";
@@ -32,7 +34,6 @@ import { fullVideoStorageAction } from "./fullVideoContentStore.js";
 import { resolveCollectedVideoOutcome } from "./collectedVideoOutcome.js";
 import {
   normalizePublicationEvidence,
-  publicationEvidenceFromFields,
   publicationEvidenceCandidateWinsSql,
   publicationEvidenceConflictPatchSql,
   publicationEvidenceConflictRecord,
@@ -278,17 +279,6 @@ function detailAccess(detail) {
   return videoAccessStatus(detail);
 }
 
-function uploadsPublishedFacts(entry) {
-  const published = text(entry?.published_at) ?? text(entry?.published_day);
-  const evidence = publicationEvidenceFromFields({
-    published_at: published,
-    published_at_status: entry?.published_at_status,
-    published_at_precision: entry?.published_at_precision,
-    published_at_source: entry?.published_at_source,
-  });
-  return evidence.published_at ? evidence : null;
-}
-
 function detailSource(detail) {
   return text(detail?.source) ?? "youtubejs_player";
 }
@@ -415,42 +405,6 @@ async function latestVideoDispositionEntries(query, channelId, videoIds) {
   return new Map(latest.rows.map((row) => [text(row.source_content_id), row]));
 }
 
-function dispositionRecheckEntry(entry, prior) {
-  return {
-    ...entry,
-    disposition_recheck: {
-      candidate_id: Number(prior.candidate_id),
-      prior_kind: text(prior.disposition),
-      prior_reason_code: text(prior.result_json?.disposition?.reason_code),
-      scheduled_at: prior.next_attempt_at == null
-        ? null
-        : new Date(prior.next_attempt_at).toISOString(),
-    },
-  };
-}
-
-function scannedVideoDispositionWork(entries, priorByVideoId, observedAt, {
-  allowDueRechecks = true,
-} = {}) {
-  const observedAtMs = Date.parse(observedAt);
-  const pendingDeferredVideoIds = [];
-  const workEntries = entries.flatMap((entry) => {
-    const prior = priorByVideoId.get(entry.id);
-    const priorKind = text(prior?.disposition);
-    if (!["deferred", "terminal_excluded"].includes(priorKind)) return [entry];
-    if (!allowDueRechecks) {
-      if (priorKind === "deferred") pendingDeferredVideoIds.push(entry.id);
-      return [];
-    }
-    const nextAttemptAtMs = Date.parse(prior.next_attempt_at);
-    const due = !Number.isFinite(nextAttemptAtMs) || nextAttemptAtMs <= observedAtMs;
-    if (due) return [dispositionRecheckEntry(entry, prior)];
-    if (priorKind === "deferred") pendingDeferredVideoIds.push(entry.id);
-    return [];
-  });
-  return { workEntries, pendingDeferredVideoIds };
-}
-
 function videoActivityEvidence(videoIdValue, contentTypeValue, publication, facts = null) {
   const videoId = text(videoIdValue);
   if (!videoId) return null;
@@ -513,7 +467,7 @@ function currentRunActivityEvidence(
   return [...evidenceByVideoId.values()];
 }
 
-async function loadDueVideoDispositionEntries(query, channelId, observedAt, scanEntries, limit = 10) {
+async function loadDueVideoDispositionEntries(query, channelId, observedAt, scanEntries, limit = 10, rawRows = false) {
   const due = await query(
     `SELECT candidate.*
      FROM crawler.content_candidates candidate
@@ -537,32 +491,7 @@ async function loadDueVideoDispositionEntries(query, channelId, observedAt, scan
      LIMIT $3`,
     [channelId, observedAt, Math.max(1, limit)],
   );
-  const scannedIds = new Set(scanEntries.map((entry) => text(entry?.id)).filter(Boolean));
-  const maxPosition = scanEntries.reduce(
-    (current, entry) => Math.max(current, integer(entry?.position) ?? 0),
-    0,
-  );
-  return due.rows
-    .filter((row) => !scannedIds.has(text(row.source_content_id)))
-    .map((row, index) => {
-      const flat = row.result_json?.flat ?? {};
-      return {
-        id: text(row.source_content_id),
-        position: maxPosition + index + 1,
-        title: text(row.title) ?? text(flat.title),
-        thumbnail_url: text(row.thumbnail_url) ?? text(flat.thumbnail_url),
-        published_day: text(flat.published_day),
-        disposition_recheck: {
-          candidate_id: Number(row.candidate_id),
-          prior_kind: text(row.disposition),
-          prior_reason_code: text(row.result_json?.disposition?.reason_code),
-          scheduled_at: row.next_attempt_at == null
-            ? null
-            : new Date(row.next_attempt_at).toISOString(),
-        },
-      };
-    })
-    .filter((entry) => entry.id);
+  return rawRows ? due.rows : projectDueVideoDispositionEntries(due.rows, scanEntries);
 }
 
 async function loadDiscoveryAnchors(query, channelId) {
@@ -1729,6 +1658,7 @@ async function loadClockRecentSamplingRows(client, {
   recentWindowDays,
   clockOwnsPlayerRefresh,
   scanEntries,
+  includeUndated = false,
 }) {
   const observedUploads = scanEntries
     .map((entry) => ({
@@ -1804,6 +1734,7 @@ async function loadClockRecentSamplingRows(client, {
        AND ($4::boolean OR NOT candidate.player_enrich_open)
        AND (
          candidate.enrich_pending
+         OR ($6::boolean AND candidate.sampling_published_at IS NULL)
          OR candidate.sampling_published_at>=($2::date - ($3::int * interval '1 day'))
        )
      ORDER BY candidate.sampling_published_at DESC NULLS LAST,candidate.content_key`,
@@ -1813,6 +1744,7 @@ async function loadClockRecentSamplingRows(client, {
       recentWindowDays,
       clockOwnsPlayerRefresh,
       JSON.stringify(observedUploads),
+      includeUndated,
     ],
   );
   return recentRows.rows.map((row) => ({
@@ -2060,32 +1992,6 @@ async function reserveSamplingPlan(client, {
   return { ...samplePlan, rows };
 }
 
-function checkpointItems(discoveryEntries, samplingPlan) {
-  const detailEligibleFirstSeen = discoveryEntries.filter(
-    (entry) => entry.disposition_recheck
-      || (entry.is_upcoming !== true && entry.is_live !== true),
-  );
-  const items = [
-    ...detailEligibleFirstSeen.map((entry, ordinal) => ({
-      phase: "first_seen",
-      ordinal,
-      video_id: entry.id,
-      target_json: jsonCheckpointValue(entry),
-    })),
-    ...samplingPlan.rows.map((row, ordinal) => ({
-      phase: "recent",
-      ordinal,
-      video_id: row.source_content_id,
-      target_json: jsonCheckpointValue(row),
-    })),
-  ];
-  const identities = new Set(items.map((item) => item.video_id));
-  if (identities.size !== items.length) {
-    throw new Error("Incremental YouTubeJS checkpoint target appears in more than one Phase");
-  }
-  return items;
-}
-
 async function createCheckpointBatch({
   plan,
   runId,
@@ -2098,6 +2004,7 @@ async function createCheckpointBatch({
   startedAt,
   observedAt,
   crawlerVersion,
+  preparedPlan = null,
 }) {
   return withTransaction(async (client) => {
     const current = await loadRunCycle(client, { plan, runId, lock: true });
@@ -2107,66 +2014,22 @@ async function createCheckpointBatch({
     const existing = await loadCheckpointBatch(client, { plan, runId, cycleKey });
     if (existing) return existing;
 
-    const ids = scan.entries.map((entry) => entry.id);
-    const known = await knownVideoIds(client.query.bind(client), plan.channel_id, ids);
-    const latestDispositions = await latestVideoDispositionEntries(
-      client.query.bind(client),
-      plan.channel_id,
-      ids.filter((id) => !known.has(id)),
-    );
-    const scannedWork = scannedVideoDispositionWork(
-      scan.entries.filter((entry) => !known.has(entry.id)),
-      latestDispositions,
-      observedAt,
-      { allowDueRechecks: scan.complete === true },
-    );
-    let discoveryEntries = scannedWork.workEntries;
-    let recoveredFirstSeen = [];
-    let samplingPlan = {
-      recent_count: 0,
-      stale_ratio: 0,
-      candidate_count: 0,
-      suggested_player_quota: 0,
-      player_quota: 0,
-      next_quota: 0,
-      rows: [],
-    };
-    if (scan.complete === true && !scan.empty_uploads) {
-      recoveredFirstSeen = await loadPendingFirstSeenCheckpoints(
-        client.query.bind(client),
-        { channelId: plan.channel_id },
-      );
-      const dueDispositionEntries = await loadDueVideoDispositionEntries(
-        client.query.bind(client),
-        plan.channel_id,
-        observedAt,
-        scan.entries,
-      );
-      discoveryEntries = [...discoveryEntries, ...dueDispositionEntries];
-      const enrichMode = await loadContentEnrichMode(client, { lock: true });
-      const recentRows = await loadClockRecentSamplingRows(client, {
-        channelId: plan.channel_id,
-        planDay: plan.plan_day,
-        recentWindowDays: config.recentWindowDays,
-        clockOwnsPlayerRefresh: enrichMode === CONTENT_ENRICH_CLOCK_MODE,
-        scanEntries: scan.entries,
-      });
-      const planned = planRecentVideoSampling(recentRows, {
-        plan: samplingPlanInput,
-        config,
-        excludeVideoIds: discoveryEntries.map((entry) => entry.id),
-        now: new Date(observedAt),
-      });
-      samplingPlan = await reserveSamplingPlan(client, {
-        samplePlan: planned,
-        runId,
-        cycleKey,
-        observedAt,
-      });
-    }
-    const items = scan.complete === true
-      ? checkpointItems(discoveryEntries, samplingPlan)
-      : [];
+    const { discoveryEntries, recoveredFirstSeen, samplingPlan, pendingDeferredVideoIds, items }
+      = preparedPlan ?? await prepareIncrementalVideoBatch({ scan, observedAt, samplingPlanInput, config, state: {
+        knownVideoIds: ids => knownVideoIds(client.query.bind(client), plan.channel_id, ids),
+        latestVideoDispositions: ids => latestVideoDispositionEntries(client.query.bind(client), plan.channel_id, ids),
+        pendingFirstSeen: () => loadPendingFirstSeenCheckpoints(client.query.bind(client), { channelId: plan.channel_id }),
+        dueDispositions: entries => loadDueVideoDispositionEntries(client.query.bind(client), plan.channel_id, observedAt, entries),
+        recentRows: async entries => {
+          const enrichMode = await loadContentEnrichMode(client, { lock: true });
+          return loadClockRecentSamplingRows(client, {
+            channelId: plan.channel_id, planDay: plan.plan_day,
+            recentWindowDays: config.recentWindowDays,
+            clockOwnsPlayerRefresh: enrichMode === CONTENT_ENRICH_CLOCK_MODE, scanEntries: entries,
+          });
+        },
+        reserveSampling: samplePlan => reserveSamplingPlan(client, { samplePlan, runId, cycleKey, observedAt }),
+      } });
     const firstSeenCount = items.filter((item) => item.phase === "first_seen").length;
     const firstSeenStatus = scan.complete !== true
       ? "not_applicable"
@@ -2194,7 +2057,7 @@ async function createCheckpointBatch({
         JSON.stringify(scan),
         JSON.stringify(anchors),
         JSON.stringify(discoveryEntries),
-        JSON.stringify(scannedWork.pendingDeferredVideoIds),
+        JSON.stringify(pendingDeferredVideoIds),
         JSON.stringify(samplingPlan),
         JSON.stringify({
           ...config,
@@ -2914,7 +2777,7 @@ function checkpointExecutorResult(recorded) {
   };
 }
 
-function normalizeProbeScan(rawScanValue, anchors, config) {
+export function normalizeProbeScan(rawScanValue, anchors, config) {
   let rawScan = rawScanValue;
   if (rawScan?.stop_reason === "pagination_error") {
     const error = rawScan.error instanceof Error
@@ -3290,6 +3153,7 @@ async function recordVideoCycle({
   startedAt,
   observedAt,
   crawlerVersion,
+  onFinalized,
 }) {
   const commandEntries = scan.entries.map((entry) => {
     const facts = detailFacts(discoveryCaptures.get(entry.id)?.detail);
@@ -3324,6 +3188,7 @@ async function recordVideoCycle({
       }
       if (lockedBatch.status === "finalized") {
         await verifyFinalizedObservation(client, lockedBatch);
+        await onFinalized?.({ client, result: lockedBatch.final_result_json });
         return lockedBatch.final_result_json;
       }
       if (lockedBatch.status !== "ready") {
@@ -3588,6 +3453,7 @@ async function recordVideoCycle({
       if (resultRowCount(finalized) !== 1) {
         throw new Error(`failed to finalize Incremental YouTubeJS Batch: ${runId}/${cycleKey}`);
       }
+      await onFinalized?.({ client, result: finalResult });
       checkpointLog("batch_finalized", {
         run_id: runId,
         cycle_key: cycleKey,
@@ -3606,6 +3472,7 @@ export async function executeIncrementalYoutubeJsVideo({
   withTransaction,
   startedAt,
   fetchDetail = null,
+  onFinalized = null,
   crawlerVersion = String(process.env.CRAWLER_VERSION || "qy-v16"),
   now = () => new Date(),
 }) {
@@ -3617,6 +3484,7 @@ export async function executeIncrementalYoutubeJsVideo({
     throw new TypeError("getChannelSnapshot is required for incremental Video");
   }
   if (typeof now !== "function") throw new TypeError("now must be a function");
+  if (onFinalized !== null && typeof onFinalized !== "function") throw new TypeError("onFinalized must be a function");
   const transaction = withTransaction;
   let executionFence = null;
   withTransaction = action => transaction(async client => {
@@ -3652,7 +3520,10 @@ export async function executeIncrementalYoutubeJsVideo({
     cycleKey = current.cycleKey;
     executionFence = await claimIncrementalVideoExecution(client, { plan, runId, cycleKey });
     const loaded = await loadCheckpointBatch(client, { plan, runId, cycleKey });
-    if (loaded?.status === "finalized") await verifyFinalizedObservation(client, loaded);
+    if (loaded?.status === "finalized") {
+      await verifyFinalizedObservation(client, loaded);
+      await onFinalized?.({ client, result: loaded.final_result_json });
+    }
     return loaded;
   });
   if (batch?.status === "finalized") return batch.final_result_json;
@@ -3802,5 +3673,109 @@ export async function executeIncrementalYoutubeJsVideo({
     startedAt: new Date(batch.started_at).toISOString(),
     observedAt: new Date(batch.cycle_observed_at).toISOString(),
     crawlerVersion: text(storedConfig.crawler_version) ?? crawlerVersion,
+    onFinalized,
   });
+}
+
+// Center-only dispatch preparation. Caller owns the business fence and a
+// REPEATABLE READ transaction. Pure target planning lives in incrementalVideoSnapshot.
+export async function createIncrementalVideoDispatchSnapshot({ client, plan, runId, now = new Date() }) {
+  const isolation = (await client.query("SHOW transaction_isolation")).rows[0].transaction_isolation;
+  if (!["repeatable read", "serializable"].includes(isolation)) throw new Error("VIDEO_SNAPSHOT_ISOLATION_REQUIRED");
+  const { cycleKey } = await loadRunCycle(client, { plan, runId, lock: true });
+  await claimIncrementalVideoExecution(client, { plan, runId, cycleKey });
+  const existing = await loadCheckpointBatch(client, { plan, runId, cycleKey });
+  if (existing) {
+    await renewCheckpointReservations({ batch: existing, withTransaction: action => action(client) });
+    return jsonCheckpointValue({ version: 1, kind: 'incremental-video-snapshot', runId, cycleKey,
+      planId: plan.plan_id, channelId: plan.channel_id, resumeBatch: existing,
+      observedAt: existing.cycle_observed_at, config: existing.sampling_config_json,
+      anchors: existing.anchors_json });
+  }
+  const config = incrementalVideoPlannerConfig(plan);
+  const observedAt = new Date(now).toISOString();
+  const known = await client.query('SELECT source_content_id FROM crawler.contents WHERE channel_id=$1 ORDER BY source_content_id LIMIT 100001', [plan.channel_id]);
+  if (known.rows.length > 100000) throw new Error('VIDEO_SNAPSHOT_TOO_LARGE');
+  const latest = await client.query(`SELECT DISTINCT ON (candidate.source_content_id)
+      candidate.source_content_id,candidate.candidate_id,candidate.disposition,
+      candidate.next_attempt_at,candidate.result_json,candidate.error_message
+    FROM crawler.content_candidates candidate WHERE candidate.channel_id=$1
+      AND NOT EXISTS (SELECT 1 FROM crawler.contents content WHERE content.channel_id=$1
+        AND content.source_content_id=candidate.source_content_id)
+    ORDER BY candidate.source_content_id,candidate.candidate_id DESC LIMIT 100001`, [plan.channel_id]);
+  if (latest.rows.length > 100000) throw new Error('VIDEO_SNAPSHOT_TOO_LARGE');
+  const anchors = await loadDiscoveryAnchors(client.query.bind(client), plan.channel_id);
+  const dueDispositionRows = await loadDueVideoDispositionEntries(client.query.bind(client), plan.channel_id, observedAt, [], 10, true);
+  const pendingFirstSeen = await loadPendingFirstSeenCheckpoints(client.query.bind(client), { channelId: plan.channel_id });
+  const enrichMode = await loadContentEnrichMode(client, { lock: true });
+  const eligible = await loadClockRecentSamplingRows(client, { channelId: plan.channel_id, planDay: plan.plan_day,
+    recentWindowDays: config.recentWindowDays, clockOwnsPlayerRefresh: enrichMode === CONTENT_ENRICH_CLOCK_MODE,
+    scanEntries: [], includeUndated: true });
+  const reserved = await reserveSamplingPlan(client, { samplePlan: { rows: eligible }, runId, cycleKey, observedAt });
+  return jsonCheckpointValue({ version: 1, kind: 'incremental-video-snapshot', runId, cycleKey,
+    planId: plan.plan_id, channelId: plan.channel_id, observedAt, config, anchors,
+    samplingPlanInput: { ...plan, capacity: { ...plan.capacity, factor: 1,
+      player_cap: Math.floor(plan.capacity.player_cap * plan.capacity.factor) } },
+    knownVideoIds: known.rows.map(row => row.source_content_id), latestDispositions: latest.rows,
+    dueDispositionRows, pendingFirstSeen, recentRows: reserved.rows });
+}
+
+export async function renewIncrementalVideoDispatchSnapshot(client, snapshot) {
+  if (snapshot.resumeBatch?.status === "finalized") return 0;
+  const batch = snapshot.resumeBatch ?? { sampling_plan_json: { rows: snapshot.recentRows } };
+  const expected = checkpointReservationFences(batch).length;
+  const renewed = await renewCheckpointReservations({ batch, withTransaction: action => action(client) });
+  if (renewed !== expected) throw new Error('VIDEO_SNAPSHOT_RESERVATION_STALE');
+  return renewed;
+}
+
+export async function releaseUnadoptedIncrementalVideoSnapshot(client, snapshot) {
+  if (!snapshot || snapshot.resumeBatch) return 0;
+  const batch = await loadCheckpointBatch(client, { plan: { plan_id: snapshot.planId, channel_id: snapshot.channelId },
+    runId: snapshot.runId, cycleKey: snapshot.cycleKey });
+  const selected = new Set(batch?.sampling_plan_json.rows.map(row => row.content_key) ?? []);
+  return releaseClockContentEnrichReservationsInTransaction(client, { preparedCaptures: new Map(
+    snapshot.recentRows.filter(row => !selected.has(row.content_key))
+      .map(row => [row.content_key, { fence: row.checkpoint_content_enrich?.fence }])) });
+}
+
+// Adopt the node's frozen target plan into the original checkpoint schema.
+// The caller already holds the remote task + business fence in this transaction.
+// Original observation/content writers continue to consume these checkpoints.
+export async function adoptIncrementalVideoDispatchResult(client, { plan, snapshot, result }) {
+  const { cycleKey } = await loadRunCycle(client, { plan, runId: snapshot.runId, lock: true });
+  if (cycleKey !== snapshot.cycleKey || snapshot.planId !== plan.plan_id || snapshot.channelId !== plan.channel_id) {
+    throw new Error('VIDEO_SNAPSHOT_IDENTITY_CONFLICT');
+  }
+  let existing = await loadCheckpointBatch(client, { plan, runId: snapshot.runId, cycleKey });
+  await renewIncrementalVideoDispatchSnapshot(client, existing ? { resumeBatch: existing } : snapshot);
+  let prepared;
+  if (snapshot.resumeBatch) {
+    if (!existing || existing.target_hash !== snapshot.resumeBatch.target_hash) throw new Error('VIDEO_SNAPSHOT_BATCH_CONFLICT');
+  } else if (result.scan) {
+    const scan = normalizeProbeScan(result.scan, snapshot.anchors, snapshot.config);
+    prepared = await planIncrementalVideoSnapshot(snapshot, scan);
+    if (existing && existing.target_hash !== incrementalYoutubeJsVideoTargetHash(prepared.items)) throw new Error('VIDEO_SNAPSHOT_BATCH_CONFLICT');
+    if (!existing) existing = await createCheckpointBatch({ plan, runId: snapshot.runId, cycleKey, scan,
+      anchors: snapshot.anchors, samplingPlanInput: snapshot.samplingPlanInput, config: snapshot.config,
+      withTransaction: action => action(client), startedAt: snapshot.observedAt, observedAt: snapshot.observedAt,
+      crawlerVersion: String(process.env.CRAWLER_VERSION || 'qy-v16'), preparedPlan: prepared });
+  }
+  if (existing) {
+    const expected = new Map(existing.items.map(item => [`${item.phase}:${item.video_id}`, item]));
+    const seen = new Set();
+    for (const item of result.items ?? []) {
+      const key = `${item.phase}:${item.video_id}`;
+      if (seen.has(key) || !expected.has(key) || expected.get(key).ordinal !== item.ordinal) throw new Error('VIDEO_SNAPSHOT_TARGET_CONFLICT');
+      seen.add(key);
+    }
+    if (!result.failure && seen.size !== expected.size) throw new Error('VIDEO_SNAPSHOT_RESULT_INCOMPLETE');
+  } else if (result.items?.length || !result.failure) throw new Error('VIDEO_SNAPSHOT_SCAN_MISSING');
+  if (!snapshot.resumeBatch) {
+    const selected = new Set(existing?.sampling_plan_json.rows.map(row => row.content_key) ?? []);
+    const unselected = snapshot.recentRows.filter(row => !selected.has(row.content_key));
+    await releaseClockContentEnrichReservationsInTransaction(client, { preparedCaptures:
+      new Map(unselected.map(row => [row.content_key, { fence: row.checkpoint_content_enrich?.fence }])) });
+  }
+  return existing;
 }

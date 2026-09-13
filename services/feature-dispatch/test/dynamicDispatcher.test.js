@@ -112,6 +112,7 @@ test("capacity probe reads all queues and the proxy Channel role", async () => {
     name,
     async getJobCounts() { return counts({ active: 1 }); },
     async getWorkersCount() { return workers; },
+    async getWorkers() { return Array.from({length:workers},()=>({rawname:'legacy'})); },
     async getGlobalConcurrency() { return workers - 1; },
     async isPaused() { return false; },
   });
@@ -131,6 +132,41 @@ test("capacity probe reads all queues and the proxy Channel role", async () => {
   assert.equal(sampled.incremental.workers, 5);
   assert.equal(sampled.incremental.global_concurrency, 4);
   assert.equal(sampled.proxy_channel_ready, 4);
+});
+
+test("26 future retries do not consume the dispatch budget of 25 incremental workers", async () => {
+  const queue = (name, values, workers) => ({
+    name,
+    async getJobCounts() { return counts(values); },
+    async getWorkersCount() { return workers; },
+    async getWorkers() { return Array.from({length:workers},()=>({rawname:'legacy'})); },
+    async getGlobalConcurrency() { return 0; },
+    async isPaused() { return false; },
+    toKey(type) { return `bull:${name}:${type}`; },
+    client: Promise.resolve({ async zcount(key, minimum, maximum) {
+      assert.equal(key, 'bull:youtube-channel-incremental:delayed');
+      assert.equal(minimum, '-inf');
+      assert.ok(Math.abs(maximum / 4096 - Date.now()) < 1000);
+      return 0;
+    } }),
+  });
+  const probe = new BullMqCapacityProbe({
+    incrementalQueue: queue('youtube-channel-incremental', { active: 9, delayed: 26 }, 25),
+    channelCrawlQueue: queue('youtube-channel-crawl', { active: 40, prioritized: 1000 }, 40),
+    agentIncrementalQueue: queue('youtube-agent-incremental', {}, 3),
+  });
+  const sample = await probe.sample();
+  const budget = computeDispatchBudget(sample, { minimumIncrementalShare: 0.7 });
+  assert.equal(sample.incremental.counts.delayed, 26, 'preserve raw queue statistics');
+  assert.equal(budget.incremental_target, 35);
+  assert.equal(budget.incremental_pressure, 9);
+  assert.equal(budget.total_limit, 26, 'continue filling workers while API requests wait');
+});
+
+test("due retries still count as runnable work and older telemetry remains conservative", () => {
+  assert.equal(queuePressure(counts({ active: 9, delayed: 26, delayed_ready: 3 })), 12);
+  assert.equal(queuePressure(counts({ active: 9, delayed: 26 })), 35);
+  assert.equal(queuePressure(counts({ active: 9, delayed: 2, delayed_ready: 3 })), 11);
 });
 
 test("release envelope receives scheduled_at only at dispatch time", () => {

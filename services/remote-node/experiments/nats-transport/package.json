@@ -1,0 +1,11 @@
+{
+  "name": "qy-nats-transport-experiment",
+  "private": true,
+  "type": "module",
+  "scripts": { "test": "node run.mjs" },
+  "dependencies": {
+    "@nats-io/transport-node": "3.4.0",
+    "@nats-io/jetstream": "3.4.0",
+    "pg": "8.22.0"
+  }
+}

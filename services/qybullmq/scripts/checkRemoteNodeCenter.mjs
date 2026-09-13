@@ -7,3 +7,9 @@ const response=await fetch(`http://127.0.0.1:${process.env.REMOTE_NODE_CENTER_PO
 });
 const result=await response.json();
 if(response.status!==200 || result.nodeId!==id || !Array.isArray(result.workers))throw new Error('REMOTE_CENTER_UNHEALTHY');
+
+if(process.env.REMOTE_NODE_NATS_URL){
+  const transport=await fetch(`http://127.0.0.1:${process.env.REMOTE_NODE_CENTER_PORT||3187}/internal/node-deployments/transport-health`,{
+    method:'POST',headers:{authorization:`Bearer ${token}`},signal:AbortSignal.timeout(4000),redirect:'error'});
+  if(!transport.ok)throw new Error('REMOTE_NATS_UNHEALTHY');
+}

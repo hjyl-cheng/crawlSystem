@@ -5,64 +5,96 @@ import { INCREMENTAL_QUEUE } from '../incrementalPlan.js';
 import { RotaSlotAdapter } from '../rotaSlotAdapter.js';
 import { RemoteManagedIncrementalRuntime } from './managedIncrementalRuntime.js';
 import { createCenterIncrementalProcessor } from './centerIncrementalProcessor.js';
-import { REMOTE_RUNTIME_REVISION } from './workerActivationStore.js';
+import { WHOLE_CHANNEL_RUNTIME_REVISION } from './workerActivationStore.js';
 import { recoverRemoteSlot, remoteSlotUnsettled, supervisionLockKey } from './centerExecutionRecovery.js';
 import { createRemoteYoutubeCheckpointConsumer } from './youtubeProfileCheckpoint.js';
+import {intakeWorkerName,publishWorkerIntake} from '../workerIntakeTelemetry.js';
+import {SupervisionGuards} from './supervisionGuards.js';
 
 const key = row => `${row.node_id}/${row.slot}`;
-const same = (a,b) => ['node_id','slot','deployment_id','config_hash','instance_id','relay_boot_id'].every(field=>a[field]===b[field]);
+const same = (a,b) => ['node_id','slot','deployment_id','config_hash','instance_id','relay_boot_id','runtime_revision'].every(field=>a[field]===b[field]);
 export { supervisionLockKey };
 const identity = row => ({version:1,mode:'incremental_collect',node_id:row.node_id,slot:row.slot,
   deployment_id:row.deployment_id,config_hash:row.config_hash,instance_id:row.instance_id,
-  relay_boot_id:row.relay_boot_id,runtime_revision:REMOTE_RUNTIME_REVISION,accepting:true});
+  relay_boot_id:row.relay_boot_id,runtime_revision:row.runtime_revision,accepting:true});
 
 // One central queue consumer/Rota adapter for each admitted remote process.
-// A dedicated PG session lock excludes another center from owning the same
-// slot. All business policy stays in the original managed attempt and runner.
+// Independent PG advisory locks, held on a bounded group of sessions, exclude
+// another center from owning the same slot. All business policy stays in the original managed attempt and runner.
 export class RemoteCenterExecutionSupervisor {
   constructor({store,channelStore,routes,youtubeSessions,activation,guardPool,connection,prefix,
-    allowedNodeIds,resolvedPolicy,profileSecret,rotaClient,proxyBaseUrl,proxyPassword,
-    createApiFallback=null,intervalMs=1000,maxSlots=32,report=()=>{},WorkerClass=Worker,createRota=args=>new RotaSlotAdapter(args),
+    allowedNodeIds=[],dashboardManaged=false,resolvedPolicy,profileSecret,rotaClient,proxyBaseUrl,proxyPassword,
+    createApiFallback=null,wholeChannels=null,loadWholeApiPolicy=null,intervalMs=1000,maxSlots=null,guardGroups=4,report=()=>{},WorkerClass=Worker,createRota=args=>new RotaSlotAdapter(args),
     createRuntime=args=>new RemoteManagedIncrementalRuntime(args),createProcessor=createCenterIncrementalProcessor}) {
-    if(!Array.isArray(allowedNodeIds)||!allowedNodeIds.length||allowedNodeIds.some(id=>!/^[a-f0-9-]{36}$/.test(id)))throw new TypeError('explicit admitted node IDs required');
-    if(!guardPool || !connection || typeof prefix!=='string' || !prefix || intervalMs<50 || !Number.isInteger(maxSlots) || maxSlots<1 || maxSlots>32)throw new TypeError('explicit supervision database, Redis connection and queue prefix required');
-    Object.assign(this,{store,channelStore,routes,youtubeSessions,activation,guardPool,connection,prefix,allowedNodeIds,
-      resolvedPolicy,profileSecret,rotaClient,proxyBaseUrl,proxyPassword,createApiFallback,intervalMs,maxSlots,report,WorkerClass,createRota,createRuntime,createProcessor});
-    this.entries=new Map();this.stopping=false;this.loop=null;
+    if(!Array.isArray(allowedNodeIds)||(!allowedNodeIds.length&&!dashboardManaged)||allowedNodeIds.some(id=>!/^[a-f0-9-]{36}$/.test(id)))throw new TypeError('explicit admitted node IDs required');
+    if(!guardPool || !connection || typeof prefix!=='string' || !prefix || intervalMs<50 || (maxSlots!==null && (!Number.isSafeInteger(maxSlots) || maxSlots<1)))throw new TypeError('explicit supervision database, Redis connection and queue prefix required');
+    Object.assign(this,{store,channelStore,routes,youtubeSessions,activation,guardPool,connection,prefix,allowedNodeIds,dashboardManaged,
+      resolvedPolicy,profileSecret,rotaClient,proxyBaseUrl,proxyPassword,createApiFallback,wholeChannels,loadWholeApiPolicy,intervalMs,maxSlots,report,WorkerClass,createRota,createRuntime,createProcessor});
+    this.entries=new Map();this.stopping=false;this.loop=null;this.waitAbort=new AbortController();
+    this.guards=new SupervisionGuards({pool:guardPool,groups:guardGroups});
     this.recoveryCheckpoints=youtubeSessions?createRemoteYoutubeCheckpointConsumer({sessions:youtubeSessions,profileSecret}):null;
   }
-  // Called under the node/connection row locks by activate, heartbeat and claim.
-  async verifyExecution(client,row) {
+  allowsNode(nodeId) { return this.dashboardManaged || this.allowedNodeIds.includes(nodeId); }
+  isProcessing(row) { return this.entries.get(key(row))?.processing === true; }
+  preparationState(row) {
     const entry=this.entries.get(key(row));
+    if(!row.activation_requested || !entry || entry.closing || entry.blocked)return null;
+    return entry.starting && !entry.rota.status().started ? 'waiting_network' : null;
+  }
+  async networkCapacity() {
+    if(this.capacityUntil>Date.now())return this.capacityValue;
+    if(!this.capacityRead)this.capacityRead=(async()=>{
+      try {
+        const role=(await this.rotaClient.capacity()).roles?.channel;
+        this.capacityValue=Number.isInteger(role?.provisioned)&&Number.isInteger(role?.claimed)
+          ?{provisioned:role.provisioned,claimed:role.claimed,available:Math.max(0,role.provisioned-role.claimed)}:null;
+      } catch {this.capacityValue=null;}
+      this.capacityUntil=Date.now()+10000;
+      return this.capacityValue;
+    })().finally(()=>{this.capacityRead=null;});
+    return this.capacityRead;
+  }
+  // Called under the node/connection row locks by activate, heartbeat and claim.
+  executionReady(entry,row) {
     if(!entry?.owned || !entry.queueReady || !same(entry.row,row) || entry.aborting || entry.redis?.status!=='ready')return false;
     const state=entry.rota.status();
     if(!state.started || state.closing || !state.assignment?.ready || (entry.closing && !entry.processing))return false;
     if(entry.rota.workerId!==entry.row.rota_worker_id || entry.rota.workerInstanceId!==entry.supervisorId)return false;
-    // Verify that this precise session still holds the advisory lock, rather
-    // than trusting a TCP error event that may arrive after a backend restart.
+    return true;
+  }
+  async verifyExecution(client,row) {
+    const entry=this.entries.get(key(row));
+    if(!this.executionReady(entry,row))return false;
+    // Check the exact backend lock, not only delayed connection error events.
     const guard=await client.query(`SELECT 1 FROM pg_locks WHERE locktype='advisory' AND pid=$1 AND granted
       AND classid=781138012::oid AND objid=(hashtext($2)::bigint & 4294967295)::oid AND objsubid=2`,[entry.backendPid,supervisionLockKey(row)]);
     return guard.rowCount===1;
   }
   async ready(entry) {
     if(this.stopping || entry.closing || !entry.owned || !entry.queueReady)return false;
-    return this.store.transaction(async client=>{
-      const row=(await client.query(`SELECT w.*,n.state AS node_state,w.connected_until>clock_timestamp() AS alive
-        FROM remote_ingestion.worker_connections w JOIN remote_ingestion.nodes n USING(node_id)
-        WHERE w.node_id=$1 AND w.slot=$2`,[entry.row.node_id,entry.row.slot])).rows[0];
-      return !!row && row.node_state==='active' && row.alive && row.accepting && row.enabled && await this.verifyExecution(client,row);
-    });
+    const row=(await this.store.pool.query(`SELECT w.*,n.state AS node_state,
+      w.connected_until>clock_timestamp() AS alive,
+      EXISTS(SELECT 1 FROM pg_locks WHERE locktype='advisory' AND pid=$3 AND granted
+        AND classid=781138012::oid AND objid=(hashtext($4)::bigint & 4294967295)::oid AND objsubid=2) AS guard_owned
+      FROM remote_ingestion.worker_connections w JOIN remote_ingestion.nodes n USING(node_id)
+      WHERE w.node_id=$1 AND w.slot=$2`,[entry.row.node_id,entry.row.slot,entry.backendPid,supervisionLockKey(entry.row)])).rows[0];
+    return !!row && row.node_state==='active' && row.alive && row.accepting && row.activation_requested
+      && row.enabled && row.guard_owned && this.executionReady(entry,row);
   }
+
   async startEntry(row) {
     const entry={row,supervisorId:randomUUID(),owned:false,queueReady:false,closing:false};
     this.entries.set(key(row),entry);
     try {
-      entry.guard=await this.guardPool.connect();
-      entry.guard.on('error',()=>{entry.owned=false;void this.closeEntry(entry,{abort:true}).catch(()=>{});});
-      const locked=(await entry.guard.query('SELECT pg_try_advisory_lock(781138012,hashtext($1)) AS locked,pg_backend_pid() AS pid',[supervisionLockKey(row)])).rows[0];
-      if(!locked.locked){entry.guard.release();entry.guard=null;this.entries.delete(key(row));return;}
-      entry.owned=true;entry.backendPid=locked.pid;
-      if(await this.unsettled(row)){
+      entry.guard=await this.guards.acquire(supervisionLockKey(row),()=>{entry.owned=false;void this.closeEntry(entry,{abort:true}).catch(()=>{});});
+      if(!entry.guard){this.entries.delete(key(row));return;}
+      if(!entry.guard.alive)throw new Error('SUPERVISION_SESSION_LOST');
+      entry.owned=true;entry.backendPid=entry.guard.backendPid;
+      const unsettled=await this.unsettled(row);
+      // A session can be lost while the initial SQL read is pending. Cleanup
+      // may already have run; never create consumers after that point.
+      if(!entry.owned || entry.closing || this.stopping){await this.closeEntry(entry);return;}
+      if(unsettled){
         entry.blocked=true;
         await this.activation.drain(row.node_id,row.slot,{keepRequested:true});
         this.report({event:'remote_center_previous_execution_unsettled',node_id:row.node_id,slot:row.slot});
@@ -71,6 +103,8 @@ export class RemoteCenterExecutionSupervisor {
       if(!row.alive || !row.accepting || !row.activation_requested){await this.closeEntry(entry);return;}
       const runtime=this.createRuntime({channelStore:this.channelStore,routes:this.routes,youtubeSessions:this.youtubeSessions,
         nodeId:row.node_id,slot:row.slot,profileSecret:this.profileSecret,createApiFallback:this.createApiFallback,
+        wholeChannels:row.runtime_revision===WHOLE_CHANNEL_RUNTIME_REVISION?this.wholeChannels:null,
+        loadWholeApiPolicy:this.loadWholeApiPolicy,
         assertAdmission:async client=>{
           const current=(await client.query(`SELECT *,connected_until>clock_timestamp() AS alive
             FROM remote_ingestion.worker_connections WHERE node_id=$1 AND slot=$2`,[row.node_id,row.slot])).rows[0];
@@ -84,7 +118,7 @@ export class RemoteCenterExecutionSupervisor {
         entry.processing=true;
         try{return await process(job,token);}finally{entry.processing=false;}
       },{connection:this.connection,prefix:this.prefix,
-        concurrency:1,autorun:false});
+        concurrency:1,autorun:false,name:intakeWorkerName('remote',`${row.node_id}-${row.slot}`)});
       entry.worker.on('error',()=>this.report({event:'remote_center_queue_error',node_id:row.node_id,slot:row.slot}));
       entry.worker.on('failed',(job,error)=>this.report({event:'remote_center_job_failed',node_id:row.node_id,slot:row.slot,job_id:job?.id,code:error?.code??error?.name}));
       await entry.worker.waitUntilReady();
@@ -98,8 +132,9 @@ export class RemoteCenterExecutionSupervisor {
         if(entry.closing||this.stopping)return;
         entry.queueReady=true;
         entry.running=entry.worker.run().catch(()=>this.closeEntry(entry,{abort:true}));
-        await this.activation.activate(identity(row));
-        if(await this.ready(entry))entry.worker.resume();
+        await this.activation.activate(identity(row),{requireRequested:true});
+        const ready=await this.ready(entry);await publishWorkerIntake(entry.worker,ready);
+        if(ready)entry.worker.resume();
       }).catch(()=>this.closeEntry(entry,{abort:true}));
     } catch {
       await this.closeEntry(entry,{abort:true});
@@ -112,20 +147,28 @@ export class RemoteCenterExecutionSupervisor {
   closeEntry(entry,{abort=false}={}) {
     if(entry.closed)return entry.closed;
     entry.closing=true;entry.aborting=abort;
+    const cleanup=async(stage,action)=>{
+      try { await action(); } catch(error) {
+        // Failed cleanup belongs to this slot. Its persisted execution remains
+        // fenced and the replacement supervisor must recover it before intake.
+        this.report({event:'remote_center_cleanup_failed',node_id:entry.row.node_id,
+          slot:entry.row.slot,stage,code:error?.code??error?.name??'Error'});
+      }
+    };
     entry.closed=(async()=>{
       await entry.recovering?.catch(()=>{});
-      await entry.worker?.pause(true);
+      await cleanup('pause',()=>entry.worker?.pause(true));
+      if(entry.worker)await publishWorkerIntake(entry.worker,false).catch(()=>{});
       // Normal stop preserves in-flight channel/country/API work. Unexpected
       // loss of exclusive ownership aborts the original Rota execution.
-      if(abort)await entry.rota?.close();
-      await entry.worker?.close();
-      await entry.rota?.close();
-      if(entry.owned)await this.activation.drain(entry.row.node_id,entry.row.slot,{keepRequested:true});
+      if(abort)await cleanup('abort_route',()=>entry.rota?.close());
+      await cleanup('close_worker',()=>entry.worker?.close());
+      await cleanup('close_route',()=>entry.rota?.close());
+      if(entry.owned)await cleanup('drain',()=>this.activation.drain(entry.row.node_id,entry.row.slot,{keepRequested:true}));
     })().finally(async()=>{
       entry.owned=false;
       if(entry.guard){
-        await entry.guard.query('SELECT pg_advisory_unlock(781138012,hashtext($1))',[supervisionLockKey(entry.row)]).catch(()=>{});
-        entry.guard.release(true);entry.guard=null;
+        await entry.guard.release().catch(()=>{});entry.guard=null;
       }
       if(this.entries.get(key(entry.row))===entry)this.entries.delete(key(entry.row));
     });
@@ -133,21 +176,45 @@ export class RemoteCenterExecutionSupervisor {
   }
   async tick() {
     if(this.stopping)return;
-    const rows=(await this.store.pool.query(`SELECT w.*,s.rota_worker_id,w.connected_until>clock_timestamp() AS alive
+    const owners=[...this.entries.values()].filter(e=>e.owned).map(e=>({pid:e.backendPid,lock_key:supervisionLockKey(e.row)}));
+    const [connections,locks]=await Promise.all([this.store.pool.query(`SELECT w.*,s.rota_worker_id,w.connected_until>clock_timestamp() AS alive
       FROM remote_ingestion.worker_connections w JOIN remote_ingestion.nodes n USING(node_id)
       JOIN remote_ingestion.network_slots s USING(node_id,slot)
-      WHERE w.node_id=ANY($1::uuid[]) AND n.state='active' AND w.mode='incremental_collect'`,[this.allowedNodeIds])).rows;
+      WHERE (w.node_id=ANY($1::uuid[]) OR ($2::boolean AND EXISTS(
+        SELECT 1 FROM remote_ingestion.node_deployments d WHERE d.node_id=w.node_id AND d.deployment_id=w.deployment_id)))
+        AND n.state='active' AND w.mode='incremental_collect'`,[this.allowedNodeIds,this.dashboardManaged]),
+      this.store.pool.query(`SELECT owner.pid,owner.lock_key FROM pg_locks AS guard
+        JOIN jsonb_to_recordset($1::jsonb) AS owner(pid integer,lock_key text)
+          ON guard.pid=owner.pid AND guard.objid=(hashtext(owner.lock_key)::bigint & 4294967295)::oid
+        WHERE guard.locktype='advisory' AND guard.granted AND guard.classid=781138012::oid AND guard.objsubid=2`,[JSON.stringify(owners)])]);
+    const rows=connections.rows,owned=new Set(locks.rows.map(r=>`${r.pid}/${r.lock_key}`));
+    const updates=[];
+    // Refresh existing consumers together. Slow admission or recovery of one
+    // slot cannot hold back the other slots' 15-second intake advertisements.
+    for(const row of rows){
+      const entry=this.entries.get(key(row));
+      if(!entry || !same(entry.row,row) || entry.blocked || !entry.queueReady || entry.closing)continue;
+      const ready=!this.stopping && row.activation_requested && row.alive && row.accepting && row.enabled
+        && owned.has(`${entry.backendPid}/${supervisionLockKey(row)}`) && this.executionReady(entry,row);
+      updates.push((async()=>{
+        if(!ready)await entry.worker.pause(true);
+        await publishWorkerIntake(entry.worker,ready);
+        if(ready && !entry.closing && !this.stopping)entry.worker.resume();
+      })());
+    }
+    const refreshed=await Promise.allSettled(updates);
+    const failed=refreshed.find(r=>r.status==='rejected');if(failed)throw failed.reason;
     for(const row of rows){
       const entry=this.entries.get(key(row));
       if(entry && !same(entry.row,row)){void this.closeEntry(entry,{abort:true}).catch(()=>{});continue;}
-      if(!entry){if(this.entries.size<this.maxSlots
+      if(!entry){if((this.maxSlots===null || this.entries.size<this.maxSlots) && this.guards.canAcquire(supervisionLockKey(row))
         && ((row.activation_requested&&row.alive&&row.accepting)||await this.unsettled(row)))await this.startEntry(row);continue;}
       if(entry.blocked){
         if(entry.closing||entry.recovering)continue;
-        if(entry.recovered || !await this.unsettled(row)){await this.closeEntry(entry);continue;}
+        if(entry.recovered){void this.closeEntry(entry).catch(()=>{});continue;}
         // A slow recovery waits only on this slot; other queue consumers keep
         // reconciling. Do not release its guard until its transaction finishes.
-        entry.recovering=recoverRemoteSlot({guard:entry.guard,row,lockKey:supervisionLockKey(row),profileSecret:this.profileSecret,checkpoints:this.recoveryCheckpoints})
+        entry.recovering=entry.guard.withSession(guard=>recoverRemoteSlot({guard,row,lockKey:supervisionLockKey(row),profileSecret:this.profileSecret,checkpoints:this.recoveryCheckpoints}))
           .then(result=>{entry.recovered=result.settled;
             if(result.closed || result.settled)this.report({event:'remote_center_execution_recovered',node_id:row.node_id,slot:row.slot,
               attempts_closed:result.closed,settled:result.settled});})
@@ -155,22 +222,33 @@ export class RemoteCenterExecutionSupervisor {
           .finally(()=>{entry.recovering=null;});
         continue;
       }
-      if(!entry.queueReady||entry.closing)continue;
-      if(!row.alive || !row.accepting){await entry.worker.pause(true);continue;}
-      // Explicit drain is respected; enabling is performed once per attachment,
-      // never by a polling loop that would undo an operator's stop request.
-      if(await this.ready(entry))entry.worker.resume();else await entry.worker.pause(true);
+      // Closing a consumer drains its current job; it must not block the
+      // shared refresh loop while that channel finishes.
+      if(!row.activation_requested)void this.closeEntry(entry).catch(()=>{});
     }
     const present=new Set(rows.map(key));
     for(const [id,entry] of this.entries)if(!present.has(id))void this.closeEntry(entry,{abort:true}).catch(()=>{});
   }
   start() {
     if(this.loop)return;
-    this.loop=(async()=>{while(!this.stopping){try{await this.tick();}catch{for(const entry of this.entries.values())await entry.worker?.pause(true);this.report({event:'remote_center_reconcile_failed'});}
-      if(!this.stopping)await delay(this.intervalMs);}})();
+    this.loop=(async()=>{while(!this.stopping){
+      // Subscribe before reading: a concurrent committed pause cannot be lost.
+      const notification=this.channelStore.transportSignals?.watch('supervisor',{timeoutMs:5000,signal:this.waitAbort.signal});
+      try {
+        try{await this.tick();}catch{
+          for(const entry of this.entries.values())await entry.worker?.pause(true);
+          this.report({event:'remote_center_reconcile_failed'});
+        }
+        if(!this.stopping){
+          if(notification){await notification.wait;await delay(100,null,{signal:this.waitAbort.signal}).catch(()=>{});}
+          else await delay(this.intervalMs,null,{signal:this.waitAbort.signal}).catch(()=>{});
+        }
+      } finally {notification?.cancel();}
+    }})();
   }
   async stop() {
-    this.stopping=true;await this.loop;
+    this.stopping=true;this.waitAbort.abort();await this.loop;
     await Promise.all([...this.entries.values()].map(entry=>this.closeEntry(entry)));
+    await this.guards.close();
   }
 }

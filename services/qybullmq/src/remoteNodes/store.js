@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { PUBLICATION_WRITER_VERSION } from '../publicationWriterVersion.js';
 import { decodeResult, generation, hash, RemoteProtocolError, uuid } from './protocol.js';
 
 const conflict = (code) => { throw new RemoteProtocolError(code); };
@@ -12,10 +13,23 @@ export class RemoteNodeStore {
     Object.assign(this, { pool, leaseSeconds, maxBacklog, maxExecutions, maxProcessAttempts, retrySeconds });
   }
 
-  async transaction(action) {
+  async transaction(action, options = {}) {
+    // Repeatable-read snapshot actions contain only transactional SQL and pure
+    // planning. Retry an aborted transaction, never an ambiguous COMMIT result.
+    for (let attempt = 0; ; attempt++) {
+      try { return await this.transactionAttempt(action, options); }
+      catch (error) {
+        if (!options.repeatableRead || !['40001', '40P01'].includes(error.code) || attempt >= 4) throw error;
+        await new Promise(resolve => setTimeout(resolve, 10 + Math.floor(Math.random() * 30) * (attempt + 1)));
+      }
+    }
+  }
+
+  async transactionAttempt(action, { repeatableRead = false } = {}) {
     const client = await this.pool.connect();
     try {
-      await client.query('BEGIN');
+      await client.query(repeatableRead ? 'BEGIN ISOLATION LEVEL REPEATABLE READ' : 'BEGIN');
+      await client.query("SELECT set_config('publication.writer_version',$1,true)",[PUBLICATION_WRITER_VERSION]);
       await client.query("SET LOCAL synchronous_commit = on");
       await client.query("SET LOCAL statement_timeout = '15s'");
       await client.query("SET LOCAL lock_timeout = '3s'");
@@ -82,12 +96,14 @@ export class RemoteNodeStore {
       throw new RemoteProtocolError('INVALID_WORKER_SLOT', 400);
     }
     return this.transaction(async (client) => {
-      // Serialize capacity checks without blocking task foreign-key checks.
-      const node = (await client.query(`SELECT * FROM remote_ingestion.nodes WHERE node_id=$1 FOR NO KEY UPDATE`, [nodeId])).rows[0];
+      // Managed slots share the node-state fence with heartbeats and route
+      // operations. Serialize only lease allocation on a separate capacity lock.
+      // The unslotted legacy protocol retains its node last-seen update.
+      const node = (await client.query(`SELECT * FROM remote_ingestion.nodes WHERE node_id=$1 ${slot === null ? 'FOR NO KEY UPDATE' : 'FOR SHARE'}`, [nodeId])).rows[0];
       if (!node || node.state === 'disabled') throw new RemoteProtocolError('UNAUTHORIZED', 401);
       const permission = authorize ? await authorize(client) : { allowNew: true };
       if (node.slot_claims_required && slot === null) conflict('WORKER_SLOT_REQUIRED');
-      await client.query('UPDATE remote_ingestion.nodes SET last_seen_at=clock_timestamp() WHERE node_id=$1', [nodeId]);
+      if (slot === null) await client.query('UPDATE remote_ingestion.nodes SET last_seen_at=clock_timestamp() WHERE node_id=$1', [nodeId]);
       const previous = (await client.query(`SELECT t.*, c.node_id AS claiming_node, c.generation AS claimed_generation,
         c.worker_slot AS claiming_slot,
         (t.lease_until > clock_timestamp()) AS alive FROM remote_ingestion.claims c
@@ -100,6 +116,7 @@ export class RemoteNodeStore {
         return this.lease(previous);
       }
       if (node.state !== 'active' || !permission.allowNew) return null;
+      await client.query('SELECT pg_advisory_xact_lock(781138017,hashtext($1))', [nodeId]);
       if (slot !== null) {
         const registered = (await client.query('SELECT 1 FROM remote_ingestion.network_slots WHERE node_id=$1 AND slot=$2', [nodeId, slot])).rows[0];
         if (!registered) conflict('UNKNOWN_NETWORK_SLOT');

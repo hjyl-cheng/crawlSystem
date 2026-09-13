@@ -12,7 +12,9 @@ else{
       if(previous!==status.state)console.log(JSON.stringify({event:'remote_node_incremental',...status}));
       previous=status.state;
     }});
-  }catch{
-    console.error(JSON.stringify({event:'remote_node_incremental_failed'}));process.exitCode=1;
+  }catch(error){
+    const code=String(error?.code||error?.message||error?.name||'UNKNOWN');
+    console.error(JSON.stringify({event:'remote_node_incremental_failed',
+      code:/^[A-Z][A-Z0-9_]{0,79}$/.test(code)?code:'NODE_EXECUTION_FAILED'}));process.exitCode=1;
   }
 }

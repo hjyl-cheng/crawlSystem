@@ -1,6 +1,8 @@
 import { RemoteProtocolError, uuid } from './protocol.js';
 
 export const REMOTE_RUNTIME_REVISION = 'youtubejs-incremental-v1';
+export const WHOLE_CHANNEL_RUNTIME_REVISION = 'youtubejs-incremental-whole-v1';
+const supportedRuntime = value => [REMOTE_RUNTIME_REVISION, WHOLE_CHANNEL_RUNTIME_REVISION].includes(value);
 const fail = code => { throw new RemoteProtocolError(code); };
 const slotValid = value => typeof value === 'string' && /^[a-z0-9-]{1,60}$/.test(value);
 const hashValid = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
@@ -33,7 +35,7 @@ export class RemoteWorkerActivationStore {
     const fields=['version','mode','node_id','slot','deployment_id','config_hash','instance_id','relay_boot_id','runtime_revision','accepting'];
     if(!value || Object.keys(value).some(key=>!fields.includes(key)) || value.version!==1 || value.mode!=='incremental_collect'
       || value.node_id!==nodeId || !slotValid(value.slot) || !hashValid(value.config_hash)
-      || !/^[a-f0-9]{48}$/.test(value.relay_boot_id) || value.runtime_revision!==REMOTE_RUNTIME_REVISION
+      || !/^[a-f0-9]{48}$/.test(value.relay_boot_id) || !supportedRuntime(value.runtime_revision)
       || typeof value.accepting!=='boolean')throw new RemoteProtocolError('INVALID_WORKER_CONNECTION',400);
     uuid(value.node_id);uuid(value.deployment_id);uuid(value.instance_id);
   }
@@ -45,11 +47,12 @@ export class RemoteWorkerActivationStore {
   async heartbeat(nodeId,value) {
     this.identity(nodeId,value);
     return this.store.transaction(async client=>{
-      const node=(await client.query('SELECT state FROM remote_ingestion.nodes WHERE node_id=$1 FOR NO KEY UPDATE',[nodeId])).rows[0];
+      const node=(await client.query('SELECT state FROM remote_ingestion.nodes WHERE node_id=$1 FOR SHARE',[nodeId])).rows[0];
       if(!node || node.state==='disabled')throw new RemoteProtocolError('UNAUTHORIZED',401);
       const row=(await client.query(`SELECT *,connected_until>clock_timestamp() AS alive
         FROM remote_ingestion.worker_connections WHERE node_id=$1 AND slot=$2 FOR UPDATE`,[nodeId,value.slot])).rows[0];
       if(!this.matches(row,value))fail('WORKER_DEPLOYMENT_MISMATCH');
+      if(row.instance_id===value.instance_id && row.runtime_revision && row.runtime_revision!==value.runtime_revision)fail('WORKER_RUNTIME_CHANGED');
       const replacement=row.instance_id!==value.instance_id || row.relay_boot_id!==value.relay_boot_id;
       if(replacement && row.instance_id){
         if(row.alive)fail('WORKER_INSTANCE_BUSY');
@@ -70,21 +73,21 @@ export class RemoteWorkerActivationStore {
     });
   }
 
-  async activate(value) {
+  async activate(value, { requireRequested = false } = {}) {
     this.identity(value?.node_id,value);
     if(typeof this.verifyExecution!=='function')fail('CENTRAL_EXECUTION_NOT_CONFIGURED');
     return this.store.transaction(async client=>{
-      const node=(await client.query('SELECT state FROM remote_ingestion.nodes WHERE node_id=$1 FOR NO KEY UPDATE',[value.node_id])).rows[0];
+      const node=(await client.query('SELECT state FROM remote_ingestion.nodes WHERE node_id=$1 FOR SHARE',[value.node_id])).rows[0];
       const row=(await client.query(`SELECT *,connected_until>clock_timestamp() AS alive
         FROM remote_ingestion.worker_connections WHERE node_id=$1 AND slot=$2 FOR UPDATE`,[value.node_id,value.slot])).rows[0];
-      if(node?.state!=='active' || !this.matches(row,value) || !row.alive || !row.accepting
+      if(node?.state!=='active' || !this.matches(row,value) || !row.alive || !row.accepting || (requireRequested && !row.activation_requested)
         || row.instance_id!==value.instance_id || row.relay_boot_id!==value.relay_boot_id
-        || row.runtime_revision!==REMOTE_RUNTIME_REVISION)fail('WORKER_NOT_READY');
+        || row.runtime_revision!==value.runtime_revision)fail('WORKER_NOT_READY');
       // The supervisor check runs under the same node/connection locks as claim.
       // It must verify its exact slot/instance, queue processor and Rota identity;
       // a page checkbox or an image label cannot authorize channel execution.
       if(await this.verifyExecution(client,row)!==true)fail('CENTRAL_EXECUTION_NOT_READY');
-      await client.query('UPDATE remote_ingestion.worker_connections SET enabled=true,activation_requested=true,activated_at=clock_timestamp() WHERE node_id=$1 AND slot=$2',[value.node_id,value.slot]);
+      await client.query('UPDATE remote_ingestion.worker_connections SET enabled=true,activation_requested=CASE WHEN $3 THEN activation_requested ELSE true END,activated_at=clock_timestamp() WHERE node_id=$1 AND slot=$2',[value.node_id,value.slot,requireRequested]);
       return {enabled:true};
     });
   }
@@ -92,7 +95,7 @@ export class RemoteWorkerActivationStore {
   async drain(nodeId,slot,{keepRequested=false}={}) {
     uuid(nodeId);if(!slotValid(slot))throw new TypeError('invalid slot');
     return this.store.transaction(async client=>{
-      await client.query('SELECT node_id FROM remote_ingestion.nodes WHERE node_id=$1 FOR NO KEY UPDATE',[nodeId]);
+      await client.query('SELECT node_id FROM remote_ingestion.nodes WHERE node_id=$1 FOR SHARE',[nodeId]);
       const changed=await client.query(`UPDATE remote_ingestion.worker_connections SET enabled=false,
         activation_requested=CASE WHEN $3 THEN activation_requested ELSE false END WHERE node_id=$1 AND slot=$2 RETURNING slot`,[nodeId,slot,keepRequested]);
       if(!changed.rowCount)fail('WORKER_DEPLOYMENT_MISMATCH');
@@ -107,7 +110,7 @@ export class RemoteWorkerActivationStore {
       const row=(await client.query(`SELECT *,connected_until>clock_timestamp() AS alive
         FROM remote_ingestion.worker_connections WHERE node_id=$1 AND slot=$2 FOR UPDATE`,[nodeId,value.slot])).rows[0];
       if(!this.matches(row,value.connection) || !row.alive || row.instance_id!==value.connection.instance_id
-        || row.relay_boot_id!==value.connection.relay_boot_id)fail('WORKER_CONNECTION_STALE');
+        || row.relay_boot_id!==value.connection.relay_boot_id || row.runtime_revision!==value.connection.runtime_revision)fail('WORKER_CONNECTION_STALE');
       return {allowNew:row.enabled && row.accepting && typeof this.verifyExecution==='function'
         && await this.verifyExecution(client,row)===true};
     }});

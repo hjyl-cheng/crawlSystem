@@ -39,10 +39,10 @@ export class RemoteChannelRouteStore {
   identity(source) { return Object.fromEntries(identityFields.map(field => [field, source[field]])); }
 
   // Lock order agrees with claim: node -> channel Task -> local slot.
-  // NO KEY UPDATE still serializes node ownership but permits the task FK's
-  // KEY SHARE check during completion, avoiding a task -> node lock cycle.
+  // Shared node state fences disable/deletion while independent slots run
+  // concurrently. Task and slot rows still serialize their own owners.
   async owned(client, nodeId, lease, slotName) {
-    const node = (await client.query('SELECT * FROM remote_ingestion.nodes WHERE node_id=$1 FOR NO KEY UPDATE', [uuid(nodeId)])).rows[0];
+    const node = (await client.query('SELECT * FROM remote_ingestion.nodes WHERE node_id=$1 FOR SHARE', [uuid(nodeId)])).rows[0];
     if (!node || node.state === 'disabled') throw new RemoteProtocolError('UNAUTHORIZED', 401);
     const task = await this.channelStore.lock(client, { ...lease, node_id: nodeId });
     if (task.worker_slot !== slotName) fail('WORKER_SLOT_MISMATCH');
@@ -162,7 +162,7 @@ export class RemoteChannelRouteStore {
     uuid(receipt.task_id); generation(receipt.generation);
     if (receipt.retired !== true || receipt.in_flight !== 0 || !Number.isSafeInteger(receipt.epoch)) fail('INVALID_NETWORK_RELEASE');
     return this.store.transaction(async client => {
-      const node = (await client.query('SELECT state FROM remote_ingestion.nodes WHERE node_id=$1 FOR NO KEY UPDATE', [uuid(nodeId)])).rows[0];
+      const node = (await client.query('SELECT state FROM remote_ingestion.nodes WHERE node_id=$1 FOR SHARE', [uuid(nodeId)])).rows[0];
       if (!node || node.state === 'disabled') throw new RemoteProtocolError('UNAUTHORIZED', 401);
       const binding = (await client.query(`SELECT * FROM remote_ingestion.network_bindings
         WHERE node_id=$1 AND slot=$2 AND task_id=$3 AND generation=$4`, [nodeId, receipt.slot, receipt.task_id, receipt.generation])).rows[0];
@@ -183,10 +183,13 @@ export class RemoteChannelRouteStore {
   async waitQuiesced(bindingId, { signal, pollMs = 100 } = {}) {
     for (;;) {
       signal?.throwIfAborted();
-      const row = (await this.store.pool.query('SELECT state,release_receipt FROM remote_ingestion.network_bindings WHERE binding_id=$1', [uuid(bindingId)])).rows[0];
-      if (!row) fail('NETWORK_BINDING_MISSING');
-      if (row.state === 'retired' && row.release_receipt?.in_flight === 0) return { active_managed_requests: 0 };
-      await delay(pollMs, null, { signal });
+      const notification=this.channelStore.transportSignals?.watch(`binding:${uuid(bindingId)}`,{timeoutMs:5000,signal});
+      try {
+        const row = (await this.store.pool.query('SELECT state,release_receipt FROM remote_ingestion.network_bindings WHERE binding_id=$1', [uuid(bindingId)])).rows[0];
+        if (!row) fail('NETWORK_BINDING_MISSING');
+        if (row.state === 'retired' && row.release_receipt?.in_flight === 0) return { active_managed_requests: 0 };
+        if(notification)await notification.wait;else await delay(pollMs,null,{signal});
+      } finally { notification?.cancel(); }
     }
   }
 
@@ -194,7 +197,7 @@ export class RemoteChannelRouteStore {
   // cleanup sees any committed binding before claiming there were no requests.
   async bindingForExecution(nodeId, lease, slot) {
     return this.store.transaction(async client => {
-      await client.query('SELECT node_id FROM remote_ingestion.nodes WHERE node_id=$1 FOR NO KEY UPDATE', [uuid(nodeId)]);
+      await client.query('SELECT node_id FROM remote_ingestion.nodes WHERE node_id=$1 FOR SHARE', [uuid(nodeId)]);
       return (await client.query(`SELECT * FROM remote_ingestion.network_bindings
         WHERE node_id=$1 AND slot=$2 AND task_id=$3 AND generation=$4`,
       [nodeId, slot, uuid(lease.task_id), generation(lease.generation)])).rows[0] ?? null;
@@ -207,7 +210,7 @@ export class RemoteChannelRouteStore {
     const known = (await this.store.pool.query('SELECT node_id,slot FROM remote_ingestion.network_bindings WHERE binding_id=$1', [uuid(bindingId)])).rows[0];
     if (!known) fail('NETWORK_BINDING_MISSING');
     await this.store.transaction(async client => {
-      await client.query('SELECT node_id FROM remote_ingestion.nodes WHERE node_id=$1 FOR NO KEY UPDATE', [known.node_id]);
+      await client.query('SELECT node_id FROM remote_ingestion.nodes WHERE node_id=$1 FOR SHARE', [known.node_id]);
       const slot = (await client.query('SELECT * FROM remote_ingestion.network_slots WHERE node_id=$1 AND slot=$2 FOR UPDATE', [known.node_id, known.slot])).rows[0];
       const binding = (await client.query('SELECT * FROM remote_ingestion.network_bindings WHERE binding_id=$1 FOR UPDATE', [bindingId])).rows[0];
       if (binding.state === 'retired') return;
@@ -225,7 +228,7 @@ export class RemoteChannelRouteStore {
     uuid(request.task_id); generation(request.generation); uuid(request.request_id);
     if (request.action !== 'activate') fail('INVALID_NETWORK_ABANDON');
     return this.store.transaction(async client => {
-      const node = (await client.query('SELECT state FROM remote_ingestion.nodes WHERE node_id=$1 FOR NO KEY UPDATE', [uuid(nodeId)])).rows[0];
+      const node = (await client.query('SELECT state FROM remote_ingestion.nodes WHERE node_id=$1 FOR SHARE', [uuid(nodeId)])).rows[0];
       if (!node || node.state === 'disabled') throw new RemoteProtocolError('UNAUTHORIZED', 401);
       const task = (await client.query('SELECT state,generation FROM remote_ingestion.tasks WHERE task_id=$1 FOR UPDATE', [request.task_id])).rows[0];
       const slot = (await client.query('SELECT * FROM remote_ingestion.network_slots WHERE node_id=$1 AND slot=$2 FOR UPDATE', [nodeId, request.slot])).rows[0];

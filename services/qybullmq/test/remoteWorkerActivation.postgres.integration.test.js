@@ -5,7 +5,7 @@ import {randomUUID,randomBytes} from 'node:crypto';
 import {once} from 'node:events';
 import pg from 'pg';
 import {RemoteNodeStore} from '../src/remoteNodes/store.js';
-import {RemoteWorkerActivationStore,REMOTE_RUNTIME_REVISION} from '../src/remoteNodes/workerActivationStore.js';
+import {RemoteWorkerActivationStore,REMOTE_RUNTIME_REVISION,WHOLE_CHANNEL_RUNTIME_REVISION} from '../src/remoteNodes/workerActivationStore.js';
 import {createRemoteNodeGateway} from '../src/remoteNodes/gateway.js';
 import {createRemoteNodeClient} from '../src/remoteNodes/client.js';
 import {assertIsolatedRemoteDatabase} from '../src/remoteNodes/isolation.js';
@@ -38,6 +38,7 @@ test('collecting deployments require explicit activation and exact live instance
   });
   const client=createRemoteNodeClient({url:`http://127.0.0.1:${server.address().port}`,token,allowLoopbackHttp:true});
   assert.equal((await client.workerHeartbeat(value)).ready_for_tasks,false);
+  await assert.rejects(client.workerHeartbeat({...value,runtime_revision:WHOLE_CHANNEL_RUNTIME_REVISION}),{code:'WORKER_RUNTIME_CHANGED'});
   await assert.rejects(client.claim(randomUUID(),slot),{code:'INVALID_WORKER_CONNECTION'});
   assert.equal(await client.claim(randomUUID(),slot,value),null);
   assert.equal((await pool.query('SELECT generation FROM remote_ingestion.tasks WHERE task_id=$1',[task])).rows[0].generation,0);
@@ -53,7 +54,7 @@ test('collecting deployments require explicit activation and exact live instance
   assert.equal(await client.claim(randomUUID(),slot,value),null);
   await client.heartbeat(lease);
   await pool.query("UPDATE remote_ingestion.worker_connections SET connected_until=now()-interval '1 second' WHERE node_id=$1",[nodeId]);
-  const replacement={...value,instance_id:randomUUID(),relay_boot_id:'c'.repeat(48)};
+  const replacement={...value,instance_id:randomUUID(),relay_boot_id:'c'.repeat(48),runtime_revision:WHOLE_CHANNEL_RUNTIME_REVISION};
   await assert.rejects(client.workerHeartbeat(replacement),{code:'WORKER_PREVIOUS_EXECUTION_UNSETTLED'});
   await pool.query("UPDATE remote_ingestion.tasks SET state='failed' WHERE task_id=$1",[task]);
   assert.equal((await client.workerHeartbeat(replacement)).ready_for_tasks,false);

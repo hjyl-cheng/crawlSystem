@@ -1,0 +1,7 @@
+# Opt-in after the NATS/control notification schema has been applied.
+# Pass the private URL through --env-file; LISTEN must bypass transaction pooling.
+services:
+  worker-incremental:
+    environment:
+      LOCAL_INCREMENTAL_INTAKE_NOTIFICATIONS: 'true'
+      LOCAL_INCREMENTAL_NOTIFY_DATABASE_URL: ${QY_LOCAL_NOTIFY_DATABASE_URL:?direct PostgreSQL notification URL required}

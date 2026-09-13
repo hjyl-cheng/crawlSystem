@@ -16,6 +16,7 @@ from .contracts import (
     VIDEO_DISPOSITION_LEDGER_FIELDS,
     VIDEO_DISPOSITION_LEDGER_TRIGGER_FIELDS,
     validate_crawler_observation_contract,
+    validate_empty_uploads_evidence,
 )
 from .utc import as_utc
 
@@ -662,6 +663,7 @@ class VideoDiscoveryPayload:
     unclosed_video_ids: tuple[str, ...] | None = None
     gap_abandonment: dict[str, Any] | None = None
     disposition_ledger: dict[str, Any] | None = None
+    empty_uploads: dict[str, Any] | None = None
 
     @classmethod
     def from_mapping(cls, source: Mapping[str, Any], *, outcome: str) -> VideoDiscoveryPayload:
@@ -707,6 +709,7 @@ class VideoDiscoveryPayload:
                 | incomplete_scan_keys
                 | unresolved_keys
                 | gap_abandonment_keys
+                | frozenset({"empty_uploads"})
                 | VIDEO_DISPOSITION_LEDGER_TRIGGER_FIELDS
             ),
             label="Video Discovery payload",
@@ -1112,6 +1115,14 @@ class VideoDiscoveryPayload:
         } and parse_gaps == 0 and effective_unresolved_count == 0 and not blocking_deferred_video_ids
         if outcome not in {"complete", "partial"} or (outcome == "complete") != complete:
             raise EventValidationError("Discovery outcome disagrees with scan coverage")
+        empty_uploads = None
+        if "empty_uploads" in source:
+            try:
+                empty_uploads = validate_empty_uploads_evidence(source["empty_uploads"])
+            except ContractValidationError as error:
+                raise EventValidationError(str(error)) from error
+            if items != 0 or anchor_matched or stop_reason != "list_end" or parse_gaps != 0:
+                raise EventValidationError("empty_uploads requires a verified empty list")
         return cls(
             pages,
             items,
@@ -1130,6 +1141,7 @@ class VideoDiscoveryPayload:
             unclosed_video_ids,
             gap_abandonment,
             disposition_ledger,
+            empty_uploads,
         )
 
     def as_facts(self) -> dict[str, Any]:
@@ -1165,6 +1177,8 @@ class VideoDiscoveryPayload:
             facts["gap_abandonment"] = self.gap_abandonment
         if self.disposition_ledger is not None:
             facts.update(self.disposition_ledger)
+        if self.empty_uploads is not None:
+            facts["empty_uploads"] = dict(self.empty_uploads)
         return facts
 
 

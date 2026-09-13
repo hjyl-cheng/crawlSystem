@@ -1,0 +1,43 @@
+{
+  "at": "2026-09-11T10:04:21.843Z",
+  "scope": "single broker, loopback, 0.5 CPU broker + 0.5 CPU PostgreSQL; synthetic video payloads; existing receipt writer",
+  "checks": {
+    "100 concurrent logical workers: command delivery and existing SQL result writer": true,
+    "JetStream publication deduplication": true,
+    "1000 deliveries, bounded consumer concurrency, heartbeat SQL renewal, no duplicate result writes": true,
+    "SQL commit followed by consumer disconnect before ACK: replay without duplicate write": true,
+    "stale generation rejected by existing writer": true,
+    "conflicting result rejected by existing writer": true,
+    "node subject permissions prevent cross-node result publication and command access": true,
+    "broker SIGKILL/restart: durable backlog, client reconnect, local spool replay": true,
+    "full queue rejects new message without evicting previously acknowledged data": true,
+    "final_sql_received": 1100
+  },
+  "measurements": {
+    "command_result_roundtrip": {
+      "workers": 100,
+      "node_connections": 2,
+      "total_ms": 1343.5
+    },
+    "event_loop_p99_ms": 14.8,
+    "load": {
+      "messages": 1000,
+      "concurrent_publishers": 100,
+      "compressed_bytes": 16700,
+      "publish_ack_per_second": 2533.6,
+      "receipt_apply_per_second": 96.7,
+      "publish_ack_p95_ms": 59.5,
+      "heartbeat_count": 138,
+      "heartbeat_p95_ms": 84.8,
+      "heartbeat_max_ms": 530.2,
+      "heartbeat_errors": 0
+    },
+    "max_pool_waiting": 1,
+    "client_rss_mib": 167.5
+  },
+  "server_version": "2.12.15",
+  "resources": [
+    "qy-nats-probe-2282528-1789121052156-broker-1 9.613MiB / 256MiB",
+    "qy-nats-probe-2282528-1789121052156-postgres-1 61.59MiB / 256MiB"
+  ]
+}

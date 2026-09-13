@@ -92,7 +92,15 @@ export async function recordIncrementalTerminalFailure({
     const domain = failedDomain(plan, run);
     if (!domain) return { recorded: false, reason: "no_failed_domain" };
 
-    const observedAt = new Date(run.finished_at || Date.now()).toISOString();
+    // An operator can resume the same Plan after its former terminal failure.
+    // Keep those failures as separate observations; replaying one attempt must
+    // reuse its committed timestamp so the generic writer's hash stays stable.
+    const idempotencyKey = `terminal-failure:${domain}:${run.run_id}:attempt:${attemptCount}`;
+    const existing = await client.query(
+      `SELECT observed_at FROM crawler.crawl_observation_keys WHERE idempotency_key=$1`,
+      [idempotencyKey],
+    );
+    const observedAt = new Date(existing.rows[0]?.observed_at || run.finished_at || Date.now()).toISOString();
     if (terminalChannel) {
       await markRemoved(client, {
         channelId: plan.channel_id,
@@ -103,7 +111,7 @@ export async function recordIncrementalTerminalFailure({
       });
     }
     const common = {
-      idempotencyKey: `terminal-failure:${domain}:${run.run_id}`,
+      idempotencyKey,
       channelId: plan.channel_id,
       runId: run.run_id,
       observedAt,

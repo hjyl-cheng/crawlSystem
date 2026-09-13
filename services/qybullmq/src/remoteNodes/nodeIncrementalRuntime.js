@@ -5,7 +5,8 @@ import { loadWorkerFiles, readNodeFile } from './workerConfig.js';
 import { runNodeProcess, nodeHealthFile } from './nodeConnectionRuntime.js';
 import { createRemoteIncrementalWorker } from './incrementalWorker.js';
 import { RemoteResultSpool } from './spool.js';
-import { REMOTE_RUNTIME_REVISION } from './workerActivationStore.js';
+import { REMOTE_RUNTIME_REVISION, WHOLE_CHANNEL_RUNTIME_REVISION } from './workerActivationStore.js';
+import { WHOLE_CHANNEL_MAX_BYTES } from './wholeChannelProtocol.js';
 
 export async function checkNodeIncrementalHealth(path = nodeHealthFile) {
   const state=JSON.parse((await readNodeFile(path,{maxBytes:4096})).toString());
@@ -18,9 +19,11 @@ export async function checkNodeIncrementalHealth(path = nodeHealthFile) {
 // local readiness lease and the center's transactional claim gate are required.
 export class RemoteIncrementalProcess {
   constructor({config,client,localRota,spool,report=async()=>{},intervalMs=10000,
-    createWorker=createRemoteIncrementalWorker}) {
+    wholeChannel=process.env.REMOTE_NODE_WHOLE_CHANNEL==='true',createWorker=createRemoteIncrementalWorker}) {
     if(config.mode!=='incremental_collect' || !Number.isInteger(intervalMs) || intervalMs<50)throw new TypeError('collecting configuration required');
     Object.assign(this,{config,client,localRota,spool,report,intervalMs});
+    if(wholeChannel && client.transport!=='nats')throw new TypeError('whole-channel execution requires NATS');
+    this.runtimeRevision=wholeChannel?WHOLE_CHANNEL_RUNTIME_REVISION:REMOTE_RUNTIME_REVISION;
     this.instanceId=randomUUID();this.connection=null;this.readyUntil=0;this.stopping=false;this.fatal=null;
     this.worker=createWorker({client:{...client,claim:async(claimId,slot)=>{
       if(this.stopping || !this.connection || this.readyUntil<=uptime())return null;
@@ -33,7 +36,7 @@ export class RemoteIncrementalProcess {
     const boot=await this.localRota.boot();
     const value={version:1,mode:this.config.mode,node_id:this.config.node_id,slot:this.config.slot,
       deployment_id:this.config.deployment_id,config_hash:this.config.config_hash,instance_id:this.instanceId,
-      relay_boot_id:boot.boot_id,runtime_revision:REMOTE_RUNTIME_REVISION,accepting:!this.stopping};
+      relay_boot_id:boot.boot_id,runtime_revision:this.runtimeRevision,accepting:!this.stopping};
     const ack=await this.client.workerHeartbeat(value);
     const expected=ack?.ready_for_tasks===true?'ready':!value.accepting?'draining':'connected_waiting_activation';
     if(Object.keys(value).some(key=>ack?.[key]!==value[key]) || typeof ack.ready_for_tasks!=='boolean'
@@ -85,6 +88,7 @@ export class RemoteIncrementalProcess {
 
 export function runNodeIncremental({spoolDirectory='/var/lib/qy-node/spool',...options}={}) {
   return runNodeProcess({...options,loadFiles:files=>loadWorkerFiles(files,{mode:'incremental_collect'}),
-    runWorker:({signal,...args})=>new RemoteIncrementalProcess({...args,spool:new RemoteResultSpool({directory:spoolDirectory})}).run({signal}),
+    runWorker:({signal,...args})=>new RemoteIncrementalProcess({...args,spool:new RemoteResultSpool({directory:spoolDirectory,
+      ...(process.env.REMOTE_NODE_WHOLE_CHANNEL==='true'?{maxBytes:8*WHOLE_CHANNEL_MAX_BYTES}:{})})}).run({signal}),
   });
 }

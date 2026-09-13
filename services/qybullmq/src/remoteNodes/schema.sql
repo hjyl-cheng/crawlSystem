@@ -5,7 +5,7 @@ CREATE TABLE IF NOT EXISTS remote_ingestion.nodes (
   node_id UUID PRIMARY KEY,
   token_hash TEXT NOT NULL UNIQUE CHECK (length(token_hash) = 64),
   capabilities TEXT[] NOT NULL,
-  max_leases INTEGER NOT NULL CHECK (max_leases BETWEEN 1 AND 100),
+  max_leases INTEGER NOT NULL CHECK (max_leases >= 1),
   state TEXT NOT NULL DEFAULT 'active' CHECK (state IN ('active','draining','disabled')),
   last_seen_at TIMESTAMPTZ
 );
@@ -69,6 +69,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS remote_worker_slot_lease
   ON remote_ingestion.tasks(node_id,worker_slot) WHERE worker_slot IS NOT NULL AND state='leased';
 CREATE UNIQUE INDEX IF NOT EXISTS remote_channel_scope_lease
   ON remote_ingestion.tasks(scope_key) WHERE scope_key IS NOT NULL AND state='leased';
+CREATE INDEX IF NOT EXISTS remote_task_target_slot
+  ON remote_ingestion.tasks(target_node_id,target_worker_slot,created_at);
 CREATE TABLE IF NOT EXISTS remote_ingestion.channel_commands (
   command_id UUID PRIMARY KEY,
   task_id UUID NOT NULL REFERENCES remote_ingestion.tasks(task_id),

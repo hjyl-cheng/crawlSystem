@@ -8,18 +8,21 @@ import {tmpdir} from 'node:os';
 import {randomUUID,randomBytes,generateKeyPairSync} from 'node:crypto';
 import pg from 'pg';
 import {assertIsolatedRemoteDatabase} from '../src/remoteNodes/isolation.js';
+import {setTimeout as delay} from 'node:timers/promises';
 const url=process.env.REMOTE_NODE_TEST_DATABASE_URL;const port=Number(process.env.REMOTE_NODE_TEST_REDIS_PORT);
 test('real central entry requires explicit config, starts gateway and shuts down without creating plans',{skip:!url||!port,timeout:30000},async t=>{
   const pool=new pg.Pool({connectionString:url,max:2});const guard=await pool.connect();const children=[];
   const folder=await mkdtemp(join(tmpdir(),'remote-center-entry-'));
+  const originalAuth=process.env.REMOTE_NATS_TEST_AUTH_FILE?await readFile(process.env.REMOTE_NATS_TEST_AUTH_FILE):null;
   t.after(async()=>{for(const child of children)if(child.exitCode===null&&!child.killed)child.kill('SIGKILL');guard.release();await pool.end();await rm(folder,{recursive:true,force:true});});
+  t.after(async()=>{if(originalAuth){await writeFile(process.env.REMOTE_NATS_TEST_AUTH_FILE,originalAuth,{mode:0o600});await delay(2500);}});
   await assertIsolatedRemoteDatabase(pool);await guard.query('SELECT pg_advisory_lock(781137981)');
   for(const file of ['schema.sql','routeSchema.sql','youtubeSessionSchema.sql','workerConnectionSchema.sql','workerActivationSchema.sql'])await pool.query(await readFile(new URL(`../src/remoteNodes/${file}`,import.meta.url),'utf8'));
   const files={REMOTE_NODE_ROUTE_PRIVATE_KEY_FILE:generateKeyPairSync('ed25519').privateKey.export({type:'pkcs8',format:'pem'}),
     REMOTE_NODE_ENCRYPTION_KEY_FILE:randomBytes(32).toString('hex'),REMOTE_NODE_ADMIN_TOKEN_FILE:randomBytes(32).toString('hex'),
     REMOTE_NODE_ROTA_TOKEN_FILE:randomBytes(32).toString('hex'),REMOTE_NODE_PROFILE_SECRET_FILE:randomBytes(32).toString('hex'),
     REMOTE_NODE_ROTA_CONTROL_TOKEN_FILE:randomBytes(32).toString('hex')};
-  const env={...process.env,DATABASE_URL:url,REMOTE_NODE_DATABASE_URL:url,REMOTE_NODE_EXECUTION_ENABLED:'true',
+  const env={...process.env,DATABASE_URL:url,REMOTE_NODE_DATABASE_URL:url,REMOTE_NODE_TRANSACTION_DATABASE_URL:process.env.REMOTE_NODE_TEST_TRANSACTION_DATABASE_URL||url,REMOTE_NODE_EXECUTION_ENABLED:'true',
     YOUTUBEJS_EXTRACTOR_MODE:'full',YOUTUBEJS_VIDEO_API_BATCH_FALLBACK:'false',ROTA_IDENTITY_POLICY_ID:'qy-br-channel-anonymous-v1',
     ROTA_WORKLOAD_SCOPE_EXPECTED:'qy-production',REMOTE_NODE_REDIS_URL:`redis://:remote-center-fixture-only@127.0.0.1:${port}/0`,
     REMOTE_NODE_QUEUE_PREFIX:'remote-center-entry-test-'+randomUUID(),REMOTE_NODE_EXECUTION_NODE_IDS:randomUUID(),
@@ -27,14 +30,25 @@ test('real central entry requires explicit config, starts gateway and shuts down
     REMOTE_NODE_COLLECT_IMAGE:'fixture.example/collect@sha256:'+'a'.repeat(64),REMOTE_NODE_GATEWAY_URL:'https://fixture.example'};
   for(const [name,value] of Object.entries(files)){env[name]=join(folder,name);await writeFile(env[name],value,{mode:0o600});}
   const before=(await pool.query('SELECT count(*)::int AS n FROM remote_ingestion.tasks')).rows[0].n;
-  for(let iteration=0;iteration<3;iteration++){
-  const child=spawn(process.execPath,['scripts/runRemoteNodeCenter.mjs'],{env,stdio:['ignore','pipe','pipe']});children.push(child);
+  for(let iteration=0;iteration<(process.env.REMOTE_NATS_TEST_URL?5:3);iteration++){
+  let runEnv=iteration===2?{...env,REMOTE_NODE_EXECUTION_ADMISSION:'dashboard',REMOTE_NODE_EXECUTION_NODE_IDS:''}:env;
+  if(iteration>=3){
+    await pool.query(await readFile(new URL('../src/remoteNodes/natsSchema.sql',import.meta.url),'utf8'));
+    await pool.query('TRUNCATE remote_ingestion.nodes CASCADE');
+    const passwordFile=join(folder,'nats-password');await writeFile(passwordFile,process.env.REMOTE_NATS_TEST_PASSWORD,{mode:0o600});
+    runEnv={...env,REMOTE_NODE_NATS_URL:process.env.REMOTE_NATS_TEST_URL,REMOTE_NODE_NATS_PASSWORD_FILE:passwordFile,REMOTE_NODE_NATS_AUTH_FILE:process.env.REMOTE_NATS_TEST_AUTH_FILE,NODE_EXTRA_CA_CERTS:process.env.REMOTE_NATS_TEST_CA,REMOTE_NODE_NATS_MAX_BYTES:String(32*1024*1024)};
+    if(iteration===4){
+      await pool.query(await readFile(new URL('../src/remoteNodes/wholeChannelSchema.sql',import.meta.url),'utf8'));
+      runEnv.REMOTE_NODE_WHOLE_CHANNEL='true';
+    }
+  }
+  const child=spawn(process.execPath,['scripts/runRemoteNodeCenter.mjs'],{env:runEnv,stdio:['ignore','pipe','pipe']});children.push(child);
   let output='';let errors='';child.stdout.on('data',bytes=>{output+=bytes;});child.stderr.on('data',bytes=>{errors+=bytes;});
   const exited=once(child,'exit');
   await new Promise((resolve,reject)=>{const timeout=setTimeout(()=>reject(new Error('entry did not become ready: '+errors)),15000);
     const listen=()=>{if(output.includes('remote_node_center_listening')){clearTimeout(timeout);child.stdout.off('data',listen);resolve();}};
     child.stdout.on('data',listen);listen();child.once('exit',code=>{clearTimeout(timeout);if(!output.includes('remote_node_center_listening'))reject(new Error('entry exited '+code+': '+errors));});});
-  assert.match(output,/explicit_node_allowlist/);child.kill('SIGTERM');assert.deepEqual(await exited,[0,null]);
+  assert.match(output,iteration===2?/dashboard_authorized/:/explicit_node_allowlist/);child.kill('SIGTERM');assert.deepEqual(await exited,[0,null]);
   for(const value of Object.values(files))assert.ok(!(output+errors).includes(value));
   }
   assert.equal((await pool.query('SELECT count(*)::int AS n FROM remote_ingestion.tasks')).rows[0].n,before);

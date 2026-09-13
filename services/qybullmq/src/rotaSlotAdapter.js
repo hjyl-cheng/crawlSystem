@@ -209,6 +209,8 @@ export class RotaSlotAdapter {
     this.activeRuntime = null;
     this.activeAttemptController = null;
     this.pendingCompletion = null;
+    this.attemptFinalization = null;
+    this.finalizationRecoveryPromise = null;
     this.completionUncertain = false;
     this.completionRecoveryPromise = null;
     this.idleRuntime = null;
@@ -257,6 +259,9 @@ export class RotaSlotAdapter {
       throw new RotaSlotDeferredError("slot_not_ready");
     }
     if (this.activeJob) throw new RotaSlotDeferredError("local_capacity");
+    if (this.activeTask || this.pendingCompletion || this.attemptFinalization) {
+      throw new RotaSlotDeferredError("execution_recovery");
+    }
     if (typeof prepare !== "function" || typeof executeAttempt !== "function") {
       throw new TypeError("prepare and executeAttempt callbacks are required");
     }
@@ -360,37 +365,54 @@ export class RotaSlotAdapter {
             : { kind: "unexpected_failure", error };
         }
 
-        const quiesced = await this.identityRuntime.quiesce(runtime, controller.signal);
+        // Retain this exact task's finalization if cleanup fails. A later
+        // renewal can finish it without rerunning collection or admitting a
+        // second channel on the still-owned route.
         const observationIDs = [];
-        if (attemptResult.kind === "retryable_network_failure") {
-          if (!attemptResult.checkpointPersisted || !RETRYABLE_OBSERVATIONS.has(attemptResult.observation)) {
-            throw new RotaSlotContractError("retryable network failure lacks a durable checkpoint or valid observation");
+        let observationIdentity;
+        let finalizedReceipt;
+        const finishAttempt = async () => {
+          if (finalizedReceipt) return finalizedReceipt;
+          const quiesced = await this.identityRuntime.quiesce(runtime, controller.signal);
+          if (attemptResult.kind === "retryable_network_failure") {
+            if (!attemptResult.checkpointPersisted || !RETRYABLE_OBSERVATIONS.has(attemptResult.observation)) {
+              throw new RotaSlotContractError("retryable network failure lacks a durable checkpoint or valid observation");
+            }
+            if (!observationIDs.length) observationIdentity ??= {
+              observationID: `${task.task_id}:${this.randomUUID()}`, occurredAt: new Date().toISOString(),
+            };
+            if (!observationIDs.length) observationIDs.push(await this.#observe({
+              ...observationIdentity,
+              prepared,
+              frozen,
+              task,
+              result: attemptResult,
+            }));
           }
-          observationIDs.push(await this.#observe({
+          const outcome = attemptResult.kind === "country_recheck" ? "success"
+            : attemptResult.kind === "unexpected_failure"
+            ? "failed"
+            : completionOutcome(attemptResult);
+          const completion = await this.#completeTask({
             prepared,
             frozen,
             task,
-            result: attemptResult,
-          }));
-        }
-        const outcome = attemptResult.kind === "country_recheck" ? "success"
-          : attemptResult.kind === "unexpected_failure"
-          ? "failed"
-          : completionOutcome(attemptResult);
-        const completion = await this.#completeTask({
-          prepared,
-          frozen,
-          task,
-          outcome,
-          durationMs: Math.max(0, Math.round(this.monotonicNow() - startedAt)),
-          businessComplete: attemptResult.kind === "country_recheck" ? false : businessComplete(attemptResult),
-          apiContinuation: Boolean(attemptResult.result?.video_api_pending),
-          recheckCountry: attemptResult.kind === "country_recheck" ? attemptResult.country : null,
-          observationIDs,
-          activeManagedRequests: Number(quiesced?.active_managed_requests ?? 0),
-        });
-        this.activeTask = null;
-        this.activeAttemptController = null;
+            outcome,
+            durationMs: Math.max(0, Math.round(this.monotonicNow() - startedAt)),
+            businessComplete: attemptResult.kind === "country_recheck" ? false : businessComplete(attemptResult),
+            apiContinuation: Boolean(attemptResult.result?.video_api_pending),
+            recheckCountry: attemptResult.kind === "country_recheck" ? attemptResult.country : null,
+            observationIDs,
+            activeManagedRequests: Number(quiesced?.active_managed_requests ?? 0),
+          });
+          this.activeTask = null;
+          this.activeAttemptController = null;
+          finalizedReceipt = completion;
+          return completion;
+        };
+        this.attemptFinalization = { runtime, frozen, finish: finishAttempt };
+        const completion = await finishAttempt();
+        this.attemptFinalization = null;
 
         if (attemptResult.kind === "country_recheck") {
           await this.identityRuntime.retire(runtime, frozen);
@@ -441,6 +463,9 @@ export class RotaSlotAdapter {
       }
       throw new RotaSlotDeferredError("adapter_closing");
     } finally {
+      if (this.attemptFinalization && !this.pendingCompletion) {
+        this.#fenceSlot("ATTEMPT_FINALIZATION_PENDING", new RotaSlotDeferredError("execution_recovery"), { preserveLeaseSafety: true });
+      }
       this.activeJob = false;
       if (this.activeJobCompletion?.promise === activeJobDone) {
         this.activeJobCompletion = null;
@@ -463,6 +488,7 @@ export class RotaSlotAdapter {
       this.activeAttemptController.abort(new RotaSlotDeferredError("adapter_closing"));
     }
     if (activeJob) await activeJob;
+    if (this.attemptFinalization && !this.pendingCompletion) await this.#scheduleFinalizationRecovery();
     if (this.completionRecoveryPromise) {
       await this.completionRecoveryPromise.catch(() => {});
     }
@@ -515,6 +541,7 @@ export class RotaSlotAdapter {
       closing: this.closing,
       active_job: this.activeJob,
       active_task_id: this.activeTask?.task_id ?? null,
+      recovery_pending: Boolean(this.attemptFinalization || this.pendingCompletion),
       assignment: this.assignment ? {
         ready: this.slotReady,
         control_state: this.controlState,
@@ -614,8 +641,8 @@ export class RotaSlotAdapter {
     });
   }
 
-  async #observe({ prepared, frozen, task, result }) {
-    const observationID = `${task.task_id}:${this.randomUUID()}`;
+  async #observe({ prepared, frozen, task, result,
+    observationID = `${task.task_id}:${this.randomUUID()}`, occurredAt = new Date().toISOString() }) {
     const observed = await this.lane.enqueue("observe", () => this.client.observe({
       slot_name: frozen.slot_name,
       worker_id: this.workerId,
@@ -627,7 +654,7 @@ export class RotaSlotAdapter {
       observation_id: observationID,
       kind: result.observation,
       source: requiredString(result.source ?? result.failedStage, "observation.source").slice(0, 255),
-      occurred_at: new Date().toISOString(),
+      occurred_at: occurredAt,
       payload: { failed_stage: String(result.failedStage ?? "").slice(0, 120) },
     }));
     if (observed.observation_id !== observationID || observed.task_id !== task.task_id) {
@@ -726,6 +753,30 @@ export class RotaSlotAdapter {
     return receipt;
   }
 
+  #scheduleFinalizationRecovery() {
+    if (this.finalizationRecoveryPromise) return this.finalizationRecoveryPromise;
+    const pending = this.attemptFinalization;
+    if (!pending || this.activeJob || this.pendingCompletion) return null;
+    const recovery = (async () => {
+      if (this.assignment?.lease_id !== pending.frozen.lease_id) return false;
+      const receipt = await pending.finish();
+      await this.identityRuntime.retire(pending.runtime, pending.frozen);
+      if (this.activeRuntime === pending.runtime) this.activeRuntime = null;
+      if (this.attemptFinalization === pending) this.attemptFinalization = null;
+      this.slotReady = !this.closing && receipt.control_state === READY_KEEP_ROUTE
+        && receipt.ready === true && this.assignment?.lease_id === pending.frozen.lease_id
+        && this.assignment.route_generation === pending.frozen.route_generation
+        && this.monotonicNow() < this.leaseSafeUntil;
+      this.controlState = receipt.control_state;
+      return true;
+    })().catch(error => {
+      this.#fenceSlot("ATTEMPT_FINALIZATION_PENDING", error, { preserveLeaseSafety: true });
+      return false;
+    });
+    this.finalizationRecoveryPromise = recovery.finally(() => { this.finalizationRecoveryPromise = null; });
+    return this.finalizationRecoveryPromise;
+  }
+
   #scheduleCompletionRecovery(frozen) {
     if (this.closing || !this.completionUncertain || !this.pendingCompletion) return null;
     if (this.completionRecoveryPromise) return this.completionRecoveryPromise;
@@ -764,6 +815,7 @@ export class RotaSlotAdapter {
     if (this.activeRuntime === runtime) this.activeRuntime = null;
     this.activeAttemptController = null;
     this.activeTask = null;
+    this.attemptFinalization = null;
     this.pendingCompletion = null;
     this.completionUncertain = false;
 
@@ -908,7 +960,7 @@ export class RotaSlotAdapter {
         requestStarted,
         expectedGeneration: frozen.route_generation,
       });
-      if (this.completionUncertain) {
+      if (this.completionUncertain || (!this.activeJob && this.attemptFinalization)) {
         this.#fenceSlot(
           "COMPLETE_UNCERTAIN",
           new RotaSlotDeferredError("completion_uncertain"),
@@ -918,6 +970,7 @@ export class RotaSlotAdapter {
       return renewed;
     });
     const recovered = command.then((renewed) => {
+      if (this.attemptFinalization && !this.pendingCompletion) this.#scheduleFinalizationRecovery();
       if (this.completionUncertain && this.pendingCompletion) {
         const recovery = this.#scheduleCompletionRecovery(frozen);
         if (recovery) void recovery.catch(() => {});
@@ -964,6 +1017,7 @@ export class RotaSlotAdapter {
     this.idleRuntime = null;
     this.activeAttemptController = null;
     this.pendingCompletion = null;
+    this.attemptFinalization = null;
     this.completionUncertain = false;
     this.activeTask = null;
     this.assignment = null;

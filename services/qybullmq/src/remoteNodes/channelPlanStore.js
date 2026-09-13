@@ -66,20 +66,20 @@ export class RemoteChannelPlanStore {
       const task = await this.lock(client, lease, { coordinatorId, requireLive: false });
       await assertBusinessFence(client, task);
       const result = await action(client, task);
-      await client.query("UPDATE remote_ingestion.tasks SET coordinator_until=clock_timestamp()+interval '60 seconds' WHERE task_id=$1", [lease.task_id]);
+      await client.query("UPDATE remote_ingestion.tasks SET coordinator_until=clock_timestamp()+interval '60 seconds' WHERE task_id=$1 AND state NOT IN ('applied','failed','cancelled')", [lease.task_id]);
       return result;
     });
   }
 
-  async transaction(lease, coordinatorId, assertBusinessFence, action) {
+  async transaction(lease, coordinatorId, assertBusinessFence, action, options = {}) {
     return this.store.transaction(async (client) => {
       const task = await this.lock(client, lease, { coordinatorId });
       await assertBusinessFence(client, task);
       const result = await action(client, task);
       await client.query(`UPDATE remote_ingestion.tasks SET coordinator_until=clock_timestamp()+interval '60 seconds'
-        WHERE task_id=$1`, [lease.task_id]);
+        WHERE task_id=$1 AND state NOT IN ('applied','failed','cancelled')`, [lease.task_id]);
       return result;
-    });
+    }, options);
   }
 
   async request(client, task, operation, input, requestKey) {
@@ -126,6 +126,7 @@ export class RemoteChannelPlanStore {
         WHERE command_id=$1 AND task_id=$2 AND generation=$3 FOR UPDATE`,
       [commandId, lease.task_id, lease.generation])).rows[0];
       if (!command) throw new RemoteProtocolError('UNKNOWN_COMMAND', 404);
+      if (command.operation === 'collect_channel') throw new RemoteProtocolError('WHOLE_CHANNEL_FRAME_REQUIRED', 400);
       if (command.state === 'received') {
         if (command.batch_id !== value.batch_id || command.sha256 !== sha256) throw new RemoteProtocolError('BATCH_CONFLICT');
       } else {
@@ -146,7 +147,7 @@ export class RemoteChannelPlanStore {
 
   async complete(client, task, result) {
     await client.query(`UPDATE remote_ingestion.tasks SET state='applied',applied_at=clock_timestamp(),
-      applied_result=$2,last_error=NULL WHERE task_id=$1`, [task.task_id, result]);
+      applied_result=$2,last_error=NULL,coordinator_id=NULL,coordinator_until=NULL WHERE task_id=$1`, [task.task_id, result]);
   }
 
   // Called by central orchestration after API completion; never an HTTP node action.

@@ -22,11 +22,16 @@ test(
     assert.equal(new URL(url).pathname, "/migration_control_test");
     const pool = new pg.Pool({ connectionString: url, max: 8 });
     const query = (...args) => pool.query(...args);
+    let captureAdmission = false;
+    const admissionSql = [];
     const withTransaction = async (fn) => {
       const c = await pool.connect();
       try {
         await c.query("BEGIN");
-        const r = await fn(c);
+        const r = await fn({query(sql, args) {
+          if (captureAdmission) admissionSql.push(sql);
+          return c.query(sql, args);
+        }});
         await c.query("COMMIT");
         return r;
       } catch (e) {
@@ -121,13 +126,20 @@ test(
         3,
         "queue prepares upcoming channels instead of limiting the whole pipeline to worker count",
       );
+      captureAdmission = true;
       const first = await startControlledMigrationChannel({
         query,
         withTransaction,
         batchId: b.batch_id,
         channelId: ids[0],
       });
+      captureAdmission = false;
       assert(first.started);
+      assert.ok(admissionSql.every(sql => !/count\(.*FROM crawler\.channel_candidates/s.test(sql)),
+        'admission must not scan all prior candidates while holding the scheduler lock');
+      const counter = (await query('SELECT total_channel_count FROM crawler.query_dispatch_batches WHERE dispatch_batch_id=$1', [b.batch_id])).rows[0];
+      assert.equal(Number(counter.total_channel_count), 1);
+
       assert.equal(
         (
           await startControlledMigrationChannel({

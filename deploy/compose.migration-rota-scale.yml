@@ -1,6 +1,7 @@
 # Append to the Rota project's existing Compose files.
-# 40 Full Crawl + 20 incremental + 1 existing auxiliary channel-role worker.
+# 40 Full Crawl + 20 local incremental + 3 remote incremental + 1 auxiliary.
+# Include remote Workers when changing fleet size; spare proxies do not create slots.
 services:
   rota-core:
     environment:
-      ROTA_CHANNEL_SLOTS: "61"
+      ROTA_CHANNEL_SLOTS: "64"

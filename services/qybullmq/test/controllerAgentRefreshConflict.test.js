@@ -4,7 +4,7 @@ import test from "node:test";
 import { finalRepairCandidateDecision } from "../src/finalRepairCandidatePolicy.js";
 
 test("Full Crawl Agent dispatch ignores terminal incremental refresh failures", async () => {
-  const source = await readFile(new URL("../src/controller.js", import.meta.url), "utf8");
+  const source = (await Promise.all(["controller.js", "agentBatchDispatch.js"].map(name => readFile(new URL(`../src/${name}`, import.meta.url), "utf8")))).join("\n");
   const retryableFailureGuards = source.match(
     /refresh\.status='failed' AND isfinite\(refresh\.next_retry_at\)/g,
   ) ?? [];

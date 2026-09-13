@@ -63,6 +63,7 @@ services:
       driver: json-file
       options: {max-size: 10m, max-file: "3"}
   remote-node-center:
+    networks: [crawler, rota]
     environment:
       NODE_EXTRA_CA_CERTS: /run/remote-center-ca/ca.pem
       REMOTE_NODE_ROTA_ROUTE_URL: https://remote-center-private:3443/internal/v1/remote-route

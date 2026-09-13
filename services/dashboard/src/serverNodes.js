@@ -53,7 +53,7 @@ export function normalizeServerNode(input) {
     if (!worker || typeof worker !== "object" || Object.keys(worker).some(k => !["role", "count"].includes(k))) throw invalid("Worker 配置格式不正确");
     if (!Object.hasOwn(workerRoles, worker.role) || seen.has(worker.role)) throw invalid("Worker 类型不支持或重复");
     seen.add(worker.role);
-    return { role: worker.role, count: integer(worker.count, "Worker 数量", 1, 100) };
+    return { role: worker.role, count: integer(worker.count, "Worker 数量", 1, Number.MAX_SAFE_INTEGER) };
   });
   return { name, host, port, username, sshAlias, kind: input.kind, notes, workers };
 }
@@ -77,6 +77,28 @@ export function serverNodeDeletionEligibility(node) {
   return { allowed: true, reason: failedBeforeChanges ? "初始化在修改远程服务器前失败，可以直接删除登记记录。" : "此节点仅保存了登记信息，尚未通过系统初始化或部署，可以直接删除登记记录。" };
 }
 
+// Initialized, unused nodes require the deletion coordinator's live checks.
+// The metadata-only remove() path deliberately remains stricter.
+export function unusedNodeDeletionEligibility(node) {
+  if (node.kind !== 'execution' || node.deployment) return { allowed: false, reason: '中心节点或已有 Worker 部署记录的节点不能直接删除，请先完成退役检查。' };
+  const allowedFields = new Set(['id','name','host','port','username','sshAlias','kind','notes','workers','createdAt','updatedAt','provisioning','runtime','deletion']);
+  if (!Object.keys(node).every(key => allowedFields.has(key)) || !nodeReady(node)
+    || (node.runtime && !['ready','failed'].includes(node.runtime.state))) {
+    return { allowed: false, reason: '初始化或运行环境尚未完成，或节点状态无法确认，暂时不能删除。' };
+  }
+  if (node.deletion && !['running','failed'].includes(node.deletion.state)) return { allowed: false, reason: '删除状态无法确认，请检查已有操作。' };
+  if (node.deletion?.state === 'running' && (!Number.isFinite(Date.parse(node.deletion.deadline)) || Date.parse(node.deletion.deadline) > Date.now())) {
+    return { allowed: false, reason: '节点正在删除，请等待操作结束。' };
+  }
+  return { allowed: true, reason: '未发现 Worker 部署记录。确认后将再次检查中心任务和远程容器，停止本系统监控并删除登记；检查不通过则保留节点。' };
+}
+
+function assertNotDeleting(node) {
+  // Even a failed cleanup may already have stopped monitoring. Only a deletion
+  // retry may proceed; onboarding/deployment must not race partial cleanup.
+  if (node?.deletion) throw invalid('节点正在删除或等待删除重试，不能编辑、初始化或部署', 409);
+}
+
 // This registry stores user-entered configuration only. Runtime observations and
 // deployment commands must not be inferred from the saved worker counts.
 export function createServerNodeStore(query) {
@@ -92,6 +114,7 @@ export function createServerNodeStore(query) {
     if (previous.version !== version) throw invalid("配置已被更新，请刷新页面后重试；你的输入仍保留在表单中", 409);
     if (id && !previous.nodes.some(item => item.id === id)) throw invalid("服务器不存在", 404);
     const existing = previous.nodes.find(item => item.id === id);
+    assertNotDeleting(existing);
     if (existing?.provisioning?.state === "running" || existing?.runtime?.state === "running" || existing?.deployment?.state === 'running') throw invalid("服务器正在初始化、准备环境或部署，请完成后再编辑", 409);
     if (existing && (existing.kind === "center" || ![undefined, "not_started"].includes(existing.provisioning?.state))
       && ["host", "port", "username", "kind"].some(key => existing[key] !== normalized[key])) {
@@ -152,11 +175,12 @@ export function createServerNodeStore(query) {
     if (result.rowCount !== 1) throw invalid("节点配置或状态已变化，请重新打开删除窗口确认", 409);
     return next;
   }
-  async function mutateNode(id, change) {
+  async function mutateNode(id, change, deleting = false) {
     for (let attempt = 0; attempt < 8; attempt++) {
       const previous = await load();
       const node = previous.nodes.find(item => item.id === id);
       if (!node) throw invalid("服务器不存在", 404);
+      if (!deleting) assertNotDeleting(node);
       const updated = change(structuredClone(node), previous);
       const next = { ...previous, version: previous.version + 1, nodes: previous.nodes.map(item => item.id === id ? updated : item) };
       const result = await query(`UPDATE crawler.settings SET value_json=$2::jsonb,updated_at=now()
@@ -164,6 +188,36 @@ export function createServerNodeStore(query) {
       if (result.rowCount === 1) return next;
     }
     throw invalid("节点状态正在更新，请稍后重试", 409);
+  }
+  async function beginDeletion({ id, version, operationId }) {
+    integer(version, '配置版本', 0, Number.MAX_SAFE_INTEGER);
+    return mutateNode(id, (node, registry) => {
+      if (registry.version !== version) throw invalid('节点配置或状态已变化，请重新打开删除窗口确认', 409);
+      const check = unusedNodeDeletionEligibility(node);
+      if (!check.allowed) throw invalid(check.reason, 409);
+      node.deletion = { state: 'running', operationId, deadline: new Date(Date.now() + 5 * 60000).toISOString() };
+      return node;
+    }, true);
+  }
+  async function failDeletion(id, operationId, error) {
+    return mutateNode(id, node => {
+      if (node.deletion?.operationId !== operationId) throw invalid('删除操作已变化', 409);
+      node.deletion = { ...node.deletion, state: 'failed', error };
+      return node;
+    }, true);
+  }
+  async function finishDeletion(id, operationId) {
+    for (let attempt = 0; attempt < 8; attempt++) {
+      const previous = await load();
+      const node = previous.nodes.find(item => item.id === id);
+      if (node?.deletion?.operationId !== operationId || node.deletion.state !== 'running'
+        || Date.parse(node.deletion.deadline) <= Date.now()) throw invalid('删除操作已变化，请重新检查', 409);
+      const next = { ...previous, version: previous.version + 1, nodes: previous.nodes.filter(item => item.id !== id) };
+      const result = await query(`UPDATE crawler.settings SET value_json=$2::jsonb,updated_at=now()
+        WHERE setting_key=$1 AND value_json=$3::jsonb RETURNING value_json`, [settingKey, JSON.stringify(next), JSON.stringify(previous)]);
+      if (result.rowCount === 1) return next;
+    }
+    throw invalid('节点列表正在更新，请重试删除', 409);
   }
   async function beginInitialization({ id, version, operationId }) {
     integer(version, "配置版本", 0, Number.MAX_SAFE_INTEGER);
@@ -225,7 +279,7 @@ export function createServerNodeStore(query) {
       return node;
     });
   }
-  async function beginWorkerDeployment({id,version,operationId,plan}){
+  async function beginWorkerDeployment({id,version,operationId,plan,count,syncIntake=false,expectedAllowedCount}){
     integer(version,'配置版本',0,Number.MAX_SAFE_INTEGER);
     return mutateNode(id,(node,registry)=>{
       if(registry.version!==version)throw invalid('配置已更新，请刷新后重试',409);
@@ -233,12 +287,19 @@ export function createServerNodeStore(query) {
       const prior=node.deployment;
       if(prior?.state==='running' && (!Number.isFinite(Date.parse(prior.deadline)) || Date.parse(prior.deadline)>Date.now()))throw invalid('Worker 正在部署，请勿重复提交',409);
       if(prior && (prior.mode!=='incremental_collect' || prior.deploymentId!==plan.deploymentId || prior.image!==plan.image
-        || plan.count<prior.desiredCount))throw invalid('缩容、更换镜像或替换部署需要先完成停止派发和任务收尾，当前入口仅支持首次部署、重试及增加数量',409);
+        || plan.count<(prior.state==='failed'?prior.appliedCount:prior.desiredCount)))throw invalid('缩容、更换镜像或替换部署需要先完成停止派发和任务收尾，当前入口仅支持首次部署、重试及增加数量',409);
+      if(count!==undefined){
+        integer(count,'部署数量',1,Number.MAX_SAFE_INTEGER);
+        if(count!==plan.count || node.workers.some(w=>w.role!=='incremental'))throw invalid('当前入口仅支持增量 Worker 部署',409);
+        node.workers=[{role:'incremental',count}];
+      }
       if(node.workers.length!==1 || node.workers[0].role!=='incremental' || node.workers[0].count!==plan.count)throw invalid('部署方案与已保存的增量数量不匹配',409);
       const now=new Date().toISOString();
       node.deployment={state:'running',mode:plan.mode,deploymentId:plan.deploymentId,operationId,image:plan.image,
         desiredCount:plan.count,appliedCount:prior?.appliedCount??0,startedAt:now,deadline:new Date(Date.now()+20*60000).toISOString(),
-        remoteChanges:prior?.remoteChanges??false,error:null,steps:Object.fromEntries(workerDeploymentSteps.map(step=>[step,'pending']))};
+        remoteChanges:prior?.remoteChanges??false,error:null,
+        intakeSync:syncIntake?{state:'pending',allowedCount:plan.count,expectedAllowedCount}:null,
+        steps:Object.fromEntries(workerDeploymentSteps.map(step=>[step,'pending']))};
       node.updatedAt=now;return node;
     });
   }
@@ -251,5 +312,5 @@ export function createServerNodeStore(query) {
       node.deployment=next;node.updatedAt=new Date().toISOString();return node;
     });
   }
-  return { load, save, deletionCheck, remove, beginInitialization, advanceInitialization, beginRuntime, advanceRuntime, beginWorkerDeployment, advanceWorkerDeployment };
+  return { load, save, deletionCheck, remove, beginDeletion, failDeletion, finishDeletion, beginInitialization, advanceInitialization, beginRuntime, advanceRuntime, beginWorkerDeployment, advanceWorkerDeployment };
 }
