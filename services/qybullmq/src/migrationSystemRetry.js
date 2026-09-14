@@ -429,7 +429,14 @@ export async function retryMigrationSystemFailure({
       row,
       failedGeneration,
     );
-    if (controlledBatch) await lockControlledMigrationRetryItem(client, controlledBatch, row);
+    const controlledItem = controlledBatch
+      ? await lockControlledMigrationRetryItem(client, controlledBatch, row) : null;
+    // Operator-selected, still-unstarted failures can re-enter the normal
+    // pipeline. Allocate G+1 through the SAME Candidate/Intent/Outbox fences;
+    // never erase history or convert an already allocated recovery execution.
+    const normalMigration = controlledItem?.state === "pending"
+      && controlledItem.snapshot_json?.migration_retry_mode === "normal"
+      && row.status === "pending" && !retryAlreadyAllocated;
 
     const candidate = retryCandidate(row, nextGeneration);
     const jobId = jobIdFactory(
@@ -485,13 +492,16 @@ export async function retryMigrationSystemFailure({
     if (row.status === "pending") {
       const dispatched = await client.query(
         `UPDATE crawler.migration_system_retry_items
-         SET status='dispatched',retry_dispatch_generation=$2,
+         SET status=CASE WHEN $5::boolean THEN 'resolved' ELSE 'dispatched' END,
+             resolution=CASE WHEN $5::boolean THEN 'handed_to_normal_migration' ELSE resolution END,
+             resolved_at=CASE WHEN $5::boolean THEN now() ELSE resolved_at END,
+             retry_dispatch_generation=$2,
              dispatched_at=COALESCE(dispatched_at,now()),updated_at=now()
          WHERE system_retry_id=$1 AND status='pending'
            AND failed_dispatch_generation=$3
            AND failed_dispatch_batch_id=$4
          RETURNING system_retry_id,status,retry_dispatch_generation,dispatched_at`,
-        [normalizedRetryId, nextGeneration, failedGeneration, failedDispatchBatchId],
+        [normalizedRetryId, nextGeneration, failedGeneration, failedDispatchBatchId, normalMigration],
       );
       if (dispatched.rowCount !== 1) {
         throw new MigrationSystemRetryError("Migration system retry item changed during dispatch", {
@@ -512,6 +522,7 @@ export async function retryMigrationSystemFailure({
       failed_dispatch_generation: failedGeneration,
       dispatch_generation: nextGeneration,
       status: "dispatched",
+      execution_mode: normalMigration ? "normal" : "recovery",
       outbox,
     });
   });

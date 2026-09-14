@@ -9,7 +9,7 @@ import { prepareManualMigrationBatch } from "../src/manualMigrationDispatch.js";
 import { sourceSnapshotHash } from "../src/migrationSource.js";
 import { retryMigrationSystemFailure } from "../src/migrationSystemRetry.js";
 import { refillMigrationControl } from "../src/migrationBatchControl.js";
-import { restoreControlledMigrationFailures } from "../src/controlledMigrationRetry.js";
+import { restoreControlledMigrationFailures, markPendingMigrationFailuresForNormalExecution } from "../src/controlledMigrationRetry.js";
 import { crawlerRuntimeSchema } from "../src/publicationCurrentSchema.js";
 
 const { Client, Pool } = pg;
@@ -363,7 +363,7 @@ test("controlled retry backfills a historical unknown Batch before G+1 dispatch"
   });
 });
 
-for (const released of [false,true]) test(`original batch refills restored failures with a new fenced Job (released=${released})`, {
+for (const normal of [false,true]) for (const released of [false,true]) test(`original batch refills restored failures with a new fenced Job (released=${released}, normal=${normal})`, {
   skip: databaseUrl ? false : 'MANAGED_JOB_TEST_DATABASE_URL is not configured', timeout: 60000,
 }, async (t) => {
   assertDedicatedLocalTestDatabase(databaseUrl);
@@ -408,13 +408,41 @@ for (const released of [false,true]) test(`original batch refills restored failu
   await setup.query(`UPDATE crawler.migration_control_items SET snapshot_json=jsonb_build_object('migration_system_retry_id','999999') WHERE batch_id=$1`,[s.failedBatchId]);
   await assert.rejects(retryMigrationSystemFailure({systemRetryId:s.systemRetryId,controlledBatchId:s.failedBatchId,withTransaction}),{code:'migration_controlled_retry_item_changed'});
   await setup.query(`UPDATE crawler.migration_control_items SET snapshot_json=jsonb_build_object('migration_system_retry_id',$2::text) WHERE batch_id=$1`,[s.failedBatchId,String(s.systemRetryId)]);
+  if(normal) {
+    const mark=()=>markPendingMigrationFailuresForNormalExecution({withTransaction,batchId:s.failedBatchId,
+      systemRetryIds:[s.systemRetryId],failureCode:'LEASE_CONFLICT',failureMessage:'test lease failure'});
+    await setup.query("UPDATE crawler.migration_control_items SET state='started' WHERE batch_id=$1",[s.failedBatchId]);
+    assert.equal((await mark()).length,0,'an executing item cannot change mode');
+    await setup.query("UPDATE crawler.migration_control_items SET state='terminal',outcome='success' WHERE batch_id=$1",[s.failedBatchId]);
+    assert.equal((await mark()).length,0,'success cannot be recollected');
+    await setup.query("UPDATE crawler.migration_control_items SET state='pending',outcome=NULL WHERE batch_id=$1",[s.failedBatchId]);
+    assert.equal((await mark()).length,1);
+    assert.equal((await mark()).length,0,'mode selection is idempotent');
+    await assert.rejects(retryMigrationSystemFailure({systemRetryId:s.systemRetryId,controlledBatchId:s.failedBatchId,withTransaction,
+      allocateOutbox:async()=>{throw Error('test allocation failure');}}),/test allocation failure/);
+    assert.equal((await setup.query('SELECT status FROM crawler.migration_system_retry_items WHERE system_retry_id=$1',[s.systemRetryId])).rows[0].status,'pending','failed allocation must not resolve the old record');
+  }
   assert.equal((await refill()).dispatched,1,'delayed/downstream work does not block an idle fetch Worker');
+  if(normal){
+    const retry=(await setup.query('SELECT status,resolution,retry_dispatch_generation FROM crawler.migration_system_retry_items WHERE system_retry_id=$1',[s.systemRetryId])).rows[0];
+    assert.equal(retry.status,'resolved','normal migration must not enter the recovery scanner');
+    assert.equal(retry.resolution,'handed_to_normal_migration');
+    assert.equal(Number(retry.retry_dispatch_generation),2);
+    assert.equal((await setup.query("SELECT count(*)::int n FROM crawler.migration_system_retry_items WHERE candidate_id=$1 AND status IN ('pending','retrying','dispatched')",[s.candidateId])).rows[0].n,0,'ordinary Agent and Finalize must be eligible');
+  }
   assert.equal((await refill()).dispatched,0,'next controller tick does not duplicate the Job');
   assert.equal(jobs.size,1);
   const job=[...jobs.values()][0];
   assert.equal(job.data.dispatch_generation,2);
   assert.equal(job.data.migration_control_start,undefined);
   assert.equal(job.data.dispatch_batch_id,s.failedBatchId);
+  assert.equal(job.data.migration_system_retry_id,undefined,'new fetch uses the ordinary migration job contract');
+  await setup.query('INSERT INTO crawler.channels(channel_id,channel_url) VALUES($1,$2)',[s.channelId,job.data.channel_url]);
+  const runId=`normal-mode-test:${s.channelId}`;
+  await setup.query('INSERT INTO crawler.channel_runs(run_id,channel_id,candidate_id) VALUES($1,$2,$3)',[runId,s.channelId,s.candidateId]);
+  const {lockGenericFinalizeAgainstMigrationSystemRetry}=await import('../src/migrationSystemRetryRecovery.js');
+  assert.equal(await withTransaction(client=>lockGenericFinalizeAgainstMigrationSystemRetry(client,{channelId:s.channelId,runId})),normal,
+    'ordinary Finalize is allowed only after the old recovery has been atomically handed off');
   assert.deepEqual((await setup.query('SELECT state,outcome FROM crawler.migration_control_items WHERE batch_id=$1',[s.failedBatchId])).rows[0],{state:'started',outcome:null});
   assert.equal((await setup.query('SELECT count(*)::int n FROM crawler.proxy_job_dispatch_outbox')).rows[0].n,1);
 });
@@ -460,4 +488,31 @@ for (const released of [false,true]) for (const initialStatus of ['running', 'co
   const first=await retry(); const second=await retry();
   assert.equal(first.dispatch_generation,2); assert.equal(second.outbox.dispatch_id,first.outbox.dispatch_id);
   assert.deepEqual((await setup.query('SELECT state,outcome,finished_at FROM crawler.migration_control_items WHERE batch_id=$1',[scenario.failedBatchId])).rows[0],{state:'started',outcome:null,finished_at:null});
+});
+
+test('40 controlled migration completions do not scan Candidates; central reconciliation stays authoritative', {
+  skip: databaseUrl ? false : 'MANAGED_JOB_TEST_DATABASE_URL is not configured', timeout: 60000,
+}, async t => {
+  assertDedicatedLocalTestDatabase(databaseUrl);
+  const setup = new Client({connectionString:databaseUrl});
+  await setup.connect(); t.after(()=>setup.end());
+  const s=await initializeScenario(setup,{suffix:randomUUID().replaceAll('-','')});
+  await setup.query(await readFile(new URL('../src/migrationBatchControlSchema.sql',import.meta.url),'utf8'));
+  await setup.query(`INSERT INTO crawler.migration_control_batches(batch_id,source_id,selection,status,frozen_at,total_count)
+    VALUES($1,'test','all','running',now(),1)`,[s.failedBatchId]);
+  await setup.query(`UPDATE crawler.query_dispatch_batches SET status='running',discovery_closed_at=now(),failed_channel_count=0 WHERE dispatch_batch_id=$1`,[s.failedBatchId]);
+  const {reconcileDispatchBatchCandidateState}=await import('../src/dispatchBatchCandidateState.js');
+  const readers=new Pool({connectionString:databaseUrl,max:8,options:'-c statement_timeout=1500 -c lock_timeout=500'});
+  t.after(()=>readers.end());
+  await setup.query('BEGIN');
+  await setup.query('LOCK crawler.channel_candidates IN ACCESS EXCLUSIVE MODE');
+  let results;
+  try {
+    results=await Promise.allSettled(Array.from({length:40},()=>reconcileDispatchBatchCandidateState(readers.query.bind(readers),s.failedBatchId)));
+  } finally {await setup.query('ROLLBACK');}
+  assert.equal(results.filter(r=>r.status==='fulfilled').length,40,'per-channel bookkeeping must not wait for the batch-wide Candidate table');
+  const counts=await reconcileDispatchBatchCandidateState(readers.query.bind(readers),s.failedBatchId,{closeValidation:true});
+  assert.equal(counts.failed_channel_count,1,'background aggregation must retain the real failure count');
+  assert.equal(counts.open,0);
+  assert.equal(counts.status,'validation_closed');
 });

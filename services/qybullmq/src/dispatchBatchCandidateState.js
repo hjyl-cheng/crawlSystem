@@ -19,6 +19,19 @@ export async function reconcileDispatchBatchCandidateState(
   if (typeof closeValidation !== "boolean") {
     throw new TypeError("closeValidation must be a boolean");
   }
+  if (!closeValidation) {
+    // Controlled All batches can contain hundreds of thousands of Candidates.
+    // Their Controller already reconciles counts/validation every 30 seconds.
+    // A per-channel caller must not start another full census or wait on it.
+    // Keep this separate from the census SQL: even a false SQL branch takes a
+    // relation lock on Candidates during planning.
+    const controlled = await query(
+      `SELECT batch_id FROM crawler.migration_control_batches
+       WHERE batch_id=$1 AND frozen_at IS NOT NULL LIMIT 1`,
+      [normalizedBatchId],
+    );
+    if (controlled.rows.length) return null;
+  }
   const result = await query(
     `WITH candidate_stats AS (
        SELECT count(*)::int AS total,

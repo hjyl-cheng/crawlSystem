@@ -427,6 +427,7 @@ test("Dispatch Batch Candidate state atomically refreshes counts behind its comp
     null,
   ];
   const query = async (sql, params) => {
+    if (sql.includes('FROM crawler.migration_control_batches')) return {rows:[]};
     calls.push({ sql: String(sql), params });
     const response = responses.shift();
     return { rows: response == null ? [] : [response] };

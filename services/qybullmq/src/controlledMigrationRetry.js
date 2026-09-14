@@ -43,6 +43,7 @@ export async function lockControlledMigrationRetryItem(client, batch, retry) {
         && ['pending', 'dispatched'].includes(retry.status))) {
     throw conflict('migration_controlled_retry_item_changed');
   }
+  return item;
 }
 
 export async function reopenControlledMigrationRetryItem(client, batch, retry) {
@@ -106,5 +107,44 @@ export async function restoreControlledMigrationFailures({
       RETURNING item.candidate_id,retry.system_retry_id`,
     [batchId,systemRetryIds,failureCode,failureMessage]);
     return restored.rows;
+  });
+}
+
+// A mode selection, not a redispatch: only the frozen, unstarted members of an
+// explicit failure cohort can be marked. Intake rechecks all execution fences
+// and atomically allocates G+1 before resolving their old recovery record.
+export async function markPendingMigrationFailuresForNormalExecution({
+  withTransaction, batchId, systemRetryIds, failureCode, failureMessage,
+}) {
+  if (!Array.isArray(systemRetryIds) || !systemRetryIds.length || systemRetryIds.length > 500
+      || systemRetryIds.some(id => !Number.isSafeInteger(Number(id)) || Number(id) < 1)
+      || !failureCode || !failureMessage) throw new TypeError('A bounded, explicit failure cohort is required');
+  return withTransaction(async client => {
+    const scheduler = (await client.query(`SELECT value_json FROM crawler.settings
+      WHERE setting_key='query_scheduler' FOR UPDATE`)).rows[0]?.value_json;
+    const batch = await lockControlledMigrationRetry(client, scheduler ?? {}, batchId);
+    if (batch.status !== 'running') throw conflict('migration_controlled_retry_blocked');
+    const result = await client.query(`UPDATE crawler.migration_control_items item
+      SET snapshot_json=item.snapshot_json||'{"migration_retry_mode":"normal"}'::jsonb
+      FROM crawler.migration_system_retry_items retry, crawler.channel_candidates candidate
+      WHERE retry.system_retry_id=ANY($2::bigint[]) AND retry.failed_dispatch_batch_id=$1
+        AND retry.status='pending' AND retry.retry_dispatch_generation IS NULL
+        AND retry.failure_code=$3 AND retry.failure_evidence#>>'{system_failure,message}'=$4
+        AND item.batch_id=$1 AND item.candidate_id=retry.candidate_id
+        AND item.state='pending' AND item.outcome IS NULL
+        AND item.snapshot_json->>'migration_system_retry_id'=retry.system_retry_id::text
+        AND item.snapshot_json->>'migration_retry_mode' IS DISTINCT FROM 'normal'
+        AND candidate.candidate_id=retry.candidate_id AND candidate.channel_id=item.channel_id
+        AND candidate.dispatch_batch_id=$1 AND candidate.status IN ('failed','accepted')
+        AND candidate.snapshot_dispatch_generation=retry.failed_dispatch_generation
+        AND candidate.snapshot_json->>'failure_type'='retryable_system_failure'
+        AND ((candidate.snapshot_active_job_id=retry.failed_job_id
+          AND candidate.snapshot_active_job_attempt=retry.failed_job_attempt)
+          OR (candidate.status='accepted' AND candidate.snapshot_active_job_id IS NULL
+            AND candidate.snapshot_active_job_attempt IS NULL
+            AND candidate.snapshot_json->>'failed_dispatch_batch_id'=$1))
+      RETURNING retry.system_retry_id,item.candidate_id,item.channel_id`,
+    [batchId,systemRetryIds,failureCode,failureMessage]);
+    return result.rows;
   });
 }

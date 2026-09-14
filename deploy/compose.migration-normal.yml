@@ -1,0 +1,9 @@
+# Append after existing migration overrides. Remote node services are unchanged.
+# Wait for active migration jobs to drain before replacing worker-channel.
+services:
+  worker-channel:
+    image: ${MIGRATION_NORMAL_WORKER_IMAGE:?set the tested migration Worker image}
+  controller:
+    image: ${MIGRATION_NORMAL_CONTROLLER_IMAGE:?set the tested migration Controller image}
+    environment:
+      CONTROLLER_THROUGHPUT_ENABLED: "true"
