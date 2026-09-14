@@ -64,12 +64,15 @@ async function maybeCreateAgentBatch(actions, agentConfigs, agentCapacity, query
   });
   for (const agentConfig of dispatchPlan) {
     const batchSize = Math.max(1, Math.min(50, Number(agentConfig?.batch_size ?? agentBatchSize)));
-    // Exclude recovery-owned work before reading the large Run result JSON.
-    // Recheck eligibility in the locking query because a channel can change
-    // after the materialized shortlist was read.
+    // Sort eligible identities before reading large Run payloads. The ordered
+    // subquery and correlated LIMIT 1 keep each payload check inside the walk;
+    // the outer LIMIT stops after one batch instead of checking the whole backlog.
+    // Recheck ownership/eligibility under the original channel and Run locks.
     const rows = await query(
-      `WITH eligible_runs AS MATERIALIZED (
-         SELECT c.channel_id,c.latest_run_id
+      `WITH candidates AS MATERIALIZED (
+         SELECT locked.channel_id,locked.channel_url
+         FROM (
+         SELECT c.channel_id,c.latest_run_id,c.priority,c.created_at
          FROM crawler.channels c
          JOIN crawler.channel_runs current_run ON current_run.run_id=c.latest_run_id
          WHERE c.ready_for_agent=true
@@ -92,12 +95,15 @@ async function maybeCreateAgentBatch(actions, agentConfigs, agentCapacity, query
              WHERE retry.candidate_id=current_run.candidate_id
                AND retry.status IN ('retrying','pending','dispatched')
            )
-       ), candidates AS MATERIALIZED (
+         ORDER BY c.priority DESC,c.created_at ASC OFFSET 0
+         ) eligible
+         CROSS JOIN LATERAL (
          SELECT c.channel_id,c.channel_url
-         FROM eligible_runs eligible
-         JOIN crawler.channels c ON c.channel_id=eligible.channel_id AND c.latest_run_id=eligible.latest_run_id
+         FROM crawler.channels c
          JOIN crawler.channel_runs current_run ON current_run.run_id=c.latest_run_id
-         WHERE c.ready_for_agent=true
+         WHERE c.channel_id=eligible.channel_id
+           AND c.latest_run_id=eligible.latest_run_id
+           AND c.ready_for_agent=true
            AND c.agent_status IN ('pending','failed')
            AND NOT EXISTS (
              SELECT 1 FROM crawler.agent_refresh_requests refresh
@@ -118,9 +124,10 @@ async function maybeCreateAgentBatch(actions, agentConfigs, agentCapacity, query
              WHERE retry.candidate_id=current_run.candidate_id
                AND retry.status IN ('retrying','pending','dispatched')
            )
-         ORDER BY c.priority DESC,c.created_at ASC
-         LIMIT $1
+         LIMIT 1
          FOR UPDATE SKIP LOCKED
+         ) locked
+         LIMIT $1
        ), candidate_count AS (
          SELECT count(*)::int AS count FROM candidates
        ), picked AS (

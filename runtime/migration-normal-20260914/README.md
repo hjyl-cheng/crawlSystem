@@ -72,3 +72,20 @@ materializing eligible channel/run IDs before reading their Run JSON returned
 The final producer preserves its original criteria and rechecks them in the
 locking query after the materialized shortlist. Existing real PostgreSQL/Redis
 normal/recovery coexistence and tail tests pass on this query as well.
+
+## Stop reading Run payloads once one Agent batch is full
+
+Materializing eligible identities alone still let the outer priority sort read
+all remaining Run JSON values before LIMIT. Under live load the Agent producer
+continued to hit its 15-second timeout. An ordered identity subquery followed by
+a correlated, locking LIMIT 1 checks each Run only as needed; the outer LIMIT
+stops after one full batch. Priority, current Run identity, authoritative Run
+batch metadata, recovery exclusions and channel/Run SKIP LOCKED all remain.
+A read-only comparison returned 20 rows in 9.2 versus 4.7 seconds and reduced
+read blocks from 31,558 to 16,450; this is a sample, not a throughput guarantee.
+The actual PostgreSQL dispatch regression fails before the change: selecting 20
+inspects all 65 fixture Run payloads. It passes after the change at 20. Tests
+also verify skipping another batch, a locked channel, a locked Run and a future
+retry while still selecting the next 20 eligible channels in priority order,
+as well as legacy pipeline_cycle_id ownership, normal/recovery coexistence,
+shared concurrency, no duplicate channels and a five-channel tail.

@@ -28,6 +28,45 @@ for (const recoveryBacklog of [0,10]) test(`real Agent dispatch fills three cons
   await query(`INSERT INTO crawler.channel_runs(run_id,channel_id,crawl_mode,result_json)
     SELECT 'agent-run-'||n,'UCagent'||n,'full',jsonb_build_object('dispatch_batch_id',$1::text) FROM generate_series(1,65)n`,[batch]);
   await query(`UPDATE crawler.channels SET latest_run_id='agent-run-'||substring(channel_id from 8)`);
+  // Picking one batch must not inspect every remaining large Run payload.
+  // Execute the actual dispatch SQL and roll it back before starting consumers.
+  let selection;
+  const capture=createAgentBatchDispatch({query:async(sql,args)=>{
+    if(sql.startsWith('SELECT discovery_closed_at'))return {rows:[{ready:false}]};
+    selection??={sql,args};return {rows:[]};
+  },agentQueue:{getJobs:async()=>[]},agentBatchSize:20,agentMaxBatchesPerTick:1});
+  await capture.dispatch([],[{config_id:1,batch_size:20,max_workers:3}],{concurrency:3},{pipeline_cycle_id:batch});
+  const probe=await pool.connect();
+  try {
+    await probe.query('BEGIN');
+    const explanation=await probe.query('EXPLAIN (ANALYZE,FORMAT JSON) '+selection.sql,selection.args);
+    let payloadChecks=0;
+    const visit=node=>{if(node['Relation Name']==='channel_runs' && String(node.Filter||'').includes('result_json'))payloadChecks+=node['Actual Loops'];for(const child of node.Plans||[])visit(child);};
+    visit(explanation.rows[0]['QUERY PLAN'][0].Plan);
+    assert.ok(payloadChecks>0 && payloadChecks<=20,`one 20-channel batch inspected ${payloadChecks} Run payloads`);
+  } finally {await probe.query('ROLLBACK');probe.release();}
+  // Walk past another batch, both kinds of execution row lock, and a future
+  // retry without starving lower-priority eligible channels or changing batch size.
+  await query("UPDATE crawler.channels SET priority=1000-substring(channel_id from 8)::int");
+  await query("UPDATE crawler.channel_runs SET result_json=jsonb_build_object('dispatch_batch_id','another-batch') WHERE run_id IN ('agent-run-1','agent-run-2')");
+  await query("UPDATE crawler.channels SET agent_next_retry_at=now()+interval '1 day' WHERE channel_id='UCagent5'");
+  // Preserve legacy Run ownership via pipeline_cycle_id as well.
+  await query("UPDATE crawler.channel_runs SET result_json=jsonb_build_object('pipeline_cycle_id',$1::text) WHERE run_id='agent-run-6'",[batch]);
+  const locks=await pool.connect(),picker=await pool.connect();
+  try {
+    await locks.query('BEGIN');
+    await locks.query("SELECT channel_id FROM crawler.channels WHERE channel_id='UCagent3' FOR UPDATE");
+    await locks.query("SELECT run_id FROM crawler.channel_runs WHERE run_id='agent-run-4' FOR UPDATE");
+    await picker.query('BEGIN');
+    await picker.query("SET LOCAL statement_timeout='2s'");
+    const picked=await picker.query(selection.sql,selection.args);
+    assert.deepEqual(picked.rows.map(r=>Number(r.channel_id.slice(7))).sort((a,b)=>a-b),Array.from({length:20},(_,i)=>i+6));
+  } finally {
+    await picker.query('ROLLBACK');picker.release();
+    await locks.query('ROLLBACK');locks.release();
+  }
+  await query("UPDATE crawler.channel_runs SET result_json=jsonb_build_object('dispatch_batch_id',$1::text) WHERE run_id IN ('agent-run-1','agent-run-2')",[batch]);
+  await query("UPDATE crawler.channels SET agent_next_retry_at=NULL WHERE channel_id='UCagent5'");
   for(let i=0;i<recoveryBacklog;i++)await queue.add('agent-profile-batch',{migration_system_retry_id:i+1,channel_ids:[`recovery-${i}`]});
   for(let i=0;i<3;i++){
     const w=new Worker(queue.name,async j=>{if(j.data.migration_system_retry_id){await recoveryGate;return;}sizes.push(j.data.channel_ids.length);for(const id of j.data.channel_ids){assert.ok(!seen.has(id),`duplicate Agent channel ${id}`);seen.add(id);}await gate;await query("UPDATE crawler.channels SET agent_status='done',ready_for_agent=false WHERE channel_id=ANY($1::text[])",[j.data.channel_ids]);},{connection,prefix:queue.opts.prefix});
