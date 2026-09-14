@@ -99,3 +99,17 @@ thousands of random recovery index lookups with a set anti-join; this returned
 still queries the real recovery table and preserves the original exclusions.
 Real PostgreSQL tests cover pending/retrying/dispatched exclusion and
 resolved/cancelled eligibility, in addition to the prior concurrency/lock cases.
+
+A rollback-only EXPLAIN ANALYZE of the complete UPDATE measured 16.1 seconds,
+with only about 0.08 seconds in triggers: roughly 9 seconds were still spent
+looking up 7,017 Run identities. The Registry composite foreign key already
+proves (registry_promotion_run_id, channel_id, registry_promotion_candidate_id).
+Eligibility now reuses that Candidate only when latest_run_id equals that exact
+Registry Run; otherwise it reads the actual latest Run's Candidate. The final
+locked check still reads the actual Run and recovery table in every case.
+The same complete, rollback-only UPDATE measured 9.4 seconds with this change.
+The regression fails before it at 85 Run identity visits for one 20-channel
+batch; after it, only the needed locked Runs and legacy/later-Run identities
+are visited. Tests cover FK-backed identities, legacy identities, and a later
+Run with a different Candidate while the old Registry Candidate has a pending
+recovery. Candidate batch reassignment does not replace Run batch evidence.

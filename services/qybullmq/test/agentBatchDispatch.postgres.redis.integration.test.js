@@ -23,11 +23,21 @@ for (const recoveryBacklog of [0,10]) test(`real Agent dispatch fills three cons
   await query(`INSERT INTO crawler.query_dispatch_batches(dispatch_batch_id,pipeline_cycle_id,status,discovery_closed_at) VALUES($1,$1,'discovery_closed',now())`,[batch]);
   await query(`INSERT INTO crawler.channel_candidates(dispatch_batch_id,pipeline_cycle_id,channel_id,channel_url,status)
     SELECT $1,$1,'UCagent'||n,'https://youtube.com/channel/UCagent'||n,'discovered' FROM generate_series(1,65)n`,[batch]);
-  await query(`INSERT INTO crawler.channels(channel_id,channel_url,title,status,subscriber_count,ready_for_agent,agent_status)
-    SELECT 'UCagent'||n,'https://youtube.com/channel/UCagent'||n,'Agent test','active',2000,true,'pending' FROM generate_series(1,65)n`);
-  await query(`INSERT INTO crawler.channel_runs(run_id,channel_id,crawl_mode,result_json)
-    SELECT 'agent-run-'||n,'UCagent'||n,'full',jsonb_build_object('dispatch_batch_id',$1::text) FROM generate_series(1,65)n`,[batch]);
-  await query(`UPDATE crawler.channels SET latest_run_id='agent-run-'||substring(channel_id from 8)`);
+  const seed=await pool.connect();
+  try {
+    await seed.query('BEGIN');
+    await seed.query(`INSERT INTO crawler.channels(channel_id,channel_url,title,status,subscriber_count,ready_for_agent,agent_status,latest_run_id,registry_promotion_candidate_id,registry_promotion_run_id)
+      SELECT 'UCagent'||n,'https://youtube.com/channel/UCagent'||n,'Agent test','active',2000,true,'pending','agent-run-'||n,
+        CASE WHEN n<=61 THEN c.candidate_id END,
+        CASE WHEN n<=60 THEN 'agent-run-'||n WHEN n=61 THEN 'agent-old-61' END
+      FROM generate_series(1,65)n JOIN crawler.channel_candidates c ON c.channel_id='UCagent'||n`);
+    await seed.query(`INSERT INTO crawler.channel_runs(run_id,channel_id,candidate_id,crawl_mode,result_json)
+      SELECT 'agent-run-'||n,'UCagent'||n,CASE WHEN n<=61 THEN c.candidate_id END,'full',jsonb_build_object('dispatch_batch_id',$1::text)
+      FROM generate_series(1,65)n JOIN crawler.channel_candidates c ON c.channel_id='UCagent'||n`,[batch]);
+    await seed.query(`INSERT INTO crawler.channel_runs(run_id,channel_id,candidate_id,crawl_mode,result_json)
+      SELECT 'agent-old-61',channel_id,candidate_id,'full','{}' FROM crawler.channel_candidates WHERE channel_id='UCagent61'`);
+    await seed.query('COMMIT');
+  } finally {seed.release();}
   // Picking one batch must not inspect every remaining large Run payload.
   // Execute the actual dispatch SQL and roll it back before starting consumers.
   let selection;
@@ -40,9 +50,10 @@ for (const recoveryBacklog of [0,10]) test(`real Agent dispatch fills three cons
   try {
     await probe.query('BEGIN');
     const explanation=await probe.query('EXPLAIN (ANALYZE,FORMAT JSON) '+selection.sql,selection.args);
-    let payloadChecks=0;
-    const visit=node=>{if(node['Relation Name']==='channel_runs' && String(node.Filter||'').includes('result_json'))payloadChecks+=node['Actual Loops'];for(const child of node.Plans||[])visit(child);};
+    let payloadChecks=0,identityReads=0;
+    const visit=node=>{if(node['Relation Name']==='channel_runs')identityReads+=node['Actual Loops'];if(node['Relation Name']==='channel_runs' && String(node.Filter||'').includes('result_json'))payloadChecks+=node['Actual Loops'];for(const child of node.Plans||[])visit(child);};
     visit(explanation.rows[0]['QUERY PLAN'][0].Plan);
+    assert.ok(identityReads<=25,`one 20-channel batch revisited ${identityReads} Run identities despite existing foreign-key-backed ownership`);
     assert.ok(payloadChecks>0 && payloadChecks<=20,`one 20-channel batch inspected ${payloadChecks} Run payloads`);
   } finally {await probe.query('ROLLBACK');probe.release();}
   // Walk past another batch, both kinds of execution row lock, and a future
@@ -85,6 +96,16 @@ for (const recoveryBacklog of [0,10]) test(`real Agent dispatch fills three cons
       assert.deepEqual(selected.rows.map(r=>Number(r.channel_id.slice(7))).sort((a,b)=>a-b),Array.from({length:20},(_,i)=>i+first));
     } finally {await client.query('ROLLBACK');client.release();}
   }
+  // A later Run can have another Candidate. An old Registry owner's recovery
+  // must not exclude this Run or replace its authoritative batch metadata.
+  const oldOwner=(await query("SELECT registry_promotion_candidate_id FROM crawler.channels WHERE channel_id='UCagent61'")).rows[0].registry_promotion_candidate_id;
+  await query("INSERT INTO crawler.query_dispatch_batches(dispatch_batch_id,pipeline_cycle_id,status) VALUES('agent-other-batch','agent-other-batch','running')");
+  const laterOwner=(await query("INSERT INTO crawler.channel_candidates(dispatch_batch_id,pipeline_cycle_id,channel_id,channel_url,status) VALUES('agent-other-batch','agent-other-batch','UCagent61','https://youtube.com/channel/UCagent61','discovered') RETURNING candidate_id")).rows[0].candidate_id;
+  await query("UPDATE crawler.channel_runs SET candidate_id=$1 WHERE run_id='agent-run-61'",[laterOwner]);
+  const oldIntent=(await query(`INSERT INTO crawler.migration_channel_intents(source_id,source_database,source_database_oid,source_candidate_id,channel_id,source_snapshot,snapshot_sha256,target_candidate_id,first_dispatch_batch_id)
+    VALUES('agent-owner-test',current_database(),(SELECT oid FROM pg_database WHERE datname=current_database()),$1,'UCagent61','{}',repeat('a',64),$1,$2) RETURNING migration_intent_id`,[oldOwner,batch])).rows[0].migration_intent_id;
+  await query(`INSERT INTO crawler.migration_system_retry_items(migration_intent_id,candidate_id,failed_dispatch_batch_id,failed_dispatch_generation,failed_job_id,failed_job_attempt,failure_code,failure_category,status)
+    VALUES($1,$2,$3,1,'agent-old-owner',1,'SYSTEM_ROUTE','system','pending')`,[oldIntent,oldOwner,batch]);
   for(let i=0;i<recoveryBacklog;i++)await queue.add('agent-profile-batch',{migration_system_retry_id:i+1,channel_ids:[`recovery-${i}`]});
   for(let i=0;i<3;i++){
     const w=new Worker(queue.name,async j=>{if(j.data.migration_system_retry_id){await recoveryGate;return;}sizes.push(j.data.channel_ids.length);for(const id of j.data.channel_ids){assert.ok(!seen.has(id),`duplicate Agent channel ${id}`);seen.add(id);}await gate;await query("UPDATE crawler.channels SET agent_status='done',ready_for_agent=false WHERE channel_id=ANY($1::text[])",[j.data.channel_ids]);},{connection,prefix:queue.opts.prefix});

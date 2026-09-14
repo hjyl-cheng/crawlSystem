@@ -69,6 +69,9 @@ async function maybeCreateAgentBatch(actions, agentConfigs, agentCapacity, query
     // the outer LIMIT stops after one batch instead of checking the whole backlog.
     // Materialize recovery IDs once: UPDATE cannot use the parallel scan of a
     // read-only probe, so per-channel recovery lookups can exhaust its timeout.
+    // The Registry composite FK fixes the Candidate identity of its Run. Reuse
+    // that identity only when it IS the latest Run; later/legacy Runs still load
+    // their own Candidate. The final locked check always reads the actual Run.
     // Recheck ownership/eligibility under the original channel and Run locks.
     const rows = await query(
       `WITH active_recovery_candidates AS MATERIALIZED (
@@ -79,8 +82,8 @@ async function maybeCreateAgentBatch(actions, agentConfigs, agentCapacity, query
          FROM (
          SELECT c.channel_id,c.latest_run_id,c.priority,c.created_at
          FROM crawler.channels c
-         JOIN crawler.channel_runs current_run ON current_run.run_id=c.latest_run_id
-         WHERE c.ready_for_agent=true
+         WHERE c.latest_run_id IS NOT NULL
+           AND c.ready_for_agent=true
            AND c.agent_status IN ('pending','failed')
            AND NOT EXISTS (
              SELECT 1 FROM crawler.agent_refresh_requests refresh
@@ -97,7 +100,11 @@ async function maybeCreateAgentBatch(actions, agentConfigs, agentCapacity, query
            AND NOT EXISTS (
              SELECT 1
              FROM active_recovery_candidates retry
-             WHERE retry.candidate_id=current_run.candidate_id
+             WHERE retry.candidate_id=CASE
+               WHEN c.latest_run_id=c.registry_promotion_run_id THEN c.registry_promotion_candidate_id
+               ELSE (SELECT identity_run.candidate_id FROM crawler.channel_runs identity_run
+                     WHERE identity_run.run_id=c.latest_run_id)
+             END
            )
          ORDER BY c.priority DESC,c.created_at ASC OFFSET 0
          ) eligible
