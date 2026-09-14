@@ -61,3 +61,14 @@ FIFO. The PostgreSQL/Redis regression holds three recovery executions with seven
 more queued, requires three normal batches to queue without exceeding three
 active Workers, then releases recovery and verifies normal batch/tail completion
 without duplicate channels. This fails before the producer accounting change.
+
+## Agent eligibility scan under the real recovery backlog
+
+The live normal producer hit its 15-second SQL timeout despite having queue
+room. A read-only comparison limited to selecting 20 channels found the old
+query timed out at 12 seconds. Reordering a CASE predicate also timed out;
+materializing eligible channel/run IDs before reading their Run JSON returned
+20 rows in 5.7 seconds in that sample. Do not describe CASE ordering as the fix.
+The final producer preserves its original criteria and rechecks them in the
+locking query after the materialized shortlist. Existing real PostgreSQL/Redis
+normal/recovery coexistence and tail tests pass on this query as well.

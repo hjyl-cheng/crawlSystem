@@ -64,10 +64,38 @@ async function maybeCreateAgentBatch(actions, agentConfigs, agentCapacity, query
   });
   for (const agentConfig of dispatchPlan) {
     const batchSize = Math.max(1, Math.min(50, Number(agentConfig?.batch_size ?? agentBatchSize)));
+    // Exclude recovery-owned work before reading the large Run result JSON.
+    // Recheck eligibility in the locking query because a channel can change
+    // after the materialized shortlist was read.
     const rows = await query(
-      `WITH candidates AS MATERIALIZED (
-         SELECT c.channel_id,c.channel_url
+      `WITH eligible_runs AS MATERIALIZED (
+         SELECT c.channel_id,c.latest_run_id
          FROM crawler.channels c
+         JOIN crawler.channel_runs current_run ON current_run.run_id=c.latest_run_id
+         WHERE c.ready_for_agent=true
+           AND c.agent_status IN ('pending','failed')
+           AND NOT EXISTS (
+             SELECT 1 FROM crawler.agent_refresh_requests refresh
+             WHERE refresh.channel_id=c.channel_id
+               AND (
+                 refresh.status IN ('pending','queued','running')
+                 OR (refresh.status='failed' AND isfinite(refresh.next_retry_at))
+               )
+           )
+           AND (c.agent_next_retry_at IS NULL OR c.agent_next_retry_at<=now())
+           AND c.status='active'
+           AND c.subscriber_count IS NOT NULL
+           AND NULLIF(btrim(c.title),'') IS NOT NULL
+           AND NOT EXISTS (
+             SELECT 1
+             FROM crawler.migration_system_retry_items retry
+             WHERE retry.candidate_id=current_run.candidate_id
+               AND retry.status IN ('retrying','pending','dispatched')
+           )
+       ), candidates AS MATERIALIZED (
+         SELECT c.channel_id,c.channel_url
+         FROM eligible_runs eligible
+         JOIN crawler.channels c ON c.channel_id=eligible.channel_id AND c.latest_run_id=eligible.latest_run_id
          JOIN crawler.channel_runs current_run ON current_run.run_id=c.latest_run_id
          WHERE c.ready_for_agent=true
            AND c.agent_status IN ('pending','failed')
