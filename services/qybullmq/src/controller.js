@@ -3182,7 +3182,10 @@ if (independentRecoveryEnabled) {
   const countsDb = database("batch-counts", { statementTimeoutMs: 30000 });
   const recoveryDb = database("migration-system-recovery", { statementTimeoutMs: 15000 });
   const migrationRecovery = new MigrationSystemRetryRecoveryReconciler({ ...recoveryDb, queues,
-    queueHighWater: { [queuesByRole.agentBatch]: 100, [queuesByRole.finalize]: 200 },
+    // Historical Finalize recovery refills up to 40 Jobs below its 200-Job
+    // high-water mark. Leave room above that producer's burst for system retry
+    // handoffs, so completed Agents cannot starve behind the historical scan.
+    queueHighWater: { [queuesByRole.agentBatch]: 100, [queuesByRole.finalize]: 250 },
   });
   const agentDispatch = createAgentBatchDispatch({ query: agentDb.query,
     agentQueue: queues[queuesByRole.agentBatch], agentBatchSize, agentMaxBatchesPerTick });

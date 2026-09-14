@@ -13,7 +13,7 @@ handoff and settlement depended on the Controller main tick, which could wait
 minutes on unrelated maintenance SQL. Throughput mode now runs that same fenced
 reconciler in a dedicated, non-overlapping work loop with its own bounded DB
 pool. Main-tick mode retains the previous behavior. New Agent and Finalize
-recovery jobs are limited by queue high-water marks (100 and 200 respectively).
+recovery jobs are limited by queue high-water marks (100 and 250 respectively).
 Scanning first selects bounded IDs using separate active/legacy cursors before
 joining channel payloads; the existing fairness and execution fences remain.
 
@@ -28,6 +28,15 @@ joining channel payloads; the existing fairness and execution fences remain.
 - Controller work-loop and recovery unit tests: 15 passed, no skips.
 - A read-only production baseline records 300 recently collected channels:
   134 waiting for Agent, 156 dormant awaiting publication, 10 already published.
+
+## Finalize queue fairness
+
+The production smoke test found that historical Finalize compensation kept its
+200-job queue budget full (its 40-job refill can reach 239 queued jobs). Sharing
+that threshold starved system retry handoffs even after Agent completed. The
+system retry high-water mark is 250, leaving bounded room above that historical
+producer. A real Controller regression reproduces starvation at 239 queued jobs
+and verifies handoff at 239 while still refusing additional work at 250.
 
 ## Online index preparation
 

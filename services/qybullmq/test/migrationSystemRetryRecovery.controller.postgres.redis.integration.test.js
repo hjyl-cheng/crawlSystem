@@ -870,6 +870,33 @@ test("the real Controller only resumes queues demanded by a completed batch syst
     { jobId: legacyGenericIdentity.jobId },
   );
 
+  // Historical Finalize recovery refills 40 jobs at a 200-job high-water mark.
+  // A system retry must still be able to finish while that producer is full.
+  const historicalFinalize = await queues[queuesByRole.finalize].addBulk(Array.from({length:249}, (_,index)=>({
+    name:'historical-finalize',data:{},opts:{jobId:`historical-finalize-${index}`,priority:100},
+  })));
+  const finalController = spawn(process.execPath, ['src/controller.js'], {
+    cwd: new URL('..', import.meta.url),
+    env: {...controllerEnvironment({prefix}), CONTROLLER_THROUGHPUT_ENABLED:'true', MIGRATION_BATCH_CONTROL_ENABLED:'false'},
+    stdio:['ignore','pipe','pipe'],
+  });
+  const finalOutput = captureChildOutput(finalController);
+  const allFinalizeJobs = () => queues[queuesByRole.finalize].getJobs(inFlightStates,0,300,true);
+  try {
+    await finalOutput.waitFor('"name":"migration_system_recovery"',15000);
+    assert.equal((await allFinalizeJobs()).length,250,'recovery must stop at its own queue high-water mark');
+    await Promise.all(historicalFinalize.splice(0,11).map(job=>job.remove()));
+    await within((async()=>{
+      while(!(await allFinalizeJobs()).some(job=>job.data.migration_system_retry_id===scenario.systemRetryId)) {
+        await new Promise(resolve=>setTimeout(resolve,25));
+      }
+    })(),'Finalize recovery with a full historical producer',10000);
+    assert.equal((await allFinalizeJobs()).length,240,
+      'a completed Agent must reach Finalize above the historical producer budget');
+  } finally {
+    await stopChild(finalController);
+    await Promise.all(historicalFinalize.map(job=>job.remove()));
+  }
   await runControllerStartupTick({ prefix, label: "completed Scheduler Finalize recovery" });
   await assertRecoveryQueueState(queues, {
     [queuesByRole.channelCrawl]: true,
