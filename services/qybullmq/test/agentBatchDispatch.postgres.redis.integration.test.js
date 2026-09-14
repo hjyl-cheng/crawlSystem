@@ -9,14 +9,14 @@ import {PUBLICATION_WRITER_VERSION} from '../src/publicationWriterVersion.js';
 const url=process.env.AGENT_DISPATCH_TEST_DATABASE_URL,port=Number(process.env.THROUGHPUT_TEST_REDIS_PORT);
 const delay=ms=>new Promise(r=>setTimeout(r,ms));
 async function until(check){const deadline=Date.now()+20000;while(!await check()){assert.ok(Date.now()<deadline,'Agent dispatch stopped making progress');await delay(50);}}
-test('real Agent dispatch fills three consumers during blocked maintenance, preserves tail eligibility and never repeats channels', {skip:!url||!port}, async t=>{
+for (const recoveryBacklog of [0,10]) test(`real Agent dispatch fills three consumers during blocked maintenance, preserves tail eligibility and never repeats channels (recovery=${recoveryBacklog})`, {skip:!url||!port}, async t=>{
   assert.equal(new URL(url).pathname,'/agent_dispatch_test');
   const pool=new pg.Pool({connectionString:url,max:6,options:`-c publication.writer_version=${PUBLICATION_WRITER_VERSION}`});
   const query=pool.query.bind(pool),connection={host:'127.0.0.1',port,password:process.env.THROUGHPUT_TEST_REDIS_PASSWORD,maxRetriesPerRequest:null};
   const queue=new Queue('youtube-agent-batch',{connection,prefix:`agent-dispatch-${Date.now()}`});
   const workers=[],seen=new Set(),sizes=[],errors=[];
-  let loops,release,unblock;const gate=new Promise(r=>{release=r}),maintenanceGate=new Promise(r=>{unblock=r});
-  t.after(async()=>{release();unblock();await loops?.shutdown();await Promise.all(workers.map(w=>w.close()));await queue.obliterate({force:true});await queue.close();await pool.end();});
+  let loops,release,unblock,releaseRecoveries;const recoveryGate=new Promise(r=>{releaseRecoveries=r});const gate=new Promise(r=>{release=r}),maintenanceGate=new Promise(r=>{unblock=r});
+  t.after(async()=>{release();releaseRecoveries();unblock();await loops?.shutdown();await Promise.all(workers.map(w=>w.close()));await queue.obliterate({force:true});await queue.close();await pool.end();});
   await query('DROP SCHEMA IF EXISTS publication CASCADE; DROP SCHEMA IF EXISTS crawler CASCADE');
   await query(await readFile(new URL('../src/schema.sql',import.meta.url),'utf8'));
   const batch='agent-test-batch';
@@ -28,8 +28,9 @@ test('real Agent dispatch fills three consumers during blocked maintenance, pres
   await query(`INSERT INTO crawler.channel_runs(run_id,channel_id,crawl_mode,result_json)
     SELECT 'agent-run-'||n,'UCagent'||n,'full',jsonb_build_object('dispatch_batch_id',$1::text) FROM generate_series(1,65)n`,[batch]);
   await query(`UPDATE crawler.channels SET latest_run_id='agent-run-'||substring(channel_id from 8)`);
+  for(let i=0;i<recoveryBacklog;i++)await queue.add('agent-profile-batch',{migration_system_retry_id:i+1,channel_ids:[`recovery-${i}`]});
   for(let i=0;i<3;i++){
-    const w=new Worker(queue.name,async j=>{sizes.push(j.data.channel_ids.length);for(const id of j.data.channel_ids){assert.ok(!seen.has(id),`duplicate Agent channel ${id}`);seen.add(id);}await gate;await query("UPDATE crawler.channels SET agent_status='done',ready_for_agent=false WHERE channel_id=ANY($1::text[])",[j.data.channel_ids]);},{connection,prefix:queue.opts.prefix});
+    const w=new Worker(queue.name,async j=>{if(j.data.migration_system_retry_id){await recoveryGate;return;}sizes.push(j.data.channel_ids.length);for(const id of j.data.channel_ids){assert.ok(!seen.has(id),`duplicate Agent channel ${id}`);seen.add(id);}await gate;await query("UPDATE crawler.channels SET agent_status='done',ready_for_agent=false WHERE channel_id=ANY($1::text[])",[j.data.channel_ids]);},{connection,prefix:queue.opts.prefix});
     w.on('error',e=>errors.push(e.message));w.on('failed',(_j,e)=>errors.push(e.message));workers.push(w);
   }
   await Promise.all(workers.map(w=>w.waitUntilReady()));await until(async()=>await queue.getWorkersCount()===3);
@@ -40,7 +41,12 @@ test('real Agent dispatch fills three consumers during blocked maintenance, pres
     publication:{intervalMs:300000,run:async()=>{await maintenanceGate;maintenanceDone=true;}},
     agent:{intervalMs:100,run:async()=>{const actions=[];const capacity=await dispatch.syncCapacity(actions,configs);await dispatch.dispatch(actions,configs,capacity,{pipeline_cycle_id:batch,status:'finishing'});}},
   },onError:({error})=>errors.push(error.message)});
-  loops.start();await until(()=>seen.size===60);
+  loops.start();
+  if(recoveryBacklog){
+    await until(async()=>{const waiting=await queue.getJobs(['waiting']);return waiting.filter(j=>!j.data.migration_system_retry_id).length===3;});
+    assert.equal(await queue.getActiveCount(),3,'queued normal batches must not exceed execution concurrency');
+  }
+  releaseRecoveries();await until(()=>seen.size===60);
   assert.equal(maintenanceDone,false);assert.deepEqual(sizes,[20,20,20]);
   await delay(200);assert.equal(await queue.getActiveCount(),3);assert.equal(seen.size,60);
   release();await until(async()=>await queue.getActiveCount()===0);

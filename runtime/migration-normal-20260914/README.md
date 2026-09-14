@@ -50,3 +50,14 @@ Worker, preserve old containers/configuration with restart disabled, verify the
 new consumers, then resume the existing batch. Do not reset active results,
 clear leases, restart the retired standalone dispatcher, or restart databases.
 The exact production samples and private deployment snapshots stay ignored.
+
+## Coexisting normal/recovery Agent work
+
+The ordinary producer previously subtracted all queued recovery jobs from its
+three-Worker capacity and could never enqueue a normal batch behind recovery.
+Count only ordinary outstanding batches against that producer's bounded window.
+Both classes still share BullMQ's unchanged global execution concurrency and
+FIFO. The PostgreSQL/Redis regression holds three recovery executions with seven
+more queued, requires three normal batches to queue without exceeding three
+active Workers, then releases recovery and verifies normal batch/tail completion
+without duplicate channels. This fails before the producer accounting change.

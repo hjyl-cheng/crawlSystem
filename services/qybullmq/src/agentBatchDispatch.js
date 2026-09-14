@@ -44,8 +44,13 @@ async function maybeCreateAgentBatch(actions, agentConfigs, agentCapacity, query
     9999,
     true,
   )).filter(Boolean);
+  // Recovery has its own bounded pending window. It must not suppress every
+  // ordinary batch until that historical backlog reaches zero. Reserve at most
+  // workerCapacity ordinary batches; BullMQ's shared global concurrency still
+  // limits running work across BOTH classes, and FIFO retains recovery progress.
+  const ordinaryJobs = jobs.filter(job => job.data?.migration_system_retry_id == null);
   const outstandingByConfig = new Map();
-  for (const job of jobs) {
+  for (const job of ordinaryJobs) {
     const configId = Number(job.data?.agent_config_id);
     if (!Number.isFinite(configId) || configId <= 0) continue;
     outstandingByConfig.set(configId, (outstandingByConfig.get(configId) ?? 0) + 1);
@@ -53,7 +58,7 @@ async function maybeCreateAgentBatch(actions, agentConfigs, agentCapacity, query
   const dispatchPlan = buildAgentDispatchPlan({
     configs: agentConfigs,
     outstandingByConfig,
-    outstandingTotal: jobs.length,
+    outstandingTotal: ordinaryJobs.length,
     workerCapacity: agentCapacity.concurrency,
     maxBatches: agentMaxBatchesPerTick,
   });
