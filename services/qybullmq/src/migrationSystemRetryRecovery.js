@@ -786,6 +786,7 @@ export class MigrationSystemRetryRecoveryReconciler {
     withTransaction,
     queues,
     jobIdFactory = safeJobId,
+    queueHighWater = {},
   } = {}) {
     if (typeof query !== "function") throw new TypeError("query is required");
     if (typeof withTransaction !== "function") throw new TypeError("withTransaction is required");
@@ -795,14 +796,30 @@ export class MigrationSystemRetryRecoveryReconciler {
     this.withTransaction = withTransaction;
     this.queues = queues;
     this.jobIdFactory = jobIdFactory;
+    this.queueHighWater = queueHighWater;
     this.activeScanCursor = "0";
     this.legacyScanCursor = "0";
     this.scanPatternOffset = 0;
   }
 
   async loadRecoveries(limit) {
-    const loadClass = (active, cursor) => this.query(
-      `SELECT retry.system_retry_id,retry.migration_intent_id,retry.candidate_id,
+    const loadClass = (active, cursor) => {
+      const predicate = active
+        ? "retry.status IN ('retrying','dispatched')"
+        : "retry.status='resolved' AND retry.resolution='job_completed'";
+      return this.query(
+      `WITH ahead AS MATERIALIZED (
+         SELECT retry.system_retry_id FROM crawler.migration_system_retry_items retry
+         WHERE ${predicate} AND retry.system_retry_id>$2::bigint
+         ORDER BY retry.system_retry_id LIMIT $1
+       ), wrapped AS MATERIALIZED (
+         SELECT retry.system_retry_id FROM crawler.migration_system_retry_items retry
+         WHERE ${predicate} AND retry.system_retry_id<=$2::bigint
+         ORDER BY retry.system_retry_id LIMIT GREATEST(0,$1-(SELECT count(*) FROM ahead))
+       ), picked AS MATERIALIZED (
+         SELECT system_retry_id FROM ahead UNION ALL SELECT system_retry_id FROM wrapped
+       )
+       SELECT retry.system_retry_id,retry.migration_intent_id,retry.candidate_id,
               retry.failed_dispatch_batch_id,retry.failed_dispatch_generation,
               retry.failed_job_id,retry.failed_job_attempt,retry.status,
               retry.retry_dispatch_generation,retry.resolution,retry.recovery_run_id,
@@ -850,7 +867,7 @@ export class MigrationSystemRetryRecoveryReconciler {
               run.publication_finalized_status,run.publication_finalized_at,
               finalized.run_id AS finalized_run_id,finalized.status AS finalized_status,
               finalized.updated_at AS finalized_updated_at
-       FROM crawler.migration_system_retry_items retry
+       FROM picked JOIN crawler.migration_system_retry_items retry USING(system_retry_id)
        JOIN crawler.channel_candidates candidate
          ON candidate.candidate_id=retry.candidate_id
        LEFT JOIN crawler.channels channel
@@ -861,18 +878,12 @@ export class MigrationSystemRetryRecoveryReconciler {
          ON finalized.channel_id=channel.channel_id
        LEFT JOIN crawler.agent_profiles agent
          ON agent.channel_id=channel.channel_id AND agent.agent_mode='basic'
-       WHERE (
-           $4::boolean
-           AND retry.status=ANY($1::text[])
-         ) OR (
-           NOT $4::boolean
-           AND retry.status='resolved' AND retry.resolution='job_completed'
-         )
-       ORDER BY CASE WHEN retry.system_retry_id>$3::bigint THEN 0 ELSE 1 END,
+       ORDER BY CASE WHEN retry.system_retry_id>$2::bigint THEN 0 ELSE 1 END,
                 retry.system_retry_id
-       LIMIT $2`,
-      [ACTIVE_RETRY_STATUSES, limit, cursor, active],
-    );
+       LIMIT $1`,
+      [limit, cursor],
+      );
+    };
     const [activeRows, legacyRows] = await Promise.all([
       loadClass(true, this.activeScanCursor),
       loadClass(false, this.legacyScanCursor),
@@ -1446,6 +1457,19 @@ export class MigrationSystemRetryRecoveryReconciler {
     let legacyNormalized = 0;
     let queueConflicts = 0;
     let terminalJobsRequeued = 0;
+    const room = new Map();
+    const canEnqueue = async name => {
+      const highWater = this.queueHighWater[name];
+      if (highWater == null) return true;
+      if (!room.has(name)) {
+        const counts = await this.queues[name].getJobCounts(...REPRESENTED_JOB_STATE_LIST);
+        room.set(name, Math.max(0, highWater - Object.values(counts).reduce((sum, count) => sum + Number(count), 0)));
+      }
+      return room.get(name) > 0;
+    };
+    const useRoom = (name, ensured) => {
+      if (room.has(name) && (ensured.created || ensured.terminalRequeued)) room.set(name, room.get(name) - 1);
+    };
     const rows = await this.loadRecoveries(normalizedLimit);
     for (const row of rows) {
       if (row.status === "resolved") {
@@ -1583,6 +1607,7 @@ export class MigrationSystemRetryRecoveryReconciler {
           continue;
         }
         requiredQueues.add(queuesByRole.agentBatch);
+        if (!(await canEnqueue(queuesByRole.agentBatch))) continue;
         const job = this.agentJob(row);
         const ensured = await this.ensureQueueJob(
           queuesByRole.agentBatch,
@@ -1593,6 +1618,7 @@ export class MigrationSystemRetryRecoveryReconciler {
           },
         );
         if (ensured.created) agentEnqueued += 1;
+        useRoom(queuesByRole.agentBatch, ensured);
         if (ensured.terminalRequeued) terminalJobsRequeued += 1;
         if (ensured.conflict) {
           queueConflicts += 1;
@@ -1605,6 +1631,7 @@ export class MigrationSystemRetryRecoveryReconciler {
         continue;
       }
       requiredQueues.add(queuesByRole.finalize);
+      if (!(await canEnqueue(queuesByRole.finalize))) continue;
       const job = this.finalizeJob(row);
       const ensured = await this.ensureQueueJob(
         queuesByRole.finalize,
@@ -1612,6 +1639,7 @@ export class MigrationSystemRetryRecoveryReconciler {
         representedFinalizeJob,
       );
       if (ensured.created) finalizeEnqueued += 1;
+      useRoom(queuesByRole.finalize, ensured);
       if (ensured.terminalRequeued) terminalJobsRequeued += 1;
       if (ensured.conflict) {
         queueConflicts += 1;

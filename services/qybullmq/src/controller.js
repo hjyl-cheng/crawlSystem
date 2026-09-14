@@ -173,6 +173,10 @@ function booleanEnv(name, fallback) {
 }
 
 const independentRecoveryEnabled = process.env.CONTROLLER_THROUGHPUT_ENABLED === "true";
+let latestMigrationSystemRecovery = {
+  scanned: 0, resolved: 0, legacyReopened: 0,
+  requiredQueues: [], dataApiRecoveryScopes: [],
+};
 let backgroundLoops = null;
 const recoveryDatabases = [];
 const intervalMs = intEnv("CONTROLLER_INTERVAL_MS", 15000, 1000, 300000);
@@ -2860,8 +2864,9 @@ async function tick() {
   }) : null;
   const agentConfigs = agentDispatch ? automaticLocalAgentConfigs(await listEnabledAgentConfigs()) : [];
   const agentCapacity = agentDispatch ? await agentDispatch.syncCapacity(actions, agentConfigs) : null;
-  const migrationSystemRecovery = await migrationSystemRetryRecoveryReconciler
-    .reconcileAvailable({ limit: 100 });
+  const migrationSystemRecovery = independentRecoveryEnabled
+    ? latestMigrationSystemRecovery
+    : await migrationSystemRetryRecoveryReconciler.reconcileAvailable({ limit: 100 });
   const migrationSystemRecoveryQueueDemand = new Set(
     migrationSystemRecovery.requiredQueues,
   );
@@ -3175,11 +3180,28 @@ if (independentRecoveryEnabled) {
   const metricsDb = database("migration-metrics", { statementTimeoutMs: 30000 });
   const agentDb = database("agent-dispatch", { statementTimeoutMs: 15000 });
   const countsDb = database("batch-counts", { statementTimeoutMs: 30000 });
+  const recoveryDb = database("migration-system-recovery", { statementTimeoutMs: 15000 });
+  const migrationRecovery = new MigrationSystemRetryRecoveryReconciler({ ...recoveryDb, queues,
+    queueHighWater: { [queuesByRole.agentBatch]: 100, [queuesByRole.finalize]: 200 },
+  });
   const agentDispatch = createAgentBatchDispatch({ query: agentDb.query,
     agentQueue: queues[queuesByRole.agentBatch], agentBatchSize, agentMaxBatchesPerTick });
   const channelQueue = queues[queuesByRole.channelCrawl];
   const finalizeQueue = queues[queuesByRole.finalize];
   const tasks = {
+    migration_system_recovery: { intervalMs: 2000, run: async () => {
+      const result = await migrationRecovery.reconcileAvailable({ limit: 100 });
+      latestMigrationSystemRecovery = result;
+      // Recovery consumes the same fenced Jobs as before, but cannot wait for
+      // unrelated main-tick SQL to hand them to Agent/Finalize or settle them.
+      const scheduler = await getQueryScheduler(recoveryDb.query);
+      if (pipelineProducerActive(scheduler) || automaticCompletedMigrationRecoveryEnabled(scheduler)) {
+        for (const name of [queuesByRole.agentBatch, queuesByRole.finalize]) {
+          if (result.requiredQueues.includes(name) && await queues[name].isPaused()) await queues[name].resume();
+        }
+      }
+      return result;
+    } },
     agent_dispatch: { intervalMs: 2000, run: async () => {
       const scheduler = await getQueryScheduler(agentDb.query);
       if (!pipelineProducerActive(scheduler)) return { inactive: true };

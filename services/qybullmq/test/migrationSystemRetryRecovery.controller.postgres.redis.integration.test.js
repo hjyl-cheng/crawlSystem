@@ -772,6 +772,37 @@ test("the real Controller only resumes queues demanded by a completed batch syst
     },
   });
 
+  // Reproduce a slow main tick while a fully fetched recovery is ready for Agent.
+  // The independent migration recovery cycle must enqueue it before main unblocks.
+  await setup.query(await readFile(new URL('../src/throughputRecoverySchema.sql', import.meta.url), 'utf8'));
+  const blocker = new Client({connectionString: databaseUrl});
+  await blocker.connect();
+  await blocker.query('BEGIN');
+  await blocker.query('LOCK TABLE crawler.youtube_api_tasks IN ACCESS EXCLUSIVE MODE');
+  const filler = await queues[queuesByRole.agentBatch].addBulk(Array.from({length:100}, (_,index)=>({
+    name:'existing-agent-work',data:{},opts:{jobId:`existing-agent-${index}`},
+  })));
+  const independent = spawn(process.execPath, ['src/controller.js'], {
+    cwd: new URL('..', import.meta.url),
+    env: {...controllerEnvironment({prefix}), CONTROLLER_THROUGHPUT_ENABLED:'true', MIGRATION_BATCH_CONTROL_ENABLED:'false'},
+    stdio:['ignore','pipe','pipe'],
+  });
+  const independentOutput = captureChildOutput(independent);
+  try {
+    await independentOutput.waitFor('"name":"migration_system_recovery"', 15000);
+    assert.equal((await inFlightJobs(queues[queuesByRole.agentBatch])).length,100,
+      'recovery must not flood a full Agent queue');
+    await Promise.all(filler.map(job=>job.remove()));
+    await within((async()=>{
+      while(!(await inFlightJobs(queues[queuesByRole.agentBatch])).length) await new Promise(resolve=>setTimeout(resolve,25));
+    })(),'Agent recovery after queue capacity becomes available',10000);
+    assert.equal((await inFlightJobs(queues[queuesByRole.agentBatch])).length,1,
+      'completed fetch must reach Agent even while the main controller tick is blocked');
+    assert.doesNotMatch(independentOutput.output(), /controller started interval_ms=/,
+      'the test must prove recovery progressed before the main tick completed');
+  } finally {
+    await blocker.query('ROLLBACK'); await blocker.end(); await stopChild(independent);
+  }
   await runControllerStartupTick({ prefix, label: "completed Scheduler Agent recovery" });
   await assertRecoveryQueueState(queues, {
     [queuesByRole.channelCrawl]: true,

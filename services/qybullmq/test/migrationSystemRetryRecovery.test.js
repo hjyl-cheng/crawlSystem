@@ -431,11 +431,11 @@ test("a represented failed or completed Content Detail Job waits for durable rep
 test("active and legacy recovery scans are both selected under a permanent active backlog", async () => {
   const selectedKinds = [];
   const reconciler = new MigrationSystemRetryRecoveryReconciler({
-    query: async (_sql, params) => ({
+    query: async (sql) => ({
       rows: [{
-        system_retry_id: params[3] ? "10" : "20",
-        status: params[3] ? "dispatched" : "resolved",
-        resolution: params[3] ? null : "job_completed",
+        system_retry_id: sql.includes("retry.status IN ('retrying','dispatched')") ? "10" : "20",
+        status: sql.includes("retry.status IN ('retrying','dispatched')") ? "dispatched" : "resolved",
+        resolution: sql.includes("retry.status IN ('retrying','dispatched')") ? null : "job_completed",
       }],
     }),
     withTransaction: async (action) => action({ query: async () => ({ rows: [] }) }),
@@ -475,7 +475,7 @@ for (const originalPresent of [true, false]) {
     };
     const databaseQuery = async (sql, params) => {
       if (sql.includes("SELECT retry.system_retry_id,retry.migration_intent_id")) {
-        return { rows: params[3] ? [row] : [] };
+        return { rows: sql.includes("retry.status IN ('retrying','dispatched')") ? [row] : [] };
       }
       if (sql.includes("SET recovery_run_id=COALESCE")) {
         return { rowCount: 1, rows: [{ recovery_run_id: "run-canary" }] };

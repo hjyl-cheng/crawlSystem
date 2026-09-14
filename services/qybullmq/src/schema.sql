@@ -805,6 +805,14 @@ WHERE status IN ('retrying','pending','dispatched');
 CREATE INDEX IF NOT EXISTS idx_crawler_migration_system_retry_status
 ON crawler.migration_system_retry_items (status,requested_at,system_retry_id);
 
+CREATE INDEX IF NOT EXISTS migration_system_retry_active_scan
+ON crawler.migration_system_retry_items(system_retry_id)
+WHERE status IN ('retrying','dispatched');
+
+CREATE INDEX IF NOT EXISTS migration_system_retry_legacy_scan
+ON crawler.migration_system_retry_items(system_retry_id)
+WHERE status='resolved' AND resolution='job_completed';
+
 ALTER TABLE crawler.channel_runs ADD COLUMN IF NOT EXISTS identity_policy_id TEXT;
 ALTER TABLE crawler.channel_runs ADD COLUMN IF NOT EXISTS identity_policy_version INTEGER;
 ALTER TABLE crawler.channel_runs ADD COLUMN IF NOT EXISTS identity_policy_hash TEXT;
