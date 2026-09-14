@@ -67,6 +67,24 @@ for (const recoveryBacklog of [0,10]) test(`real Agent dispatch fills three cons
   }
   await query("UPDATE crawler.channel_runs SET result_json=jsonb_build_object('dispatch_batch_id',$1::text) WHERE run_id IN ('agent-run-1','agent-run-2')",[batch]);
   await query("UPDATE crawler.channels SET agent_next_retry_at=NULL WHERE channel_id='UCagent5'");
+  // Active recovery belongs to its existing owner; resolved/cancelled history
+  // must not keep a normal channel out of future batches.
+  const recoveryCandidate=(await query("SELECT candidate_id FROM crawler.channel_candidates WHERE channel_id='UCagent1'")).rows[0].candidate_id;
+  await query("UPDATE crawler.channel_runs SET candidate_id=$1 WHERE run_id='agent-run-1'",[recoveryCandidate]);
+  const intent=(await query(`INSERT INTO crawler.migration_channel_intents(source_id,source_database,source_database_oid,source_candidate_id,channel_id,source_snapshot,snapshot_sha256,target_candidate_id,first_dispatch_batch_id)
+    VALUES('agent-owner-test',current_database(),(SELECT oid FROM pg_database WHERE datname=current_database()),$1,'UCagent1','{}',repeat('a',64),$1,$2) RETURNING migration_intent_id`,[recoveryCandidate,batch])).rows[0].migration_intent_id;
+  const retry=(await query(`INSERT INTO crawler.migration_system_retry_items(migration_intent_id,candidate_id,failed_dispatch_batch_id,failed_dispatch_generation,failed_job_id,failed_job_attempt,failure_code,failure_category,status)
+    VALUES($1,$2,$3,1,'agent-owner-test',1,'SYSTEM_ROUTE','system','pending') RETURNING system_retry_id`,[intent,recoveryCandidate,batch])).rows[0].system_retry_id;
+  for(const status of ['pending','retrying','dispatched','resolved','cancelled']) {
+    await query('UPDATE crawler.migration_system_retry_items SET status=$2 WHERE system_retry_id=$1',[retry,status]);
+    const client=await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const selected=await client.query(selection.sql,selection.args);
+      const first=['resolved','cancelled'].includes(status)?1:2;
+      assert.deepEqual(selected.rows.map(r=>Number(r.channel_id.slice(7))).sort((a,b)=>a-b),Array.from({length:20},(_,i)=>i+first));
+    } finally {await client.query('ROLLBACK');client.release();}
+  }
   for(let i=0;i<recoveryBacklog;i++)await queue.add('agent-profile-batch',{migration_system_retry_id:i+1,channel_ids:[`recovery-${i}`]});
   for(let i=0;i<3;i++){
     const w=new Worker(queue.name,async j=>{if(j.data.migration_system_retry_id){await recoveryGate;return;}sizes.push(j.data.channel_ids.length);for(const id of j.data.channel_ids){assert.ok(!seen.has(id),`duplicate Agent channel ${id}`);seen.add(id);}await gate;await query("UPDATE crawler.channels SET agent_status='done',ready_for_agent=false WHERE channel_id=ANY($1::text[])",[j.data.channel_ids]);},{connection,prefix:queue.opts.prefix});

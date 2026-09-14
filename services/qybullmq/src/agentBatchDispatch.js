@@ -67,9 +67,14 @@ async function maybeCreateAgentBatch(actions, agentConfigs, agentCapacity, query
     // Sort eligible identities before reading large Run payloads. The ordered
     // subquery and correlated LIMIT 1 keep each payload check inside the walk;
     // the outer LIMIT stops after one batch instead of checking the whole backlog.
+    // Materialize recovery IDs once: UPDATE cannot use the parallel scan of a
+    // read-only probe, so per-channel recovery lookups can exhaust its timeout.
     // Recheck ownership/eligibility under the original channel and Run locks.
     const rows = await query(
-      `WITH candidates AS MATERIALIZED (
+      `WITH active_recovery_candidates AS MATERIALIZED (
+         SELECT candidate_id FROM crawler.migration_system_retry_items
+         WHERE status IN ('retrying','pending','dispatched')
+       ), candidates AS MATERIALIZED (
          SELECT locked.channel_id,locked.channel_url
          FROM (
          SELECT c.channel_id,c.latest_run_id,c.priority,c.created_at
@@ -91,9 +96,8 @@ async function maybeCreateAgentBatch(actions, agentConfigs, agentCapacity, query
            AND NULLIF(btrim(c.title),'') IS NOT NULL
            AND NOT EXISTS (
              SELECT 1
-             FROM crawler.migration_system_retry_items retry
+             FROM active_recovery_candidates retry
              WHERE retry.candidate_id=current_run.candidate_id
-               AND retry.status IN ('retrying','pending','dispatched')
            )
          ORDER BY c.priority DESC,c.created_at ASC OFFSET 0
          ) eligible

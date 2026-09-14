@@ -89,3 +89,13 @@ also verify skipping another batch, a locked channel, a locked Run and a future
 retry while still selecting the next 20 eligible channels in priority order,
 as well as legacy pipeline_cycle_id ownership, normal/recovery coexistence,
 shared concurrency, no duplicate channels and a five-channel tail.
+
+The first bounded-query production rollout still timed out: its read-only probe
+had used three parallel participants, while the UPDATE executes serially.
+Rechecking with max_parallel_workers_per_gather=0 reproduced the 12-second
+SELECT timeout. Materializing the active recovery candidate IDs once replaces
+thousands of random recovery index lookups with a set anti-join; this returned
+20 rows in 10.0 seconds in that same serial comparison. The final locking check
+still queries the real recovery table and preserves the original exclusions.
+Real PostgreSQL tests cover pending/retrying/dispatched exclusion and
+resolved/cancelled eligibility, in addition to the prior concurrency/lock cases.
