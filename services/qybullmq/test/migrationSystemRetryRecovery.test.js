@@ -450,6 +450,41 @@ test("active and legacy recovery scans are both selected under a permanent activ
   assert.deepEqual(selectedKinds, ["active", "active", "active", "active", "legacy"]);
 });
 
+for (const failedKind of ['active','legacy']) {
+  test(`${failedKind} scan timeout does not discard the other class or lose its own cursor`, async () => {
+    let now = 0;
+    let unavailable = true;
+    const calls = {active:[],legacy:[]};
+    const reconciler = new MigrationSystemRetryRecoveryReconciler({
+      now: () => now,
+      query: async (sql,params) => {
+        const kind = sql.includes("retry.status IN ('retrying','dispatched')") ? 'active' : 'legacy';
+        calls[kind].push(params);
+        if (unavailable && kind===failedKind) throw new Error('canceling statement due to statement timeout');
+        return {rows:[{system_retry_id:kind==='active'?'10':'20',status:kind==='active'?'dispatched':'resolved'}]};
+      },
+      withTransaction: async action => action({}),
+      queues:{},
+    });
+    assert.equal((await reconciler.loadRecoveries(2)).length,1);
+    now = 1000;
+    assert.equal((await reconciler.loadRecoveries(2)).length,1);
+    assert.equal(calls[failedKind].length,1,'the unavailable class must back off without delaying healthy scans');
+    now = 31000;
+    unavailable = false;
+    assert.equal((await reconciler.loadRecoveries(2)).length,2);
+    assert.equal(calls[failedKind][1][1],'0','retry the failed scan from its unadvanced cursor');
+  });
+}
+
+test('failure of both recovery scans remains observable', async () => {
+  const reconciler = new MigrationSystemRetryRecoveryReconciler({
+    query: async () => { throw new Error('database unavailable'); },
+    withTransaction: async action => action({}), queues:{},
+  });
+  await assert.rejects(reconciler.loadRecoveries(2), /Both migration recovery scans failed/);
+});
+
 for (const originalPresent of [true, false]) {
   test(`YouTubeJS recovery ${originalPresent ? "retries its original Job" : "blocks a missing original Job"} without dispatching legacy Detail`, async () => {
     const row = {

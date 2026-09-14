@@ -787,6 +787,7 @@ export class MigrationSystemRetryRecoveryReconciler {
     queues,
     jobIdFactory = safeJobId,
     queueHighWater = {},
+    now = () => Date.now(),
   } = {}) {
     if (typeof query !== "function") throw new TypeError("query is required");
     if (typeof withTransaction !== "function") throw new TypeError("withTransaction is required");
@@ -797,6 +798,8 @@ export class MigrationSystemRetryRecoveryReconciler {
     this.queues = queues;
     this.jobIdFactory = jobIdFactory;
     this.queueHighWater = queueHighWater;
+    this.now = now;
+    this.scanRetryAfter = { active: 0, legacy: 0 };
     this.activeScanCursor = "0";
     this.legacyScanCursor = "0";
     this.scanPatternOffset = 0;
@@ -884,14 +887,29 @@ export class MigrationSystemRetryRecoveryReconciler {
       [limit, cursor],
       );
     };
-    const [activeRows, legacyRows] = await Promise.all([
-      loadClass(true, this.activeScanCursor),
-      loadClass(false, this.legacyScanCursor),
-    ]);
-    const available = {
-      active: activeRows.rows,
-      legacy: legacyRows.rows,
-    };
+    const kinds = ['active', 'legacy'];
+    const results = await Promise.allSettled(kinds.map(kind =>
+      this.scanRetryAfter[kind] > this.now()
+        ? Promise.resolve({ rows: [] })
+        : loadClass(kind === 'active', kind === 'active' ? this.activeScanCursor : this.legacyScanCursor),
+    ));
+    const available = { active: [], legacy: [] };
+    const errors = [];
+    for (const [index, result] of results.entries()) {
+      const kind = kinds[index];
+      if (result.status === 'fulfilled') {
+        available[kind] = result.value.rows;
+      } else {
+        // A historical scan timeout must not discard a successful active scan.
+        // Keep the failed cursor and retry it after a short backoff; subsequent
+        // healthy scans can proceed without repeatedly waiting for its timeout.
+        this.scanRetryAfter[kind] = this.now() + 30000;
+        errors.push(result.reason);
+        console.error(JSON.stringify({ event: 'migration_recovery_scan_failed', kind,
+          retry_after_ms: 30000, error: result.reason?.message ?? String(result.reason) }));
+      }
+    }
+    if (errors.length === kinds.length) throw new AggregateError(errors, 'Both migration recovery scans failed');
     const indexes = { active: 0, legacy: 0 };
     const selected = [];
     while (selected.length < limit) {

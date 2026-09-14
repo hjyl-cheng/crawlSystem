@@ -38,6 +38,15 @@ system retry high-water mark is 250, leaving bounded room above that historical
 producer. A real Controller regression reproduces starvation at 239 queued jobs
 and verifies handoff at 239 while still refusing additional work at 250.
 
+## Scan failure isolation
+
+A production restart exposed a second coupling: a historical scan timeout caused
+Promise.all to discard the successful active scan. Each class now preserves its
+own cursor on failure and backs off for 30 seconds while the other class keeps
+advancing. Errors remain logged; both failing scans propagate an aggregate error.
+Regression tests cover either failed class, retry from the unadvanced cursor,
+and both classes failing.
+
 ## Online index preparation
 
 Use CREATE INDEX CONCURRENTLY outside a transaction for these schema indexes:
