@@ -31,20 +31,32 @@ export async function sampleMigrationThroughput(query) {
   ) s ON true WHERE b.status NOT IN ('ended','completed') OR s.sampled_at IS NULL
     OR b.finished_at>s.sampled_at`)).rows.map(row => row.batch_id);
   const progress = ids.length ? await loadMigrationControlProgress(query, { batchIds: ids }) : { batches: [] };
+  let fetchMetricFailures = 0;
   for (const batch of progress.batches) {
+    // Visible settlement counts must survive an expensive optional Run census.
+    // Persist this sample first; an absent fetch count means unknown, not zero.
+    const sample = (await query(`INSERT INTO crawler.migration_throughput_samples(batch_id,active_seconds,counts,publishing_count)
+      VALUES($1,$2,$3::jsonb,$4) RETURNING sampled_at::text AS sample_key`,
+    [batch.batch_id, batch.active_seconds, JSON.stringify(batch.counts), batch.publishing_count])).rows[0];
     // Count each admitted channel once, even if it has multiple completed Runs.
     // Detail completion is distinct from Agent/Finalize/publication settlement.
-    batch.counts.fetch_completed = Number((await query(`SELECT count(*)::int AS count
-      FROM crawler.migration_control_items i WHERE i.batch_id=$1 AND i.candidate_id IS NOT NULL
-        AND EXISTS(SELECT 1 FROM crawler.channel_runs r
-          WHERE r.candidate_id=i.candidate_id AND r.channel_id=i.channel_id AND r.detail_status='done')`,
-    [batch.batch_id])).rows[0].count);
-    await query(`INSERT INTO crawler.migration_throughput_samples(batch_id,active_seconds,counts,publishing_count)
-      VALUES($1,$2,$3::jsonb,$4)`, [batch.batch_id, batch.active_seconds, JSON.stringify(batch.counts), batch.publishing_count]);
+    try {
+      const fetched = Number((await query(`SELECT count(*)::int AS count
+        FROM crawler.migration_control_items i WHERE i.batch_id=$1 AND i.candidate_id IS NOT NULL
+          AND EXISTS(SELECT 1 FROM crawler.channel_runs r
+            WHERE r.candidate_id=i.candidate_id AND r.channel_id=i.channel_id AND r.detail_status='done')`,
+      [batch.batch_id])).rows[0].count);
+      await query(`UPDATE crawler.migration_throughput_samples
+        SET counts=counts || jsonb_build_object('fetch_completed',$3::integer)
+        WHERE batch_id=$1 AND sampled_at=$2::timestamptz`,[batch.batch_id,sample.sample_key,fetched]);
+    } catch (error) {
+      fetchMetricFailures += 1;
+      console.error(JSON.stringify({ event:'migration_fetch_metric_failed',batch_id:batch.batch_id,error:error.message }));
+    }
   }
   await query(`DELETE FROM crawler.migration_throughput_samples s WHERE sampled_at<now()-interval '2 hours'
     AND sampled_at<(SELECT max(keep.sampled_at) FROM crawler.migration_throughput_samples keep WHERE keep.batch_id=s.batch_id)`);
-  return { batches: progress.batches.length };
+  return { batches: progress.batches.length, fetchMetricFailures };
 }
 
 export function createMigrationProgressReader(query) {

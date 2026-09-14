@@ -157,6 +157,30 @@ test('40 concurrent real consumers keep receiving frozen migration jobs during a
     assert.equal(progress.active.counts.started, 250);
     assert.equal(progress.active.counts.success ?? 0, 0);
   });
+  await t.test('slow optional fetch counts cannot freeze the visible settlement counters', async () => {
+    await query(`UPDATE crawler.migration_control_items SET state='terminal',outcome='success'
+      WHERE batch_id=$1 AND ordinal=(SELECT min(ordinal) FROM crawler.migration_control_items WHERE batch_id=$1)`,[batch.batch_id]);
+    let entered, release;
+    const started = new Promise(resolve=>{entered=resolve;});
+    const blocked = new Promise((_resolve,reject)=>{release=()=>reject(new Error('optional fetch metric timed out'));});
+    let samplingError;
+    const sampling = sampleMigrationThroughput((sql,args)=>{
+      if (sql.includes('FROM crawler.channel_runs r') && sql.includes('detail_status')) {
+        entered();return blocked;
+      }
+      return query(sql,args);
+    }).catch(error=>{samplingError=error;});
+    try {
+      await started;
+      const progress=await createMigrationProgressReader(query)();
+      assert.equal(progress.active.counts.started,249,'the page must see current states while the optional count is blocked');
+      assert.equal(progress.active.counts.success,1);
+      assert.equal(progress.active.counts.fetch_completed,undefined,'missing fetch statistics must not be reported as zero or as fresh old data');
+    } finally {release();await sampling;}
+    assert.equal(samplingError,undefined);
+    await sampleMigrationThroughput(query);
+    assert.equal((await createMigrationProgressReader(query)()).active.counts.fetch_completed,1);
+  });
   await t.test('closed batch final statistics are sampled once and retained without recounting', async () => {
     await query("UPDATE crawler.migration_control_batches SET status='ended',finished_at=now() WHERE batch_id=$1", [batch.batch_id]);
     assert.equal((await sampleMigrationThroughput(query)).batches, 1);
