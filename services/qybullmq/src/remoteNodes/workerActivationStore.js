@@ -95,6 +95,9 @@ export class RemoteWorkerActivationStore {
   async drain(nodeId,slot,{keepRequested=false}={}) {
     uuid(nodeId);if(!slotValid(slot))throw new TypeError('invalid slot');
     return this.store.transaction(async client=>{
+      if(!keepRequested)await client.query(`UPDATE remote_ingestion.node_intake_requests
+        SET selected_slots=array_remove(selected_slots,$2),revision=revision+1,updated_at=clock_timestamp()
+        WHERE node_id=$1 AND $2=ANY(selected_slots)`,[nodeId,slot]);
       await client.query('SELECT node_id FROM remote_ingestion.nodes WHERE node_id=$1 FOR SHARE',[nodeId]);
       const changed=await client.query(`UPDATE remote_ingestion.worker_connections SET enabled=false,
         activation_requested=CASE WHEN $3 THEN activation_requested ELSE false END WHERE node_id=$1 AND slot=$2 RETURNING slot`,[nodeId,slot,keepRequested]);
@@ -106,7 +109,7 @@ export class RemoteWorkerActivationStore {
   async claim(nodeId,value) {
     this.identity(nodeId,value?.connection);
     if(value.slot!==value.connection.slot)fail('WORKER_SLOT_MISMATCH');
-    return this.store.claim(nodeId,uuid(value.claim_id),value.slot,{authorize:async client=>{
+    return this.store.claim(nodeId,uuid(value.claim_id),value.slot,{retryOnBusy:true,authorize:async client=>{
       const row=(await client.query(`SELECT *,connected_until>clock_timestamp() AS alive
         FROM remote_ingestion.worker_connections WHERE node_id=$1 AND slot=$2 FOR UPDATE`,[nodeId,value.slot])).rows[0];
       if(!this.matches(row,value.connection) || !row.alive || row.instance_id!==value.connection.instance_id

@@ -10,6 +10,7 @@ import { recoverRemoteSlot, remoteSlotUnsettled, supervisionLockKey } from './ce
 import { createRemoteYoutubeCheckpointConsumer } from './youtubeProfileCheckpoint.js';
 import {intakeWorkerName,publishWorkerIntake} from '../workerIntakeTelemetry.js';
 import {SupervisionGuards} from './supervisionGuards.js';
+import {reconcileIntakeRequests} from './intakeRequests.js';
 
 const key = row => `${row.node_id}/${row.slot}`;
 const same = (a,b) => ['node_id','slot','deployment_id','config_hash','instance_id','relay_boot_id','runtime_revision'].every(field=>a[field]===b[field]);
@@ -74,11 +75,13 @@ export class RemoteCenterExecutionSupervisor {
     if(this.stopping || entry.closing || !entry.owned || !entry.queueReady)return false;
     const row=(await this.store.pool.query(`SELECT w.*,n.state AS node_state,
       w.connected_until>clock_timestamp() AS alive,
+      COALESCE((SELECT w.slot=ANY(p.selected_slots) FROM remote_ingestion.node_intake_requests p
+        WHERE p.node_id=w.node_id AND p.deployment_id=w.deployment_id),w.activation_requested) AS intake_requested,
       EXISTS(SELECT 1 FROM pg_locks WHERE locktype='advisory' AND pid=$3 AND granted
         AND classid=781138012::oid AND objid=(hashtext($4)::bigint & 4294967295)::oid AND objsubid=2) AS guard_owned
       FROM remote_ingestion.worker_connections w JOIN remote_ingestion.nodes n USING(node_id)
       WHERE w.node_id=$1 AND w.slot=$2`,[entry.row.node_id,entry.row.slot,entry.backendPid,supervisionLockKey(entry.row)])).rows[0];
-    return !!row && row.node_state==='active' && row.alive && row.accepting && row.activation_requested
+    return !!row && row.node_state==='active' && row.alive && row.accepting && row.activation_requested && row.intake_requested
       && row.enabled && row.guard_owned && this.executionReady(entry,row);
   }
 
@@ -176,6 +179,7 @@ export class RemoteCenterExecutionSupervisor {
   }
   async tick() {
     if(this.stopping)return;
+    await reconcileIntakeRequests(this.store);
     const owners=[...this.entries.values()].filter(e=>e.owned).map(e=>({pid:e.backendPid,lock_key:supervisionLockKey(e.row)}));
     const [connections,locks]=await Promise.all([this.store.pool.query(`SELECT w.*,s.rota_worker_id,w.connected_until>clock_timestamp() AS alive
       FROM remote_ingestion.worker_connections w JOIN remote_ingestion.nodes n USING(node_id)

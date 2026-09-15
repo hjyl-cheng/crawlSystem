@@ -40,7 +40,7 @@ try{
   stage='schema';
   pool=new pg.Pool({connectionString:transactionDatabaseUrl,max:12,connectionTimeoutMillis:5000,
     application_name:'remote-node-center-gateway',options:`-c timezone=UTC -c publication.writer_version=${PUBLICATION_WRITER_VERSION}`});
-  for(const table of ['node_deployments','worker_connections','channel_commands','network_bindings','youtube_sessions']){
+  for(const table of ['node_deployments','node_intake_requests','worker_connections','channel_commands','network_bindings','youtube_sessions']){
     const row=(await pool.query('SELECT to_regclass($1) AS relation',[`remote_ingestion.${table}`])).rows[0];
     if(!row.relation)throw new Error('REMOTE_CENTER_SCHEMA_NOT_READY');
   }

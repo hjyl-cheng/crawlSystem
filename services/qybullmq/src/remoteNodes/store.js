@@ -90,12 +90,31 @@ export class RemoteNodeStore {
       input: row.input, lease_until: row.lease_until, heartbeat_ms: Math.max(1000, this.leaseSeconds * 1000 / 3) };
   }
 
-  async claim(nodeId, claimId, slot = null, { authorize = null } = {}) {
+  // A hint only, never permission to execute. NATS idle waits use this indexed
+  // read without a transaction/row lock; claim() repeats every authority check.
+  async hasClaimWork(nodeId, claimId, slot = null) {
+    uuid(nodeId);uuid(claimId);
+    const result=await this.pool.query(`SELECT 1 FROM (
+      SELECT 1 FROM remote_ingestion.claims WHERE claim_id=$2
+      UNION ALL
+      SELECT 1 FROM remote_ingestion.tasks WHERE target_node_id=$1 AND target_worker_slot=$3 AND state='pending'
+      UNION ALL
+      SELECT 1 FROM remote_ingestion.tasks WHERE target_node_id IS NULL
+        AND state IN ('pending','leased') AND (state='pending' OR lease_until<=clock_timestamp())
+    ) available LIMIT 1`,[nodeId,claimId,slot]);
+    return result.rowCount>0;
+  }
+
+  async claim(nodeId, claimId, slot = null, { authorize = null, retryOnBusy = false } = {}) {
     uuid(nodeId); uuid(claimId);
     if (slot !== null && (typeof slot !== 'string' || !/^[a-zA-Z0-9_.-]{1,100}$/.test(slot))) {
       throw new RemoteProtocolError('INVALID_WORKER_SLOT', 400);
     }
     return this.transaction(async (client) => {
+      // Do not queue behind another allocation while holding node/Worker row
+      // locks. A busy allocation is retried by the existing notification wait.
+      const allocation=(await client.query('SELECT pg_try_advisory_xact_lock(781138017,hashtext($1)) AS acquired',[nodeId])).rows[0];
+      if(!allocation.acquired){if(retryOnBusy)throw new RemoteProtocolError('CLAIM_BUSY',503);return null;}
       // Managed slots share the node-state fence with heartbeats and route
       // operations. Serialize only lease allocation on a separate capacity lock.
       // The unslotted legacy protocol retains its node last-seen update.
@@ -116,7 +135,6 @@ export class RemoteNodeStore {
         return this.lease(previous);
       }
       if (node.state !== 'active' || !permission.allowNew) return null;
-      await client.query('SELECT pg_advisory_xact_lock(781138017,hashtext($1))', [nodeId]);
       if (slot !== null) {
         const registered = (await client.query('SELECT 1 FROM remote_ingestion.network_slots WHERE node_id=$1 AND slot=$2', [nodeId, slot])).rows[0];
         if (!registered) conflict('UNKNOWN_NETWORK_SLOT');
@@ -139,7 +157,14 @@ export class RemoteNodeStore {
         (SELECT 1 FROM remote_ingestion.tasks WHERE state='received' LIMIT $1) q`, [this.maxBacklog])).rows[0].n;
       if (backlog >= this.maxBacklog) return null;
       const row = (await client.query(`SELECT * FROM remote_ingestion.tasks candidate
-        WHERE capability=ANY($1) AND (state='pending' OR (state='leased' AND lease_until <= clock_timestamp()))
+        WHERE task_id IN (
+          SELECT task_id FROM remote_ingestion.tasks
+            WHERE target_node_id=$2 AND target_worker_slot=$3 AND capability=ANY($1) AND state='pending'
+          UNION ALL
+          SELECT task_id FROM remote_ingestion.tasks
+            WHERE target_node_id IS NULL AND capability=ANY($1) AND state IN ('pending','leased')
+        )
+        AND capability=ANY($1) AND (state='pending' OR (state='leased' AND lease_until <= clock_timestamp()))
         AND (target_node_id IS NULL OR (target_node_id=$2 AND target_worker_slot=$3 AND state='pending'))
         AND (scope_key IS NULL OR NOT EXISTS (SELECT 1 FROM remote_ingestion.tasks owner
           WHERE owner.scope_key=candidate.scope_key AND owner.task_id<>candidate.task_id AND owner.state='leased'))

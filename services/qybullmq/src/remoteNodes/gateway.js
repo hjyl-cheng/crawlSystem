@@ -115,6 +115,9 @@ export function createRemoteNodeGateway({ store, channelPlans = null, routes = n
       throw new RemoteProtocolError('NOT_FOUND', 404);
     } catch (error) {
       request.resume();
+      if(control && ['55P03','57014','40P01'].includes(error.code)){
+        send(503,{error:'REMOTE_CONTROL_BUSY'});return;
+      }
       send(error instanceof RemoteProtocolError ? error.status : 503,
         { error: error instanceof RemoteProtocolError ? error.code : 'GATEWAY_UNAVAILABLE' });
     } finally { release?.(); response.removeListener('close', onClose); }

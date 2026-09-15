@@ -3,6 +3,7 @@ import {parseWorkerConfig} from './workerConfig.js';
 import {CHANNEL_PLAN_CAPABILITY} from './channelPlanContract.js';
 import {hash,RemoteProtocolError,uuid} from './protocol.js';
 import {selectIntakeWorkers,intakeStatus} from './intakeSelection.js';
+import {reconcileIntakeRequests} from './intakeRequests.js';
 const fail=code=>{throw new RemoteProtocolError(code);};
 
 // A separate center credential authorizes Dashboard deployment. Node tokens can
@@ -55,7 +56,9 @@ export function createRemoteDeploymentAdmin({store,routes,token,image,gatewayUrl
           if(slot.rota_worker_id!==workerId)fail('NETWORK_SLOT_CONFLICT');
           await client.query(`INSERT INTO remote_ingestion.worker_connections(node_id,slot,deployment_id,config_hash,role,mode,activation_requested)
             VALUES($1,$2,$3,$4,'incremental','incremental_collect',false) ON CONFLICT(node_id,slot) DO NOTHING`,[value.nodeId,config.slot,value.deploymentId,config.config_hash]);
-          const row=(await client.query('SELECT * FROM remote_ingestion.worker_connections WHERE node_id=$1 AND slot=$2 FOR UPDATE',[value.nodeId,config.slot])).rows[0];
+          // The deployment lock serializes immutable registration changes.
+          // Reading an existing slot must not wait for its live heartbeat.
+          const row=(await client.query('SELECT * FROM remote_ingestion.worker_connections WHERE node_id=$1 AND slot=$2',[value.nodeId,config.slot])).rows[0];
           if(row.deployment_id!==value.deploymentId || row.config_hash!==config.config_hash || row.mode!=='incremental_collect')fail('WORKER_DEPLOYMENT_CONFLICT');
         }
         await client.query('UPDATE remote_ingestion.nodes SET max_leases=$2,slot_claims_required=true WHERE node_id=$1',[value.nodeId,registeredCount]);
@@ -84,15 +87,18 @@ export function createRemoteDeploymentAdmin({store,routes,token,image,gatewayUrl
       const desired=byCount?value.allowedCount:value.enabled?value.workerCount:0;
       if(desired<0 || desired>value.workerCount)throw new RemoteProtocolError('INVALID_EXECUTION_COUNT',400);
       if(desired>0 && !execution?.allowsNode(value.nodeId))fail('REMOTE_CENTER_EXECUTION_NOT_CONFIGURED');
-      if(desired>0)await capacity?.ensure();
+      if(desired>0 && (!byCount || desired>value.expectedAllowedCount))await capacity?.ensure();
       await store.transaction(async client=>{
         await client.query('SELECT pg_advisory_xact_lock(hashtext($1))',[`remote-deploy:${value.nodeId}`]);
-        const node=(await client.query('SELECT state FROM remote_ingestion.nodes WHERE node_id=$1 FOR NO KEY UPDATE',[value.nodeId])).rows[0];
+        const node=(await client.query('SELECT state FROM remote_ingestion.nodes WHERE node_id=$1 FOR SHARE',[value.nodeId])).rows[0];
         const deployment=(await client.query('SELECT * FROM remote_ingestion.node_deployments WHERE node_id=$1 FOR UPDATE',[value.nodeId])).rows[0];
         if(!node || !deployment || deployment.deployment_id!==value.deploymentId || value.workerCount>deployment.worker_count)fail('WORKER_DEPLOYMENT_MISMATCH');
         const rows=(await client.query(`SELECT *,connected_until>clock_timestamp() AS alive
-          FROM remote_ingestion.worker_connections WHERE node_id=$1 AND deployment_id=$2 ORDER BY slot FOR UPDATE`,[value.nodeId,value.deploymentId])).rows;
+          FROM remote_ingestion.worker_connections WHERE node_id=$1 AND deployment_id=$2 ORDER BY slot`,[value.nodeId,value.deploymentId])).rows;
         if(rows.length!==deployment.worker_count || rows.some(r=>r.mode!=='incremental_collect'))fail('WORKER_DEPLOYMENT_MISMATCH');
+        const previous=(await client.query('SELECT * FROM remote_ingestion.node_intake_requests WHERE node_id=$1 FOR UPDATE',[value.nodeId])).rows[0];
+        if(previous && previous.deployment_id!==value.deploymentId)fail('WORKER_DEPLOYMENT_MISMATCH');
+        if(previous){const selected=new Set(previous.selected_slots);for(const row of rows)row.activation_requested=selected.has(row.slot);}
         const requested=rows.some(r=>r.activation_requested);
         const currentCount=rows.filter(r=>r.activation_requested).length;
         if(byCount ? currentCount!==value.expectedAllowedCount && currentCount!==desired
@@ -104,17 +110,26 @@ export function createRemoteDeploymentAdmin({store,routes,token,image,gatewayUrl
         if(eligible.length!==value.workerCount)fail('WORKER_DEPLOYMENT_MISMATCH');
         const selected=selectIntakeWorkers(eligible,desired);
         if(desired>0 && (node.state!=='active' || selected.some(r=>!r.activation_requested && (!r.alive || !r.accepting))))fail('WORKER_NOT_READY');
-        // A pause changes desired intake only. The owner retains enabled until
-        // it has drained the active processor and released its Rota session.
-        await client.query('UPDATE remote_ingestion.worker_connections SET activation_requested=(slot=ANY($3::text[])) WHERE node_id=$1 AND deployment_id=$2',
+        // Commit the user's request independently of live Worker writes. The
+        // owner retains enabled until its current channel has drained.
+        await client.query(`INSERT INTO remote_ingestion.node_intake_requests(node_id,deployment_id,selected_slots)
+          VALUES($1,$2,$3) ON CONFLICT(node_id) DO UPDATE SET selected_slots=EXCLUDED.selected_slots,
+          revision=remote_ingestion.node_intake_requests.revision+1,updated_at=clock_timestamp()`,
           [value.nodeId,value.deploymentId,selected.map(r=>r.slot)]);
+        await client.query("SELECT pg_notify('qy_remote_transport','supervisor')");
       });
-      return this.status(value);
+      // Best effort only: the durable request is retried by the supervisor.
+      await reconcileIntakeRequests(store,value.nodeId).catch(()=>{});
+      try{return {...await this.status(value),saved:true};}
+      catch{return {nodeId:value.nodeId,deploymentId:value.deploymentId,saved:true,
+        allowedCount:desired,requested:desired>0,adjusting:true,observationPending:true};}
     },
     async status({nodeId,deploymentId}){
       if(nodeId==='local-center'){if(!localIntake)fail('LOCAL_INTAKE_NOT_CONFIGURED');return localIntake.status();}
       uuid(nodeId);uuid(deploymentId);
       const result=await store.transaction(async client=>{
+        const request=(await client.query('SELECT selected_slots FROM remote_ingestion.node_intake_requests WHERE node_id=$1 AND deployment_id=$2',[nodeId,deploymentId])).rows[0];
+        const desired=request?new Set(request.selected_slots):null;
         const rows=(await client.query(`SELECT w.*,n.state AS node_state,w.connected_until>clock_timestamp() AS connected,
           EXISTS(SELECT 1 FROM remote_ingestion.tasks t WHERE t.target_node_id=w.node_id AND t.target_worker_slot=w.slot
             AND t.state IN ('pending','leased','received')) AS unsettled
@@ -122,10 +137,11 @@ export function createRemoteDeploymentAdmin({store,routes,token,image,gatewayUrl
           WHERE w.node_id=$1 AND deployment_id=$2 ORDER BY slot`,[nodeId,deploymentId])).rows;
         const workers=[];
         for(const row of rows)workers.push({slot:row.slot,connected:row.connected===true,preparation:execution?.preparationState?.(row)??null,
-          requested:row.activation_requested,enabled:row.enabled,active:execution?.isProcessing(row)===true || row.unsettled===true,
-          readyForTasks:row.connected===true && row.activation_requested && row.enabled && row.accepting && row.node_state==='active'
+          requested:desired?desired.has(row.slot):row.activation_requested,enabled:row.enabled,active:execution?.isProcessing(row)===true || row.unsettled===true,
+          readyForTasks:row.connected===true && (desired?desired.has(row.slot):row.activation_requested) && row.activation_requested && row.enabled && row.accepting && row.node_state==='active'
             && typeof activation?.verifyExecution==='function' && await activation.verifyExecution(client,row)===true});
         return {nodeId,deploymentId,workers,executionAvailable:execution?.allowsNode(nodeId)===true,
+          adjusting:!!desired && rows.some(row=>row.activation_requested!==desired.has(row.slot)),
           ...intakeStatus(workers)};
       });
       // Network inspection must not hold a business database transaction open.

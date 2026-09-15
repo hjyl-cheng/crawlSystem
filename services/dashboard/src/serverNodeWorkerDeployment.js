@@ -51,7 +51,7 @@ export function createNodeWorkerDeployment({store,ssh,center,image,gatewayUrl,na
       // Neither SSH/HTTP errors nor the transient credential bundle reach the
       // registry/logging. A durable operation can safely retry the frozen plan.
       await advance({state:'failed',finishedAt:new Date().toISOString(),steps:{[step]:'failed'},
-        error:step==='center' && ['REMOTE_NETWORK_CAPACITY_UNAVAILABLE','REMOTE_NETWORK_CAPACITY_LIMIT'].includes(error?.code) ? error.message : `${({center:'中心登记及网络准备',ssh:'SSH 连接与资源检查',files:'部署文件准备',start:'容器启动',verify:'容器检查',connection:'中心连接检查'})[step]??'部署'}失败，请检查配置后重试；已有部署记录和采集暂存文件已保留。`}).catch(()=>{});
+        error:step==='center' && ['REMOTE_NETWORK_CAPACITY_UNAVAILABLE','REMOTE_NETWORK_CAPACITY_LIMIT','REMOTE_CONTROL_BUSY'].includes(error?.code) ? error.message : `${({center:'中心登记及网络准备',ssh:'SSH 连接与资源检查',files:'部署文件准备',start:'容器启动',verify:'容器检查',connection:'中心连接检查'})[step]??'部署'}失败，请检查配置后重试；已有部署记录和采集暂存文件已保留。`}).catch(()=>{});
     }finally{password=undefined;ssh.close(connection);active.delete(node.id);}
   }
   return {

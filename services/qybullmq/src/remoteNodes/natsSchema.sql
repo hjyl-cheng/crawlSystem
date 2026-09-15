@@ -15,7 +15,11 @@ BEGIN
   PERFORM pg_notify('qy_remote_transport', 'task:' || NEW.task_id::text);
   IF TG_TABLE_NAME = 'tasks' THEN
    IF NEW.target_node_id IS NOT NULL THEN
-    PERFORM pg_notify('qy_remote_transport', 'node:' || NEW.target_node_id::text);
+    IF NEW.target_worker_slot IS NOT NULL THEN
+      PERFORM pg_notify('qy_remote_transport', 'slot:' || NEW.target_node_id::text || ':' || NEW.target_worker_slot);
+    ELSE
+      PERFORM pg_notify('qy_remote_transport', 'node:' || NEW.target_node_id::text);
+    END IF;
    END IF;
   END IF;
   IF TG_TABLE_NAME = 'network_bindings' THEN

@@ -4,6 +4,7 @@ import {createRequestAdmission} from './requestAdmission.js';
 import {RESULT_STREAM,RESULT_CONSUMER,natsEndpoint,resultEnvelope,encode,decode,failure} from './natsProtocol.js';
 import {RemoteProtocolError,uuid} from './protocol.js';
 import {forwardLocalIntakeSignals} from './localIntakeSignals.js';
+import {setTimeout as delay} from 'node:timers/promises';
 
 export async function startRemoteNatsCenter({url,user='center',password,tls,allowLoopback=false,store,channelPlans,wholeChannels=null,resultWholeChannels=wholeChannels,routes,youtubeSessions,workerConnections,
   signals,heartbeatStore=store,heartbeatConnections=workerConnections,resultStore=store,resultChannelPlans=channelPlans,resultConcurrency=8,rpcConcurrency=32,heartbeatConcurrency=16,maxPending=1024,resultMaxBytes=1024*1024*1024,replicas=1,report=()=>{}}){
@@ -30,7 +31,16 @@ export async function startRemoteNatsCenter({url,user='center',password,tls,allo
       const deadline=Date.now()+10000;
       for(;;){
         const watch=signals.watch(key,{timeoutMs:Math.max(1,deadline-Date.now())});
-        try{const value=await read();if(ready(value)||closing||Date.now()>=deadline)return value;await watch.wait;}
+        try{
+          let value;
+          try{value=await read();}catch(error){
+            if(error.code!=='CLAIM_BUSY'||closing||Date.now()>=deadline)throw error;
+            // Busy allocation is not an empty queue. Back off outside SQL so
+            // ready work does not wait for the ten-second lost-notice fallback.
+            await delay(25+Math.floor(Math.random()*100));continue;
+          }
+          if(ready(value)||closing||Date.now()>=deadline)return value;await watch.wait;
+        }
         finally{watch.cancel();}
       }
     }
@@ -43,7 +53,10 @@ export async function startRemoteNatsCenter({url,user='center',password,tls,allo
       node_heartbeat:(id,p)=>heartbeatConnections.heartbeat(id,p),
       network_grant:(id,p)=>routes.grant(id,p),network_release:(id,p)=>routes.release(id,p),network_abandon:(id,p)=>routes.abandon(id,p),
       heartbeat:(id,p)=>heartbeatStore.heartbeat(id,uuid(p.task_id),p.generation),
-      claim:async(id,p)=>({lease:await readAfterHint(`node:${id}`,()=>workerConnections?workerConnections.claim(id,p):store.claim(id,uuid(p.claim_id),p.slot??null),Boolean)}),
+      claim:async(id,p)=>({lease:await readAfterHint(p.slot?`slot:${id}:${p.slot}`:`node:${id}`,async()=>{
+        if(!await store.hasClaimWork(id,uuid(p.claim_id),p.slot??null))return null;
+        return workerConnections?workerConnections.claim(id,p):store.claim(id,uuid(p.claim_id),p.slot??null);
+      },Boolean)}),
       commands:(id,p)=>readAfterHint(`task:${uuid(p.task_id)}`,()=>channelPlans.poll(id,{task_id:p.task_id,generation:p.generation}),v=>v.status!=='leased'||v.commands.length>0),
       receipt:(id,p)=>store.receipt(id,uuid(p.batch_id)),
       result_receipt:(id,p)=>{

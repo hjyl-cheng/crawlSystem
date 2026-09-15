@@ -77,6 +77,7 @@ function executionPanel(node) {
   const state = executionStates.get(node.id), known = state?.counts;
   const counts = state?.counts, allowed = state?.allowedCount ?? 0;
   const label = !known ? state?.error ? '接任务状态暂不可用' : '正在读取接任务状态'
+    : state.adjusting ? '接单设置已保存，正在调整'
     : counts.draining ? '正在调整，当前频道完成后待命'
     : allowed ? counts.ready ? '正在接任务' : '正在准备接任务' : '已暂停接单';
   return `<div class="nodes-execution"><div><strong>${label}${known && state.error ? '（上次状态）' : ''}</strong>${known ? `<small>已部署 ${counts.deployed} · 允许接任务 ${allowed} · 已连接 ${counts.connected}</small><small>执行 ${counts.running ?? counts.active} · 空闲 ${counts.idle} · 收尾 ${counts.draining} · 待命 ${counts.standby}</small>` : ''}${known && state.error ? '<small>状态更新失败，正在重试；以上为上次读取结果。</small>' : ''}</div></div>`;

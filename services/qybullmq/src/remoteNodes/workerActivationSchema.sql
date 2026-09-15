@@ -16,3 +16,13 @@ CREATE TABLE IF NOT EXISTS remote_ingestion.node_deployments (
   created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
 );
+
+-- Desired intake is independent of busy collection/heartbeat rows. The
+-- supervisor applies it with short, skip-locked updates; a restart can resume.
+CREATE TABLE IF NOT EXISTS remote_ingestion.node_intake_requests (
+  node_id UUID PRIMARY KEY REFERENCES remote_ingestion.nodes(node_id) ON DELETE CASCADE,
+  deployment_id UUID NOT NULL,
+  selected_slots TEXT[] NOT NULL,
+  revision BIGINT NOT NULL DEFAULT 1,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+);

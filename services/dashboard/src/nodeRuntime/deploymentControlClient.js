@@ -14,13 +14,14 @@ export function createDeploymentControlClient({url,token,fetchImpl=fetch}){
       const result=JSON.parse(Buffer.concat(chunks).toString());
       if(!response.ok){
         const messages={REMOTE_NETWORK_CAPACITY_UNAVAILABLE:'网络名额自动扩容暂未完成，请稍后重试；节点登记已保留',
+          REMOTE_CONTROL_BUSY:'中心正在处理其他节点操作，本次操作未完成，请稍后重试',
           INVALID_EXECUTION_COUNT:'允许接任务数量应为 0 到实际已部署数量之间的整数',
           LOCAL_INTAKE_NOT_CONFIGURED:'中心服务器接任务控制尚未就绪',
           REMOTE_NETWORK_CAPACITY_LIMIT:'所需网络名额超过当前系统上限，请调整 Worker 数量',
           REMOTE_CENTER_EXECUTION_NOT_CONFIGURED:'中心尚未开放此节点的接任务控制',
           WORKER_NOT_READY:'Worker 尚未全部在线就绪，请稍后重试',WORKER_DEPLOYMENT_MISMATCH:'部署状态已变化，请刷新后重试',
           EXECUTION_CONTROL_CHANGED:'接任务状态已被其他操作修改，请刷新后重试'};
-        if(messages[result.error])throw Object.assign(new Error(messages[result.error]),{statusCode:result.error==='REMOTE_NETWORK_CAPACITY_UNAVAILABLE'?503:409,code:result.error});
+        if(messages[result.error])throw Object.assign(new Error(messages[result.error]),{statusCode:['REMOTE_NETWORK_CAPACITY_UNAVAILABLE','REMOTE_CONTROL_BUSY'].includes(result.error)?503:409,code:result.error});
         throw new Error();
       }
       return result;

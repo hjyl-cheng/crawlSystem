@@ -71,6 +71,15 @@ CREATE UNIQUE INDEX IF NOT EXISTS remote_channel_scope_lease
   ON remote_ingestion.tasks(scope_key) WHERE scope_key IS NOT NULL AND state='leased';
 CREATE INDEX IF NOT EXISTS remote_task_target_slot
   ON remote_ingestion.tasks(target_node_id,target_worker_slot,created_at);
+-- Active-only indexes avoid traversing completed history on every idle claim.
+CREATE INDEX IF NOT EXISTS remote_tasks_target_pending
+  ON remote_ingestion.tasks(target_node_id,target_worker_slot,capability,created_at,task_id) WHERE state='pending';
+CREATE INDEX IF NOT EXISTS remote_tasks_unassigned_claim
+  ON remote_ingestion.tasks(capability,created_at,task_id) WHERE target_node_id IS NULL AND state IN ('pending','leased');
+CREATE INDEX IF NOT EXISTS remote_tasks_live_slot
+  ON remote_ingestion.tasks(target_node_id,target_worker_slot) WHERE state IN ('pending','leased','received');
+CREATE INDEX IF NOT EXISTS remote_tasks_live_lease_lookup
+  ON remote_ingestion.tasks(node_id,lease_until,worker_slot) INCLUDE(task_id,generation,scope_key) WHERE state='leased';
 CREATE TABLE IF NOT EXISTS remote_ingestion.channel_commands (
   command_id UUID PRIMARY KEY,
   task_id UUID NOT NULL REFERENCES remote_ingestion.tasks(task_id),
