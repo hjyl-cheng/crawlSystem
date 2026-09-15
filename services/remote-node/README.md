@@ -24,7 +24,7 @@ docker build -f services/remote-node/Dockerfile.collect -t qy-remote-node-increm
 
 首次部署支持 1～32 个增量 Worker，每个容器内存上限 768 MiB、CPU 上限 0.5，主机总内存至少容纳全部容器上限另加 512 MiB。此检查不代表主机当前一定有足够空闲内存，实际数量仍应结合监控确定。其他 Worker 类型尚未接入此入口。
 
-失败重试和增加数量沿用同一部署 ID、旧实例配置及凭据；`compose up --no-recreate` 保留已有容器。缩容、替换镜像、替换部署需要先接通停止派发与任务收尾，此入口明确拒绝这些操作。已有部署记录的节点不能直接删除。
+失败重试和增加数量沿用同一部署 ID、旧实例配置及凭据；`compose up --no-recreate` 保留已有容器。新增入口拒绝直接缩容、替换镜像或替换部署。管理 Worker 中可逐个删除空闲 Worker：中心先阻止接单并确认任务与执行锁已释放，节点再移除对应容器；保留采集文件和历史登记，后续新增使用新的编号。删除中断可重试同一操作，未完成期间禁止并行部署和修改接单数量。已有部署记录的节点不能直接删除。
 
 Dashboard 重启后仍能展示数据库中的阶段记录；后台操作不会跨重启自动续跑。未结束的操作在 20 分钟期限内防止重复提交，期限结束后可重试原部署。节点安装步骤有独立锁及超时，重试不会删除暂存结果。
 
@@ -114,3 +114,9 @@ docker exec qy-remote-node-center node scripts/checkRemoteNodeCenter.mjs
 页面新增节点及扩容通过 NATS 部署时，安装包显式设置 `REMOTE_NODE_WHOLE_CHANNEL=true`，并检查容器实际采用该模式。中心需先完成 `--nats --whole-channel --apply` 显式数据库升级并启用同名开关。新旧模式仍使用共享 YouTubeJS/Rota 采集策略；API-batch 和发布留在中心。详见 [生产验证](../../docs/WHOLE_CHANNEL_PRODUCTION_ROLLOUT_20260913.md)。
 
 升级已有节点必须先排空其正在执行的任务，再同步中心 `REMOTE_NODE_COLLECT_IMAGE`、Dashboard `SERVER_NODE_COLLECT_IMAGE`、中心部署登记和页面节点登记的镜像摘要。不能仅更新页面默认镜像，否则现有部署的身份校验会拒绝扩容。保持原有允许接任务数量和凭据。
+
+### 删除空闲 Worker
+
+页面位于「服务器节点 → 管理 Worker → 已部署的 Worker」。在线且没有执行/恢复任务的 Worker 可点击删除；状态未知的 Worker 不可删除。确认后先保存停止接单状态，等待监督器释放该 Worker 的执行锁，再由固定脚本移除它的容器并更新部署清单。不会删除频道、视频、评论、采集检查点或历史网络记录。允许删除至零个 Worker，之后仍可新增。
+
+中心内部接口为 `POST /internal/node-deployments/retire`，沿用管理员鉴权。`reserve`、`ready`、`finish` 使用同一个操作 ID；`ready` 与 `finish` 都重新核实未完成任务并取得排他执行锁。新增两个退役字段需显式运行 `scripts/applyRemoteWorkerRetirementUpgrade.mjs --apply` 并提供数据库身份校验变量，启动过程不自动迁移。旧版本没有退役拦截能力，已有退役记录后不可直接回滚到旧中心。

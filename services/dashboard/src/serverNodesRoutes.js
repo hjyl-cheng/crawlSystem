@@ -4,7 +4,7 @@ import { renderServerNodesPage } from "./serverNodesPage.js";
 import { connectionDeploymentPreview } from './nodeRuntime/connectionDeployment.js';
 import { collectDeploymentPreview } from './nodeRuntime/collectDeployment.js';
 
-export function serverNodesRoutes({ store, layout, onboarding = null, runtime = null, workerDeployment = null, deletion = null, executionControl = null, deploymentEnvironment = process.env }) {
+export function serverNodesRoutes({ store, layout, onboarding = null, runtime = null, workerDeployment = null, workerRemoval = null, deletion = null, executionControl = null, deploymentEnvironment = process.env }) {
   const router = express.Router();
   const localNode=deploymentEnvironment.SERVER_NODE_LOCAL_INTAKE_CONTROL==='true'
     ?{id:'local-center',name:'中心服务器',kind:'center',localIntake:true,host:deploymentEnvironment.SERVER_NODE_LOCAL_HOST||'本机',workers:[]}:null;
@@ -18,7 +18,7 @@ export function serverNodesRoutes({ store, layout, onboarding = null, runtime = 
   router.get("/assets/server-nodes.js", (_req, res) => res.sendFile(fileURLToPath(new URL("./serverNodesClient.js", import.meta.url))));
   router.get("/assets/server-nodes.css", (_req, res) => res.sendFile(fileURLToPath(new URL("./serverNodes.css", import.meta.url))));
   router.get("/api/server-nodes", async (_req, res, next) => {
-    try { const registry=await store.load();res.set("Cache-Control", "no-store").json({ ...registry,nodes:localNode?[localNode,...registry.nodes]:registry.nodes, capabilities: { onboarding: !!onboarding, runtime: !!runtime, workerDeployment: !!workerDeployment } }); }
+    try { const registry=await store.load();res.set("Cache-Control", "no-store").json({ ...registry,nodes:localNode?[localNode,...registry.nodes]:registry.nodes, capabilities: { onboarding: !!onboarding, runtime: !!runtime, workerDeployment: !!workerDeployment, workerRemoval: !!workerRemoval } }); }
     catch (error) { next(error); }
   });
   const save = async (req, res, next) => {
@@ -94,6 +94,15 @@ export function serverNodesRoutes({ store, layout, onboarding = null, runtime = 
         syncIntake:req.body?.syncIntake,expectedAllowedCount:req.body?.expectedAllowedCount}));
     }catch(error){res.status(error.statusCode??503).json({error:error.statusCode?error.message:'Worker 部署暂时不可用，请检查中心配置'});}
   });
+  router.post('/api/server-nodes/:id/remove-worker',async(req,res)=>{
+    try{
+      if(!req.is('application/json'))return res.status(415).json({error:'请使用 JSON 提交删除信息'});
+      if(!workerRemoval)return res.status(503).json({error:'Worker 删除服务尚未配置'});
+      if(Object.keys(req.body??{}).some(k=>!['version','slot','password'].includes(k)))return res.status(400).json({error:'删除参数无效'});
+      const password=req.body?.password??'';if(req.body)delete req.body.password;
+      res.set('Cache-Control','no-store').status(202).json(await workerRemoval.start({id:req.params.id,version:req.body?.version,slot:req.body?.slot,password}));
+    }catch(error){res.status(error.statusCode??503).json({error:error.statusCode?error.message:'Worker 删除暂时不可用，请稍后重试'});}
+  });
   router.get('/api/server-nodes/:id/execution', async (req,res) => {
     try {
       const registry=await store.load();const node=findNode(registry,req.params.id);
@@ -119,6 +128,7 @@ export function serverNodesRoutes({ store, layout, onboarding = null, runtime = 
         return res.set('Cache-Control','no-store').json(await executionControl.setExecution({nodeId:node.id,
           workerCount:state.counts.deployed,allowedCount:input.allowedCount,expectedAllowedCount:input.expectedAllowedCount}));
       }
+      if(node.workerRemoval && !['completed','rejected'].includes(node.workerRemoval.state))return res.status(409).json({error:'请先完成或重试 Worker 删除'});
       if(node.kind!=='execution' || node.deletion || !node.deployment
         || (!byCount && input.enabled && node.deployment.state!=='connected'))return res.status(409).json({error:'请先完成执行节点的 Worker 部署和连接检查'});
       if(installedCount(node)<1 || (byCount&&input.allowedCount>installedCount(node)))return res.status(400).json({error:'允许接任务数量不能超过已确认部署数量'});

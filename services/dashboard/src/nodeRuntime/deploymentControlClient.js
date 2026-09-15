@@ -13,7 +13,10 @@ export function createDeploymentControlClient({url,token,fetchImpl=fetch}){
       for await(const chunk of response.body){size+=chunk.length;if(size>512*1024)throw new Error();chunks.push(chunk);}
       const result=JSON.parse(Buffer.concat(chunks).toString());
       if(!response.ok){
-        const messages={REMOTE_NETWORK_CAPACITY_UNAVAILABLE:'网络名额自动扩容暂未完成，请稍后重试；节点登记已保留',
+        const messages={WORKER_STATE_UNKNOWN:'Worker 状态无法确认，暂时不能删除',WORKER_NOT_IDLE:'该 Worker 有执行中或待恢复的任务，不能删除',
+          WORKER_RETIREMENT_WAIT:'正在停止接单并释放执行资源，请稍候',
+          WORKER_RETIREMENT_CONFLICT:'Worker 删除尚未完成或操作已变化，请刷新后重试',
+          INVALID_WORKER_RETIREMENT:'Worker 删除参数无效',REMOTE_NETWORK_CAPACITY_UNAVAILABLE:'网络名额自动扩容暂未完成，请稍后重试；节点登记已保留',
           REMOTE_CONTROL_BUSY:'中心正在处理其他节点操作，本次操作未完成，请稍后重试',
           INVALID_EXECUTION_COUNT:'允许接任务数量应为 0 到实际已部署数量之间的整数',
           LOCAL_INTAKE_NOT_CONFIGURED:'中心服务器接任务控制尚未就绪',
@@ -27,7 +30,7 @@ export function createDeploymentControlClient({url,token,fetchImpl=fetch}){
       return result;
     }catch(error){if(error.statusCode)throw error;throw new Error('中心部署控制请求失败，请核实中心接入服务和部署配置');}
   }
-  return {setExecution:value=>request('execution',value),prepare:plan=>request('prepare',{nodeId:plan.nodeId,deploymentId:plan.deploymentId,image:plan.image,files:plan.files}),
+  return {retire:value=>request('retire',value),setExecution:value=>request('execution',value),prepare:plan=>request('prepare',{nodeId:plan.nodeId,deploymentId:plan.deploymentId,image:plan.image,files:plan.files}),
     status:plan=>request('status',{nodeId:plan.nodeId,deploymentId:plan.deploymentId})};
 }
 
@@ -47,5 +50,5 @@ export function deploymentControlFromEnv(env=process.env){
     }
     return client;
   };
-  return {setExecution:async value=>(await load()).setExecution(value),prepare:async plan=>(await load()).prepare(plan),status:async plan=>(await load()).status(plan)};
+  return {retire:async value=>(await load()).retire(value),setExecution:async value=>(await load()).setExecution(value),prepare:async plan=>(await load()).prepare(plan),status:async plan=>(await load()).status(plan)};
 }

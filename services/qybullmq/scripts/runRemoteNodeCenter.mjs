@@ -103,6 +103,7 @@ try{
   }
   if(process.env.REMOTE_NODE_NATS_URL){
     stage='nats_schema';
+    await pool.query('SELECT retirement_id,retired_at FROM remote_ingestion.worker_connections LIMIT 0');
     const ready=(await pool.query("SELECT to_regclass('remote_ingestion.transport_receipts') AS relation")).rows[0];
     if(!ready.relation)throw new Error('REMOTE_NATS_SCHEMA_REQUIRED');
     const password=await secret('REMOTE_NODE_NATS_PASSWORD_FILE');

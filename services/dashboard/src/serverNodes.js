@@ -1,3 +1,4 @@
+import {deploymentSlots} from './nodeRuntime/workerSlots.js';
 import { randomUUID } from "node:crypto";
 import { isIP } from "node:net";
 
@@ -94,6 +95,7 @@ export function unusedNodeDeletionEligibility(node) {
 }
 
 function assertNotDeleting(node) {
+  if(node?.workerRemoval && !['completed','rejected'].includes(node.workerRemoval.state))throw invalid('Worker 删除尚未完成，请先完成或重试该操作',409);
   // Even a failed cleanup may already have stopped monitoring. Only a deletion
   // retry may proceed; onboarding/deployment must not race partial cleanup.
   if (node?.deletion) throw invalid('节点正在删除或等待删除重试，不能编辑、初始化或部署', 409);
@@ -296,6 +298,7 @@ export function createServerNodeStore(query) {
       if(node.workers.length!==1 || node.workers[0].role!=='incremental' || node.workers[0].count!==plan.count)throw invalid('部署方案与已保存的增量数量不匹配',409);
       const now=new Date().toISOString();
       node.deployment={state:'running',mode:plan.mode,deploymentId:plan.deploymentId,operationId,image:plan.image,
+        slots:plan.slots??plan.registrations.map(r=>r.slot),allocationSlots:plan.allocationSlots??plan.slots,slotSequence:plan.slotSequence??plan.count,
         desiredCount:plan.count,appliedCount:prior?.appliedCount??0,startedAt:now,deadline:new Date(Date.now()+20*60000).toISOString(),
         remoteChanges:prior?.remoteChanges??false,error:null,
         intakeSync:syncIntake?{state:'pending',allowedCount:plan.count,expectedAllowedCount}:null,
@@ -312,5 +315,33 @@ export function createServerNodeStore(query) {
       node.deployment=next;node.updatedAt=new Date().toISOString();return node;
     });
   }
-  return { load, save, deletionCheck, remove, beginDeletion, failDeletion, finishDeletion, beginInitialization, advanceInitialization, beginRuntime, advanceRuntime, beginWorkerDeployment, advanceWorkerDeployment };
+  async function beginWorkerRemoval({id,version,slot,operationId}){
+    integer(version,'配置版本',0,Number.MAX_SAFE_INTEGER);
+    return mutateNode(id,(node,registry)=>{
+      if(registry.version!==version)throw invalid('配置已更新，请刷新后重试',409);
+      if(node.deletion || node.kind!=='execution' || node.deployment?.state!=='connected')throw invalid('请先完成当前部署或删除操作',409);
+      if(node.workerRemoval && !['completed','rejected'].includes(node.workerRemoval.state)){
+        if(node.workerRemoval.slot!==slot)throw invalid('请先重试并完成上次 Worker 删除',409);
+        if(node.workerRemoval.state==='running' && Date.parse(node.workerRemoval.deadline)>Date.now())throw invalid('该 Worker 正在删除',409);
+        operationId=node.workerRemoval.operationId;
+      }
+      if(!deploymentSlots(node.deployment).includes(slot))throw invalid('Worker 不存在或已删除',409);
+      node.workerRemoval={operationId,slot,state:'running',startedAt:new Date().toISOString(),deadline:new Date(Date.now()+5*60000).toISOString(),error:null};
+      return node;
+    },true);
+  }
+  async function finishWorkerRemoval(id,operationId,error=null,rejected=false){
+    return mutateNode(id,node=>{
+      if(node.deletion || node.workerRemoval?.operationId!==operationId)throw invalid('删除操作已变化',409);
+      if(error){node.workerRemoval={...node.workerRemoval,state:rejected?'rejected':'failed',error};return node;}
+      const slots=deploymentSlots(node.deployment).filter(s=>s!==node.workerRemoval.slot);
+      const count=slots.length;
+      node.deployment={...node.deployment,slots,allocationSlots:(node.deployment.allocationSlots??deploymentSlots(node.deployment)).filter(s=>s!==node.workerRemoval.slot),slotSequence:node.deployment.slotSequence??node.deployment.desiredCount,
+        appliedCount:count,desiredCount:count,intakeSync:null};
+      node.workers=count?[{role:'incremental',count}]:[];
+      node.workerRemoval={...node.workerRemoval,state:'completed',finishedAt:new Date().toISOString(),error:null};
+      return node;
+    },true);
+  }
+  return { beginWorkerRemoval, finishWorkerRemoval, load, save, deletionCheck, remove, beginDeletion, failDeletion, finishDeletion, beginInitialization, advanceInitialization, beginRuntime, advanceRuntime, beginWorkerDeployment, advanceWorkerDeployment };
 }

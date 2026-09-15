@@ -7,13 +7,13 @@ export async function reconcileIntakeRequests(store, nodeId = null) {
       WHERE ($1::uuid IS NULL OR node_id=$1) AND EXISTS (
         SELECT 1 FROM remote_ingestion.worker_connections w WHERE w.node_id=node_intake_requests.node_id
           AND w.deployment_id=node_intake_requests.deployment_id
-          AND w.activation_requested IS DISTINCT FROM (w.slot=ANY(node_intake_requests.selected_slots))
+          AND w.retirement_id IS NULL AND w.activation_requested IS DISTINCT FROM (w.slot=ANY(node_intake_requests.selected_slots))
       ) ORDER BY node_id LIMIT 100 FOR UPDATE SKIP LOCKED`,[nodeId])).rows;
     let changed=0;
     for(const request of requests){
       const result=await client.query(`WITH available AS (
         SELECT node_id,slot FROM remote_ingestion.worker_connections
-        WHERE node_id=$1 AND deployment_id=$2
+        WHERE node_id=$1 AND deployment_id=$2 AND retirement_id IS NULL
           AND activation_requested IS DISTINCT FROM (slot=ANY($3::text[]))
         ORDER BY slot FOR UPDATE SKIP LOCKED
       ) UPDATE remote_ingestion.worker_connections w

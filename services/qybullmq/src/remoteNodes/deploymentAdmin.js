@@ -3,6 +3,7 @@ import {parseWorkerConfig} from './workerConfig.js';
 import {CHANNEL_PLAN_CAPABILITY} from './channelPlanContract.js';
 import {hash,RemoteProtocolError,uuid} from './protocol.js';
 import {selectIntakeWorkers,intakeStatus} from './intakeSelection.js';
+import {createWorkerRetirement} from './workerRetirement.js';
 import {reconcileIntakeRequests} from './intakeRequests.js';
 const fail=code=>{throw new RemoteProtocolError(code);};
 
@@ -14,14 +15,16 @@ export function createRemoteDeploymentAdmin({store,routes,token,image,gatewayUrl
   const endpoint=new URL(gatewayUrl);if(endpoint.protocol!=='https:' || endpoint.username || endpoint.password || endpoint.search || endpoint.hash)throw new TypeError('HTTPS gateway required');
   const publicKey=createPublicKey(routes.privateKey).export({type:'spki',format:'pem'});
   return {
+    retire:createWorkerRetirement({store,execution}),
     authenticate(value){const bytes=Buffer.from(value??'');const secret=Buffer.from(token);if(bytes.length!==secret.length || !timingSafeEqual(bytes,secret))throw new RemoteProtocolError('UNAUTHORIZED',401);},
     async prepare(value){
       if(!value || Object.keys(value).some(key=>!['nodeId','deploymentId','image','files'].includes(key)) || value.image!==image
         || !value.files || typeof value.files!=='object' || Array.isArray(value.files))throw new RemoteProtocolError('INVALID_DEPLOYMENT',400);
       uuid(value.nodeId);uuid(value.deploymentId);
       const names=Object.keys(value.files);if(names.length<1)throw new RemoteProtocolError('INVALID_DEPLOYMENT',400);
-      const configs=Array.from({length:names.length},(_,i)=>{
-        const slot=`incremental-${i+1}`;const bytes=value.files[`${slot}.json`];
+      const configs=names.map(name=>{
+        if(!/^incremental-[1-9][0-9]*\.json$/.test(name))throw new RemoteProtocolError('INVALID_DEPLOYMENT',400);
+        const slot=name.slice(0,-5);const bytes=value.files[`${slot}.json`];
         if(typeof bytes!=='string' || Buffer.byteLength(bytes)>16384)throw new RemoteProtocolError('INVALID_DEPLOYMENT',400);
         const config=parseWorkerConfig(Buffer.from(bytes),{mode:'incremental_collect'});
         if(config.node_id!==value.nodeId || config.deployment_id!==value.deploymentId || config.slot!==slot
@@ -34,16 +37,22 @@ export function createRemoteDeploymentAdmin({store,routes,token,image,gatewayUrl
         const old=(await client.query('SELECT * FROM remote_ingestion.node_deployments WHERE node_id=$1 FOR UPDATE',[value.nodeId])).rows[0];
         if(node && (!old || node.state!=='active'))fail('REMOTE_DEPLOYMENT_NODE_CONFLICT');
         if(old && (old.deployment_id!==value.deploymentId || old.image!==value.image))fail('REMOTE_DEPLOYMENT_REQUIRES_DRAIN');
+        if(old){
+          const removed=(await client.query('SELECT 1 FROM remote_ingestion.worker_connections WHERE node_id=$1 AND retirement_id IS NOT NULL AND slot=ANY($2::text[]) LIMIT 1',[value.nodeId,configs.map(c=>c.slot)])).rowCount;
+          if(removed)fail('WORKER_RETIREMENT_CONFLICT');
+        }
         if(old?.worker_count>configs.length){
           // A failed expansion may leave unused registrations. Keep them reserved;
           // never remove or reuse a slot with a live connection or unsettled work.
           const excluded=(await client.query(`SELECT w.slot FROM remote_ingestion.worker_connections w
-            WHERE w.node_id=$1 AND NOT (w.slot=ANY($2::text[])) AND
+            WHERE w.node_id=$1 AND w.retired_at IS NULL AND NOT (w.slot=ANY($2::text[])) AND
             (w.activation_requested OR w.enabled OR w.connected_until>clock_timestamp() OR
              EXISTS(SELECT 1 FROM remote_ingestion.tasks t WHERE t.target_node_id=w.node_id
                AND t.target_worker_slot=w.slot AND t.state IN ('pending','leased','received')))`,[value.nodeId,configs.map(c=>c.slot)])).rows;
           if(excluded.length)fail('REMOTE_DEPLOYMENT_REQUIRES_DRAIN');
         }
+        const absent=(await client.query(`SELECT 1 FROM remote_ingestion.worker_connections WHERE node_id=$1 AND retired_at IS NULL AND NOT (slot=ANY($2::text[])) LIMIT 1`,[value.nodeId,configs.map(c=>c.slot)])).rowCount;
+        if(absent && (old?.worker_count??0)<=configs.length)fail('REMOTE_DEPLOYMENT_REQUIRES_DRAIN');
         const registeredCount=Math.max(old?.worker_count??0,configs.length);
         const credentials=old?routes.decrypt(old.credentials_cipher,`node-deployment:${value.nodeId}`):{nodeToken:randomBytes(32).toString('hex'),relayTokens:{}};
         if(!node)await client.query(`INSERT INTO remote_ingestion.nodes(node_id,token_hash,capabilities,max_leases,slot_claims_required)
@@ -94,7 +103,7 @@ export function createRemoteDeploymentAdmin({store,routes,token,image,gatewayUrl
         const deployment=(await client.query('SELECT * FROM remote_ingestion.node_deployments WHERE node_id=$1 FOR UPDATE',[value.nodeId])).rows[0];
         if(!node || !deployment || deployment.deployment_id!==value.deploymentId || value.workerCount>deployment.worker_count)fail('WORKER_DEPLOYMENT_MISMATCH');
         const rows=(await client.query(`SELECT *,connected_until>clock_timestamp() AS alive
-          FROM remote_ingestion.worker_connections WHERE node_id=$1 AND deployment_id=$2 ORDER BY slot`,[value.nodeId,value.deploymentId])).rows;
+          FROM remote_ingestion.worker_connections WHERE node_id=$1 AND deployment_id=$2 AND retired_at IS NULL ORDER BY slot`,[value.nodeId,value.deploymentId])).rows;
         if(rows.length!==deployment.worker_count || rows.some(r=>r.mode!=='incremental_collect'))fail('WORKER_DEPLOYMENT_MISMATCH');
         const previous=(await client.query('SELECT * FROM remote_ingestion.node_intake_requests WHERE node_id=$1 FOR UPDATE',[value.nodeId])).rows[0];
         if(previous && previous.deployment_id!==value.deploymentId)fail('WORKER_DEPLOYMENT_MISMATCH');
@@ -105,8 +114,9 @@ export function createRemoteDeploymentAdmin({store,routes,token,image,gatewayUrl
           : requested!==value.expectedRequested && !rows.every(r=>r.activation_requested===value.enabled))fail('EXECUTION_CONTROL_CHANGED');
         // Registration precedes installation. A failed additive deployment must
         // not remove control of the previously verified prefix of Worker slots.
-        const installed=new Set(Array.from({length:value.workerCount},(_,i)=>`incremental-${i+1}`));
+        const installed=new Set(rows.filter(r=>!r.retirement_id).sort((a,b)=>a.slot.localeCompare(b.slot,'en',{numeric:true})).slice(0,value.workerCount).map(r=>r.slot));
         const eligible=rows.filter(row=>installed.has(row.slot));
+        if(rows.some(r=>r.retirement_id))fail('WORKER_RETIREMENT_CONFLICT');
         if(eligible.length!==value.workerCount)fail('WORKER_DEPLOYMENT_MISMATCH');
         const selected=selectIntakeWorkers(eligible,desired);
         if(desired>0 && (node.state!=='active' || selected.some(r=>!r.activation_requested && (!r.alive || !r.accepting))))fail('WORKER_NOT_READY');
@@ -134,9 +144,9 @@ export function createRemoteDeploymentAdmin({store,routes,token,image,gatewayUrl
           EXISTS(SELECT 1 FROM remote_ingestion.tasks t WHERE t.target_node_id=w.node_id AND t.target_worker_slot=w.slot
             AND t.state IN ('pending','leased','received')) AS unsettled
           FROM remote_ingestion.worker_connections w JOIN remote_ingestion.nodes n USING(node_id)
-          WHERE w.node_id=$1 AND deployment_id=$2 ORDER BY slot`,[nodeId,deploymentId])).rows;
+          WHERE w.node_id=$1 AND deployment_id=$2 AND w.retired_at IS NULL ORDER BY slot`,[nodeId,deploymentId])).rows;
         const workers=[];
-        for(const row of rows)workers.push({slot:row.slot,connected:row.connected===true,preparation:execution?.preparationState?.(row)??null,
+        for(const row of rows)workers.push({slot:row.slot,retiring:!!row.retirement_id,connected:row.connected===true,preparation:execution?.preparationState?.(row)??null,
           requested:desired?desired.has(row.slot):row.activation_requested,enabled:row.enabled,active:execution?.isProcessing(row)===true || row.unsettled===true,
           readyForTasks:row.connected===true && (desired?desired.has(row.slot):row.activation_requested) && row.activation_requested && row.enabled && row.accepting && row.node_state==='active'
             && typeof activation?.verifyExecution==='function' && await activation.verifyExecution(client,row)===true});

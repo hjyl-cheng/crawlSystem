@@ -81,7 +81,7 @@ export class RemoteCenterExecutionSupervisor {
         AND classid=781138012::oid AND objid=(hashtext($4)::bigint & 4294967295)::oid AND objsubid=2) AS guard_owned
       FROM remote_ingestion.worker_connections w JOIN remote_ingestion.nodes n USING(node_id)
       WHERE w.node_id=$1 AND w.slot=$2`,[entry.row.node_id,entry.row.slot,entry.backendPid,supervisionLockKey(entry.row)])).rows[0];
-    return !!row && row.node_state==='active' && row.alive && row.accepting && row.activation_requested && row.intake_requested
+    return !!row && !row.retirement_id && row.node_state==='active' && row.alive && row.accepting && row.activation_requested && row.intake_requested
       && row.enabled && row.guard_owned && this.executionReady(entry,row);
   }
 
@@ -111,7 +111,7 @@ export class RemoteCenterExecutionSupervisor {
         assertAdmission:async client=>{
           const current=(await client.query(`SELECT *,connected_until>clock_timestamp() AS alive
             FROM remote_ingestion.worker_connections WHERE node_id=$1 AND slot=$2`,[row.node_id,row.slot])).rows[0];
-          return !!current?.alive && current.enabled && same(entry.row,current) && await this.verifyExecution(client,current);
+          return !!current?.alive && !current.retirement_id && current.enabled && same(entry.row,current) && await this.verifyExecution(client,current);
         }});
       entry.rota=this.createRota({client:this.rotaClient,role:'channel',workerId:row.rota_worker_id,workerInstanceId:entry.supervisorId,
         resolvedPolicy:this.resolvedPolicy,proxyBaseUrl:this.proxyBaseUrl,proxyPassword:this.proxyPassword,identityRuntime:runtime});
@@ -186,7 +186,7 @@ export class RemoteCenterExecutionSupervisor {
       JOIN remote_ingestion.network_slots s USING(node_id,slot)
       WHERE (w.node_id=ANY($1::uuid[]) OR ($2::boolean AND EXISTS(
         SELECT 1 FROM remote_ingestion.node_deployments d WHERE d.node_id=w.node_id AND d.deployment_id=w.deployment_id)))
-        AND n.state='active' AND w.mode='incremental_collect'`,[this.allowedNodeIds,this.dashboardManaged]),
+        AND n.state='active' AND w.mode='incremental_collect' AND w.retired_at IS NULL`,[this.allowedNodeIds,this.dashboardManaged]),
       this.store.pool.query(`SELECT owner.pid,owner.lock_key FROM pg_locks AS guard
         JOIN jsonb_to_recordset($1::jsonb) AS owner(pid integer,lock_key text)
           ON guard.pid=owner.pid AND guard.objid=(hashtext(owner.lock_key)::bigint & 4294967295)::oid

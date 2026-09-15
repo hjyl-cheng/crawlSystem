@@ -25,7 +25,7 @@ export class RemoteWorkerActivationStore {
       await client.query(`INSERT INTO remote_ingestion.worker_connections(node_id,slot,deployment_id,config_hash,role,mode)
         VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(node_id,slot) DO NOTHING`,[nodeId,slot,deploymentId,configHash,role,mode]);
       const row=(await client.query('SELECT * FROM remote_ingestion.worker_connections WHERE node_id=$1 AND slot=$2 FOR UPDATE',[nodeId,slot])).rows[0];
-      if(row.deployment_id!==deploymentId || row.config_hash!==configHash || row.mode!==mode)fail('WORKER_DEPLOYMENT_CONFLICT');
+      if(row.retirement_id || row.deployment_id!==deploymentId || row.config_hash!==configHash || row.mode!==mode)fail('WORKER_DEPLOYMENT_CONFLICT');
       await client.query('UPDATE remote_ingestion.nodes SET slot_claims_required=true WHERE node_id=$1',[nodeId]);
       return {node_id:nodeId,slot,deployment_id:deploymentId,config_hash:configHash,role,mode};
     });
@@ -41,7 +41,7 @@ export class RemoteWorkerActivationStore {
   }
 
   matches(row,value) {
-    return row && row.mode===value.mode && row.deployment_id===value.deployment_id && row.config_hash===value.config_hash;
+    return row && !row.retirement_id && row.mode===value.mode && row.deployment_id===value.deployment_id && row.config_hash===value.config_hash;
   }
 
   async heartbeat(nodeId,value) {

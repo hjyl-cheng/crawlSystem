@@ -255,6 +255,14 @@ printf '%s  %s\\n' ${quote(digest)} ${quote(installed)} | sha256sum -c - >/dev/n
       }
     }finally{await exec(connection,`rm -rf -- ${quote(staging)}`).catch(()=>{});}
   }
+  async function removeWorker(connection,node,value,password){
+    if(value.nodeId!==node.id)throw new Error('节点标识不匹配');
+    const script=await readFile(new URL('./nodeRuntime/removeWorker.py',import.meta.url),'utf8');
+    const command=`set -eu\nexec 9>/run/lock/qy-node-runtime.lock\nflock -n 9\npython3 -c ${quote(script)} ${quote(JSON.stringify(value))}`;
+    const result=JSON.parse(await rootExec(connection,command,password,150000,140));
+    if(result.nodeId!==node.id || result.slot!==value.slot || result.operationId!==value.operationId || result.removed!==true)throw new Error('Worker 删除检查未通过');
+    return result;
+  }
   async function removeUnusedNode(connection, node, password, mode = 'check') {
     if (!uuidPattern.test(node.id) || !['check','cleanup'].includes(mode)) throw new Error('节点删除参数无效');
     const script = await readFile(new URL('./nodeRuntime/removeUnusedNode.sh', import.meta.url), 'utf8');
@@ -267,5 +275,5 @@ printf '%s  %s\\n' ${quote(digest)} ${quote(installed)} | sha256sum -c - >/dev/n
     if (blocked) throw Object.assign(new Error(`${reasons[blocked] ?? '远程状态无法核实'}，节点登记已保留`), { deletionSafe: true });
     if (output !== 'QY_DELETE_OK') throw new Error('远程删除检查结果不完整');
   }
-  return { connect, verify, installKey, installMonitoring, prepareRuntime, deployWorkers, removeUnusedNode, close(connection) { connection?.client.end(); } };
+  return { connect, verify, installKey, installMonitoring, prepareRuntime, deployWorkers, removeWorker, removeUnusedNode, close(connection) { connection?.client.end(); } };
 }

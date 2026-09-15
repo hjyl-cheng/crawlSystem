@@ -5,6 +5,7 @@ import { createServerNodeStore } from "./serverNodes.js";
 import { nodeDeletionFromEnv } from './serverNodeDeletion.js';
 import { nodeRuntimeFromEnv } from './serverNodeRuntime.js';
 import { deploymentControlFromEnv } from './nodeRuntime/deploymentControlClient.js';
+import {workerRemovalFromEnv} from './serverNodeWorkerRemoval.js';
 import { workerDeploymentFromEnv } from './serverNodeWorkerDeployment.js';
 import { serverNodesRoutes } from "./serverNodesRoutes.js";
 import { nodeOnboardingFromEnv } from "./serverNodeOnboarding.js";
@@ -4783,7 +4784,7 @@ app.use((req, res, next) => {
 
 app.get("/", (_req, res) => res.redirect("/queries"));
 const serverNodeStore = createServerNodeStore(db);
-app.use(serverNodesRoutes({ store: serverNodeStore, executionControl: deploymentControlFromEnv(), deletion: nodeDeletionFromEnv(serverNodeStore, db), layout, onboarding: nodeOnboardingFromEnv(serverNodeStore), runtime: nodeRuntimeFromEnv(serverNodeStore), workerDeployment: workerDeploymentFromEnv(serverNodeStore) }));
+app.use(serverNodesRoutes({ store: serverNodeStore, executionControl: deploymentControlFromEnv(), deletion: nodeDeletionFromEnv(serverNodeStore, db), layout, onboarding: nodeOnboardingFromEnv(serverNodeStore), runtime: nodeRuntimeFromEnv(serverNodeStore), workerRemoval: workerRemovalFromEnv(serverNodeStore), workerDeployment: workerDeploymentFromEnv(serverNodeStore) }));
 
 app.get("/health", async (_req, res) => {
   try {

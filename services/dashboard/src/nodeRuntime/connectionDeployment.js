@@ -1,3 +1,4 @@
+import {plannedWorkerSlots} from './workerSlots.js';
 import { randomUUID, createHash } from 'node:crypto';
 
 // A reviewable deployment recipe. Producing it performs no SSH, registration,
@@ -18,8 +19,8 @@ export function buildNodeConnectionDeployment({ node, gatewayUrl, image, deploym
   if (count * 128 > 1024 * 1024) throw new Error('部署配置超过单次传输大小限制');
   const root = `/etc/qy-node/runtime/deployments/${deploymentId}`;
   const services = {}; const files = {}; const registrations = [];
-  for (let index = 1; index <= count; index++) {
-    const slot = `incremental-${index}`;
+  const {slots,allocationSlots,slotSequence}=plannedWorkerSlots(node,count);
+  for (const slot of slots) {
     const config = { version: 1, mode: 'connect_only', role: 'incremental', node_id: node.id, slot, deployment_id: deploymentId, gateway_url: url.href.replace(/\/$/, '') };
     const bytes = JSON.stringify(config) + '\n';
     files[`${slot}.json`] = bytes;
@@ -38,7 +39,7 @@ export function buildNodeConnectionDeployment({ node, gatewayUrl, image, deploym
     };
   }
   return { deploymentId, nodeId: node.id, mode: 'connect_only', readyForTasks: false,
-    count, memoryLimitMiB: count * 256, image, gatewayOrigin: url.origin,
+    count, slots, allocationSlots, slotSequence, memoryLimitMiB: count * 256, image, gatewayOrigin: url.origin,
     compose: { name: `qy-node-${node.id.replaceAll('-', '').slice(0, 16)}`, services }, files, registrations };
 }
 

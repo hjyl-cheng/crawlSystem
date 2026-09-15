@@ -11,7 +11,7 @@ CREATE TABLE IF NOT EXISTS remote_ingestion.node_deployments (
   node_id UUID PRIMARY KEY REFERENCES remote_ingestion.nodes(node_id),
   deployment_id UUID NOT NULL,
   image TEXT NOT NULL,
-  worker_count INTEGER NOT NULL CHECK(worker_count >= 1),
+  worker_count INTEGER NOT NULL CHECK(worker_count >= 0),
   credentials_cipher BYTEA NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
@@ -26,3 +26,9 @@ CREATE TABLE IF NOT EXISTS remote_ingestion.node_intake_requests (
   revision BIGINT NOT NULL DEFAULT 1,
   updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
 );
+
+-- Removed slots remain as tombstones so late heartbeats cannot revive them.
+ALTER TABLE remote_ingestion.worker_connections ADD COLUMN IF NOT EXISTS retirement_id UUID;
+ALTER TABLE remote_ingestion.worker_connections ADD COLUMN IF NOT EXISTS retired_at TIMESTAMPTZ;
+ALTER TABLE remote_ingestion.node_deployments DROP CONSTRAINT IF EXISTS node_deployments_worker_count_check;
+ALTER TABLE remote_ingestion.node_deployments ADD CONSTRAINT node_deployments_worker_count_check CHECK(worker_count >= 0);

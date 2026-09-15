@@ -22,8 +22,8 @@ try{
       console.log(JSON.stringify({index:name,ready:true}));
     }
     const activation=await readFile(new URL('../src/remoteNodes/workerActivationSchema.sql',import.meta.url),'utf8');
-    const table=activation.slice(activation.indexOf('CREATE TABLE IF NOT EXISTS remote_ingestion.node_intake_requests'));
-    if(!table.startsWith('CREATE TABLE'))throw Error('intake schema missing');
+    const table=activation.match(/CREATE TABLE IF NOT EXISTS remote_ingestion\.node_intake_requests[\s\S]*?;/)?.[0];
+    if(!table)throw Error('intake schema missing');
     await client.query("SET lock_timeout='5s'");
     await client.query('BEGIN');
     await client.query(table);

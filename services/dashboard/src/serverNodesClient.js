@@ -16,6 +16,7 @@ let onboardingAvailable = false;
 let initializeId = null;
 let closeInitializationOnSuccess = false;
 let workerDeploymentAvailable = false;
+let workerRemovalAvailable = false;
 let runtimeAvailable = false;
 let runtimeId = null;
 let closeRuntimeOnSuccess = false;
@@ -108,6 +109,8 @@ function openWorkerManager(id) {
   $('worker-intake-count').value=executionStates.get(id)?.allowedCount??0;
   $('worker-sync-intake').checked=!node.deployment;
   $('worker-deployment-password').value='';
+  $('worker-removal-password').value='';
+  $('worker-removal-error').hidden=true;
   for(const name of ['worker-deployment-error','worker-intake-error']){$(name).hidden=true;$(name).textContent='';}
   $('worker-intake-result').textContent='';
   $('worker-deployment-history').open=false;
@@ -117,7 +120,7 @@ function renderWorkerManager() {
   if(!workerManager)return;
   const node=registry.nodes.find(n=>n.id===workerManager.id);if(!node){$('node-worker-manager').close();return;}
   const state=executionStates.get(node.id),counts=state?.counts,known=!!counts&&!state.error;
-  const d=node.deployment,running=deploymentRunning(node),busy=!!$('node-worker-manager').dataset.saving;
+  const d=node.deployment,removing=node.workerRemoval&&!['completed','rejected'].includes(node.workerRemoval.state),running=deploymentRunning(node),busy=!!$('node-worker-manager').dataset.saving||!!removing;
   const installed=installedCount(node);
   $('worker-manager-name').textContent=node.name;
   $('worker-manager-summary').innerHTML=executionPanel(node);
@@ -149,6 +152,7 @@ function renderWorkerManager() {
   $('worker-intake-count').disabled=busy||!known||!state.executionAvailable||!installed;
   $('worker-allowed-label').textContent=known?`当前允许 ${state.allowedCount} 个 · 可设 0–${installed}`:'等待接单状态';
   $('worker-intake-save').disabled=busy||!known||!state.executionAvailable||!installed;
+  renderWorkerRemoval(node,state);
   const history=$('worker-deployment-history');history.hidden=!d||!!node.localIntake;
   if(d){
     const changed=workerManager.lastOperation!==d.operationId||workerManager.lastState!==d.state;
@@ -160,6 +164,40 @@ function renderWorkerManager() {
     if(d.intakeSync)steps.push(['intake','同步接单数量']);
     $('worker-deployment-steps').innerHTML=steps.map(([key,label],i)=>{const status=key==='intake'?d.intakeSync.state:d.steps?.[key]??'pending';return `<li data-state="${escapeHtml(status)}"><b>${i+1}</b><div><strong>${label}</strong></div><span>${({pending:'待执行',running:'执行中',completed:'已完成',failed:'未完成'})[status]??'待执行'}</span></li>`;}).join('');
   }
+}
+function renderWorkerRemoval(node,state){
+  $('worker-removal-section').hidden=!!node.localIntake||!workerRemovalAvailable||!node.deployment;
+  const removal=node.workerRemoval;
+  const inProgress=removal?.state==='running'&&Date.parse(removal.deadline)>Date.now();
+  const pending=removal&&!['completed','rejected'].includes(removal.state);
+  const known=!!state&&!state.error;
+  const busy=!!$('node-worker-manager').dataset.saving||deploymentRunning(node)||inProgress;
+  $('worker-removal-status').textContent=removal?inProgress?`正在核实并删除 ${removal.slot}，可以关闭窗口等待。`
+    :removal.state==='completed'?`${removal.slot} 已删除。`:removal.error||'上次删除中断，可重试继续。':'';
+  const installedSlots=new Set(node.deployment?.slots??Array.from({length:installedCount(node)},(_,i)=>`incremental-${i+1}`));
+  const rows=known?[...(state.workers??[])].filter(w=>installedSlots.has(w.slot)).sort((a,b)=>a.slot.localeCompare(b.slot,'en',{numeric:true})):[];
+  $('worker-removal-list').innerHTML=known?rows.map(w=>{
+    const retry=pending&&removal.slot===w.slot&&!inProgress;
+    const idle=w.connected&&!w.active;
+    const disabled=busy||node.deployment.state!=='connected'||(!retry&&(!idle||pending));
+    const label=w.retiring?'正在移除':!w.connected?'状态未知':w.active?'执行 / 恢复中':w.requested?'空闲，可接任务':'空闲，待命';
+    return `<div class="nodes-worker-row"><span><strong>${escapeHtml(w.slot)}</strong><small>${label}</small></span><button type="button" class="nodes-button danger" data-remove-worker="${escapeHtml(w.slot)}" ${disabled?'disabled':''}>${retry?'重试删除':'删除'}</button></div>`;
+  }).join('')||'<p class="nodes-manager-help">暂无已部署的 Worker。</p>':'<p class="nodes-manager-help">正在读取 Worker 状态，暂时不能删除。</p>';
+  $('worker-removal-form').hidden=!workerManager.removalSlot;
+  $('worker-removal-title').textContent=`删除 ${workerManager.removalSlot??''}？`;
+  const target=rows.find(w=>w.slot===workerManager.removalSlot);
+  $('worker-removal-confirm').disabled=busy||!target||(!target.connected||target.active)&&!(pending&&removal.slot===target.slot);
+}
+async function removeIdleWorker(event){
+  event.preventDefault();const manager=workerManager,dialog=$('node-worker-manager');
+  if(!manager?.removalSlot||dialog.dataset.saving)return;
+  dialog.dataset.saving='true';$('worker-removal-error').hidden=true;
+  let password=$('worker-removal-password').value;$('worker-removal-password').value='';
+  try{
+    registry=await request(`/api/server-nodes/${encodeURIComponent(manager.id)}/remove-worker`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({version:registry.version,slot:manager.removalSlot,password})});
+    manager.removalSlot=null;manager.deploymentDirty=false;manager.intakeDirty=false;announce('已开始检查并删除空闲 Worker，进度会自动更新。');
+  }catch(error){$('worker-removal-error').textContent=error.message;$('worker-removal-error').hidden=false;}
+  finally{password='';delete dialog.dataset.saving;render();renderWorkerManager();}
 }
 async function saveIntake(id,allowedCount,expectedAllowedCount) {
   if(executionActions.has(id))return;
@@ -247,6 +285,7 @@ async function refresh(quiet = false) {
     onboardingAvailable = registry.capabilities?.onboarding === true;
     runtimeAvailable = registry.capabilities?.runtime === true;
     workerDeploymentAvailable = registry.capabilities?.workerDeployment === true;
+    workerRemovalAvailable = registry.capabilities?.workerRemoval === true;
     if (!quiet) announce("");
     render();
     if ($("node-initialize").open) renderInitialization();
@@ -520,6 +559,8 @@ document.addEventListener("click", event => {
   }
   const target = event.target.closest("button");
   if (!target || target.disabled) return;
+  if(target.hasAttribute('data-remove-worker')){workerManager.removalSlot=target.dataset.removeWorker;renderWorkerManager();$('worker-removal-form').scrollIntoView({block:'nearest'});}
+  if(target.hasAttribute('data-cancel-worker-removal')){workerManager.removalSlot=null;renderWorkerManager();}
   if (target.hasAttribute("data-manage")) openWorkerManager(target.dataset.manage);
   if (target.hasAttribute("data-toggle-intake")) void toggleIntake(target.dataset.toggleIntake);
   if (target.hasAttribute("data-close") && !$(target.dataset.close).dataset.saving) $(target.dataset.close).close();
@@ -554,3 +595,5 @@ $("node-initialize-start").addEventListener("click", () => void startInitializat
 $("node-runtime-start").addEventListener("click", () => void startRuntime());
 setInterval(() => { if (!document.hidden) void refresh(true); }, 5000);
 void refresh();
+
+$('worker-removal-form').addEventListener('submit',removeIdleWorker);

@@ -50,6 +50,8 @@ test('page-authorized nodes share the original queue; pause drains active work a
   const control=(enabled,expectedRequested)=>admin.setExecution({nodeId,deploymentId,enabled,expectedRequested,workerCount:1});
   await queue.add('fixture',{}, {jobId:'first'});await supervisor.tick();assert.equal(supervisor.entries.size,0);
   await control(true,false);await supervisor.tick();await until(()=>!!releaseActive);
+  await assert.rejects(admin.retire({nodeId,deploymentId,slot,operationId:randomUUID(),phase:'reserve'}),{code:'WORKER_NOT_IDLE'});
+  assert.equal((await admin.status({nodeId,deploymentId})).allowedCount,1,'busy deletion leaves intake unchanged');
   local=new Worker(INCREMENTAL_QUEUE,async job=>{calls.push({owner:'local',id:job.id});return 'done';},{connection,prefix});await local.waitUntilReady();
   await queue.add('fixture',{}, {jobId:'second'});await until(async()=>(await queue.getJob('second')).getState().then(s=>s==='completed'));
   assert.deepEqual(calls.filter(r=>r.id==='first'),[{owner:'remote',id:'first'}],'local consumer cannot also run the claimed Plan');

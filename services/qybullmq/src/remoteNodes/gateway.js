@@ -43,7 +43,7 @@ export function createRemoteNodeGateway({ store, channelPlans = null, routes = n
     };
     const path = new URL(request.url, 'http://gateway.invalid').pathname;
     const control = deploymentAdmin && request.method === 'POST'
-      && ['/internal/node-deployments/prepare','/internal/node-deployments/status','/internal/node-deployments/execution','/internal/node-deployments/transport-health'].includes(path);
+      && ['/internal/node-deployments/retire','/internal/node-deployments/prepare','/internal/node-deployments/status','/internal/node-deployments/execution','/internal/node-deployments/transport-health'].includes(path);
     const heartbeat = request.method === 'POST' && (path === '/v1/node/heartbeat' || /^\/v1\/work\/[^/]+\/heartbeat$/.test(path));
     const aborted = new AbortController();
     const onClose = () => aborted.abort();
@@ -56,7 +56,7 @@ export function createRemoteNodeGateway({ store, channelPlans = null, routes = n
         deploymentAdmin.authenticate(token);
         if(path.endsWith('/transport-health')){send(200,transportHealth?await transportHealth():{transport:'http'});return;}
         const value=await json(request,512*1024);
-        send(200,path.endsWith('/prepare')?await deploymentAdmin.prepare(value):path.endsWith('/execution')?await deploymentAdmin.setExecution(value):await deploymentAdmin.status(value));return;
+        send(200,path.endsWith('/retire')?await deploymentAdmin.retire(value):path.endsWith('/prepare')?await deploymentAdmin.prepare(value):path.endsWith('/execution')?await deploymentAdmin.setExecution(value):await deploymentAdmin.status(value));return;
       }
       const nodeId = await store.authenticate(token);
       if (youtubeSessions && request.method === 'POST' && ['/v1/youtube/session','/v1/youtube/checkpoint'].includes(path)) {

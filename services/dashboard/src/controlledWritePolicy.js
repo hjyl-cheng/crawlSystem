@@ -12,7 +12,7 @@ export function allowDashboardRequestDuringControlledMigration(method, path) {
   if (normalizedMethod === "POST" && /^\/api\/server-nodes\/[0-9a-f-]{36}\/initialize$/.test(String(path))) return true;
   if (normalizedMethod === "POST" && /^\/api\/server-nodes\/[0-9a-f-]{36}\/prepare-runtime$/.test(String(path))) return true;
   // Explicit deployment starts only waiting nodes; it cannot activate collection.
-  if (normalizedMethod === "POST" && /^\/api\/server-nodes\/[0-9a-f-]{36}\/deploy-workers$/.test(String(path))) return true;
+  if (normalizedMethod === "POST" && /^\/api\/server-nodes\/[0-9a-f-]{36}\/(?:deploy-workers|remove-worker)$/.test(String(path))) return true;
   // Per-node incremental intake only; never global queue pause/resume.
   if (normalizedMethod === "POST" && path === "/api/server-nodes/local-center/execution") return true;
   if (normalizedMethod === "POST" && /^\/api\/server-nodes\/[0-9a-f-]{36}\/execution$/.test(String(path))) return true;

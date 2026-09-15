@@ -32,9 +32,9 @@ test('page deployment freezes saved count, persists progress, retries and expand
    if(changeDuringDeployment)allowedCount=1;
  },close(){}};
  const image='registry.example/collect@sha256:'+'a'.repeat(64);const gatewayUrl='https://center.example';
- const deployment=createNodeWorkerDeployment({store,center,ssh,image,gatewayUrl,pollMs:1,waitMs:50,registryCredentials:async()=>({server:'registry.example',username:'node-pull',password:'c'.repeat(64)})});
+ const deployment=createNodeWorkerDeployment({store,center,ssh,image,gatewayUrl,natsUrl:'tls://messages.example:4222',pollMs:1,waitMs:50,registryCredentials:async()=>({server:'registry.example',username:'node-pull',password:'c'.repeat(64)})});
  const app=express();app.use(express.json());app.use((req,res,next)=>allowDashboardRequestDuringControlledMigration(req.method,req.path)?next():res.sendStatus(423));
- app.use(serverNodesRoutes({store,layout:({body})=>body,workerDeployment:deployment,deploymentEnvironment:{SERVER_NODE_COLLECT_IMAGE:image,SERVER_NODE_GATEWAY_URL:gatewayUrl}}));
+ app.use(serverNodesRoutes({store,layout:({body})=>body,workerDeployment:deployment,deploymentEnvironment:{SERVER_NODE_COLLECT_IMAGE:image,SERVER_NODE_GATEWAY_URL:gatewayUrl,SERVER_NODE_NATS_URL:'tls://messages.example:4222'}}));
  server=app.listen(0,'127.0.0.1');await once(server,'listening');const base=`http://127.0.0.1:${server.address().port}/api/server-nodes/${node.id}`;
  const post=body=>fetch(base+'/deploy-workers',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
  assert.equal((await post({version:1,image:'unsafe'})).status,400);assert.equal(begins,0);

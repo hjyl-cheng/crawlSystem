@@ -98,6 +98,19 @@ export function renderServerNodesPage() {
         <p id="worker-intake-error" class="nodes-form-error" role="alert" hidden></p>
       </form>
     </section>
+    <section id="worker-removal-section" class="nodes-manager-section">
+      <h3>已部署的 Worker</h3>
+      <p class="nodes-manager-help">只能删除空闲 Worker。执行中、恢复中或状态未知时不能删除；删除前会再次检查并停止接单。已采集的数据会保留。</p>
+      <p id="worker-removal-status" class="nodes-manager-help" role="status"></p>
+      <div id="worker-removal-list" class="nodes-worker-list"></div>
+      <form id="worker-removal-form" class="nodes-worker-confirm" hidden>
+        <strong id="worker-removal-title"></strong>
+        <p class="nodes-manager-help">确认后移除此 Worker 的容器，释放运行资源。需要时可以重新新增 Worker。</p>
+        <label class="nodes-field">sudo 密码（按需填写）<input id="worker-removal-password" type="password" autocomplete="new-password" placeholder="免密 sudo 时留空"></label>
+        <div class="nodes-manager-control"><button type="submit" id="worker-removal-confirm" class="nodes-button danger">确认删除空闲 Worker</button><button type="button" class="nodes-button" data-cancel-worker-removal>取消</button></div>
+      </form>
+      <p id="worker-removal-error" class="nodes-form-error" role="alert" hidden></p>
+    </section>
     <details id="worker-deployment-history" class="nodes-deployment-history">
       <summary id="worker-deployment-history-title">最近部署记录</summary>
       <p id="worker-deployment-status" class="nodes-manager-help" role="status"></p>

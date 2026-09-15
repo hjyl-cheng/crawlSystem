@@ -65,7 +65,9 @@ def deploy(bundle_file, step):
     require(credentials['nodeId'] == node and credentials['deploymentId'] == deployment)
     root = Path('/etc/qy-node/runtime/deployments') / deployment
     project = 'qy-node-' + node.replace('-', '')[:16]
-    slots = [f'incremental-{i}' for i in range(1, plan['count'] + 1)]
+    slots = plan.get('slots', [f'incremental-{i}' for i in range(1, plan['count'] + 1)])
+    require(len(slots) == plan['count'] and len(set(slots)) == len(slots)
+            and all(re.fullmatch(r'incremental-[1-9][0-9]*', slot) for slot in slots))
     compose = plan['compose']
     require(compose['name'] == project and set(compose) == {'name', 'services'} and set(compose['services']) == set(slots))
     for slot, service in compose['services'].items():
