@@ -1,0 +1,6 @@
+# Independent center stack: allow the same digest used by page deployments.
+# Keep the current center application image and remaining settings.
+services:
+  remote-node-center:
+    environment:
+      REMOTE_NODE_COLLECT_IMAGE: ${QY_REMOTE_COLLECT_IMAGE:-newcrawdashboard.137-175-93-199.nip.io/qy-node-incremental@sha256:fde4f16d2ff2ce56b7c81b75fae26cdcb56099718b44b40d1b1af1946984e8d7}

@@ -70,3 +70,25 @@ test('shutdown while a heartbeat is in flight validates the request that was act
   const run=runner.run({signal:abort.signal});await requested;abort.abort();release();await run;
   assert.equal(runner.fatal,null);
 });
+
+test('paused worker sleeps between heartbeats, wakes on activation and can shut down while waiting', {timeout:6000}, async t=>{
+  const {RemoteChannelPlanExecutor}=await import('../src/remoteNodes/channelPlanExecutor.js');
+  const {RemoteResultSpool}=await import('../src/remoteNodes/spool.js');
+  const directory=await mkdtemp(join(tmpdir(),'node-paused-wait-'));t.after(()=>rm(directory,{recursive:true,force:true}));
+  let ready=false,beats=0,iterations=0,claims=0;const abort=new AbortController();
+  const runner=new RemoteIncrementalProcess({config:config(),intervalMs:50,spool:new RemoteResultSpool({directory}),
+    localRota:{boot:async()=>({boot_id:'b'.repeat(48)})},
+    client:{transport:'nats',workerHeartbeat:async value=>{beats++;return ack(value,ready);},claim:async()=>{claims++;return null;}},
+    createWorker:({client,spool})=>{
+      const worker=new RemoteChannelPlanExecutor({client,spool,withSession:()=>assert.fail('no task'),
+        youtube:{openChannel:()=>assert.fail('no task'),fetchDetail:()=>assert.fail('no task')}});
+      const once=worker.runOnce.bind(worker);worker.runOnce=()=>{iterations++;return once();};return worker;
+    }});
+  t.after(()=>abort.abort());const run=runner.run({signal:abort.signal});
+  await until(()=>beats>=2);await delay(1100);
+  assert.equal(iterations,1,'paused loop must sleep, not scan the spool every second');assert.equal(claims,0);
+  ready=true;await until(()=>claims>0);
+  ready=false;await until(()=>runner.readyUntil===0);await delay(1100);
+  const paused=iterations;await delay(1100);assert.equal(iterations,paused);
+  const before=Date.now();abort.abort();await run;assert.ok(Date.now()-before<1500,'shutdown wakes a paused executor');
+});

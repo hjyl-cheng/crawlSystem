@@ -25,6 +25,7 @@ export async function flushWholeChannel({ client, spool }) {
       if (error.code !== 'STALE_LEASE' || error.status !== 409) throw error;
       await journal.put('stale', { code: error.code });
       await spool.archiveStaleResult('whole-pending.json');
+      await spool.archiveWholeJournal(pending.command_id);
       return true;
     }
     if (receipt?.durable !== true || receipt.command_id !== pending.command_id || receipt.part !== chunk.part
@@ -50,6 +51,7 @@ export async function recoverWholeChannel({ client, spool }) {
     const journal = await new Journal(directory(spool, entry.name), spool.maxBytes).init();
     if (journal.get('stale')) {
       if ((await spool.read('whole-pending.json'))?.command_id === entry.name) await spool.archiveStaleResult('whole-pending.json');
+      await spool.archiveWholeJournal(entry.name);
       continue;
     }
     if (journal.get('receipt')) {

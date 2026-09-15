@@ -82,7 +82,7 @@ export function renderServerNodesPage() {
         <div class="nodes-manager-control"><label class="nodes-field" for="worker-deployment-count">本次新增几个<input id="worker-deployment-count" type="number" min="1" step="1" required></label><button type="submit" class="nodes-button primary" id="worker-deployment-save">部署 Worker</button></div>
         <p id="worker-deployment-impact" class="nodes-manager-help" role="status"></p>
         <p id="worker-deployment-memory" class="nodes-manager-help"></p>
-        <label class="nodes-check"><input type="checkbox" id="worker-sync-intake">新增成功后，将允许接任务数量同步为新增后的总数</label>
+        <p class="nodes-help">部署不改变接单设置。完成后，请通过“允许接任务数量”或“开始接任务”启用 Worker。</p>
         <p class="nodes-manager-help">关闭窗口后部署仍会继续。若期间手动修改了接单设置，将保留较新的设置。</p>
         <label class="nodes-field" id="worker-deployment-password-field">sudo 密码（按需填写）<input id="worker-deployment-password" type="password" autocomplete="new-password" placeholder="已配置免密 sudo 时留空"></label>
         <p id="worker-deployment-error" class="nodes-form-error" role="alert" hidden></p>

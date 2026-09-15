@@ -25,7 +25,12 @@ export class RemoteIncrementalProcess {
     if(wholeChannel && client.transport!=='nats')throw new TypeError('whole-channel execution requires NATS');
     this.runtimeRevision=wholeChannel?WHOLE_CHANNEL_RUNTIME_REVISION:REMOTE_RUNTIME_REVISION;
     this.instanceId=randomUUID();this.connection=null;this.readyUntil=0;this.stopping=false;this.fatal=null;
-    this.worker=createWorker({client:{...client,claim:async(claimId,slot)=>{
+    this.activationWaiters=new Set();
+    this.worker=createWorker({client:{...client,waitForActivation:async()=>{
+      while(!this.stopping && (!this.connection || this.readyUntil<=uptime())) {
+        await new Promise(resolve=>this.activationWaiters.add(resolve));
+      }
+    },claim:async(claimId,slot)=>{
       if(this.stopping || !this.connection || this.readyUntil<=uptime())return null;
       return client.claim(claimId,slot,this.connection);
     }},localRota,spool,slot:config.slot});
@@ -46,13 +51,19 @@ export class RemoteIncrementalProcess {
       || !Number.isFinite(remaining) || remaining<1000 || remaining>120000
       || startedUptime+remaining/1000<=uptime())throw new Error('NODE_CONNECTION_CLOCK_OR_LEASE_INVALID');
     this.connection=value;this.readyUntil=ack.ready_for_tasks?startedUptime+remaining/1000:0;
+    if(this.readyUntil>uptime())this.wakeActivation();
     return {version:1,node_id:value.node_id,slot:value.slot,deployment_id:value.deployment_id,
       state:ack.state,ready_for_tasks:ack.ready_for_tasks,valid_until_uptime:startedUptime+remaining/1000};
   }
 
+  wakeActivation() {
+    for(const resolve of this.activationWaiters)resolve();
+    this.activationWaiters.clear();
+  }
+
   async run({signal}) {
     const stopped=new AbortController();let finished=false;
-    const stop=()=>{this.stopping=true;this.readyUntil=0;this.worker.stop();};
+    const stop=()=>{this.stopping=true;this.readyUntil=0;this.worker.stop();this.wakeActivation();};
     signal.addEventListener('abort',stop,{once:true});if(signal.aborted)stop();
     const connection=(async()=>{
       let failures=0;

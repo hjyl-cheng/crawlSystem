@@ -1,7 +1,7 @@
 import { mkdir, open, readdir, readFile, rename, lstat, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { MAX_GZIP_BYTES } from './protocol.js';
+import { MAX_GZIP_BYTES, uuid } from './protocol.js';
 
 // Single executor owns a directory. Never mount the same spool into two workers.
 export class RemoteResultSpool {
@@ -81,6 +81,22 @@ export class RemoteResultSpool {
       // cap, but a conclusively expired execution must not disable this Worker.
       await rename(join(this.directory, name), join(this.directory, `${randomUUID()}.stale`));
       await this.syncDirectory();
+    });
+  }
+
+  async archiveWholeJournal(commandId) {
+    uuid(commandId);
+    return this.exclusive(async () => {
+      const source = join(this.directory, 'whole');
+      const archive = join(this.directory, 'whole-archive');
+      await mkdir(archive, { recursive: true, mode: 0o700 });
+      await rename(join(source, commandId), join(archive, commandId));
+      // Keep terminal evidence (and its disk accounting), outside recovery.
+      // Sync both parents so a restart cannot resurrect an active journal.
+      for (const path of [source, archive, this.directory]) {
+        const fd = await open(path, 'r');
+        try { await fd.sync(); } finally { await fd.close(); }
+      }
     });
   }
 }

@@ -107,7 +107,6 @@ function openWorkerManager(id) {
   $('worker-deployment-count').value=1;
   $('worker-deployment-role').value='incremental';
   $('worker-intake-count').value=executionStates.get(id)?.allowedCount??0;
-  $('worker-sync-intake').checked=!node.deployment;
   $('worker-deployment-password').value='';
   $('worker-removal-password').value='';
   $('worker-removal-error').hidden=true;
@@ -136,16 +135,14 @@ function renderWorkerManager() {
   $('worker-deployment-count').removeAttribute('max');
   $('worker-deployment-count').disabled=busy||running;
   $('worker-deployment-role').disabled=busy||running;
-  $('worker-sync-intake').disabled=busy||running||!!d&&(!known||!state.executionAvailable);
   $('worker-deployment-password-field').hidden=running;
   $('worker-deployment-impact').textContent=running?`正在部署至 ${d.desiredCount} 个。已确认部署 ${installed} 个，进度会自动更新。`
-    :valid?`已有 ${workerManager.expectedInstalledCount} 个增量 Worker ＋ 本次新增 ${additional} 个 ＝ 新增后共 ${target} 个。现有 Worker 继续运行。`
+    :valid?`已有 ${workerManager.expectedInstalledCount} 个增量 Worker ＋ 本次新增 ${additional} 个 ＝ 新增后共 ${target} 个。现有 Worker 继续运行，允许接任务数量保持不变。`
     :'请输入有效的新增数量（正整数）。';
   const memoryRequired=(target*256+1536)/1024,memoryTotal=observations.get(node.id)?.metrics?.memoryTotalGiB;
   $('worker-deployment-memory').textContent=valid
     ?`内存参考：按每个 Worker 256 MiB ＋ 系统预留 1.5 GiB 估算，${target} 个约需 ${memoryRequired.toFixed(2)} GiB。${Number.isFinite(memoryTotal)?` 本机总内存约 ${Number(memoryTotal).toFixed(2)} GiB。`:''}仅供参考，不限制新增数量，请按实际运行情况自行安排。`:'';
-  $('worker-deployment-save').disabled=busy||running||!workerDeploymentAvailable||node.runtime?.state!=='ready'||!valid
-    ||$('worker-sync-intake').checked&&!!d&&(!known||!state.executionAvailable);
+  $('worker-deployment-save').disabled=busy||running||!workerDeploymentAvailable||node.runtime?.state!=='ready'||!valid;
   $('worker-deployment-save').textContent=running?'正在新增…':`新增 ${Number.isInteger(additional)&&additional>0?additional:'—'} 个增量 Worker`;
   if(!workerManager.intakeDirty&&known){$('worker-intake-count').value=state.allowedCount;workerManager.expectedAllowedCount=state.allowedCount;}
   $('worker-intake-count').max=installed;
@@ -212,13 +209,11 @@ $('worker-deployment-count').addEventListener('input',()=>{if(workerManager){wor
 $('worker-intake-count').addEventListener('input',()=>{if(workerManager)workerManager.intakeDirty=true;});
 $('worker-deployment-form').addEventListener('submit',async event=>{
   event.preventDefault();if(!workerManager||$('worker-deployment-save').disabled)return;
-  const manager=workerManager,dialog=$('node-worker-manager'),node=registry.nodes.find(n=>n.id===manager.id);
+  const manager=workerManager,dialog=$('node-worker-manager');
   let password=$('worker-deployment-password').value;$('worker-deployment-password').value='';
-  const syncIntake=$('worker-sync-intake').checked;
-  const expectedAllowedCount=node.deployment?executionStates.get(node.id)?.allowedCount:0;
   dialog.dataset.saving='true';$('worker-deployment-error').hidden=true;renderWorkerManager();
   try{
-    registry=await request(`/api/server-nodes/${encodeURIComponent(manager.id)}/deploy-workers`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({version:manager.version,additionalCount:Number($('worker-deployment-count').value),role:$('worker-deployment-role').value,expectedInstalledCount:manager.expectedInstalledCount,password,syncIntake,...(syncIntake?{expectedAllowedCount}:{})})});
+    registry=await request(`/api/server-nodes/${encodeURIComponent(manager.id)}/deploy-workers`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({version:manager.version,additionalCount:Number($('worker-deployment-count').value),role:$('worker-deployment-role').value,expectedInstalledCount:manager.expectedInstalledCount,password})});
     manager.deploymentDirty=false;$('worker-deployment-count').value=1;announce('新增 Worker 已开始，完成并核实连接后才更新已部署数量。');
   }catch(error){$('worker-deployment-error').textContent=error.message;$('worker-deployment-error').hidden=false;}
   finally{password=undefined;delete dialog.dataset.saving;render();renderWorkerManager();void refresh(true);}

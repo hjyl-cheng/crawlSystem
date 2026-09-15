@@ -54,8 +54,6 @@ test('page deployment freezes saved count, persists progress, retries and expand
  assert.equal((await store.deletionCheck(node.id)).allowed,false);
  // The manager submits the new count and deployment as one durable operation.
  assert.equal((await post({version:registry.version,count:0,password:'fixture-password'})).status,400);
- assert.equal((await post({version:registry.version,count:5,syncIntake:true,expectedAllowedCount:1,password:'fixture-password'})).status,409);
- assert.equal((await store.load()).version,registry.version,'invalid sync does not change the saved plan');
  fail=true;
  assert.equal((await post({version:registry.version,count:5,syncIntake:true,expectedAllowedCount:0,password:'fixture-password'})).status,202);
  await deployment.waitForIdle();registry=await store.load();
@@ -64,15 +62,15 @@ test('page deployment freezes saved count, persists progress, retries and expand
  fail=false;
  assert.equal((await post({version:registry.version,count:5,syncIntake:true,expectedAllowedCount:0,password:'fixture-password'})).status,202);
  await deployment.waitForIdle();registry=await store.load();
- assert.equal(allowedCount,5);assert.equal(registry.nodes[0].deployment.intakeSync.state,'completed');
+ assert.equal(allowedCount,0);assert.equal(registry.nodes[0].deployment.intakeSync,null);
  assert.equal(registry.nodes[0].deployment.state,'connected');
  changeDuringDeployment=true;
  assert.equal((await post({version:registry.version,count:6,syncIntake:true,expectedAllowedCount:5,password:'fixture-password'})).status,202);
  await deployment.waitForIdle();registry=await store.load();
  assert.equal(registry.nodes[0].deployment.appliedCount,6);assert.equal(registry.nodes[0].deployment.state,'connected');
- assert.equal(registry.nodes[0].deployment.intakeSync.state,'failed');assert.equal(allowedCount,1,'a newer manual intake setting wins');
- assert.equal(intakeCalls.length,1);
- assert.equal((await createServerNodeStore(pool.query.bind(pool)).load()).nodes[0].deployment.intakeSync.state,'failed','sync outcome survives a service restart');
+ assert.equal(registry.nodes[0].deployment.intakeSync,null);assert.equal(allowedCount,1,'a newer manual intake setting wins');
+ assert.equal(intakeCalls.length,0);
+ assert.equal((await createServerNodeStore(pool.query.bind(pool)).load()).nodes[0].deployment.intakeSync,null,'no deferred intake change survives a service restart');
  changeDuringDeployment=false;
  // A failed target must not force the user to keep retrying that large total.
  fail=true;
@@ -104,9 +102,9 @@ test('page deployment freezes saved count, persists progress, retries and expand
  connected=true;
  assert.equal((await post({version:registry.version,count:21,syncIntake:true,expectedAllowedCount:1,password:'fixture-password'})).status,202);
  await deployment.waitForIdle();registry=await store.load();
- assert.equal(registry.nodes[0].deployment.state,'connected');assert.equal(registry.nodes[0].deployment.appliedCount,21);assert.equal(allowedCount,21);
+ assert.equal(registry.nodes[0].deployment.state,'connected');assert.equal(registry.nodes[0].deployment.appliedCount,21);assert.equal(allowedCount,1);
  assert.equal((await post({version:registry.version,additionalCount:29,role:'incremental',expectedInstalledCount:21,syncIntake:true,expectedAllowedCount:21,password:'fixture-password'})).status,202);
  await deployment.waitForIdle();registry=await store.load();
- assert.equal(registry.nodes[0].deployment.appliedCount,50);assert.equal(allowedCount,50);
+ assert.equal(registry.nodes[0].deployment.appliedCount,50);assert.equal(allowedCount,1);
  assert.equal(plans.at(-1).files['incremental-1.json'],plans[0].files['incremental-1.json']);
 });

@@ -7,7 +7,7 @@ import {registryCredentialsFromEnv} from './nodeRuntime/registryCredentials.js';
 
 export function createNodeWorkerDeployment({store,ssh,center,image,gatewayUrl,natsUrl,waitMs=60000,pollMs=1000,registryCredentials=async()=>null}){
   const active=new Map();
-  async function execute(node,operationId,plan,password,intakeSync){
+  async function execute(node,operationId,plan,password){
     let connection;let step='ssh';
     const advance=patch=>store.advanceWorkerDeployment(node.id,operationId,patch);
     try{
@@ -34,18 +34,6 @@ export function createNodeWorkerDeployment({store,ssh,center,image,gatewayUrl,na
         await delay(pollMs);
       }
       await advance({appliedCount:plan.count,steps:{connection:'completed'}});
-      if(intakeSync){
-        try{
-          await advance({intakeSync:{...intakeSync,state:'running'}});
-          await center.setExecution({nodeId:node.id,deploymentId:plan.deploymentId,workerCount:plan.count,
-            allowedCount:plan.count,expectedAllowedCount:intakeSync.expectedAllowedCount});
-          await advance({intakeSync:{...intakeSync,state:'completed'}});
-        }catch(error){
-          await advance({intakeSync:{...intakeSync,state:'failed',error:error?.code==='EXECUTION_CONTROL_CHANGED'
-            ?'部署期间接单设置已变化，已保留较新的设置。请核实后手动调整接单数量。'
-            :'Worker 部署成功，但接单数量未能自动同步。请在本窗口核实并调整接单数量。'}});
-        }
-      }
       await advance({state:'connected',finishedAt:new Date().toISOString(),error:null});
     }catch(error){
       // Neither SSH/HTTP errors nor the transient credential bundle reach the
@@ -72,12 +60,12 @@ export function createNodeWorkerDeployment({store,ssh,center,image,gatewayUrl,na
         if(!Number.isSafeInteger(count))throw invalid('新增后的部署总数无效');
       }else if(role!==undefined||expectedInstalledCount!==undefined)throw invalid('请同时填写新增数量');
       const plan=buildNodeCollectDeployment({node:count===undefined?node:{...node,workers:[{role:'incremental',count}]},image,gatewayUrl,natsUrl,...(node.deployment?.deploymentId?{deploymentId:node.deployment.deploymentId}:{})});
-      if(syncIntake){
-        const actual=node.deployment?(await center.status(plan)).allowedCount:0;
-        if(actual!==expectedAllowedCount)throw Object.assign(new Error('接单设置已变化，请刷新后重新确认'),{statusCode:409});
-      }
+      // Older pages may still send syncIntake. Deployment never changes intake:
+      // enabling workers must go through the explicit execution-control action.
+      syncIntake=false;
+      expectedAllowedCount=undefined;
       const operationId=randomUUID();const updated=await store.beginWorkerDeployment({id,version,operationId,plan,count,syncIntake,expectedAllowedCount});
-      const task=execute(node,operationId,plan,password,syncIntake?{allowedCount:plan.count,expectedAllowedCount}:null);active.set(id,task);void task.catch(()=>{});return updated;
+      const task=execute(node,operationId,plan,password);active.set(id,task);void task.catch(()=>{});return updated;
     },
     waitForIdle:()=>Promise.allSettled([...active.values()]),
   };

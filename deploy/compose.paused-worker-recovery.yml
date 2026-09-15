@@ -1,0 +1,7 @@
+# Apply after the existing production Dashboard overlays. No collector queues
+# or center services are recreated by this overlay.
+services:
+  dashboard:
+    image: qy-allpachong/dashboard:paused-recovery-20260915
+    environment:
+      SERVER_NODE_COLLECT_IMAGE: ${QY_REMOTE_COLLECT_IMAGE:-newcrawdashboard.137-175-93-199.nip.io/qy-node-incremental@sha256:fde4f16d2ff2ce56b7c81b75fae26cdcb56099718b44b40d1b1af1946984e8d7}

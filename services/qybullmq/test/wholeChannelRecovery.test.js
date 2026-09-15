@@ -133,3 +133,26 @@ test('received evidence is reused only if it still satisfies the new frozen targ
   assert.deepEqual(fetched,['first']);
   assert.deepEqual(result.items.map(item=>item.status),['captured','captured']);
 });
+
+test('idle execution archives terminal evidence without replaying it on each pass', async t => {
+  const { RemoteChannelPlanExecutor } = await import('../src/remoteNodes/channelPlanExecutor.js');
+  const f = await fixture(t); await crash(f, 'before_pointer');
+  const path = join(f.directory, 'whole', f.command.command_id);
+  await (await new Journal(path).init()).put('stale', { code: 'STALE_LEASE' });
+  let opens = 0;
+  const init = Journal.prototype.init;
+  t.mock.method(Journal.prototype, 'init', async function () { opens++; return init.call(this); });
+  const worker = new RemoteChannelPlanExecutor({ spool: f.spool,
+    client: { transport: 'nats', claim: async () => null, uploadWholeChannel: () => assert.fail('terminal result') },
+    youtube: { openChannel: () => assert.fail('idle'), fetchDetail: () => assert.fail('idle') },
+    withSession: () => assert.fail('idle'),
+  });
+  assert.equal(await worker.runOnce(), 'idle');
+  const initial = opens;
+  for (let n = 0; n < 3; n++) assert.equal(await worker.runOnce(), 'idle');
+  assert.equal(opens, initial, 'idle passes must not reopen terminal journals');
+  assert.deepEqual(await readdir(join(f.directory, 'whole')), []);
+  const archived = await new Journal(join(f.directory, 'whole-archive', f.command.command_id)).init();
+  assert.equal(archived.get('stale').code, 'STALE_LEASE');
+  assert.ok(archived.get('result'), 'preserve historical evidence');
+});

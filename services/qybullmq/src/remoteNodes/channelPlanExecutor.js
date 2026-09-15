@@ -15,6 +15,7 @@ export class RemoteChannelPlanExecutor {
     Object.assign(this, { client, spool, youtube, withSession, networkSession, pollMs, timeoutMs });
     this.stopping = false;
     this.busy = false;
+    this.recoveryNeeded = true;
   }
 
   stop() { this.stopping = true; }
@@ -46,7 +47,10 @@ export class RemoteChannelPlanExecutor {
     this.busy = true;
     try {
       await this.spool.init();
-      await recoverWholeChannel({ client: this.client, spool: this.spool });
+      if (this.recoveryNeeded) {
+        await recoverWholeChannel({ client: this.client, spool: this.spool });
+        this.recoveryNeeded = false;
+      }
       let recoveryError;
       try { await this.networkSession?.recover(); } catch (error) { recoveryError = error; }
       // Receipt replay must remain possible while a retired session waits for
@@ -153,6 +157,11 @@ export class RemoteChannelPlanExecutor {
       } finally {
         done = true; clearTimeout(timer); await renewal;
       }
+    } catch (error) {
+      // An interrupted command may have fsynced a delivery without its pointer.
+      // Reconcile it before the next claim; successful idle passes need no replay.
+      this.recoveryNeeded = true;
+      throw error;
     } finally { this.busy = false; }
   }
 
@@ -166,6 +175,7 @@ export class RemoteChannelPlanExecutor {
         failures = 0;
         if (status === 'stopped' || status === 'blocked') return;
         if (this.stopping && !(await this.spool.read('claim.json'))) return;
+        if (status === 'idle') await this.client.waitForActivation?.();
       } catch (error) {
         failures++;
         onStatus({ status: 'retrying', code: error.code || 'TRANSPORT_ERROR' });
