@@ -26,3 +26,13 @@ Run `scripts/applyRemoteIntakeUpgrade.mjs` with an explicit database URL and `EX
 Deploy the center and Dashboard only after the upgrade completes. Existing remote collector images need no replacement. Keep the metadata and valid indexes on an application rollback; older applications ignore the new table. Restore the prior notification function if rolling back the center, to recover its node-wide wakeup behavior.
 
 During this deployment, the daily Plan generator held a coordination transaction for over five hours and prevented index validation. It was stopped under the user's existing request to pause daily Clock execution. Committed Plans are retained. The incremental queue and dispatcher remain paused; migration must remain running.
+
+## Production verification
+
+On 2026-09-15, all four indexes became valid and the targeted metadata upgrade completed. The center and Dashboard were deployed from commit `329e4ee`. A long background publication scan also delayed index validation; it ended naturally before the guarded cancellation request matched any query.
+
+- The actual Dashboard control client saved 45→10 in 188 ms and 10→45 in 221 ms. Final allowed intake was restored to 45.
+- Before this deployment, `incremental-30` had stopped heartbeating at 01:34 UTC despite its container remaining up. It had no pending, leased or received task. Restarting only that container restored its connection; its underlying hang is not diagnosed by this intake patch.
+- Retried the user's failed desired deployment of 46 through the Dashboard deployment coordinator. All deployment steps completed in 20 seconds and `appliedCount` became 46. Existing containers were preserved by the additive deployment path; the allowed intake count was not automatically increased.
+- The migration queue remained unpaused with 40 active tasks. The incremental queue remained paused with 0 active and 62 paused jobs. The daily generator and dispatcher remained stopped.
+- A final database sample found zero remote-ingestion lock waiters. This is a point-in-time verification, not a long-duration throughput benchmark.
