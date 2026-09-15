@@ -96,3 +96,29 @@ test('idle claims do not take node/Worker locks or block additive deployment',{s
     assert.equal((await pool.query('SELECT worker_count FROM remote_ingestion.node_deployments WHERE node_id=$1',[nodeId])).rows[0].worker_count,46);
   }finally{clearTimeout(timer);await gate.query('ROLLBACK');gate.release();await claim.catch(()=>{});}
 });
+
+test('paused node saves a count without enabling any slot; start and pause preserve the saved count',{skip:!url,timeout:20000},async t=>{
+  const {pool,admin,nodeId,deploymentId}=await fixture(t);
+  await admin.setExecution({nodeId,deploymentId,workerCount:45,enabled:false,expectedRequested:true});
+  const saved=await admin.setExecution({nodeId,deploymentId,workerCount:45,allowedCount:20,expectedAllowedCount:45});
+  assert.equal(saved.allowedCount,0,'saving a limit must not resume a paused node');
+  assert.equal(saved.configuredCount,20);assert.equal(saved.intakeEnabled,false);
+  assert.equal((await pool.query('SELECT count(*)::int n FROM remote_ingestion.worker_connections WHERE node_id=$1 AND activation_requested',[nodeId])).rows[0].n,0);
+  const started=await admin.setExecution({nodeId,deploymentId,workerCount:45,enabled:true,expectedRequested:false});
+  assert.equal(started.allowedCount,20);assert.equal(started.intakeEnabled,true);
+  const resized=await admin.setExecution({nodeId,deploymentId,workerCount:45,allowedCount:10,expectedAllowedCount:20});
+  assert.equal(resized.allowedCount,10);
+  const paused=await admin.setExecution({nodeId,deploymentId,workerCount:45,enabled:false,expectedRequested:true});
+  assert.equal(paused.allowedCount,0);assert.equal(paused.configuredCount,10);
+  assert.equal((await admin.status({nodeId,deploymentId})).configuredCount,10);
+});
+
+test('concurrent pause and count save preserve both operator choices',{skip:!url,timeout:20000},async t=>{
+  const {admin,nodeId,deploymentId}=await fixture(t);
+  await Promise.all([
+    admin.setExecution({nodeId,deploymentId,workerCount:45,allowedCount:20,expectedAllowedCount:45}),
+    admin.setExecution({nodeId,deploymentId,workerCount:45,enabled:false,expectedRequested:true}),
+  ]);
+  const state=await admin.status({nodeId,deploymentId});
+  assert.equal(state.configuredCount,20);assert.equal(state.intakeEnabled,false);assert.equal(state.allowedCount,0);
+});

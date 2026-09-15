@@ -1,0 +1,5 @@
+# Apply intakeControlSchema.sql with applyIntakeControlUpgrade.mjs first.
+# Independent center stack only; does not recreate collectors or migration.
+services:
+  remote-node-center:
+    image: qy-allpachong/remote-node-center:intake-switch-20260915

@@ -5,6 +5,7 @@ import {hash,RemoteProtocolError,uuid} from './protocol.js';
 import {selectIntakeWorkers,intakeStatus} from './intakeSelection.js';
 import {createWorkerRetirement} from './workerRetirement.js';
 import {reconcileIntakeRequests} from './intakeRequests.js';
+import {readIntakeControl,saveIntakeControl,changeIntakeControl} from './intakeControl.js';
 const fail=code=>{throw new RemoteProtocolError(code);};
 
 // A separate center credential authorizes Dashboard deployment. Node tokens can
@@ -93,10 +94,9 @@ export function createRemoteDeploymentAdmin({store,routes,token,image,gatewayUrl
         || (byCount ? !Number.isInteger(value.expectedAllowedCount) : typeof value.enabled!=='boolean' || typeof value.expectedRequested!=='boolean')
         || !Number.isSafeInteger(value.workerCount) || value.workerCount<1)throw new RemoteProtocolError('INVALID_EXECUTION_CONTROL',400);
       uuid(value.nodeId);uuid(value.deploymentId);
-      const desired=byCount?value.allowedCount:value.enabled?value.workerCount:0;
-      if(desired<0 || desired>value.workerCount)throw new RemoteProtocolError('INVALID_EXECUTION_COUNT',400);
-      if(desired>0 && !execution?.allowsNode(value.nodeId))fail('REMOTE_CENTER_EXECUTION_NOT_CONFIGURED');
-      if(desired>0 && (!byCount || desired>value.expectedAllowedCount))await capacity?.ensure();
+      if(byCount && (value.allowedCount<0 || value.allowedCount>value.workerCount))throw new RemoteProtocolError('INVALID_EXECUTION_COUNT',400);
+      if(value.enabled===true)await capacity?.ensure();
+      let control;
       await store.transaction(async client=>{
         await client.query('SELECT pg_advisory_xact_lock(hashtext($1))',[`remote-deploy:${value.nodeId}`]);
         const node=(await client.query('SELECT state FROM remote_ingestion.nodes WHERE node_id=$1 FOR SHARE',[value.nodeId])).rows[0];
@@ -108,10 +108,10 @@ export function createRemoteDeploymentAdmin({store,routes,token,image,gatewayUrl
         const previous=(await client.query('SELECT * FROM remote_ingestion.node_intake_requests WHERE node_id=$1 FOR UPDATE',[value.nodeId])).rows[0];
         if(previous && previous.deployment_id!==value.deploymentId)fail('WORKER_DEPLOYMENT_MISMATCH');
         if(previous){const selected=new Set(previous.selected_slots);for(const row of rows)row.activation_requested=selected.has(row.slot);}
-        const requested=rows.some(r=>r.activation_requested);
         const currentCount=rows.filter(r=>r.activation_requested).length;
-        if(byCount ? currentCount!==value.expectedAllowedCount && currentCount!==desired
-          : requested!==value.expectedRequested && !rows.every(r=>r.activation_requested===value.enabled))fail('EXECUTION_CONTROL_CHANGED');
+        control=changeIntakeControl(await readIntakeControl(client,value.nodeId,currentCount,value.workerCount),value);
+        const desired=control.effectiveCount;
+        if(desired>0 && !execution?.allowsNode(value.nodeId))fail('REMOTE_CENTER_EXECUTION_NOT_CONFIGURED');
         // Registration precedes installation. A failed additive deployment must
         // not remove control of the previously verified prefix of Worker slots.
         const installed=new Set(rows.filter(r=>!r.retirement_id).sort((a,b)=>a.slot.localeCompare(b.slot,'en',{numeric:true})).slice(0,value.workerCount).map(r=>r.slot));
@@ -126,13 +126,14 @@ export function createRemoteDeploymentAdmin({store,routes,token,image,gatewayUrl
           VALUES($1,$2,$3) ON CONFLICT(node_id) DO UPDATE SET selected_slots=EXCLUDED.selected_slots,
           revision=remote_ingestion.node_intake_requests.revision+1,updated_at=clock_timestamp()`,
           [value.nodeId,value.deploymentId,selected.map(r=>r.slot)]);
+        await saveIntakeControl(client,value.nodeId,control);
         await client.query("SELECT pg_notify('qy_remote_transport','supervisor')");
       });
       // Best effort only: the durable request is retried by the supervisor.
       await reconcileIntakeRequests(store,value.nodeId).catch(()=>{});
       try{return {...await this.status(value),saved:true};}
       catch{return {nodeId:value.nodeId,deploymentId:value.deploymentId,saved:true,
-        allowedCount:desired,requested:desired>0,adjusting:true,observationPending:true};}
+        allowedCount:control.effectiveCount,configuredCount:control.configuredCount,intakeEnabled:control.intakeEnabled,requested:control.effectiveCount>0,adjusting:true,observationPending:true};}
     },
     async status({nodeId,deploymentId}){
       if(nodeId==='local-center'){if(!localIntake)fail('LOCAL_INTAKE_NOT_CONFIGURED');return localIntake.status();}
@@ -148,11 +149,12 @@ export function createRemoteDeploymentAdmin({store,routes,token,image,gatewayUrl
         const workers=[];
         for(const row of rows)workers.push({slot:row.slot,retiring:!!row.retirement_id,connected:row.connected===true,preparation:execution?.preparationState?.(row)??null,
           requested:desired?desired.has(row.slot):row.activation_requested,enabled:row.enabled,active:execution?.isProcessing(row)===true || row.unsettled===true,
+          processing:execution?.isProcessing(row)===true,awaitingRecovery:row.unsettled===true && execution?.isProcessing(row)!==true,
           readyForTasks:row.connected===true && (desired?desired.has(row.slot):row.activation_requested) && row.activation_requested && row.enabled && row.accepting && row.node_state==='active'
             && typeof activation?.verifyExecution==='function' && await activation.verifyExecution(client,row)===true});
         return {nodeId,deploymentId,workers,executionAvailable:execution?.allowsNode(nodeId)===true,
           adjusting:!!desired && rows.some(row=>row.activation_requested!==desired.has(row.slot)),
-          ...intakeStatus(workers)};
+          ...intakeStatus(workers),...await readIntakeControl(client,nodeId,workers.filter(w=>w.requested).length,workers.length)};
       });
       // Network inspection must not hold a business database transaction open.
       if(result.workers.some(w=>w.preparation==='waiting_network'))result.networkCapacity=await execution?.networkCapacity?.()??null;

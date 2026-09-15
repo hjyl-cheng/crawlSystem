@@ -10,8 +10,8 @@ export function renderServerNodesPage() {
     <div class="nodes-summary" aria-label="节点概览">
       <div class="nodes-stat"><span>已登记服务器</span><strong id="nodes-total">—</strong><small>中心与执行节点</small></div>
       <div class="nodes-stat"><span>已部署增量 Worker</span><strong id="nodes-planned">—</strong><small>实际部署数量</small></div>
-      <div class="nodes-stat"><span>允许接任务</span><strong id="nodes-allowed">—</strong><small>各服务器设置的合计</small></div>
-      <div class="nodes-stat"><span>正在执行 / 收尾</span><strong id="nodes-active">—</strong><small>已领取任务的 Worker</small></div>
+      <div class="nodes-stat"><span>并发额度合计</span><strong id="nodes-allowed">—</strong><small>各服务器设置的合计</small></div>
+      <div class="nodes-stat"><span>采集 / 等待处理</span><strong id="nodes-active">—</strong><small>已领取任务的 Worker</small></div>
     </div>
     <ol class="nodes-journey" aria-label="服务器接入流程"><li class="current"><b>01</b><div><strong>添加并初始化</strong><small>验证 SSH · 配置密钥 · 接入 Beszel</small></div></li><li><b>02</b><div><strong>准备运行环境</strong><small>Docker · Compose · 运行目录</small></div></li><li><b>03</b><div><strong>部署与接单</strong><small>部署实例 · 调整接单数量</small></div></li></ol>
     <div class="nodes-stage"><span class="nodes-stage-icon" aria-hidden="true">i</span><div><strong>按步骤完成服务器接入</strong><p>添加并初始化后，在服务器卡片点击“准备运行环境”，查看各步骤进度。环境就绪后，在“管理 Worker”中部署实例并调整接单数量。</p></div></div>
@@ -73,7 +73,7 @@ export function renderServerNodesPage() {
   </dialog>
   <dialog id="node-worker-manager" class="nodes-dialog nodes-worker-manager" aria-labelledby="node-worker-manager-title">
     <div class="nodes-dialog-heading"><div><div class="nodes-eyebrow" id="worker-manager-name"></div><h2 id="node-worker-manager-title">管理 Worker</h2></div><button type="button" class="nodes-icon-button" data-close="node-worker-manager" aria-label="关闭">×</button></div>
-    <p class="nodes-dialog-intro">先选择 Worker 类型，再填写本次新增数量；下方可以单独调整允许接任务数量。</p>
+    <p class="nodes-dialog-intro">先选择 Worker 类型，再填写本次新增数量；下方设置并发额度，开始与暂停通过服务器卡片上的按钮控制。</p>
     <div id="worker-manager-summary" class="nodes-manager-summary" aria-live="polite"></div>
     <section class="nodes-manager-section" id="worker-deployment-section">
       <form id="worker-deployment-form">
@@ -82,7 +82,7 @@ export function renderServerNodesPage() {
         <div class="nodes-manager-control"><label class="nodes-field" for="worker-deployment-count">本次新增几个<input id="worker-deployment-count" type="number" min="1" step="1" required></label><button type="submit" class="nodes-button primary" id="worker-deployment-save">部署 Worker</button></div>
         <p id="worker-deployment-impact" class="nodes-manager-help" role="status"></p>
         <p id="worker-deployment-memory" class="nodes-manager-help"></p>
-        <p class="nodes-help">部署不改变接单设置。完成后，请通过“允许接任务数量”或“开始接任务”启用 Worker。</p>
+        <p class="nodes-help">部署不改变接单设置。完成后，先保存并发额度，再点击“开始接任务”启用 Worker。</p>
         <p class="nodes-manager-help">关闭窗口后部署仍会继续。若期间手动修改了接单设置，将保留较新的设置。</p>
         <label class="nodes-field" id="worker-deployment-password-field">sudo 密码（按需填写）<input id="worker-deployment-password" type="password" autocomplete="new-password" placeholder="已配置免密 sudo 时留空"></label>
         <p id="worker-deployment-error" class="nodes-form-error" role="alert" hidden></p>
@@ -91,9 +91,9 @@ export function renderServerNodesPage() {
     <p id="worker-center-note" class="nodes-manager-help" hidden>中心现有增量 Worker 的部署数量暂不在此调整；可以直接设置允许接任务数量。</p>
     <section class="nodes-manager-section">
       <form id="worker-intake-form">
-        <div class="nodes-section-heading"><h3>允许接任务数量</h3><span id="worker-allowed-label"></span></div>
-        <div class="nodes-manager-control"><label class="nodes-field" for="worker-intake-count">最多同时参与采集的 Worker<input id="worker-intake-count" type="number" min="0" step="1" required></label><button type="submit" class="nodes-button" id="worker-intake-save">保存接单数量</button></div>
-        <p id="worker-intake-impact" class="nodes-manager-help">设为 0 暂停接单；调小后，多出的 Worker 完成当前频道再待命。</p>
+        <div class="nodes-section-heading"><h3>并发额度</h3><span id="worker-allowed-label"></span></div>
+        <div class="nodes-manager-control"><label class="nodes-field" for="worker-intake-count">最多同时参与采集的 Worker<input id="worker-intake-count" type="number" min="0" step="1" required></label><button type="submit" class="nodes-button" id="worker-intake-save">保存额度</button></div>
+        <p id="worker-intake-impact" class="nodes-manager-help">保存只修改并发额度，不会开始或暂停接单。暂停后额度会保留；需点击“开始接任务”才会执行。调小后，已有任务先完成。</p>
         <p id="worker-intake-result" class="nodes-manager-help" role="status"></p>
         <p id="worker-intake-error" class="nodes-form-error" role="alert" hidden></p>
       </form>

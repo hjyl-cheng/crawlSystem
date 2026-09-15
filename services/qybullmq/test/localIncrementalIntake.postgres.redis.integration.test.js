@@ -35,7 +35,9 @@ test('local count control drains only surplus Workers, persists zero through res
  for(let i=1;i<=3;i++)await start(`test-worker-${i}`);
  const set=async(allowedCount,expectedAllowedCount)=>{const s=await admin.setExecution({workerCount:3,allowedCount,expectedAllowedCount});await until(async()=>(await admin.status()).workers.filter(w=>w.readyForTasks).length===allowedCount);return admin.status();};
  assert.equal((await admin.status()).allowedCount,0,'new Workers start in standby');
- await set(2,0);await queue.addBulk([1,2].map(i=>({name:'hold',data:{},opts:{jobId:`held-${i}`}})));await until(()=>release.size===2);
+ const saved=await admin.setExecution({workerCount:3,allowedCount:2,expectedAllowedCount:3});assert.equal(saved.allowedCount,0);assert.equal(saved.configuredCount,2);assert.equal(saved.intakeEnabled,false);
+ await admin.setExecution({workerCount:3,enabled:true,expectedRequested:false});await until(async()=>(await admin.status()).workers.filter(w=>w.readyForTasks).length===2);
+ await queue.addBulk([1,2].map(i=>({name:'hold',data:{},opts:{jobId:`held-${i}`}})));await until(()=>release.size===2);
  await set(1,2);let state=await admin.status();assert.equal(state.counts.running,1);assert.equal(state.counts.draining,1);
  await until(async()=>await incrementalWorkerCapacity(queue)===1);
  await queue.add('ordinary',{}, {jobId:'next'});release.get('test-worker-2')();await until(async()=>(await admin.status()).counts.draining===0);

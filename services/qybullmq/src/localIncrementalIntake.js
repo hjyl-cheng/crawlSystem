@@ -3,6 +3,7 @@ import {setTimeout as delay} from 'node:timers/promises';
 import {DelayedError} from 'bullmq';
 import {RemoteProtocolError} from './remoteNodes/protocol.js';
 import {selectIntakeWorkers,intakeStatus} from './remoteNodes/intakeSelection.js';
+import {readIntakeControl,saveIntakeControl,changeIntakeControl} from './remoteNodes/intakeControl.js';
 import {publishWorkerIntake} from './workerIntakeTelemetry.js';
 
 export function createLocalIntakeAdmin({query,transaction}) {
@@ -13,22 +14,25 @@ export function createLocalIntakeAdmin({query,transaction}) {
       const workers=rows.map(r=>({slot:r.worker_id,connected:r.alive,requested:r.activation_requested,
         enabled:r.alive&&r.accepting,active:r.alive&&r.active,
         readyForTasks:r.alive&&r.accepting&&r.activation_requested}));
-      return {nodeId:'local-center',executionAvailable:true,workers,...intakeStatus(workers)};
+      return {nodeId:'local-center',executionAvailable:true,workers,...intakeStatus(workers),
+        ...await readIntakeControl({query},'local-center',workers.filter(w=>w.requested).length,workers.length)};
     },
     async setExecution(value) {
-      if(!value || Object.keys(value).some(k=>!['allowedCount','expectedAllowedCount','workerCount'].includes(k))
-        || !Number.isInteger(value.expectedAllowedCount) || !Number.isInteger(value.workerCount))throw new RemoteProtocolError('INVALID_EXECUTION_CONTROL',400);
+      const byCount=Number.isInteger(value?.allowedCount);
+      if(!value || Object.keys(value).some(k=>!['allowedCount','expectedAllowedCount','workerCount','enabled','expectedRequested'].includes(k))
+        || (byCount?!Number.isInteger(value.expectedAllowedCount):typeof value.enabled!=='boolean'||typeof value.expectedRequested!=='boolean') || !Number.isInteger(value.workerCount))throw new RemoteProtocolError('INVALID_EXECUTION_CONTROL',400);
       await transaction(async client=>{
         await client.query('SELECT pg_advisory_xact_lock(781138020)');
         const rows=(await client.query(`SELECT *,worker_id AS slot,connected_until>clock_timestamp() AS alive
           FROM remote_ingestion.local_incremental_workers ORDER BY worker_id FOR UPDATE`)).rows;
         if(rows.length!==value.workerCount)throw new RemoteProtocolError('WORKER_DEPLOYMENT_MISMATCH');
         const current=rows.filter(r=>r.activation_requested).length;
-        const selected=selectIntakeWorkers(rows,value.allowedCount);
-        if(current!==value.expectedAllowedCount && current!==value.allowedCount)throw new RemoteProtocolError('EXECUTION_CONTROL_CHANGED');
+        const control=changeIntakeControl(await readIntakeControl(client,'local-center',current,rows.length),value);
+        const selected=selectIntakeWorkers(rows,control.effectiveCount);
         if(selected.some(r=>!r.activation_requested&&!r.alive))throw new RemoteProtocolError('WORKER_NOT_READY');
         await client.query(`UPDATE remote_ingestion.local_incremental_workers
           SET activation_requested=(worker_id=ANY($1::text[])),updated_at=clock_timestamp()`,[selected.map(r=>r.worker_id)]);
+        await saveIntakeControl(client,'local-center',control);
       });
       return this.status();
     },

@@ -32,3 +32,11 @@ ALTER TABLE remote_ingestion.worker_connections ADD COLUMN IF NOT EXISTS retirem
 ALTER TABLE remote_ingestion.worker_connections ADD COLUMN IF NOT EXISTS retired_at TIMESTAMPTZ;
 ALTER TABLE remote_ingestion.node_deployments DROP CONSTRAINT IF EXISTS node_deployments_worker_count_check;
 ALTER TABLE remote_ingestion.node_deployments ADD CONSTRAINT node_deployments_worker_count_check CHECK(worker_count >= 0);
+
+-- Operator configuration only; never changes tasks or collection results.
+CREATE TABLE IF NOT EXISTS remote_ingestion.intake_controls (
+  node_key TEXT PRIMARY KEY,
+  configured_count INTEGER NOT NULL CHECK(configured_count >= 0),
+  intake_enabled BOOLEAN NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+);

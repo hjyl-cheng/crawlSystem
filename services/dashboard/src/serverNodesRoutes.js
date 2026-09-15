@@ -10,7 +10,8 @@ export function serverNodesRoutes({ store, layout, onboarding = null, runtime = 
     ?{id:'local-center',name:'中心服务器',kind:'center',localIntake:true,host:deploymentEnvironment.SERVER_NODE_LOCAL_HOST||'本机',workers:[]}:null;
   const findNode=(registry,id)=>id===localNode?.id?localNode:registry.nodes.find(n=>n.id===id);
   const installedCount=node=>node.deployment?.appliedCount??(node.deployment?.state==='connected'?node.deployment.desiredCount:0);
-  const installedStatus=(node,state)=>node.localIntake?state:{...state,counts:state.counts?{...state.counts,
+  const installedStatus=(node,state)=>node.localIntake?state:{...state,
+    ...(Number.isInteger(state.configuredCount)?{configuredCount:Math.min(state.configuredCount,installedCount(node))}:{}),counts:state.counts?{...state.counts,
     registered:state.counts.deployed,deployed:installedCount(node)}:state.counts};
   router.get("/server-nodes", (_req, res) => {
     res.set("Cache-Control", "no-store").send(layout({ title: "服务器节点", active: "server-nodes", body: renderServerNodesPage() }));
@@ -123,10 +124,9 @@ export function serverNodesRoutes({ store, layout, onboarding = null, runtime = 
       if(!node)return res.status(404).json({error:'服务器不存在'});
       if(registry.version!==input.version)return res.status(409).json({error:'节点配置已变化，请刷新后重试'});
       if(node.localIntake){
-        if(!byCount)return res.status(400).json({error:'请填写允许接任务数量'});
         const state=await executionControl.status({nodeId:node.id});
         return res.set('Cache-Control','no-store').json(await executionControl.setExecution({nodeId:node.id,
-          workerCount:state.counts.deployed,allowedCount:input.allowedCount,expectedAllowedCount:input.expectedAllowedCount}));
+          workerCount:state.counts.deployed,...(byCount?{allowedCount:input.allowedCount,expectedAllowedCount:input.expectedAllowedCount}:{enabled:input.enabled,expectedRequested:input.expectedRequested})}));
       }
       if(node.workerRemoval && !['completed','rejected'].includes(node.workerRemoval.state))return res.status(409).json({error:'请先完成或重试 Worker 删除'});
       if(node.kind!=='execution' || node.deletion || !node.deployment

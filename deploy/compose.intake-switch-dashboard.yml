@@ -1,0 +1,4 @@
+# Apply after previous Dashboard overlays; collector image/config stay pinned.
+services:
+  dashboard:
+    image: qy-allpachong/dashboard:intake-switch-20260915

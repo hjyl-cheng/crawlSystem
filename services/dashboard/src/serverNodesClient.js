@@ -61,34 +61,24 @@ function metrics(node) {
 }
 
 let workerManager = null;
-const lastIntakeCounts=new Map();
-function rememberIntake(id,count){
-  if(!Number.isInteger(count)||count<1||lastIntakeCounts.get(id)===count)return;
-  lastIntakeCounts.set(id,count);
-  try{localStorage.setItem('qy-worker-intake-'+id,String(count));}catch{}
-}
-function resumeIntakeCount(id,installed){
-  let remembered=lastIntakeCounts.get(id);
-  if(!remembered){try{remembered=Number(localStorage.getItem('qy-worker-intake-'+id));}catch{}}
-  return Math.min(installed,Number.isInteger(remembered)&&remembered>0?remembered:installed);
-}
 const installedCount = node => executionStates.get(node.id)?.counts?.deployed ?? node.deployment?.appliedCount ?? 0;
 function executionPanel(node) {
   if (!node.deployment && !node.localIntake) return '<p class="nodes-worker-gate">尚未部署 Worker</p>';
   const state = executionStates.get(node.id), known = state?.counts;
-  const counts = state?.counts, allowed = state?.allowedCount ?? 0;
+  const counts = state?.counts, allowed = state?.configuredCount ?? state?.allowedCount ?? 0;
+  const intakeEnabled=state?.intakeEnabled??state?.requested??false;
   const label = !known ? state?.error ? '接任务状态暂不可用' : '正在读取接任务状态'
+    : !intakeEnabled ? counts.draining?'已暂停接单，已有任务继续收尾':'已暂停接单'
     : state.adjusting ? '接单设置已保存，正在调整'
     : counts.draining ? '正在调整，当前频道完成后待命'
-    : allowed ? counts.ready ? '正在接任务' : '正在准备接任务' : '已暂停接单';
-  return `<div class="nodes-execution"><div><strong>${label}${known && state.error ? '（上次状态）' : ''}</strong>${known ? `<small>已部署 ${counts.deployed} · 允许接任务 ${allowed} · 已连接 ${counts.connected}</small><small>执行 ${counts.running ?? counts.active} · 空闲 ${counts.idle} · 收尾 ${counts.draining} · 待命 ${counts.standby}</small>` : ''}${known && state.error ? '<small>状态更新失败，正在重试；以上为上次读取结果。</small>' : ''}</div></div>`;
+    : allowed ? counts.ready ? '已开启接单' : '已开启接单，等待就绪' : '已开启接单，额度为 0';
+  return `<div class="nodes-execution"><div><strong>${label}${known && state.error ? '（上次状态）' : ''}</strong>${known ? `<small>已部署 ${counts.deployed} · 并发额度 ${allowed} · 当前启用 ${state.allowedCount??0} · 已连接 ${counts.connected}</small><small>采集中 ${counts.collecting ?? counts.running ?? counts.active} · 等待处理 ${counts.awaiting ?? 0} · 空闲 ${counts.idle} · 收尾 ${counts.finishing ?? counts.draining} · 待命 ${counts.standby}</small>` : ''}${known && state.error ? '<small>状态更新失败，正在重试；以上为上次读取结果。</small>' : ''}</div></div>`;
 }
 function workerActions(node) {
   const state=executionStates.get(node.id);
   const enabled=node.localIntake || (isReady(node) && node.runtime?.state==='ready');
-  if(state&&!state.error)rememberIntake(node.id,state.allowedCount);
-  const installed=installedCount(node),pause=state?.allowedCount>0,busy=executionActions.has(node.id);
-  const toggle=installed?`<button type="button" class="nodes-button" data-toggle-intake="${escapeHtml(node.id)}" title="${pause?'停止接新任务，已领取频道继续收尾':`允许 ${resumeIntakeCount(node.id,installed)} 个 Worker 接任务，可在管理窗口调整`}"
+  const installed=installedCount(node),pause=state?.intakeEnabled??state?.requested??false,busy=executionActions.has(node.id);
+  const toggle=installed?`<button type="button" class="nodes-button" data-toggle-intake="${escapeHtml(node.id)}" title="${pause?'停止接新任务，已领取频道继续收尾':`允许 ${(state?.configuredCount??state?.allowedCount??installed)} 个 Worker 接任务，可在管理窗口调整`}"
     ${busy||!state||state.error||!state.executionAvailable?'disabled':''}>${busy?'正在切换…':pause?'暂停接任务':'开始接任务'}</button>`:'';
   return `<button type="button" class="nodes-button primary" data-manage="${escapeHtml(node.id)}" ${enabled?'':'disabled'}>${node.localIntake || installed>0 || node.deployment?'管理 Worker':'部署 Worker'}</button>${toggle}`;
 }
@@ -106,7 +96,7 @@ function openWorkerManager(id) {
   workerManager={id,version:registry.version,expectedInstalledCount:installedCount(node),deploymentDirty:false,intakeDirty:false,lastOperation:null,lastState:null};
   $('worker-deployment-count').value=1;
   $('worker-deployment-role').value='incremental';
-  $('worker-intake-count').value=executionStates.get(id)?.allowedCount??0;
+  $('worker-intake-count').value=executionStates.get(id)?.configuredCount??executionStates.get(id)?.allowedCount??0;
   $('worker-deployment-password').value='';
   $('worker-removal-password').value='';
   $('worker-removal-error').hidden=true;
@@ -144,10 +134,10 @@ function renderWorkerManager() {
     ?`内存参考：按每个 Worker 256 MiB ＋ 系统预留 1.5 GiB 估算，${target} 个约需 ${memoryRequired.toFixed(2)} GiB。${Number.isFinite(memoryTotal)?` 本机总内存约 ${Number(memoryTotal).toFixed(2)} GiB。`:''}仅供参考，不限制新增数量，请按实际运行情况自行安排。`:'';
   $('worker-deployment-save').disabled=busy||running||!workerDeploymentAvailable||node.runtime?.state!=='ready'||!valid;
   $('worker-deployment-save').textContent=running?'正在新增…':`新增 ${Number.isInteger(additional)&&additional>0?additional:'—'} 个增量 Worker`;
-  if(!workerManager.intakeDirty&&known){$('worker-intake-count').value=state.allowedCount;workerManager.expectedAllowedCount=state.allowedCount;}
+  if(!workerManager.intakeDirty&&known){$('worker-intake-count').value=state.configuredCount??state.allowedCount;workerManager.expectedAllowedCount=state.configuredCount??state.allowedCount;}
   $('worker-intake-count').max=installed;
   $('worker-intake-count').disabled=busy||!known||!state.executionAvailable||!installed;
-  $('worker-allowed-label').textContent=known?`当前允许 ${state.allowedCount} 个 · 可设 0–${installed}`:'等待接单状态';
+  $('worker-allowed-label').textContent=known?`当前额度 ${state.configuredCount??state.allowedCount} 个 · ${(state.intakeEnabled??state.requested)?'已开启接单':'已暂停接单'} · 可设 0–${installed}`:'等待接单状态';
   $('worker-intake-save').disabled=busy||!known||!state.executionAvailable||!installed;
   renderWorkerRemoval(node,state);
   const history=$('worker-deployment-history');history.hidden=!d||!!node.localIntake;
@@ -225,17 +215,22 @@ $('worker-intake-form').addEventListener('submit',async event=>{
   try{
     const count=Number($('worker-intake-count').value);
     await saveIntake(manager.id,count,manager.expectedAllowedCount);
-    manager.intakeDirty=false;$('worker-intake-result').textContent=`允许接任务数量已保存为 ${count} 个。正在执行的频道会先完成，运行状态自动更新。`;
+    manager.intakeDirty=false;$('worker-intake-result').textContent=`并发额度已保存为 ${count} 个，启停状态保持不变。暂停时需点击“开始接任务”才会接单。`;
   }catch(error){$('worker-intake-error').textContent=error.message;$('worker-intake-error').hidden=false;}
   finally{delete dialog.dataset.saving;renderWorkerManager();void refresh(true);}
 });
 async function toggleIntake(id){
   const state=executionStates.get(id);if(!state||state.error)return;
-  const pause=state.allowedCount>0;
-  if(pause)rememberIntake(id,state.allowedCount);
-  const count=pause?0:resumeIntakeCount(id,state.counts.deployed);
-  try{await saveIntake(id,count,state.allowedCount);announce(pause?'已暂停接新任务，正在执行的频道完成后待命。':`已允许 ${count} 个 Worker 接任务，正在准备接单。`);}
+  const pause=state.intakeEnabled??state.requested??false;
+  if(!pause && !(state.configuredCount??state.allowedCount)){announce('请先保存大于 0 的并发额度。',true);return;}
+  if(executionActions.has(id))return;
+  executionActions.add(id);render();
+  try{
+    const result=await request(`/api/server-nodes/${encodeURIComponent(id)}/execution`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({version:registry.version,enabled:!pause,expectedRequested:pause})},false);
+    executionStates.set(id,result);announce(pause?'已暂停接新任务，并发额度已保留。':'已开启接单，按保存的并发额度接任务。');
+  }
   catch(error){announce(error.message,true);}
+  finally{executionActions.delete(id);render();}
   void refresh(true);
 }
 
@@ -254,7 +249,7 @@ function render() {
   $("nodes-total").textContent = registry.nodes.length;
   const states=[...executionStates.values()].filter(state=>state.counts&&!state.error);
   $('nodes-planned').textContent=states.length?states.reduce((sum,s)=>sum+s.counts.deployed,0):'—';
-  $('nodes-allowed').textContent=states.length?states.reduce((sum,s)=>sum+s.allowedCount,0):'—';
+  $('nodes-allowed').textContent=states.length?states.reduce((sum,s)=>sum+(s.configuredCount??s.allowedCount),0):'—';
   $('nodes-active').textContent=states.length?states.reduce((sum,s)=>sum+s.counts.active,0):'—';
   $("nodes-add").disabled = false;
   const search = $("nodes-search").value.trim().toLowerCase();

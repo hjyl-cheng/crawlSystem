@@ -64,7 +64,8 @@ test('Dashboard registration is atomic, encrypted, repeatable and supports addit
  await pool.query("UPDATE remote_ingestion.worker_connections SET connected_until=clock_timestamp()+interval '1 minute',accepting=true WHERE node_id=$1",[nodeId]);
  const control=createRemoteDeploymentAdmin({store,routes,image,token,gatewayUrl,execution:{allowsNode:()=>true,isProcessing:()=>false}});
  const set=(allowedCount,expectedAllowedCount)=>control.setExecution({nodeId,deploymentId,workerCount:150,allowedCount,expectedAllowedCount});
- assert.equal((await set(150,0)).allowedCount,150);
+ assert.equal((await set(150,2)).allowedCount,0,'saving limit preserves the explicit pause');
+ assert.equal((await control.setExecution({nodeId,deploymentId,workerCount:150,enabled:true,expectedRequested:false})).allowedCount,150);
  assert.equal((await set(50,150)).allowedCount,50);
  await assert.rejects(set(151,50),{code:'INVALID_EXECUTION_COUNT'});
  assert.equal((await set(0,50)).allowedCount,0);
