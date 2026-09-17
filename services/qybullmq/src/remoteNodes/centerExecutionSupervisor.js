@@ -6,7 +6,7 @@ import { RotaSlotAdapter } from '../rotaSlotAdapter.js';
 import { RemoteManagedIncrementalRuntime } from './managedIncrementalRuntime.js';
 import { createCenterIncrementalProcessor } from './centerIncrementalProcessor.js';
 import { WHOLE_CHANNEL_RUNTIME_REVISION } from './workerActivationStore.js';
-import { recoverRemoteSlot, remoteSlotUnsettled, supervisionLockKey } from './centerExecutionRecovery.js';
+import { recoverRemoteSlot, remoteSlotUnsettled, supervisionLockKey, settleTerminalRemoteHandoffs } from './centerExecutionRecovery.js';
 import { createRemoteYoutubeCheckpointConsumer } from './youtubeProfileCheckpoint.js';
 import {intakeWorkerName,publishWorkerIntake} from '../workerIntakeTelemetry.js';
 import {SupervisionGuards} from './supervisionGuards.js';
@@ -40,7 +40,9 @@ export class RemoteCenterExecutionSupervisor {
   preparationState(row) {
     const entry=this.entries.get(key(row));
     if(!row.activation_requested || !entry || entry.closing || entry.blocked)return null;
-    return entry.starting && !entry.rota.status().started ? 'waiting_network' : null;
+    if(!entry.rota)return 'preparing';
+    const state=entry.rota.status();
+    return !state.started ? 'waiting_network' : !state.assignment?.ready ? 'network_unready' : null;
   }
   async networkCapacity() {
     if(this.capacityUntil>Date.now())return this.capacityValue;
@@ -179,6 +181,13 @@ export class RemoteCenterExecutionSupervisor {
   }
   async tick() {
     if(this.stopping)return;
+    if(!this.handoffRecovery && (!this.handoffCheckedAt || Date.now()-this.handoffCheckedAt>=30000)){
+      this.handoffCheckedAt=Date.now();
+      this.handoffRecovery=settleTerminalRemoteHandoffs(this.store)
+        .then(count=>{if(count)this.report({event:'remote_center_terminal_handoffs_settled',count});})
+        .catch(error=>this.report({event:'remote_center_terminal_handoff_recovery_failed',code:error?.code??error?.name}))
+        .finally(()=>{this.handoffRecovery=null;});
+    }
     await reconcileIntakeRequests(this.store);
     const owners=[...this.entries.values()].filter(e=>e.owned).map(e=>({pid:e.backendPid,lock_key:supervisionLockKey(e.row)}));
     const [connections,locks]=await Promise.all([this.store.pool.query(`SELECT w.*,s.rota_worker_id,w.connected_until>clock_timestamp() AS alive
@@ -200,6 +209,8 @@ export class RemoteCenterExecutionSupervisor {
       if(!entry || !same(entry.row,row) || entry.blocked || !entry.queueReady || entry.closing)continue;
       const ready=!this.stopping && row.activation_requested && row.alive && row.accepting && row.enabled
         && owned.has(`${entry.backendPid}/${supervisionLockKey(row)}`) && this.executionReady(entry,row);
+      if(ready)entry.notReadySince=null;
+      else entry.notReadySince??=Date.now();
       updates.push((async()=>{
         if(!ready)await entry.worker.pause(true);
         await publishWorkerIntake(entry.worker,ready);
@@ -213,6 +224,20 @@ export class RemoteCenterExecutionSupervisor {
       if(entry && !same(entry.row,row)){void this.closeEntry(entry,{abort:true}).catch(()=>{});continue;}
       if(!entry){if((this.maxSlots===null || this.entries.size<this.maxSlots) && this.guards.canAcquire(supervisionLockKey(row))
         && ((row.activation_requested&&row.alive&&row.accepting)||await this.unsettled(row)))await this.startEntry(row);continue;}
+      // A non-retryable Renew failure stops the adapter's renewal loop. An
+      // otherwise healthy node heartbeat cannot restart it. Recreate only an
+      // idle, quiesced owner; never recycle an active/finalizing attempt or a
+      // healthy owner merely waiting for reserve capacity.
+      const route=entry.rota?.status();
+      if(!entry.closing && !entry.blocked && entry.queueReady && !entry.processing
+        && !route?.active_job && !route?.active_task_id && !route?.recovery_pending
+        && row.activation_requested && row.alive && row.accepting
+        && entry.notReadySince && Date.now()-entry.notReadySince>=30000
+        && ['RENEW_FAILED','LEASE_GONE','LEASE_CONFLICT'].includes(route?.assignment?.control_state)){
+        this.report({event:'remote_center_idle_route_recovering',node_id:row.node_id,slot:row.slot,
+          reason:route.assignment.control_state});
+        void this.closeEntry(entry).catch(()=>{});continue;
+      }
       if(entry.blocked){
         if(entry.closing||entry.recovering)continue;
         if(entry.recovered){void this.closeEntry(entry).catch(()=>{});continue;}
@@ -252,6 +277,7 @@ export class RemoteCenterExecutionSupervisor {
   }
   async stop() {
     this.stopping=true;this.waitAbort.abort();await this.loop;
+    await this.handoffRecovery;
     await Promise.all([...this.entries.values()].map(entry=>this.closeEntry(entry)));
     await this.guards.close();
   }

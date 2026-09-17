@@ -1,3 +1,4 @@
+import { isLoginRequiredExclusion, loginRequiredExclusionSql } from "./youtubeLoginRequired.js";
 import { createHash } from "node:crypto";
 import {
   currentChannelExecution,
@@ -742,6 +743,7 @@ function scannedVideoDispositionWork(entries, priorByVideoId, observedAt, {
     const prior = priorByVideoId.get(entry.id);
     const priorKind = text(prior?.disposition);
     if (!["deferred", "terminal_excluded"].includes(priorKind)) return [entry];
+    if (String(prior.next_attempt_at).toLowerCase() === "infinity") return [];
     if (!allowDueRechecks) {
       if (priorKind === "deferred") pendingDeferredVideoIds.push(entry.id);
       return [];
@@ -2191,6 +2193,7 @@ export async function applyIncrementalVideoDetail(client, {
   detailMetadataKey = "incremental_detail",
 }) {
   if (!detail) throw new TypeError("detail is required");
+  if (isLoginRequiredExclusion(detail)) return { success: true, excluded: true, reason_code: "login_required" };
   const facts = detailFacts(detail);
   const classification = resolveYoutubeContentType({
     videoId: row.source_content_id,
@@ -2440,6 +2443,7 @@ async function loadClockRecentSamplingRows(client, {
          ON observed.video_id=content.source_content_id
        WHERE content.channel_id=$1
          AND content.content_type IN ('video','short','live')
+         AND NOT ${loginRequiredExclusionSql("content")}
      )
      SELECT candidate.*
      FROM candidate

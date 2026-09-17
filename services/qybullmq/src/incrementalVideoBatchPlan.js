@@ -47,6 +47,7 @@ export function scannedVideoDispositionWork(entries, priorByVideoId, observedAt,
     const prior = priorByVideoId.get(entry.id);
     const priorKind = text(prior?.disposition);
     if (!["deferred", "terminal_excluded"].includes(priorKind)) return [entry];
+    if (String(prior.next_attempt_at).toLowerCase() === "infinity") return [];
     if (!allowDueRechecks) {
       if (priorKind === "deferred") pendingDeferredVideoIds.push(entry.id);
       return [];

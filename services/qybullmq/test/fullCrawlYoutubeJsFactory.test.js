@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { loginRequiredDetail } from "../src/youtubeLoginRequired.js";
 import test from "node:test";
 import { createFullCrawlYoutubeJsExecutor } from "../src/fullCrawlYoutubeJsFactory.js";
 import { YOUTUBEJS_API_FULL_CRAWL_FETCH_CONTRACT } from "../src/fullCrawlFetchContract.js";
@@ -305,6 +306,32 @@ function executor(fixture) {
     locale: "en",
   });
 }
+
+for (const cached of [false, true]) test(`Full Crawl continues after a login exclusion (cached=${cached})`, async () => {
+  const detail = loginRequiredDetail("video-1", []);
+  const fixture = scriptedFixture({ phase: "detail", candidates: [
+    { target: target("video-1", 1), detail_status: "queued", ...(cached ? { excluded_detail: detail } : {}) },
+    { target: target("video-2", 2), detail_status: "queued" },
+  ] });
+  const fetched = [];
+  fixture.youtube.fetchDetail = async id => {
+    fetched.push(id);
+    return id === "video-1" ? detail : publicDetail(id);
+  };
+  const committed = [];
+  fixture.store.commitDetail = async (_fence, candidate, observation) => {
+    committed.push(candidate.target.video_id);
+    if (candidate.target.video_id === "video-1") {
+      assert.equal(observation.detail.collection_exclusion.reason_code, "login_required");
+      assert.equal(observation.access.access_status, "unknown");
+    }
+  };
+  const result = await executor(fixture)(job());
+  assert.equal(result.ok, true);
+  assert.deepEqual(fetched, cached ? ["video-2"] : ["video-1", "video-2"]);
+  assert.deepEqual(committed, ["video-1", "video-2"]);
+  assert.ok(fixture.calls.includes("handoff:fetch"));
+});
 
 test("v3 video fallback returns through the original Detail checkpoint and handoff", async () => {
   const fixture = scriptedFixture();

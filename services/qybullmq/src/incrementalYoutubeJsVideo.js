@@ -1,4 +1,5 @@
 import { planIncrementalVideoSnapshot } from './incrementalVideoSnapshot.js';
+import { isLoginRequiredExclusion, loginRequiredDisposition, loginRequiredExclusionSql } from "./youtubeLoginRequired.js";
 import { checkpointItems, scannedVideoDispositionWork, prepareIncrementalVideoBatch, projectDueVideoDispositionEntries, uploadsPublishedFacts } from './incrementalVideoBatchPlan.js';
 import { assertVideoApiNetworkAllowed, isVideoApiReplay, isVideoApiHandoff } from "./videoApiContinuation.js";
 import { upsertDiscoveredVideoContent, refreshVideoContent } from "./videoContentStore.js";
@@ -637,6 +638,7 @@ async function persistClockContentEnrichOutcome(client, {
     observed_at: outcome.observed_at,
     access_status: outcome.access_status,
     failure_decision: outcome.failure_decision ?? null,
+    ...(outcome.collection_exclusion ? { collection_exclusion: outcome.collection_exclusion } : {}),
     consumer: "clock",
   });
   await client.query(
@@ -684,7 +686,7 @@ async function persistClockContentEnrichOutcome(client, {
       outcome.observed_at,
       observedAt,
       incrementsAttempts,
-      outcome.detail != null,
+      outcome.detail != null && !isLoginRequiredExclusion(outcome.detail),
       priorTaskStatus === "terminal",
     ],
   );
@@ -1072,7 +1074,7 @@ async function upsertFirstSeenContent(client, {
       disposition,
       missingFields,
       detailStatus: terminalExcluded ? "unavailable" : detail ? "done" : "failed",
-      apiStatus: terminalExcluded ? "unavailable" : "not_needed",
+      apiStatus: terminalExcluded && disposition.reason_code !== "login_required" ? "unavailable" : "not_needed",
       typeStatus: classification?.authoritative === true
         ? "resolved"
         : terminalExcluded ? "unavailable" : "unresolved",
@@ -1536,6 +1538,8 @@ async function applyDiscovery({
     stored_count: dispositions.filter((item) => item.kind === "stored").length,
     deferred_count: dispositions.filter((item) => item.kind === "deferred").length,
     terminal_excluded_count: dispositions.filter((item) => item.kind === "terminal_excluded").length,
+    login_required_excluded_count: [...dispositions, ...recheckDispositions]
+      .filter(item => item.reason_code === "login_required").length,
     unresolved_video_ids: unresolvedVideoIds,
     unresolved_count: unresolvedVideoIds.length,
     recheck_deferred_video_ids: recheckDeferredVideoIds,
@@ -1569,6 +1573,7 @@ async function applyDiscovery({
       stored_count: payload.stored_count,
       deferred_count: payload.deferred_count,
       terminal_excluded_count: payload.terminal_excluded_count,
+      login_required_excluded_count: payload.login_required_excluded_count,
       detail_success_count: detailSuccessCount,
       detail_failure_count: detailFailureCount,
       unresolved_count: unresolvedVideoIds.length,
@@ -1606,6 +1611,7 @@ export async function applyIncrementalVideoDetail(client, {
   allowStaticRepair = true,
 }) {
   if (!detail) throw new TypeError("detail is required");
+  if (isLoginRequiredExclusion(detail)) return { success: true, excluded: true, reason_code: "login_required" };
   const facts = detailFacts(detail);
   const classification = resolveYoutubeContentType({
     videoId: row.source_content_id,
@@ -1725,6 +1731,7 @@ async function loadClockRecentSamplingRows(client, {
          ON observed.video_id=content.source_content_id
        WHERE content.channel_id=$1
          AND content.content_type IN ('video','short','live')
+         AND NOT ${loginRequiredExclusionSql("content")}
      )
      SELECT candidate.*
      FROM candidate
@@ -2608,6 +2615,7 @@ function preparedSamplingFromCheckpoint(batch) {
 }
 
 function recentMetricsDetailOutcome(task, detail, observedAt, retryOptions) {
+  if (isLoginRequiredExclusion(detail)) return contentEnrichDetailOutcome(task, detail, observedAt, retryOptions);
   const accessStatus = detailAccess(detail);
   if (!["members_only", "private", "unavailable"].includes(accessStatus)
       && detailViewCount(detail) == null) {
@@ -2663,6 +2671,7 @@ async function applyRecentSampling({
   let viewDeltaTotal = 0;
   let comparableViewCount = 0;
   let engagementChangedCount = 0;
+  let excludedCount = 0;
   const activityEvidence = [];
   for (const row of locked.rows) {
     const spec = planned.get(row.content_key);
@@ -2699,6 +2708,26 @@ async function applyRecentSampling({
     }
     if (prepared.state !== "publication") {
       throw new Error(`invalid prepared Recent Sampling state: ${prepared.state}`);
+    }
+    if (isLoginRequiredExclusion(prepared.outcome.detail)) {
+      const detail = prepared.outcome.detail;
+      await persistIncrementalCandidate(transactionClient, {
+        runId, channelId: row.channel_id,
+        entry: { id: row.source_content_id, position: row.position ?? 1, title: row.title },
+        detail, classification: null, disposition: loginRequiredDisposition(observedAt),
+        missingFields: [], detailStatus: "unavailable", apiStatus: "not_needed",
+        typeStatus: "unavailable", contentKey: row.content_key,
+        resultJson: { detail, disposition: loginRequiredDisposition(observedAt) },
+        observedAt, attempted: true,
+      });
+      await persistClockContentEnrichOutcome(transactionClient, {
+        currentTask: ownership.currentTask ?? prepared.currentTask,
+        priorTaskStatus: prepared.fence?.prior_status ?? ownership.currentTask?.status,
+        outcome: prepared.outcome, contentKey: row.content_key, channelId: row.channel_id,
+        runId, observationId, jobType: "player-refresh", observedAt,
+      });
+      excludedCount += 1;
+      continue;
     }
     const applied = await applyIncrementalVideoDetail(transactionClient, {
       row,
@@ -2743,6 +2772,7 @@ async function applyRecentSampling({
     selected_count: samplePlan.rows.length,
     success_count: successCount,
     failure_count: failureCount,
+    login_required_excluded_count: excludedCount,
     next_count: samplePlan.next_quota,
     comparable_view_count: comparableViewCount,
     view_changed_count: viewChangedCount,
@@ -2759,6 +2789,7 @@ async function applyRecentSampling({
       selected_count: payload.selected_count,
       success_count: successCount,
       failure_count: failureCount,
+      login_required_excluded_count: excludedCount,
     },
   };
 }
@@ -3716,7 +3747,8 @@ export async function createIncrementalVideoDispatchSnapshot({ client, plan, run
     planId: plan.plan_id, channelId: plan.channel_id, observedAt, config, anchors,
     samplingPlanInput: { ...plan, capacity: { ...plan.capacity, factor: 1,
       player_cap: Math.floor(plan.capacity.player_cap * plan.capacity.factor) } },
-    knownVideoIds: known.rows.map(row => row.source_content_id), latestDispositions: latest.rows,
+    knownVideoIds: known.rows.map(row => row.source_content_id), latestDispositions: latest.rows.map(row => ({ ...row,
+      next_attempt_at: row.next_attempt_at === Infinity ? "infinity" : row.next_attempt_at })),
     dueDispositionRows, pendingFirstSeen, recentRows: reserved.rows });
 }
 

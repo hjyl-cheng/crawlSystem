@@ -72,7 +72,7 @@ function executionPanel(node) {
     : state.adjusting ? '接单设置已保存，正在调整'
     : counts.draining ? '正在调整，当前频道完成后待命'
     : allowed ? counts.ready ? '已开启接单' : '已开启接单，等待就绪' : '已开启接单，额度为 0';
-  return `<div class="nodes-execution"><div><strong>${label}${known && state.error ? '（上次状态）' : ''}</strong>${known ? `<small>已部署 ${counts.deployed} · 并发额度 ${allowed} · 当前启用 ${state.allowedCount??0} · 已连接 ${counts.connected}</small><small>采集中 ${counts.collecting ?? counts.running ?? counts.active} · 等待处理 ${counts.awaiting ?? 0} · 空闲 ${counts.idle} · 收尾 ${counts.finishing ?? counts.draining} · 待命 ${counts.standby}</small>` : ''}${known && state.error ? '<small>状态更新失败，正在重试；以上为上次读取结果。</small>' : ''}</div></div>`;
+  return `<div class="nodes-execution"><div><strong>${label}${known && state.error ? '（上次状态）' : ''}</strong>${known ? `<small>已部署 ${counts.deployed} · 并发额度 ${allowed} · 当前启用 ${state.allowedCount??0} · 已连接 ${counts.connected}</small><small>采集 / 回传 ${counts.collecting ?? counts.running ?? counts.active} · 中心处理 / 派发 ${counts.processing ?? 0} · 等待恢复 ${counts.awaiting ?? 0} · 未就绪 ${counts.unready ?? 0} · 空闲 ${counts.idle} · 收尾 ${counts.finishing ?? counts.draining} · 待命 ${counts.standby} · 离线 ${counts.offline ?? 0}</small>` : ''}${known && state.error ? '<small>状态更新失败，正在重试；以上为上次读取结果。</small>' : ''}</div></div>`;
 }
 function workerActions(node) {
   const state=executionStates.get(node.id);
@@ -147,9 +147,9 @@ function renderWorkerManager() {
     workerManager.lastOperation=d.operationId;workerManager.lastState=d.state;
     $('worker-deployment-history-title').textContent=running?`部署进度 · 目标 ${d.desiredCount} 个`:d.state==='connected'?'最近部署记录 · 已完成':'最近部署记录 · 未完成';
     $('worker-deployment-status').textContent=d.error||d.intakeSync?.error||(running?'部署在后台执行，可以关闭窗口。':d.state==='connected'?`已确认部署 ${d.appliedCount} 个 Worker。${d.intakeSync?.state==='completed'?'接单数量已同步。':''}`:'上次部署未完成，可重试。');
-    const steps=[['ssh','连接与资源检查'],['center','准备中心接入'],['files','准备部署文件'],['start','启动 Worker'],['verify','检查运行状态'],['connection','确认连接中心']];
+    const steps=[['ssh','连接与资源检查'],['center','准备中心接入'],['files','准备部署文件'],['pull','下载镜像（最长 30 分钟）'],['start','启动 Worker'],['verify','检查运行状态'],['connection','确认连接中心']];
     if(d.intakeSync)steps.push(['intake','同步接单数量']);
-    $('worker-deployment-steps').innerHTML=steps.map(([key,label],i)=>{const status=key==='intake'?d.intakeSync.state:d.steps?.[key]??'pending';return `<li data-state="${escapeHtml(status)}"><b>${i+1}</b><div><strong>${label}</strong></div><span>${({pending:'待执行',running:'执行中',completed:'已完成',failed:'未完成'})[status]??'待执行'}</span></li>`;}).join('');
+    $('worker-deployment-steps').innerHTML=steps.map(([key,label],i)=>{const status=key==='intake'?d.intakeSync.state:d.steps?.[key]??(key==='pull'&&d.steps?.start==='completed'?'completed':'pending');return `<li data-state="${escapeHtml(status)}"><b>${i+1}</b><div><strong>${label}</strong></div><span>${({pending:'待执行',running:'执行中',completed:'已完成',failed:'未完成'})[status]??'待执行'}</span></li>`;}).join('');
   }
 }
 function renderWorkerRemoval(node,state){

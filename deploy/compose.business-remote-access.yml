@@ -1,0 +1,32 @@
+name: kolfinder-business-remote
+
+services:
+  business-remote-access:
+    image: nginx:1.29-alpine
+    container_name: kolfinder-business-remote-access
+    restart: unless-stopped
+    entrypoint: ["nginx"]
+    command: ["-g", "daemon off;"]
+    ports:
+      - "0.0.0.0:19644:5432"
+    volumes:
+      - ./business-remote-access.nginx.conf:/etc/nginx/nginx.conf:ro
+    read_only: true
+    tmpfs:
+      - /run
+    mem_limit: 64m
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+    networks:
+      - remote-ingress
+      - business-database
+
+networks:
+  remote-ingress:
+    driver: bridge
+  business-database:
+    external: true
+    name: qy-newcrawler-business-database

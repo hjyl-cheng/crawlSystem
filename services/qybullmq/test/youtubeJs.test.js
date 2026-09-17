@@ -1277,13 +1277,14 @@ test("Video Detail accepts a complete IOS response after an inconclusive WEB res
   assert.equal(result.client, "IOS");
 });
 
-test("Video Detail does not try ANDROID after IOS fails", async () => {
+test("Video Detail excludes confirmed login instead of trying ANDROID", async () => {
   const calls = [];
   const error = Object.assign(new Error("Please sign in"), { info: { status: "LOGIN_REQUIRED", reason: "Please sign in" } });
-  await assert.rejects(fetchYoutubeJsVideoInfoWithTerminalFallback({
+  const result = await fetchYoutubeJsVideoInfoWithTerminalFallback({
     getInfo: async (_id, { client }) => { calls.push(client); throw error; },
     getBasicInfo: async () => assert.fail("unexpected basic probe"),
-  }, "69tt-8JAqO4"), /alternate clients exhausted/);
+  }, "69tt-8JAqO4");
+  assert.equal(result.detail.collection_exclusion.reason_code, "login_required");
   assert.deepEqual(calls, ["WEB", "IOS"]);
 });
 
@@ -1291,7 +1292,7 @@ test("Video Detail requests a new Route after every supported client stays incon
   const calls = [];
   const inconclusive = infoFixture({
     basic_info: { view_count: null },
-    playability_status: { status: "LOGIN_REQUIRED", reason: "Please sign in" },
+    playability_status: { status: "ERROR", reason: "Video unavailable" },
   });
   delete inconclusive.page[0].microformat.publish_date;
   delete inconclusive.page[0].microformat.upload_date;
@@ -1422,7 +1423,7 @@ test("Video metrics mode does not require fresh publication or duration", async 
   assert.deepEqual(calls, [["metrics-only", "WEB"]]);
 });
 
-test("Video metrics mode still rejects an inconclusive sign-in response with only a view count", async () => {
+test("Video metrics mode excludes repeated sign-in with only a view count", async () => {
   const metrics = infoFixture({
     basic_info: { duration: null, view_count: 43 },
     playability_status: { status: "LOGIN_REQUIRED", reason: "Please sign in" },
@@ -1442,12 +1443,10 @@ test("Video metrics mode still rejects an inconclusive sign-in response with onl
     },
   };
 
-  await assert.rejects(
-    fetchYoutubeJsVideoInfoWithTerminalFallback(client, "sign-in-metrics", {
-      detailMode: "metrics",
-    }),
-    (error) => decideYoutubeFailure({ error }).kind === "youtube_challenge",
-  );
+  const result = await fetchYoutubeJsVideoInfoWithTerminalFallback(client, "sign-in-metrics", {
+    detailMode: "metrics",
+  });
+  assert.equal(result.detail.collection_exclusion.reason_code, "login_required");
   assert.deepEqual(calls, ["WEB", "IOS"]);
 });
 

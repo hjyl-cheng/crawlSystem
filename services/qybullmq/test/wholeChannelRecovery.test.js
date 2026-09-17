@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { loginRequiredDetail } from '../src/youtubeLoginRequired.js';
 import test from 'node:test';
 import { randomUUID } from 'node:crypto';
 import { mkdtemp, rm, writeFile, readdir } from 'node:fs/promises';
@@ -29,6 +30,27 @@ async function fixture(t) {
   const spool = new RemoteResultSpool({ directory }); await spool.init();
   return { directory, input, command, lease, spool, detail: detailFixture('first') };
 }
+
+test('remote collection journals login exclusions, continues, and replays without API or network', async t => {
+  const f = await fixture(t);
+  f.input.apiPolicy = { enabled: true, available: true, dailyRequestLimit: 100 };
+  f.input.networkBudget = { business_tasks_used: 9, business_tasks_limit: 9 };
+  const journal = await new Journal(join(f.directory, 'whole', f.command.command_id)).init();
+  const fetched = [];
+  const youtube = { openChannel: () => assert.fail('frozen scan is reused'), fetchDetail: async id => {
+    fetched.push(id);
+    return id === 'first' ? loginRequiredDetail(id, []) : { ...f.detail, id };
+  } };
+  const result = await collectWholeChannel({ input: f.input, journal,
+    signal: new AbortController().signal, youtube });
+  assert.equal(result.failure, null);
+  assert.deepEqual(fetched, ['first', 'second']);
+  assert.deepEqual(result.items.map(item => item.status), ['captured', 'captured']);
+  assert.equal(result.items[0].detail.collection_exclusion.reason_code, 'login_required');
+  assert.equal(journal.get('api:detail:first_seen:first'), undefined);
+  await collectWholeChannel({ input: f.input, journal, signal: new AbortController().signal,
+    youtube: { openChannel: () => assert.fail('no scan'), fetchDetail: () => assert.fail('no retry') } });
+});
 
 async function crash(f, crashAt) {
   const path = join(f.directory, 'fixture.json');

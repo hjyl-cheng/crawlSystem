@@ -418,7 +418,10 @@ export function createFullCrawlYoutubeJsExecutor({
         let observation;
         let terminalReason = preflight.terminalReason;
         let window = preflight.window ?? null;
-        if (terminalReason) {
+        if (candidate.excluded_detail) {
+          observation = validateFullCrawlYoutubeJsDetail(candidate.target.video_id, candidate.excluded_detail);
+          terminalReason = "login_required";
+        } else if (terminalReason) {
           const detail = preflight.detail ?? fullCrawlTargetDetail(candidate.target);
           observation = {
             detail,

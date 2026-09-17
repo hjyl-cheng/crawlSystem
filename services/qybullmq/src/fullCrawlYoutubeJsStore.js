@@ -1,3 +1,4 @@
+import { isLoginRequiredExclusion, loadLoginRequiredExclusion } from "./youtubeLoginRequired.js";
 import { assertVideoApiNetworkAllowed, isVideoApiReplay } from "./videoApiContinuation.js";
 import { activeChannelCandidateAttemptFence } from "./channelCandidateAttemptFence.js";
 import {
@@ -782,7 +783,10 @@ export class FullCrawlYoutubeJsStore {
       );
       const row = selected.rows[0];
       if (!row) return null;
-      if (isVideoApiReplay()) {
+      const excludedDetail = await loadLoginRequiredExclusion(
+        client.query.bind(client), row.channel_id, row.source_content_id,
+      );
+      if (isVideoApiReplay() && !excludedDetail) {
         const existing = await client.query("SELECT 1 FROM crawler.youtube_api_detail_requests WHERE request_id=$1",
           [JSON.stringify(["full", fence.runId, row.source_content_id])]);
         if (!existing.rows.length) assertVideoApiNetworkAllowed();
@@ -797,7 +801,8 @@ export class FullCrawlYoutubeJsStore {
       if (claimed.rowCount !== 1) {
         throw checkpointError("Detail Candidate claim conflicted", { runId: fence.runId }, "detail");
       }
-      return { ...row, ...claimed.rows[0], target: targetFromCandidate(claimed.rows[0]) };
+      return { ...row, ...claimed.rows[0], excluded_detail: excludedDetail,
+        target: targetFromCandidate(claimed.rows[0]) };
     });
   }
 
@@ -884,7 +889,7 @@ export class FullCrawlYoutubeJsStore {
       const typeSource = authoritative
         ? classification.source
         : terminalLive ? text(row.target?.type_source) ?? "youtubejs_uploads_live_flag" : locked.type_source;
-      const detailStatus = ["private", "unavailable"].includes(access?.access_status)
+      const detailStatus = isLoginRequiredExclusion(detail) || ["private", "unavailable"].includes(access?.access_status)
         ? "unavailable"
         : "done";
       const resultJson = {
@@ -987,6 +992,9 @@ export class FullCrawlYoutubeJsStore {
         stored_count: counts.stored,
         excluded_count: counts.excluded,
         deferred_count: counts.deferred,
+        login_required_excluded_count: candidateRows.rows.filter(candidate =>
+          candidate.disposition === "terminal_excluded"
+          && candidate.result_json?.disposition?.reason_code === "login_required").length,
       };
       await client.query(
         `UPDATE crawler.channel_runs

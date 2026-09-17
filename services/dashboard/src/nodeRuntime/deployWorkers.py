@@ -49,8 +49,31 @@ def run(args, timeout=300):
     return result.stdout.decode()
 
 
+def pull_image(image, registry):
+    # Inspect the exact immutable digest, not a mutable tag or another version.
+    try:
+        run(['docker', 'image', 'inspect', image], 30)
+        return
+    except subprocess.CalledProcessError:
+        pass
+    if registry is None:
+        run(['docker', 'pull', image], 1800)
+    else:
+        require(set(registry) == {'server', 'username', 'password'})
+        require(registry['server'] == image.split('/')[0])
+        require(re.fullmatch(r'[a-z0-9.-]+(?::[0-9]{1,5})?', registry['server']))
+        require(re.fullmatch(r'[a-zA-Z0-9_-]{1,64}', registry['username']))
+        require(re.fullmatch(r'[a-zA-Z0-9_-]{32,256}', registry['password']))
+        # The root-only Docker config exists only for pull, including on
+        # failure. No credentials in argv, node config or global login.
+        with tempfile.TemporaryDirectory(prefix='qy-registry-', dir='/run') as config_dir:
+            auth = base64.b64encode((registry['username'] + ':' + registry['password']).encode()).decode()
+            immutable(Path(config_dir) / 'config.json', json.dumps({'auths': {registry['server']: {'auth': auth}}}), owner=0)
+            run(['docker', '--config', config_dir, 'pull', image], 1800)
+
+
 def deploy(bundle_file, step):
-    require(step in ['files', 'start', 'verify'])
+    require(step in ['files', 'pull', 'start', 'verify'])
     bundle_path = Path(bundle_file)
     require(bundle_path.is_file() and bundle_path.stat().st_size <= 1024 * 1024)
     bundle = json.loads(bundle_path.read_text())
@@ -113,22 +136,9 @@ def deploy(bundle_file, step):
         immutable(temporary, json.dumps(compose), owner=0)
         os.replace(temporary, root / 'compose.json')
         run(command + ['config','--quiet'], 30)
+    elif step == 'pull':
+        pull_image(plan['image'], credentials.get('registry'))
     elif step == 'start':
-        registry = credentials.get('registry')
-        if registry is None:
-            run(command + ['pull'], 600)
-        else:
-            require(set(registry) == {'server', 'username', 'password'})
-            require(registry['server'] == plan['image'].split('/')[0])
-            require(re.fullmatch(r'[a-z0-9.-]+(?::[0-9]{1,5})?', registry['server']))
-            require(re.fullmatch(r'[a-zA-Z0-9_-]{1,64}', registry['username']))
-            require(re.fullmatch(r'[a-zA-Z0-9_-]{32,256}', registry['password']))
-            # The root-only Docker config exists only for pull, including on
-            # failure. No credentials in argv, node config or global login.
-            with tempfile.TemporaryDirectory(prefix='qy-registry-', dir='/run') as config_dir:
-                auth = base64.b64encode((registry['username'] + ':' + registry['password']).encode()).decode()
-                immutable(Path(config_dir) / 'config.json', json.dumps({'auths': {registry['server']: {'auth': auth}}}), owner=0)
-                run(['docker', '--config', config_dir, *command[1:], 'pull'], 600)
         run(command + ['up','-d','--no-recreate','--pull','never'], 120)
     else:
         deadline = time.monotonic() + 90

@@ -11,7 +11,7 @@ export const workerRoles = Object.freeze({
 });
 export const initializationSteps = ["ssh", "key", "monitoring", "metrics"];
 export const runtimeSteps = ["ssh", "check", "docker", "layout", "verify"];
-export const workerDeploymentSteps = ['center','ssh','files','start','verify','connection'];
+export const workerDeploymentSteps = ['center','ssh','files','pull','start','verify','connection'];
 export function nodeReady(node) {
   return node?.provisioning?.state === "ready" && !!node.provisioning.systemId
     && initializationSteps.every(step => node.provisioning.steps?.[step] === "completed");
@@ -299,7 +299,7 @@ export function createServerNodeStore(query) {
       const now=new Date().toISOString();
       node.deployment={state:'running',mode:plan.mode,deploymentId:plan.deploymentId,operationId,image:plan.image,
         slots:plan.slots??plan.registrations.map(r=>r.slot),allocationSlots:plan.allocationSlots??plan.slots,slotSequence:plan.slotSequence??plan.count,
-        desiredCount:plan.count,appliedCount:prior?.appliedCount??0,startedAt:now,deadline:new Date(Date.now()+20*60000).toISOString(),
+        desiredCount:plan.count,appliedCount:prior?.appliedCount??0,startedAt:now,deadline:new Date(Date.now()+40*60000).toISOString(),
         remoteChanges:prior?.remoteChanges??false,error:null,
         intakeSync:syncIntake?{state:'pending',allowedCount:plan.count,expectedAllowedCount}:null,
         steps:Object.fromEntries(workerDeploymentSteps.map(step=>[step,'pending']))};

@@ -165,7 +165,10 @@ class _VideoDispositionEvidenceContract(_ContractModel):
     def validate_retry_class(self) -> Self:
         if self.kind == "stored" and self.retry_class is not None:
             raise ValueError("stored disposition cannot contain retry_class")
-        if self.kind != "stored" and self.retry_class is None:
+        login_excluded = self.kind == "terminal_excluded" and self.reason_code == "login_required"
+        if login_excluded and self.retry_class is not None:
+            raise ValueError("login_required exclusion cannot contain retry_class")
+        if self.kind != "stored" and not login_excluded and self.retry_class is None:
             raise ValueError(f"{self.kind} disposition requires retry_class")
         return self
 
@@ -256,6 +259,7 @@ class _VideoDiscoveryPayloadContract(_ContractModel):
     stored_count: NonNegativeInt | None = None
     deferred_count: NonNegativeInt | None = None
     terminal_excluded_count: NonNegativeInt | None = None
+    login_required_excluded_count: NonNegativeInt | None = None
     recheck_deferred_video_ids: list[NonEmptyText] | None = None
     recheck_deferred_count: NonNegativeInt | None = None
     pending_deferred_video_ids: list[NonEmptyText] | None = None
@@ -541,6 +545,7 @@ class _VideoRecentSamplingPayloadContract(_ContractModel):
     view_changed_count: NonNegativeInt
     view_delta_total: int
     engagement_changed_count: NonNegativeInt
+    login_required_excluded_count: NonNegativeInt | None = None
 
 
 class _VideoDiscoveryPhaseContract(_ContractModel):

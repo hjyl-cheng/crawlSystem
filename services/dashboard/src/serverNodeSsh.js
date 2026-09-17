@@ -245,10 +245,10 @@ printf '%s  %s\\n' ${quote(digest)} ${quote(installed)} | sha256sum -c - >/dev/n
             .then(resolve,()=>reject(new Error('部署文件上传失败'))).finally(()=>{clearTimeout(timer);session.end();});
         });
       });
-      for(const step of ['files','start','verify']){
+      for(const step of ['files','pull','start','verify']){
         await beforeStep(step);
         const command=`set -eu\nexec 9>/run/lock/qy-node-runtime.lock\nflock -n 9\npython3 ${quote(`${staging}/deploy.py`)} ${quote(`${staging}/bundle.json`)} ${quote(step)}`;
-        const output=await rootExec(connection,command,password,step==='start'?760000:120000,step==='start'?740:110);
+        const output=await rootExec(connection,command,password,step==='pull'?1860000:step==='start'?180000:120000,step==='pull'?1840:step==='start'?160:110);
         const result=JSON.parse(output);
         if(result.nodeId!==node.id || result.deploymentId!==plan.deploymentId || result.step!==step || result.count!==plan.count)throw new Error('部署检查结果与节点不匹配');
         await afterStep(step);

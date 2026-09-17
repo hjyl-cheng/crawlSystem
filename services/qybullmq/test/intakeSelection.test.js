@@ -17,10 +17,24 @@ test('partial reduction distinguishes running, draining, standby and available W
   {requested:false,connected:true,enabled:false,active:false,readyForTasks:false},
  ]);
  assert.equal(state.allowedCount,1);assert.equal(state.draining,true);
- assert.deepEqual(state.counts,{deployed:3,connected:3,allowed:1,ready:1,active:2,running:1,draining:1,idle:0,standby:1,collecting:2,awaiting:0,finishing:0});
+ assert.deepEqual(state.counts,{deployed:3,connected:3,allowed:1,ready:1,active:2,running:1,draining:1,idle:0,standby:1,collecting:1,processing:0,awaiting:0,unready:0,finishing:1,offline:0});
 });
 
 test('centrally pending results are not reported as active network collection',()=>{
  const state=intakeStatus([{requested:true,connected:true,enabled:false,active:true,processing:false,awaitingRecovery:true}]);
  assert.equal(state.counts.collecting,0);assert.equal(state.counts.awaiting,1);assert.equal(state.counts.finishing,0);
+});
+
+test('every connected Worker is counted once, including enabled workers without an execution route',()=>{
+ const workers=[...Array.from({length:44},()=>({requested:true,connected:true,enabled:true,active:true,processing:true,executionPhase:'collecting'})),
+  {requested:true,connected:true,enabled:true,active:true,processing:false,awaitingRecovery:true},
+  ...Array.from({length:2},()=>({requested:true,connected:true,enabled:true,active:false,processing:false,readyForTasks:false}))];
+ const {counts}=intakeStatus(workers);
+ assert.equal(counts.collecting,44);assert.equal(counts.awaiting,1);assert.equal(counts.unready,2);
+ assert.equal(['collecting','processing','awaiting','unready','idle','finishing','standby','offline'].reduce((n,k)=>n+counts[k],0),47);
+});
+
+test('received results and task preparation are not reported as network collection',()=>{
+ const {counts}=intakeStatus(['preparing','processing','collecting'].map(executionPhase=>({requested:true,connected:true,enabled:true,active:true,processing:true,executionPhase})));
+ assert.equal(counts.collecting,1);assert.equal(counts.processing,2);
 });

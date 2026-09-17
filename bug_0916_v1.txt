@@ -1,0 +1,316 @@
+问题记录：YouTube 视频返回 Please sign in 时的处理优化
+记录日期：2026-09-16
+状态：修复已部署，但发现 Feature 事件协议兼容回归，Plan 收尾验收未通过；待补充修复（2026-09-16）。
+
+一、问题范围
+
+涉及全量抓取和增量抓取中的视频详情采集。
+典型响应为 LOGIN_REQUIRED / Please sign in，且响应不足以满足当前采集所需字段。
+该响应说明本次请求被要求登录，不能单独证明视频私有、已删除或永久不可访问。
+
+二、当前处理方式
+
+1. 视频详情先尝试 WEB，再尝试 IOS；当前不继续尝试 ANDROID。
+2. 客户端均未取得所需信息时，抛出 alternate_clients_exhausted，统一归类为
+   youtube_challenge，并进入更换身份、线路及断点重试流程。
+3. API 兜底启用时，此类网络/风控失败在受管执行中依赖 Rota 业务网络预算耗尽，
+   才允许进入官方 Data API 兜底。
+4. 增量 API 兜底由 YOUTUBEJS_VIDEO_API_BATCH_FALLBACK 控制；全量需使用
+   youtubejs_full_v3。Compose 默认启用两者，但环境覆盖和已有任务契约可能不同。
+5. 持续登录提示且未进入 API 兜底时，重试耗尽后本轮抓取失败。
+   API 兜底仍失败或信息不足时，全量最终走失败收尾；增量可能将单视频记为
+   settled_error，视频域汇总为 partial，后续步骤成功后频道 Run 仍可为 done。
+
+三、存在的问题
+
+1. 将持续登录要求与机器人验证混为 youtube_challenge，错误分类不够准确。
+2. 对需要登录权限的访问限制，反复更换匿名客户端或代理无法补足账号权限，
+   容易消耗请求、换线和重试预算，并可能对正常代理产生不恰当的风控反馈。
+3. 单条无法采集的视频可能阻塞频道其他视频的处理。
+4. 增量流程结束状态与数据完整程度不同，单看 done 容易被理解为所有详情均已取得。
+
+四、已确认的优化策略
+
+业务定义：当前匿名采集不支持持续要求登录的视频，将其按策略排除，
+不再为该视频反复换线、不调用 Data API、不安排自动重试。
+这是主动缩小采集范围，不是认定视频已删除，也不是证明 Data API 无法取得信息。
+
+建议触发条件：
+- WEB、IOS 均返回 LOGIN_REQUIRED / Please sign in，且所需信息仍不足。
+- 任一客户端取得满足要求的信息，则继续正常采集。
+- 任一客户端返回明确私有、删除等原因，则按真实内容状态处理。
+- 机器人验证（如 not a bot）、年龄限制、限流和网络故障仍走各自策略，
+  不得仅按包含 sign in 的宽泛文本匹配归入本分支。
+
+触发后的目标字段：
+  disposition       = terminal_excluded
+  reason_code       = login_required
+  detail_status     = unavailable
+  api_status        = not_needed
+  next_attempt_at   = infinity
+  retryable         = false
+
+字段语义：
+- terminal_excluded：按当前采集策略排除该视频，完成该视频的处理结算。
+- detail_status=unavailable：当前采集无法取得所需详情。
+- api_status=not_needed：按策略不调用 Data API，不表示 API 已验证该视频不可用。
+- next_attempt_at=infinity：不安排自动重试或定期复查，允许人工解除排除后重新采集。
+
+处理结果：
+- 不再把本分支当作 youtube_challenge，不处罚代理，不继续消耗换线预算。
+- 记录客户端响应、缺失字段及排除原因，保留审计依据。
+- 频道继续处理其他视频；该视频本身不导致频道任务失败或进入失败队列。
+- 其他必要步骤成功后，频道可以按采集范围完成，并展示
+  “采集完成，因登录限制排除 N 个视频”，不能表述为所有视频详情均已取得。
+- 若频道其他步骤失败，仍正常进入相应失败流程。
+
+五、数据保护与实现注意事项
+
+1. 区分采集详情状态与视频真实访问状态。
+   不得仅因登录提示将已有视频的 access_status 改为已下架或不可用，
+   不得删除已有内容、清空已有有效详情或触发不实的下架传播。
+
+2. 排除策略需覆盖全量、增量首次发现、增量已有视频刷新，以及本地、远程执行路径。
+   已入库视频还需停止对应的自动刷新调度；只修改候选项可能仍会再次请求。
+
+3. 排除结论需在后续调度、任务恢复及再次发现该视频时保留。
+   不能只在当前 Run 中生效，也不能在恢复执行时重新反复尝试 WEB、IOS。
+   人工解除排除应能恢复正常调度。
+
+4. 现有 terminal_excluded 并不等于永久不重试。
+   videoDisposition.js 中普通排除原因存在七天低频复查逻辑，
+   必须为 login_required 保留 infinity，防止后续结算覆盖为有限时间。
+
+5. 增量当前会将部分 terminal_excluded 项的 api_status 写为 unavailable，
+   需要针对 login_required 与全量统一为 not_needed。
+
+6. 不能通过伪造 access_status=unavailable 来复用排除逻辑。
+   应增加明确的 login_required 排除分支，保证结算不依赖不实的访问状态。
+
+7. 检查 infinity 在数据库、JavaScript、序列化及展示中的兼容性，
+   避免日期转换异常或被当作普通待重试时间。
+
+8. 该策略明确放弃登录受限视频可能通过 API 获取的信息，以及未来自动恢复采集的机会。
+   排除清单应可查询、可人工解除，频道结果应包含登录受限排除数量。
+
+六、验收建议
+
+1. WEB、IOS 均持续返回目标登录提示且字段不足：视频按上述字段排除，
+   不换代理、不调用 API、不进入自动重试，其他视频继续处理。
+2. WEB 要求登录、IOS 返回足够数据：正常保存，不排除。
+3. 机器人验证、年龄限制、私有、删除、限流及网络错误：保持各自既有分类。
+4. 全量、增量及远程路径采用相同排除语义，恢复执行不重复采集已排除视频。
+5. 已有有效视频数据不被清空，也不被误标为下架。
+6. 下一轮调度及自动修复不再次选中 login_required 排除项；人工解除后可重新采集。
+7. 频道正常收尾时能查询排除原因和数量；其他真实失败仍进入失败流程。
+
+七、主要代码定位
+
+- services/qybullmq/src/youtubeJs.js
+  WEB/IOS 回退及 alternate_clients_exhausted 的生成。
+- services/qybullmq/src/youtubeFailurePolicy.js
+  YouTube 错误分类与重试决策。
+- services/qybullmq/src/videoDetailApiFallback.js
+  官方 API 兜底条件。
+- services/qybullmq/src/videoDisposition.js
+  视频排除、修复资格和下次尝试时间。
+- services/qybullmq/src/incrementalYoutubeJsVideo.js
+  增量视频断点、候选项、错误结算和汇总。
+- services/qybullmq/src/incrementalChannelRunner.js
+- services/qybullmq/src/incrementalRunStore.js
+  增量业务域与 Run 的最终状态。
+- services/qybullmq/src/fullCrawlYoutubeJsFactory.js
+- services/qybullmq/src/fullCrawlYoutubeJsStore.js
+  全量详情采集、候选项结算和抓取收尾。
+- services/qybullmq/src/remoteNodes/wholeChannelCollector.js
+  远程增量采集与 API 交接。
+- services/qybullmq/src/managedWorkerExecution.js
+- services/qybullmq/src/rotaSlotAdapter.js
+  受管失败处理、线路更换与断点恢复。
+
+八、修复结果（2026-09-16）
+
+1. 新增 youtubeLoginRequired.js，严格识别 LOGIN_REQUIRED / Please sign in。
+   WEB、IOS 均返回该响应且不能满足详情要求时，生成独立的 collection_exclusion，
+   保留客户端响应证据；不再抛出本分支的 alternate_clients_exhausted。
+2. 全量和增量详情校验接受该排除结果，无需调用评论、Data API 或继续换线。
+3. 全量、增量首次发现及已有视频刷新将候选项按确认的字段结算：
+   terminal_excluded / login_required / unavailable / not_needed / infinity。
+   已有视频刷新另将补采任务置为 terminal、next_retry_at=infinity。
+4. 保留已有 contents 数据与真实 access_status；不触发登录提示导致的访问状态改写。
+5. 调度过滤登录排除项，全量详情领取可复用已有排除结果；修复 infinity 被日期解析
+   误判为到期的逻辑，并在远程派发快照中将 PostgreSQL Infinity 转为字符串 infinity，
+   避免 JSON 序列化为 null。
+6. 全量抓取收据、增量观察结果增加 login_required_excluded_count。
+   本次未新增 dashboard 专用展示组件；排除原因和计数可从持久化结果查询。
+7. 保持 not a bot、年龄限制、私有、删除、限流、网络错误等现有分支。
+
+验证结果：
+- 254 项相关测试通过，覆盖客户端切换、无 API 兜底、全量继续处理后续视频、
+  增量校验、调度策略、补采及远程日志恢复。
+- 10 项全量/增量 PostgreSQL 集成测试通过，包含新视频和已有视频排除落库、
+  原数据保持不变、断点回放、下一轮不重新采集、远程快照 infinity 保真。
+- 2 项补采 PostgreSQL 测试通过，验证实际调度 SQL 和任务结算生命周期。
+- git diff --check 通过。
+- 数据库测试使用独立临时 PostgreSQL 容器，未连接业务数据库。
+
+后续操作说明：
+- 更新相关 Worker/远程节点运行版本后，新执行才使用此策略。
+- 历史失败任务未自动恢复，也未未经确认批量改为排除。
+- 人工解除时应同时调整有效候选项的永久排除时间以及已有视频补采任务的
+  terminal/infinity 状态，避免只解除其中一层后仍被另一层调度条件过滤。
+
+九、部署与线上验收（2026-09-16 UTC）
+
+发布版本：79729ef6d98db51bc6000317531b7a9b52523851。
+发布源码在独立干净检出中提交，未纳入工作区其他未跟踪文件。
+源码 Git bundle、镜像清单、私密容器配置快照与验证日志保存在
+runtime/bug0916-deploy/；主工作区保留原有源码修改，未替用户提交其他文件。
+
+部署范围：
+- 40 个全量 Worker、20 个本地增量 Worker、1 个补采 Worker。
+- QYBullMQ API、全量调度器、远程增量中心。
+- 47 个远程增量 Worker，保持原节点身份、配置、卷及回传日志。
+- Dashboard 仅更新采集镜像默认值，节点登记和持久化部署配置同步更新。
+- 所有更新实例运行正常，重启次数为 0；原本带健康检查的实例均健康。
+- 核对 7 类实际运行角色的 13 个修复源码文件哈希，与发布源码一致。
+- 远程恢复 47 个接单名额；本地增量保持原先暂停，配置数量仍为 20。
+  队列暂停状态与部署前一致。
+
+发布镜像验收：
+- Node 20 发布镜像的 254 项相关回归通过，包含 9 项远程日志恢复测试。
+- 发布镜像的真实指纹网关和 yt-dlp 会话 2 项测试通过。
+- 发布镜像连接独立临时 PostgreSQL，全量/增量 10 项及补采 2 项测试通过。
+- 已部署全量、本地增量、远程节点及远程中心的确定性登录场景测试通过。
+- scripts/verify.sh 通过。
+- scripts/test.sh 未全绿：QYBullMQ 阶段 1755 项通过、240 项跳过、5 项失败。
+  其中 3 项断言失败在修复前 HEAD 也可复现（controllerAgentRefreshConflict、
+  remoteCenterCapacity）；另 2 项为宿主测试环境缺少 Python 依赖，
+  已在包含依赖的发布镜像内验证通过。脚本因该阶段失败未继续后续无关组件测试。
+
+真实线上样本（不是模拟结果）：
+- 2026-09-16 11:47:45 UTC，视频 r24xrSVn3_M，候选 ID 11391580。
+- 频道：UCbbfDxJ8RfFY9UDwc68MCSw。
+- Run：incremental:c240da2f-1988-58c4-8dce-6d0c9f4fedaf。
+- WEB 和 IOS 响应证据均为 LOGIN_REQUIRED / Please sign in。
+- disposition=terminal_excluded，reason_code=login_required。
+- detail_status=unavailable，api_status=not_needed。
+- next_attempt_at=infinity，retryable=false。
+- 同一 Run 的另 2 个视频为 stored，频道 Run 最终为 done。
+- 11:49 UTC 的最近 3 分钟观察窗口：118 个增量任务完成、13 个失败；
+  失败并未全部消失，登录排除策略不处理其他网络或租约异常。
+- 线上具体证据保存在 runtime/bug0916-deploy/live-sample.json。
+- 真实样本验证了远程增量路径；全量路径通过实际部署容器模拟请求与
+  独立 PostgreSQL 集成测试验收，未额外向生产队列注入测试频道。
+
+部署期间的历史积压与回滚：
+- 部署前已有 5 个远程任务长时间等待，节点保留 whole-pending/network 日志。
+- 先备份日志并正常重启原节点；积压仍存在。确认无 leased 任务和活动网络绑定，
+  暂停增量队列后切换中心；旧中心未在 60 秒内退出，由 Docker 结束，退出码 137。
+- 新中心记录了这 5 个执行断点的恢复结算（settled=true）。未删除队列任务，
+  未清除未确认回传日志，未把它们直接改为 login_required。
+- 本地原容器保留为 <原名称>-before-bug0916，可按原镜像和快照回滚。
+- 远程回滚配置与日志备份位于 /etc/qy-node/runtime/rollouts/bug0916/。
+
+十、补充诊断：Run done 但 Plan 未收尾（2026-09-16 12:05 UTC）
+
+此前“已完成线上验收”的结论不充分：只确认了采集 Run 和候选结算，
+未覆盖 Feature 事件应用及 Daily Plan 最终完成状态。
+
+固定观察窗口截至 11:59:12.216 UTC 的最近 5 分钟，184 个已完成任务：
+- 161 个 Plan=running、Run=done；About 事件已 applied，Video 事件缺失。
+- 13 个 Plan=dispatched、Run=done；仅要求 Video，完成事件未应用。
+- 10 个 Plan=succeeded、Run=done；仅要求 About。
+12:03 UTC 复查时，上述 174 个计划仍未收尾，不是几秒钟的统计缓存延迟。
+对应 174 个 Video Outbox 均为 published，但 Feature Inbox 中无对应 Video 事件；
+171 个 About 事件均已 applied。
+
+使用线上 Feature 容器的 CrawlerObservationRecorded.from_mapping 对原始持久化
+Video 事件进行纯解析（不写库），确定性复现协议错误：
+1. discovery.payload.login_required_excluded_count: unexpected field。
+2. recent_sampling.payload.login_required_excluded_count: unexpected field。
+3. 对实际 login_required 排除项：terminal_excluded disposition requires retry_class，
+   新策略的 retry_class=null 被旧校验拒绝。
+
+根因：本次修复增加了生产者事件字段及永久排除语义，却遗漏 Feature 消费者
+严格协议和语义解析的兼容修改、跨服务事件验收。
+计数字段即使为 0 也会发送，因此影响不仅限于真正出现 Please sign in 的视频。
+Outbox published 只代表上游投递完成，不能据此认定 Feature 已接受并应用事件。
+
+Plan 收尾由 Feature 对所需 About/Video/Agent applied 事件聚合决定；
+采集 Run.done 并不会直接修改 Plan 为 succeeded。
+因此“每分钟队列完成数”不能当作端到端频道完成速度；此前将低速主要解释为
+状态滞后的说法不准确，已证实为本次变更引起的下游事件兼容故障。
+
+待修复范围：
+- 补齐 Feature 严格契约及语义解析对登录排除计数、永久不重试语义的支持。
+- 使用实际生产事件覆盖协议解析、事件应用和 Plan 终态的跨服务回归。
+- 修复后按已持久化事件 ID、原顺序与幂等约束恢复事件消费，避免重新抓取。
+- 检查失败/拒绝投递的实际存储位置及重放入口，不直接伪造 Plan 成功状态。
+
+本轮仅诊断并记录，未修改运行配置、任务状态或重放事件。
+证据：runtime/bug0916-plan-diagnosis/initial.json、events.json、outbox.json、video-event.json。
+
+
+十一、Feature 兼容修复与失败频道单轮恢复（2026-09-16 12:42 UTC）
+
+已修复第十节发现的下游协议问题，并部署 Feature 镜像：
+qy-allpachong/feature-engine:pachongsys-5b535b8。
+发布提交：5b535b813fce29bb2c2b60bfc22d284f78e4d225。
+- 严格契约和语义解析均接受可选 login_required_excluded_count，并校验计数一致性。
+- 只允许 terminal_excluded/login_required 的 retry_class=null，保留其他排除类型的重查约束。
+- 旧事件不添加新字段，原始 payload_hash 保持不变。
+- 新增 4 项回归；Feature 全套测试共 231 项，214 项通过、17 项跳过。
+  包含 59 项事件相关测试；生产原始事件纯解析通过后再恢复消费。
+- 保留原事件 ID、内容与哈希，从 feature-recalc 的 failed 原任务重试：
+  首批 1621 条，按载荷补查错误文本被截断的 4 条，共 1625 条。
+- 12:41:44 UTC 核验：1625 条全部 applied；原 184 个样本计划全部 succeeded。
+  未直接把 Plan 伪造为成功，也未重新采集这些已有结果。
+- Feature 容器 healthy、重启次数 0；旧容器保留为
+  qy-newcrawler-fresh-feature-ingest-1-before-bug0916-feature。
+
+按用户要求，对失败增量频道各安排一轮重抓：
+- 初始队列 1215 条 failed；按频道取最新仍有效计划，实际重试 576 个不同频道。
+- 跳过 475 条旧重复计划、144 条已被新计划替代的任务、17 条频道已不可用任务、
+  3 条已有终态的计划。未清空失败队列或删除历史证据。
+- 每个任务重试前再次核查：原任务仍 failed、频道 active、无更新有效计划、
+  业务内容哈希一致、远程任务 failed、无 running 执行和有效网络绑定。
+- 575 个业务 Run 的网络预算已耗尽，仅各追加一次有效网络尝试额度；
+  另 1 个尚有预算，保持原额度。不重置网络序号、历史尝试计数或全局策略。
+- 将相应 failed Plan 恢复 dispatched，保留所有已采集内容和断点，
+  使用原 BullMQ 任务重试，attempts 设置为当前 attemptsMade+1，不重置已用次数。
+- 576 个任务全部成功投递；审计事件 operation=bug0916-login-required-one-retry-20260916。
+- 最先试跑的 3 个任务均已完成：1 succeeded、2 partial；Run 都为 done。
+- 12:41:41 UTC 批次快照：14 completed、37 active、524 waiting、1 failed。
+  其中失败原因为 content_candidates_run_id_position_key 唯一键冲突，
+  属于其他问题；本轮不对其继续追加重试，不把它当成 login_required 排除。
+  批次尚在执行，不代表 576 个频道都已抓取完成或全部成功。
+
+证据与重现：runtime/bug0916-retry/manifest.json、inventory.json、business-before.json、
+rota-before.json、*-retry-result.jsonl、feature-final.json、progress-2.json。
+镜像固定覆盖：runtime/bug0916-retry/feature-image.compose.yml；后续 Compose 发布应保留该覆盖。
+恢复脚本有旧状态/计数校验和 recovery_requested 审计防重约束，不应直接重复执行补预算脚本。
+
+
+十二、全量失败频道真实生产测试（2026-09-16 12:55 UTC）
+
+用户要求从 Please sign in 全量失败频道中选择少量测试。扫描前 200 个失败任务，
+找到 58 个有视频级错误证据的频道，选择 5 个恢复原全量任务详情断点，各重试一次。
+原网络额度足够，未增加预算；保留频道信息、视频列表和已完成视频结果。
+- Maikon Melo / UCPtadcv34G9SYkLMYFsd3uQ：候选 2 个，login_required 排除 2 个；Run=done。
+- universo geek / UCjJVmGijpFM9gjCt5mpxrvA：候选 9 个，login_required 排除 6 个；Run=done。
+- Stella Mania / UC0eLXAkPviR5Hc8XHc2F7_w：候选 11 个，login_required 排除 8 个；Run=done。
+- Animamix Brinquedos / UCZWS9hRN9thG3RioYEC_vWw：候选 27 个，login_required 排除 1 个；Run=done。
+- Paróquia Sagrada Família - Uberaba / UCDajZ9xFnJNfE97wYH4reXA：候选 29 个，login_required 排除 1 个；Run=done。
+
+真实验证结果：5 个队列任务 completed，5 个 Run/detail_status=done，fetch.status=complete。
+78 个候选全部结算，其中 18 个 login_required、58 个 outside_content_window、2 个 upcoming_live。
+18 个登录视频均有本次 WEB、IOS 的 LOGIN_REQUIRED / Please sign in 响应证据，
+全部 terminal_excluded、unavailable、not_needed、next_attempt_at=infinity、retryable=false。
+0 个 Data API 请求；5 About + 5 Video 事件全部 applied；原先完成的 45 个候选未重复请求详情。
+
+验证边界：这是生产失败全量任务的断点恢复测试，执行 detail、close_fetch、handoff；
+未从空白状态重新抓取频道信息和视频列表。本轮无可入库的近期视频，现有活动门槛
+将 5 个频道均判定 dormant（no_published_content_within_90_days），Agent skipped。
+因此完成是按排除规则收尾，不应表述为取得受限视频详情或 5 个频道保持 active。
+证据和频道清单：runtime/bug0916-full-test/report.md、verified.json、progress-2.json。

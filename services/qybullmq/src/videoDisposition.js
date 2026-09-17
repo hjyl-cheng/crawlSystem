@@ -1,3 +1,4 @@
+import { isLoginRequiredExclusion, loginRequiredDisposition } from "./youtubeLoginRequired.js";
 export const VIDEO_DISPOSITION_VERSION = "video-disposition-v1";
 const SCHEDULED_VIDEO_DISPOSITIONS = Object.freeze(["deferred", "terminal_excluded"]);
 
@@ -54,6 +55,7 @@ function retainedTerminalDisposition(priorDisposition, observedAt) {
   if (text(priorDisposition?.kind) !== "terminal_excluded") return null;
   const reasonCode = text(priorDisposition?.reason_code);
   if (!reasonCode) return null;
+  if (reasonCode === "login_required") return loginRequiredDisposition(observedAt);
   const policyRecheck = reasonCode === "outside_content_window";
   const oneDayRecheck = ["upcoming_live", "live_in_progress"].includes(reasonCode);
   const retryAfter = policyRecheck
@@ -84,6 +86,9 @@ export function resolveVideoDisposition({
   priorDisposition = null,
 } = {}) {
   const accessStatus = text(access?.access_status) ?? "unknown";
+  if (isLoginRequiredExclusion(detail) || terminalReason === "login_required") {
+    return loginRequiredDisposition(observedAt);
+  }
   if (["upcoming_live", "live_in_progress"].includes(terminalReason)) {
     const nextAttemptAt = isoAfter(observedAt, 24 * 60 * 60 * 1000);
     return {

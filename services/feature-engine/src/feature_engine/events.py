@@ -481,7 +481,10 @@ def _video_disposition_entries(value: Any, field: str) -> tuple[dict[str, Any], 
         retry_class = _optional_text(raw["retry_class"], f"{field}[{index}].retry_class")
         if kind == "stored" and retry_class is not None:
             raise EventValidationError(f"stored {field}[{index}] cannot contain retry_class")
-        if kind != "stored" and retry_class is None:
+        login_excluded = kind == "terminal_excluded" and raw["reason_code"] == "login_required"
+        if login_excluded and retry_class is not None:
+            raise EventValidationError("login_required exclusion cannot contain retry_class")
+        if kind != "stored" and not login_excluded and retry_class is None:
             raise EventValidationError(f"{kind} {field}[{index}] requires retry_class")
         output.append(
             {
@@ -664,6 +667,7 @@ class VideoDiscoveryPayload:
     gap_abandonment: dict[str, Any] | None = None
     disposition_ledger: dict[str, Any] | None = None
     empty_uploads: dict[str, Any] | None = None
+    login_required_excluded_count: int | None = None
 
     @classmethod
     def from_mapping(cls, source: Mapping[str, Any], *, outcome: str) -> VideoDiscoveryPayload:
@@ -709,7 +713,7 @@ class VideoDiscoveryPayload:
                 | incomplete_scan_keys
                 | unresolved_keys
                 | gap_abandonment_keys
-                | frozenset({"empty_uploads"})
+                | frozenset({"empty_uploads", "login_required_excluded_count"})
                 | VIDEO_DISPOSITION_LEDGER_TRIGGER_FIELDS
             ),
             label="Video Discovery payload",
@@ -792,6 +796,15 @@ class VideoDiscoveryPayload:
             detail_success_count=successes,
             detail_failure_count=failures,
         )
+        login_excluded = None
+        if "login_required_excluded_count" in source:
+            login_excluded = _integer(source["login_required_excluded_count"],
+                                      "login_required_excluded_count", minimum=0)
+            entries = (disposition_ledger or {}).get("dispositions", []) + (disposition_ledger or {}).get("recheck_dispositions", [])
+            expected_login_excluded = sum(item["kind"] == "terminal_excluded" and item["reason_code"] == "login_required" for item in entries)
+            if login_excluded != expected_login_excluded:
+                raise EventValidationError("login_required_excluded_count must match disposition entries")
+
         if first_seen_count != len(first_seen):
             raise EventValidationError("first_seen_count must match first_seen entries")
         if supplied_proof:
@@ -1142,6 +1155,7 @@ class VideoDiscoveryPayload:
             gap_abandonment,
             disposition_ledger,
             empty_uploads,
+            login_excluded,
         )
 
     def as_facts(self) -> dict[str, Any]:
@@ -1179,6 +1193,8 @@ class VideoDiscoveryPayload:
             facts.update(self.disposition_ledger)
         if self.empty_uploads is not None:
             facts["empty_uploads"] = dict(self.empty_uploads)
+        if self.login_required_excluded_count is not None:
+            facts["login_required_excluded_count"] = self.login_required_excluded_count
         return facts
 
 
@@ -1194,6 +1210,7 @@ class VideoRecentSamplingPayload:
     view_changed_count: int
     view_delta_total: int
     engagement_changed_count: int
+    login_required_excluded_count: int | None = None
 
     @classmethod
     def from_mapping(
@@ -1213,7 +1230,9 @@ class VideoRecentSamplingPayload:
                 "engagement_changed_count",
             }
         )
-        _exact_keys(source, keys, "Video Recent Sampling payload")
+        _required_optional_keys(source, required=keys, optional=frozenset({"login_required_excluded_count"}), label="Video Recent Sampling payload")
+        login_excluded = (_integer(source["login_required_excluded_count"], "login_required_excluded_count", minimum=0)
+                          if "login_required_excluded_count" in source else None)
         recent = _integer(source["recent_count"], "recent_count", minimum=0)
         stale = _number(source["stale_ratio"], "stale_ratio", minimum=0.0, maximum=1.0)
         selected = _integer(source["selected_count"], "selected_count", minimum=0)
@@ -1226,7 +1245,7 @@ class VideoRecentSamplingPayload:
         engagement = _integer(
             source["engagement_changed_count"], "engagement_changed_count", minimum=0
         )
-        if selected > recent or success + failure != selected:
+        if selected > recent or success + failure + (login_excluded or 0) != selected:
             raise EventValidationError("Recent Sampling selected/success/failure counts disagree")
         if next_count > selected or comparable > success or view_changed > comparable or engagement > success:
             raise EventValidationError("Recent Sampling coverage counts disagree")
@@ -1244,6 +1263,7 @@ class VideoRecentSamplingPayload:
             view_changed,
             view_delta,
             engagement,
+            login_excluded,
         )
 
     def as_facts(self) -> dict[str, Any]:
@@ -1258,6 +1278,8 @@ class VideoRecentSamplingPayload:
             "view_changed_count": self.view_changed_count,
             "view_delta_total": self.view_delta_total,
             "engagement_changed_count": self.engagement_changed_count,
+            **({"login_required_excluded_count": self.login_required_excluded_count}
+               if self.login_required_excluded_count is not None else {}),
         }
 
 

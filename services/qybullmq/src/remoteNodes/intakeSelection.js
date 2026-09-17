@@ -10,14 +10,22 @@ export function selectIntakeWorkers(rows, count) {
 export function intakeStatus(workers) {
   const allowed = workers.filter(w => w.requested).length;
   const draining = workers.filter(w => !w.requested && (w.active || w.enabled)).length;
+  const phases={collecting:0,processing:0,awaiting:0,unready:0,idle:0,finishing:0,standby:0,offline:0};
+  for(const worker of workers){
+    const processing=worker.processing??worker.active;
+    const phase=!worker.requested && (processing||worker.enabled) && !worker.awaitingRecovery ? 'finishing'
+      : processing ? (worker.executionPhase && worker.executionPhase!=='collecting' ? 'processing' : 'collecting')
+      : worker.awaitingRecovery || worker.active ? 'awaiting'
+      : !worker.connected ? 'offline'
+      : worker.readyForTasks ? 'idle'
+      : !worker.requested && !worker.enabled ? 'standby' : 'unready';
+    phases[phase]++;
+  }
   return {
     allowedCount: allowed, requested: allowed > 0, draining: draining > 0,
     counts: { deployed: workers.length, connected: workers.filter(w => w.connected).length,
       allowed, ready: workers.filter(w => w.readyForTasks).length,
-      collecting:workers.filter(w=>w.processing??w.active).length,awaiting:workers.filter(w=>w.awaitingRecovery).length,
-      finishing:workers.filter(w=>!w.requested && !w.awaitingRecovery && (w.processing||w.enabled)).length,
       active: workers.filter(w => w.active).length, running: workers.filter(w => w.active && w.requested).length,
-      draining, idle: workers.filter(w => w.readyForTasks && !w.active).length,
-      standby: workers.filter(w => w.connected && !w.requested && !w.active && !w.enabled).length },
+      draining, ...phases },
   };
 }

@@ -1,4 +1,5 @@
 import { assertVideoApiNetworkAllowed } from "./videoApiContinuation.js";
+import { isPleaseSignInResponse, loginRequiredDetail } from "./youtubeLoginRequired.js";
 import { emptyUploadsDecision, prepareDormantUploadsProbe, pendingUploadsDormancy, uploadsResponseEvidence, assertNormalEmptyUploadsResponse, isMissingUploadsError } from "./youtubeUploadsCountry.js";
 import { canonicalizeCrawlerCountry } from "./agentCountryPolicy.js";
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -1888,6 +1889,10 @@ export async function fetchYoutubeJsVideoInfoWithTerminalFallback(client, videoI
     });
     if (resolution) return resolution;
     attempts.push(youtubeJsClientAttempt(clientName, info));
+  }
+  if (attempts.length === clients.length && attempts.every(attempt =>
+    isPleaseSignInResponse(attempt.playability_status, attempt.playability_reason))) {
+    return { kind: "terminal", detail: loginRequiredDetail(cleanVideoId, attempts) };
   }
   return throwYoutubeJsAlternateClientsExhausted(cleanVideoId, attempts);
 }

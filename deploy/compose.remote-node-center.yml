@@ -21,7 +21,7 @@ services:
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     mem_limit: 768m
-    cpus: 1.0
+    cpus: 4.0
     pids_limit: 96
     stop_grace_period: 16m
     healthcheck:

@@ -1,4 +1,5 @@
 import { resolveVideoDisposition } from "./videoDisposition.js";
+import { isLoginRequiredExclusion } from "./youtubeLoginRequired.js";
 
 function text(value) {
   return String(value ?? "").trim() || null;
@@ -55,7 +56,7 @@ export function fullVideoStorageAction({ candidate, classification, access } = {
 export function resolveCollectedVideoOutcome({ candidate = {}, classification, access, detail,
   error = null, observedAt, terminalReason = null, deferredReason = null, priorDisposition = null,
 }) {
-  const storageAction = terminalReason ? { kind: "unresolved" }
+  const storageAction = terminalReason || isLoginRequiredExclusion(detail) ? { kind: "unresolved" }
     : fullVideoStorageAction({ candidate, classification, access });
   const disposition = resolveVideoDisposition({
     storageAction, classification, access, detail, error, observedAt,

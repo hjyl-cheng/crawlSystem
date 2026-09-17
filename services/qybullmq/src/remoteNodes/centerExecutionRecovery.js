@@ -4,6 +4,34 @@ import { RemoteProtocolError } from './protocol.js';
 
 export const supervisionLockKey = row => `remote-incremental-supervisor:${row.node_id}/${row.slot}`;
 
+// This closes transport bookkeeping only. A completed API request alone is
+// never permission to finish/replay a Plan or release a live network owner.
+export async function settleTerminalRemoteHandoffs(store) {
+  return store.transaction(async client=>{
+    const result=await client.query(`WITH settled AS (
+      SELECT t.task_id,p.status AS plan_status FROM remote_ingestion.tasks t
+      JOIN feature_clock.daily_channel_plans p ON p.plan_id=(t.input#>>'{plan,plan_id}')::uuid
+        AND p.channel_id=t.input#>>'{plan,channel_id}'
+      JOIN crawler.channel_execution_attempts a ON a.attempt_id=t.context->>'execution_attempt_id'
+      WHERE t.capability=$1 AND t.state='received'
+        AND t.last_error IN ('VIDEO_API_PENDING','UPLOADS_COUNTRY_RECHECK')
+        AND p.status IN ('succeeded','partial','failed','cancelled') AND p.completed_at IS NOT NULL
+        AND a.finished_at IS NOT NULL AND a.status IN ('success','failed','aborted')
+        AND a.channel_id=p.channel_id AND a.business_run_id='incremental:'||p.plan_id::text
+        AND a.dispatch_generation::text=t.input#>>'{plan,dispatch_generation}'
+        AND (t.coordinator_until IS NULL OR t.coordinator_until<=clock_timestamp())
+        AND NOT EXISTS(SELECT 1 FROM remote_ingestion.network_bindings b WHERE b.task_id=t.task_id
+          AND (b.state<>'retired' OR b.release_receipt->>'in_flight' IS DISTINCT FROM '0'))
+      ORDER BY t.created_at LIMIT 32 FOR UPDATE OF t,p,a SKIP LOCKED
+    ) UPDATE remote_ingestion.tasks t SET state='failed',coordinator_id=NULL,coordinator_until=NULL,
+      last_error='REMOTE_PLAN_ALREADY_TERMINAL',
+      applied_result=COALESCE(t.applied_result,'{}'::jsonb)||jsonb_build_object('transport_recovery',
+        jsonb_build_object('reason','terminal_plan','plan_status',s.plan_status,'previous_error',t.last_error,'at',clock_timestamp()))
+      FROM settled s WHERE t.task_id=s.task_id`,[CHANNEL_PLAN_CAPABILITY]);
+    return result.rowCount;
+  });
+}
+
 // Older writers renewed the coordinator after applying a result. A completed,
 // identity-matched attempt is authoritative even when that obsolete timestamp
 // remains. This never waives the separate unfinished-attempt/network checks.

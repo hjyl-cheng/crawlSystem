@@ -142,12 +142,23 @@ export function createRemoteDeploymentAdmin({store,routes,token,image,gatewayUrl
         const request=(await client.query('SELECT selected_slots FROM remote_ingestion.node_intake_requests WHERE node_id=$1 AND deployment_id=$2',[nodeId,deploymentId])).rows[0];
         const desired=request?new Set(request.selected_slots):null;
         const rows=(await client.query(`SELECT w.*,n.state AS node_state,w.connected_until>clock_timestamp() AS connected,
+          current_work.state AS task_state,current_work.command_state,
           EXISTS(SELECT 1 FROM remote_ingestion.tasks t WHERE t.target_node_id=w.node_id AND t.target_worker_slot=w.slot
             AND t.state IN ('pending','leased','received')) AS unsettled
           FROM remote_ingestion.worker_connections w JOIN remote_ingestion.nodes n USING(node_id)
+          LEFT JOIN LATERAL (
+            SELECT t.state,(SELECT c.state FROM remote_ingestion.channel_commands c
+              WHERE c.task_id=t.task_id AND c.generation=t.generation
+              ORDER BY c.created_at DESC LIMIT 1) AS command_state
+            FROM remote_ingestion.tasks t WHERE t.target_node_id=w.node_id AND t.target_worker_slot=w.slot
+              AND t.state IN ('pending','leased','received')
+            ORDER BY CASE WHEN t.state='received' THEN 1 ELSE 0 END,t.created_at DESC LIMIT 1
+          ) current_work ON true
           WHERE w.node_id=$1 AND deployment_id=$2 AND w.retired_at IS NULL ORDER BY slot`,[nodeId,deploymentId])).rows;
         const workers=[];
         for(const row of rows)workers.push({slot:row.slot,retiring:!!row.retirement_id,connected:row.connected===true,preparation:execution?.preparationState?.(row)??null,
+          executionPhase:row.task_state==='leased' && row.command_state==='pending' ? 'collecting'
+            : row.task_state==='leased' && row.command_state==='received' ? 'processing' : 'preparing',
           requested:desired?desired.has(row.slot):row.activation_requested,enabled:row.enabled,active:execution?.isProcessing(row)===true || row.unsettled===true,
           processing:execution?.isProcessing(row)===true,awaitingRecovery:row.unsettled===true && execution?.isProcessing(row)!==true,
           readyForTasks:row.connected===true && (desired?desired.has(row.slot):row.activation_requested) && row.activation_requested && row.enabled && row.accepting && row.node_state==='active'

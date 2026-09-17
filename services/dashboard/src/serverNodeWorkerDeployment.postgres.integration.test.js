@@ -28,7 +28,7 @@ test('page deployment freezes saved count, persists progress, retries and expand
    }};
  const ssh={async connect(){begins++;return {};},async verify(){},async deployWorkers(_conn,_node,plan,credentials,password,before,after){
    assert.equal(password,'fixture-password');assert.equal(credentials.nodeToken,'a'.repeat(64));assert.equal(credentials.registry.password,'c'.repeat(64));
-   for(const step of ['files','start','verify']){await before(step);if(step==='start'&&fail)throw new Error('do not persist fixture-password or token');await after(step);}
+   for(const step of ['files','pull','start','verify']){await before(step);if(step==='pull'&&fail)throw new Error('do not persist fixture-password or token');await after(step);}
    if(changeDuringDeployment)allowedCount=1;
  },close(){}};
  const image='registry.example/collect@sha256:'+'a'.repeat(64);const gatewayUrl='https://center.example';
@@ -41,8 +41,8 @@ test('page deployment freezes saved count, persists progress, retries and expand
  const preview=await (await fetch(base+'/worker-deployment')).json();assert.equal(preview.mode,'incremental_collect');assert.equal(preview.memoryLimitMiB,768);assert.equal(begins,0);
  assert.equal((await post({version:0,password:'fixture-password'})).status,409);assert.equal(begins,0);
  assert.equal((await post({version:1,password:'fixture-password'})).status,202);await deployment.waitForIdle();
- let registry=await store.load();assert.equal(registry.nodes[0].deployment.state,'failed');assert.equal(registry.nodes[0].deployment.steps.start,'failed');
- assert.ok(!JSON.stringify(registry).includes('fixture-password'));assert.ok(!JSON.stringify(registry).includes('c'.repeat(64)));const deploymentId=registry.nodes[0].deployment.deploymentId;
+ let registry=await store.load();assert.ok(Date.parse(registry.nodes[0].deployment.deadline)-Date.parse(registry.nodes[0].deployment.startedAt)>=40*60000,'deployment deadline must cover the 30-minute image pull plus startup and connection checks');assert.equal(registry.nodes[0].deployment.state,'failed');assert.equal(registry.nodes[0].deployment.steps.pull,'failed');
+ assert.match(registry.nodes[0].deployment.error,/下载镜像/);assert.equal(registry.nodes[0].deployment.steps.start,'pending');assert.ok(!JSON.stringify(registry).includes('fixture-password'));assert.ok(!JSON.stringify(registry).includes('c'.repeat(64)));const deploymentId=registry.nodes[0].deployment.deploymentId;
  fail=false;assert.equal((await post({version:registry.version,password:'fixture-password'})).status,202);await deployment.waitForIdle();
  registry=await store.load();assert.equal(registry.nodes[0].deployment.state,'connected');assert.equal(registry.nodes[0].deployment.deploymentId,deploymentId);
  const values=Object.fromEntries(['name','host','port','username','kind','notes','sshAlias','workers'].map(k=>[k,node[k]]));

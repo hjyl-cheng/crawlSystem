@@ -1,6 +1,7 @@
 import { hasCompletePublicVideoSurface, videoAccessStatus } from "./detailPolicy.js";
 import { videoAccessRecheckAt } from "./videoDisposition.js";
 import { decideYoutubeFailure, youtubeFailureText } from "./youtubeFailurePolicy.js";
+import { isLoginRequiredExclusion } from "./youtubeLoginRequired.js";
 
 const TERMINAL_ACCESS_STATUSES = new Set(["members_only", "private", "unavailable"]);
 
@@ -51,6 +52,13 @@ function terminalAccessSource(error) {
 }
 
 export function contentEnrichDetailOutcome(task, detail, observedAt, retryOptions) {
+  if (isLoginRequiredExclusion(detail)) {
+    return {
+      ...outcomeReference(task), kind: "terminal", detail, access_status: null,
+      observed_at: observedAt.toISOString(), next_retry_at: "infinity", error_message: null,
+      collection_exclusion: detail.collection_exclusion,
+    };
+  }
   const accessStatus = videoAccessStatus(detail);
   if (!TERMINAL_ACCESS_STATUSES.has(accessStatus) && !hasCompletePublicVideoSurface(detail)) {
     const error = Object.assign(

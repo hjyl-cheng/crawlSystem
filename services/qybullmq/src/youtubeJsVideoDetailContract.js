@@ -6,6 +6,7 @@ import {
 } from "./detailPolicy.js";
 import { resolveYoutubeContentType } from "./youtubeContentType.js";
 import { assertYoutubeContentObservation } from "./youtubePlayability.js";
+import { isLoginRequiredExclusion } from "./youtubeLoginRequired.js";
 
 function text(value) {
   return String(value ?? "").trim() || null;
@@ -57,6 +58,9 @@ export function validateYoutubeJsVideoDetail(videoIdValue, detailValue, {
     throw new TypeError(`YouTube.js detail is missing for ${videoId}`);
   }
   const access = youtubeJsVideoAccess(detail);
+  if (isLoginRequiredExclusion(detail)) {
+    return Object.freeze({ detail, access, classification: resolveYoutubeContentType({ videoId, detail }) });
+  }
   const terminalAccess = ["members_only", "private", "unavailable"]
     .includes(access.access_status);
   const upcoming = isUpcomingLiveDetail(detail);

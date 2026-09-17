@@ -1,3 +1,4 @@
+import { loginRequiredExclusionSql } from "./youtubeLoginRequired.js";
 import { createHash, randomUUID } from "node:crypto";
 import {
   CONTENT_ENRICH_DISPATCH_LOCK_KEY,
@@ -520,6 +521,7 @@ export class PostgresContentEnrichDispatchRepository {
            JOIN crawler.contents content ON content.content_key=task.content_key
            JOIN crawler.channels registry ON registry.channel_id=task.channel_id
            WHERE task.job_type='player-refresh'
+             AND NOT ${loginRequiredExclusionSql("content")}
              AND (
                task.status IN ('queued','failed')
                OR (task.status='terminal' AND task.next_retry_at IS NOT NULL)
@@ -549,6 +551,7 @@ export class PostgresContentEnrichDispatchRepository {
            JOIN crawler.contents content ON content.content_key=task.content_key
            JOIN crawler.channels registry ON registry.channel_id=task.channel_id
            WHERE task.channel_id=channel.channel_id
+             AND NOT ${loginRequiredExclusionSql("content")}
              AND task.job_type='player-refresh'
              AND (
                task.status IN ('queued','failed')

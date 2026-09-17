@@ -191,6 +191,26 @@ test('remote work checks original Clock, managed run and execution records', { s
     assert.equal(row.state,'applied');assert.equal(row.coordinator_until,null);assert.equal(row.coordinator_id,null);
   });
 
+  await t.test('terminal Plan releases only its quiesced historical API handoff without replaying collection',async()=>{
+    const {settleTerminalRemoteHandoffs}=await import('../src/remoteNodes/centerExecutionRecovery.js');
+    const f=await checkpointFixture();await f.finish();
+    await profiles.finishAttempt(f.executionAttemptId,{status:'failed',error:new Error('API handoff')});
+    await query("UPDATE feature_clock.daily_channel_plans SET status='failed',completed_at=now() WHERE plan_id=$1",[f.plan.plan_id]);
+    await query("UPDATE remote_ingestion.tasks SET state='received',last_error='VIDEO_API_PENDING',applied_result=$2,coordinator_until=NULL WHERE task_id=$1",[f.lease.task_id,{request_id:'saved-api-evidence'}]);
+    // A terminal business record does not authorize retiring an active network.
+    await query("UPDATE remote_ingestion.network_bindings SET state='active' WHERE binding_id=$1",[f.binding.binding_id]);
+    assert.equal(await settleTerminalRemoteHandoffs(store),0);
+    await query("UPDATE remote_ingestion.network_bindings SET state='retired' WHERE binding_id=$1",[f.binding.binding_id]);
+    await query("UPDATE remote_ingestion.tasks SET coordinator_until=now()+interval '60 seconds' WHERE task_id=$1",[f.lease.task_id]);
+    assert.equal(await settleTerminalRemoteHandoffs(store),0);
+    await query('UPDATE remote_ingestion.tasks SET coordinator_until=NULL WHERE task_id=$1',[f.lease.task_id]);
+    assert.equal(await settleTerminalRemoteHandoffs(store),1);
+    assert.equal(await settleTerminalRemoteHandoffs(store),0);
+    const task=(await query('SELECT * FROM remote_ingestion.tasks WHERE task_id=$1',[f.lease.task_id])).rows[0];
+    assert.equal(task.state,'failed');assert.equal(task.applied_result.request_id,'saved-api-evidence');
+    assert.equal((await query('SELECT status FROM feature_clock.daily_channel_plans WHERE plan_id=$1',[f.plan.plan_id])).rows[0].status,'failed');
+  });
+
   await t.test('finished historical coordinator does not block slot but unfinished and mismatched evidence does', async () => {
     const {remoteSlotUnsettled}=await import('../src/remoteNodes/centerExecutionRecovery.js');
     const f=await checkpointFixture();await f.finish();await profiles.finishAttempt(f.executionAttemptId,{status:'success'});

@@ -1,3 +1,4 @@
+import { isLoginRequiredExclusion } from "./youtubeLoginRequired.js";
 import {
   contentEnrichDetailOutcome,
   contentEnrichFailureOutcome,
@@ -569,7 +570,7 @@ export class PostgresContentEnrichExecutionRepository {
           summary.skipped += 1;
           continue;
         }
-        if (outcome.detail) {
+        if (outcome.detail && !isLoginRequiredExclusion(outcome.detail)) {
           await this.applyDetail(client, {
             row: lockedRow.content,
             detail: outcome.detail,
@@ -585,6 +586,7 @@ export class PostgresContentEnrichExecutionRepository {
           observed_at: outcome.observed_at,
           access_status: outcome.access_status,
           failure_decision: outcome.failure_decision ?? null,
+          ...(outcome.collection_exclusion ? { collection_exclusion: outcome.collection_exclusion } : {}),
         });
         const updated = ["retryable", "dead_letter"].includes(outcome.kind)
           ? await client.query(
@@ -621,7 +623,7 @@ export class PostgresContentEnrichExecutionRepository {
                 outcome.kind,
                 outcome.next_retry_at ?? null,
                 outcome.error_message,
-                outcome.detail != null,
+                outcome.detail != null && !isLoginRequiredExclusion(outcome.detail),
                 observedAt,
                 resultJson,
               ],
