@@ -6,7 +6,10 @@ import {
   runWithChannelExecution,
 } from "../src/channelExecutionContext.js";
 
-test("YouTube.js internal timeout remains a recorded upstream failure", async () => {
+test("YouTube.js internal timeout remains a recorded upstream failure", async (t) => {
+  // The fake transport has no socket to keep Node alive for an unref'ed timeout.
+  const transportHandle = setInterval(() => {}, 1000);
+  t.after(() => clearInterval(transportHandle));
   const previousMode = process.env.YOUTUBEJS_EXTRACTOR_MODE;
   const previousTimeout = process.env.YOUTUBEJS_TIMEOUT_MS;
   const previousProxy = process.env.YOUTUBE_PROXY_URL;

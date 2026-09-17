@@ -9,7 +9,8 @@ test("Full Crawl Agent dispatch ignores terminal incremental refresh failures", 
     /refresh\.status='failed' AND isfinite\(refresh\.next_retry_at\)/g,
   ) ?? [];
 
-  assert.equal(retryableFailureGuards.length, 3);
+  // One Controller query and three Agent dispatch queries share this guard.
+  assert.equal(retryableFailureGuards.length, 4);
   assert.doesNotMatch(
     source,
     /refresh\.status IN \('pending','queued','running','failed'\)/,

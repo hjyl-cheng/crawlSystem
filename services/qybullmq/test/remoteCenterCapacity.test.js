@@ -14,14 +14,17 @@ function fixture() {
  }
  const store={pool:{query:async sql=>({rows:sql.includes('FROM pg_locks')&&!sql.includes('worker_connections')
   ? rows.map((r,i)=>({pid:i+1,lock_key:`remote-incremental-supervisor:node/${r.slot}`})):rows})},
-  transaction:async action=>{transactions++;return action({query:async(sql,args)=>({rows:sql.includes('worker_connections')?[rows.find(r=>r.slot===args[1])]:(args[0]===999?[]:[{}]),rowCount:args[0]===999?0:1})});}};
+  transaction:async action=>{transactions++;return action({query:async sql=>{
+   if(sql.includes('FROM remote_ingestion.node_intake_requests') || sql.includes('WITH settled AS'))return {rows:[],rowCount:0};
+   assert.fail(`unexpected per-slot transaction: ${sql}`);
+  }});}};
  const supervisor=Object.assign(Object.create(RemoteCenterExecutionSupervisor.prototype),{store,entries,guardPool:{options:{max:1}},stopping:false,maxSlots:32,allowedNodeIds:[],dashboardManaged:true,report:()=>{},channelStore:{}});
  return {supervisor,rows,writes,paused,transactions:()=>transactions};
 }
 test('20 remote consumers refresh capacity from a bulk snapshot without 20 serial readiness transactions',async()=>{
  const f=fixture();await f.supervisor.tick();
  assert.equal(f.writes.size,20);assert.equal([...f.writes.values()].filter(v=>v==='1').length,20);
- assert.equal(f.transactions(),0,'capacity refresh must not do serial per-slot transactions that outlive intake TTL');
+ assert.equal(f.transactions(),2,'only batched handoff recovery and intake reconciliation may open transactions');
 });
 test('bulk capacity excludes disconnected, disabled, route-unready and lock-lost consumers',async()=>{
  const f=fixture();f.rows[0].alive=false;f.rows[1].enabled=false;
