@@ -1,3 +1,4 @@
+import { lockPublicationChannelMutation } from "./publicationChannelMutationLock.js";
 import { observationFactsHash, recordCrawlerObservation } from "./crawlObservationStore.js";
 import { classifyAgentFailure } from "./agentRetryPolicy.js";
 import { buildAgentPublicationRun } from "./agentPublicationCurrent.js";
@@ -357,6 +358,7 @@ export class IncrementalAgentResultStore {
     const runId = request.run_ids[0] ?? null;
     const planId = request.plan_ids[0] ?? null;
     return this.withTransaction(async (client) => {
+      await lockPublicationChannelMutation(client, request.channel_id);
       const recorded = await recordCrawlerObservation(client, {
         idempotencyKey: `agent:${batchId}:${request.channel_id}:attempt:${request.attempts}`,
         observationKind: "agent",

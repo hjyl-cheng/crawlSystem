@@ -1,3 +1,4 @@
+import { finalizeTransactions } from "./finalizeDeferral.js";
 import { createYoutubeApiSettingsLoader } from './youtubeApiSettings.js';
 import { createCheckpointYoutubeJsDetail } from "./checkpointYoutubeJsDetail.js";
 import { closeRepairedFullCrawlScan } from "./fullCrawlScanEvidence.js";
@@ -4666,6 +4667,11 @@ export async function processFinalizeV2(job) {
   });
   const runRows = runId ? await query("SELECT * FROM crawler.channel_runs WHERE run_id=$1 LIMIT 1", [runId]) : { rows: [] };
   let run = runRows.rows[0] ?? null;
+  const withFinalizeTransaction = finalizeTransactions(withTransaction, {
+    channelId, runId,
+    secondary: run?.publication_finalized_at != null
+      && ["ready_auto", "ready_partial"].includes(run.publication_finalized_status),
+  });
   let candidates = runId
     ? await query("SELECT * FROM crawler.content_candidates WHERE run_id=$1 ORDER BY position", [runId])
     : { rows: [] };
@@ -4694,7 +4700,7 @@ export async function processFinalizeV2(job) {
   const publicationAsOf = publicationContext.asOf;
   const publicationRevisionType = publicationContext.revisionType;
   const initialObservations = await recordInitialFullObservations({
-    withTransaction,
+    withTransaction: withFinalizeTransaction,
     channelId,
     runId,
     observedAt: publicationAsOf,
@@ -4743,7 +4749,7 @@ export async function processFinalizeV2(job) {
     sourceRevision,
     initialObservations.outcomes,
   )) {
-    const committed = await withTransaction(async (client) => {
+    const committed = await withFinalizeTransaction(async (client) => {
       const lockedSource = await commitSource(client);
       if (!lockedSource.accepted) return { sourceRejected: lockedSource.reason };
       return commitFinalizedProfile(client, {
@@ -4804,7 +4810,7 @@ export async function processFinalizeV2(job) {
     status,
     String(existingFinalizedRow?.run_id ?? "") === String(runId ?? ""),
   )) {
-    const synchronized = await withTransaction(async (client) => {
+    const synchronized = await withFinalizeTransaction(async (client) => {
       const lockedSource = await commitSource(client);
       if (!lockedSource.accepted) return { sourceRejected: lockedSource.reason };
       await synchronizeFinalizedRun(client, {
@@ -4879,7 +4885,7 @@ export async function processFinalizeV2(job) {
   };
   let rawObject = null;
   if (isSuccessfulPublicationFinalize(status)) {
-    const preflight = await withTransaction(commitSource);
+    const preflight = await withFinalizeTransaction(commitSource);
     if (!preflight.accepted) return rejectedFinalizeSourceResult(preflight.reason);
     rawObject = await saveJsonRaw({
       objectType: "youtube_final_profile_json",
@@ -4890,7 +4896,7 @@ export async function processFinalizeV2(job) {
       metadata: { channel_id: channelId, run_id: runId, status },
     });
   }
-  const committed = await withTransaction(async (client) => {
+  const committed = await withFinalizeTransaction(async (client) => {
     const lockedSource = await commitSource(client);
     if (!lockedSource.accepted) return { sourceRejected: lockedSource.reason };
     return commitFinalizedProfile(client, {

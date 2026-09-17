@@ -1,3 +1,4 @@
+import { delayFinalizeJob } from "./finalizeDeferral.js";
 import {MIGRATION_START_JOB,startControlledMigrationChannel,prepareControlledMigrationSnapshot,migrationBatchControlEnabled} from "./migrationBatchControl.js";
 import { Worker } from "bullmq";
 import { gateVideoApiJob, isVideoApiHandoff, runVideoApiResumable } from "./videoApiContinuation.js";
@@ -1349,6 +1350,7 @@ async function processJobInner(job, { resumeMode = "initial", prepared = null } 
       ? await execute()
       : await runWithProxyIdentity(proxyStart, execute);
   } catch (error) {
+    if (error?.code === "FINALIZE_DEFERRED") throw error;
     // This is a quiesced route-selection handoff, not a failed crawl.
     if (error?.code === "UPLOADS_COUNTRY_RECHECK" || isVideoApiHandoff(error) || isVideoExecutionRecoveryPending(error)) throw error;
     const failureDecision = retryableSystemFailureDecision(error)
@@ -1556,8 +1558,17 @@ async function processJob(job, token) {
     return startControlledMigrationChannel({query,withTransaction,batchId:job.data.batch_id,channelId:job.data.channel_id});
   }
   try {
-    return await processJobWithOwnership(job, token);
+    const result = await processJobWithOwnership(job, token);
+    if (job.queueName === queuesByRole.finalize) {
+      await query(`UPDATE crawler.finalize_recovery_requests SET defer_until=NULL,defer_job_id=NULL,
+        defer_count=0,first_deferred_at=NULL,defer_reason=NULL
+        WHERE channel_id=$1 AND defer_job_id=$2`, [job.data.channel_id,String(job.id)]);
+    }
+    return result;
   } catch (error) {
+    if (error?.code === "FINALIZE_DEFERRED") {
+      return delayFinalizeJob({ query, job, token, error });
+    }
     // Entry/settlement fences can fail outside processJobInner as well.
     if (isStaleExecutionFailure(error)) job.discard();
     throw error;

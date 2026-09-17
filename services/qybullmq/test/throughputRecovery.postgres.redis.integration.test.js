@@ -1,3 +1,4 @@
+import { persistFinalizeDeferral, delayFinalizeJob, FinalizeDeferredError } from '../src/finalizeDeferral.js';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFile } from 'node:fs/promises';
@@ -165,4 +166,44 @@ test('bounded recovery and durable source generations survive Redis failures, co
       await job.moveToCompleted({}, 'priority-test-token', false);
     } finally { await worker.close(true); }
   });
+  await t.test('deferral survives source triggers and Redis failure without acknowledging newer generations', async () => {
+    await queue.obliterate({ force:true });
+    await query("UPDATE crawler.finalize_recovery_requests SET handled_generation=requested_generation,lease_token=NULL,lease_until=NULL");
+    const job = await queue.add('finalize-channel',{channel_id:'a',run_id:'run-a'},{jobId:'deferred-a',attempts:3});
+    const error = new FinalizeDeferredError('a','run-a','channel_writer_busy');
+    await assert.rejects(delayFinalizeJob({query,job:{id:job.id,moveToDelayed:async()=>{throw new Error('redis unavailable');}},token:'lost',error}),/redis unavailable/);
+    const before = (await query("SELECT * FROM crawler.finalize_recovery_requests WHERE channel_id='a'")).rows[0];
+    assert.ok(new Date(before.defer_until)>new Date());
+    await query("UPDATE crawler.channels SET title='new while deferred',updated_at=now() WHERE channel_id='a'");
+    const after = (await query("SELECT * FROM crawler.finalize_recovery_requests WHERE channel_id='a'")).rows[0];
+    assert.equal(after.defer_until.toISOString(),before.defer_until.toISOString());
+    assert.ok(Number(after.requested_generation)>Number(before.requested_generation));
+    assert.equal(after.handled_generation,before.handled_generation);
+    const recovery = createFinalizeChangeRecovery({query,withTransaction,queue});
+    assert.equal((await recovery()).dispatched,0);
+    await query("UPDATE crawler.finalize_recovery_requests SET defer_until=now()-interval '1 second',next_check_at=now() WHERE channel_id='a'");
+    assert.equal((await recovery()).dispatched,0); // existing Job is still waiting across generations
+    assert.equal((await query("SELECT last_decision FROM crawler.finalize_recovery_requests WHERE channel_id='a'")).rows[0].last_decision,'waiting_deferred_job');
+    await job.remove(); // Redis loss is repaired by the durable request
+    await query("UPDATE crawler.finalize_recovery_requests SET next_check_at=now() WHERE channel_id='a'");
+    assert.equal((await recovery()).dispatched,1);
+    assert.equal((await query("SELECT handled_generation FROM crawler.finalize_recovery_requests WHERE channel_id='a'")).rows[0].handled_generation,before.handled_generation);
+    assert.equal(await persistFinalizeDeferral(query,{channelId:'a',runId:'obsolete',jobId:'old',reason:'busy'}),null);
+  });
+  await t.test('BullMQ token moves active Finalize to delayed without spending failed attempts', async () => {
+    await queue.obliterate({force:true});
+    await query("UPDATE crawler.finalize_recovery_requests SET defer_job_id=NULL WHERE channel_id='a'");
+    await queue.add('finalize-channel',{channel_id:'a',run_id:'run-a'},{jobId:'token-deferral',attempts:3});
+    const worker = new Worker(queue.name, async()=>{}, {prefix:queue.opts.prefix,
+      connection:{host:'127.0.0.1',port:redisPort,maxRetriesPerRequest:null},autorun:false});
+    try {
+      const job = await worker.getNextJob('deferral-token');
+      await assert.rejects(delayFinalizeJob({query,job,token:'deferral-token',error:new FinalizeDeferredError('a','run-a','channel_writer_busy')}),e=>e.name==='DelayedError');
+      const stored = await queue.getJob(job.id);
+      assert.equal(await stored.getState(),'delayed');
+      assert.equal(stored.attemptsMade,0);
+      assert.equal(stored.failedReason,undefined);
+    } finally { await worker.close(true); }
+  });
+
 });

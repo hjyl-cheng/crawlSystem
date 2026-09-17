@@ -1,3 +1,4 @@
+import { lockPublicationChannelMutation } from '../publicationChannelMutationLock.js';
 import { businessRunIntentHash } from '../businessRunBindingStore.js';
 import { incrementalPlanHash, incrementalRunId, INCREMENTAL_QUEUE, validateIncrementalPlan } from '../incrementalPlan.js';
 import { planFromTask, remoteChannelPlan, CHANNEL_PLAN_CAPABILITY } from './channelPlanContract.js';
@@ -26,6 +27,8 @@ export async function assertRemoteIncrementalBusinessFence(client, task, { admis
   const plan = planFromTask(task); const planHash = incrementalPlanHash(plan);
   const executionId = task.context?.execution_attempt_id;
   if (typeof executionId !== 'string' || !executionId) reject();
+  // Task lock may already be held; acquire before any Plan/Run/attempt row.
+  await lockPublicationChannelMutation(client, plan.channel_id);
   let apiReplay = false;
   if (apiReplayRequestId !== null) {
     if (admission || task.state !== 'received' || task.last_error !== 'VIDEO_API_PENDING'

@@ -1,3 +1,4 @@
+import { postponeSecondaryFinalize } from './finalizeDeferral.js';
 import { loadFinalizeRecoveryCandidates } from './finalizeRecoveryPolicy.js';
 import { dispatchFinalizeForRun } from './finalizeDispatch.js';
 
@@ -35,6 +36,7 @@ export function createFinalizeRecoveryScan({ query, withTransaction, queue, page
                 THEN now() ELSE crawler.finalize_recovery_requests.next_check_at END`, [row.channel_id]);
           continue;
         }
+        if (await postponeSecondaryFinalize(query,row.channel_id,row.run_id)) continue;
         await dispatchFinalizeForRun({ query,
           queue: { add: (name, data, options) => queue.add(name, data, { ...options, priority: 100 }) },
           channelId: row.channel_id, runId: row.run_id, reason: 'controller-bounded-finalize-recovery' });

@@ -1239,3 +1239,52 @@ test("the real Worker entry rejects a controlled Finalize Job after its source r
   await stopChild(workerProcess);
   assert.equal(workerProcess.exitCode, 0, workerOutput.output());
 });
+
+test('real Finalize Worker defers without failure and resumes the durable Job after restart', {
+  skip: !databaseUrl || !redisUrl, timeout:60000,
+}, async t => {
+  const { lockPublicationChannelMutation } = await import('../src/publicationChannelMutationLock.js');
+  assertDedicatedLocalTestDatabase(databaseUrl); assertDedicatedLocalRedis(redisUrl);
+  const setup = new Client({connectionString:databaseUrl});
+  const writer = new Client({connectionString:databaseUrl});
+  const connection = redisConnection(redisUrl);
+  const queue = new Queue(queuesByRole.finalize,{connection,prefix:bullmqPrefix});
+  const events = new QueueEvents(queuesByRole.finalize,{connection,prefix:bullmqPrefix});
+  let child;
+  await Promise.all([setup.connect(),writer.connect(),events.waitUntilReady()]);
+  t.after(async()=>{
+    await writer.query('ROLLBACK'); await stopChild(child);
+    await queue.obliterate({force:true});
+    await Promise.all([queue.close(),events.close(),setup.end(),writer.end()]);
+  });
+  await initializeScenario(setup);
+  await queue.obliterate({force:true});
+  const id='UCDeferredFinalizeWorker'; const run='deferred-finalize-run';
+  await setup.query("INSERT INTO crawler.channels(channel_id,channel_url,status) VALUES($1,$1,'active')",[id]);
+  await setup.query(`INSERT INTO crawler.channel_runs(run_id,channel_id,status,crawl_mode,detail_status,
+    publication_finalized_at,publication_finalized_status) VALUES($1,$2,'done','full','done',now(),'ready_auto')`,[run,id]);
+  await setup.query('UPDATE crawler.channels SET latest_run_id=$2 WHERE channel_id=$1',[id,run]);
+  await writer.query('BEGIN'); await lockPublicationChannelMutation(writer,id);
+  const job = await queue.add('finalize-channel',{channel_id:id,run_id:run,source_revision:'stale-after-delay'},
+    {jobId:'real-finalize-deferral',attempts:1,removeOnComplete:false,removeOnFail:false});
+  const start = async()=>{
+    child=spawn(process.execPath,['src/worker.js'],{cwd:new URL('..',import.meta.url),
+      env:unmanagedWorkerEnvironment(queuesByRole.finalize),stdio:['ignore','pipe','pipe']});
+    const output=captureChildOutput(child);
+    await output.waitFor(`worker started queue=${queuesByRole.finalize}`);
+    return output;
+  };
+  const output=await start(); await output.waitFor('finalize_deferred');
+  assert.equal(await job.getState(),'delayed');
+  assert.equal((await queue.getJob(job.id)).attemptsMade,0);
+  assert.equal((await setup.query("SELECT count(*)::int AS n FROM crawler.task_events WHERE job_id=$1 AND status='failed'",[job.id])).rows[0].n,0);
+  const pending=(await setup.query('SELECT * FROM crawler.finalize_recovery_requests WHERE channel_id=$1',[id])).rows[0];
+  assert.equal(pending.defer_job_id,job.id);
+  assert.ok(Number(pending.requested_generation)>Number(pending.handled_generation));
+  await stopChild(child); await writer.query('COMMIT');
+  await job.promote(); await start();
+  const result=await within(job.waitUntilFinished(events),'resumed Finalize');
+  assert.equal(result.skipped,true);
+  assert.equal(result.skip_reason,'finalize_source_revision_stale');
+  assert.equal((await setup.query('SELECT defer_job_id FROM crawler.finalize_recovery_requests WHERE channel_id=$1',[id])).rows[0].defer_job_id,null);
+});

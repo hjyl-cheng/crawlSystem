@@ -45,3 +45,15 @@ export async function lockPublicationRunMutation(clientValue, runIdValue) {
     [runId, PUBLICATION_CHANNEL_MUTATION_LOCK_SEED],
   );
 }
+
+export async function tryLockPublicationChannelMutation(clientValue, channelIdValue) {
+  const client = activeClient(clientValue);
+  const channelId = requiredText(channelIdValue, "channelId");
+  await assertTransaction(client);
+  const result = await client.query(
+    `/* publication-channel-mutation-lock:try-channel */
+     SELECT pg_try_advisory_xact_lock(hashtextextended($1,$2)) AS acquired`,
+    [channelId, PUBLICATION_CHANNEL_MUTATION_LOCK_SEED],
+  );
+  return result.rows[0]?.acquired === true;
+}

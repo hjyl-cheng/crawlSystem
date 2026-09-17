@@ -1,3 +1,4 @@
+import { lockPublicationChannelMutation } from "./publicationChannelMutationLock.js";
 import { isVideoApiHandoff } from "./videoApiContinuation.js";
 import { isVideoExecutionRecoveryPending } from "./videoExecutionRecovery.js";
 import { prepareDormantUploadsProbe, pendingUploadsDormancy, dormantUploadsScan } from "./youtubeUploadsCountry.js";
@@ -145,7 +146,10 @@ export class IncrementalChannelRunner {
       plan,
       runId,
       startedAt,
-      withTransaction: this.withTransaction,
+      withTransaction: action => this.withTransaction(async client => {
+        await lockPublicationChannelMutation(client, plan.channel_id);
+        return action(client);
+      }),
       query: this.query,
       getChannelSnapshot,
       agentBacklog: this.agentBacklog,

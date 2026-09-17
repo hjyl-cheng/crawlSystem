@@ -545,3 +545,33 @@ test("the first pending About observation does not invalidate its own Finalize d
   }));
   assert.equal(accepted.accepted, true);
 });
+
+test('secondary Finalize yields in both initial observations and commit source transactions', { skip: !databaseUrl }, async t => {
+  const { finalizeTransactions } = await import('../src/finalizeDeferral.js');
+  assertDedicatedLocalTestDatabase(databaseUrl);
+  const setup = new Client({connectionString:databaseUrl});
+  const executor = new Client({connectionString:databaseUrl});
+  const writer = new Client({connectionString:databaseUrl});
+  await Promise.all([setup.connect(),executor.connect(),writer.connect()]);
+  t.after(async()=>{
+    await writer.query('ROLLBACK');
+    await Promise.all([setup.end(),executor.end(),writer.end()]);
+  });
+  await initializeSchema(setup);
+  await seedFinalizeSource(setup);
+  const source = await readFinalizeSource(setup.query.bind(setup),{channelId,runId});
+  const guarded = finalizeTransactions(action=>transaction(executor,action), {channelId,runId,secondary:true});
+  await writer.query('BEGIN');
+  // Legacy writer deliberately does not take the new advisory lock.
+  await writer.query('SELECT 1 FROM crawler.channels WHERE channel_id=$1 FOR NO KEY UPDATE',[channelId]);
+  await assert.rejects(recordInitialFullObservations({withTransaction:guarded,channelId,runId,
+    observedAt:'2026-09-17T00:00:00Z'}),{code:'FINALIZE_DEFERRED'});
+  await assert.rejects(guarded(client=>lockFinalizeCommitSource(client,{channelId,runId,
+    expectedSourceRevision:source.sourceRevision,expectedDispatchRevision:source.dispatchRevision})),{code:'FINALIZE_DEFERRED'});
+  // Both rolled back, so FK key share succeeds without waiting for the Finalize worker.
+  await writer.query("SET LOCAL lock_timeout='300ms'");
+  await writer.query('SELECT 1 FROM crawler.channel_runs WHERE run_id=$1 FOR KEY SHARE',[runId]);
+  await writer.query('COMMIT');
+  assert.equal((await guarded(client=>lockFinalizeCommitSource(client,{channelId,runId,
+    expectedSourceRevision:source.sourceRevision,expectedDispatchRevision:source.dispatchRevision}))).accepted,true);
+});

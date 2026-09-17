@@ -1,3 +1,4 @@
+import { lockPublicationChannelMutation } from "./publicationChannelMutationLock.js";
 import { planIncrementalVideoSnapshot } from './incrementalVideoSnapshot.js';
 import { isLoginRequiredExclusion, loginRequiredDisposition, loginRequiredExclusionSql } from "./youtubeLoginRequired.js";
 import { checkpointItems, scannedVideoDispositionWork, prepareIncrementalVideoBatch, projectDueVideoDispositionEntries, uploadsPublishedFacts } from './incrementalVideoBatchPlan.js';
@@ -3519,6 +3520,7 @@ export async function executeIncrementalYoutubeJsVideo({
   const transaction = withTransaction;
   let executionFence = null;
   withTransaction = action => transaction(async client => {
+    await lockPublicationChannelMutation(client,plan.channel_id);
     if (executionFence) await lockIncrementalVideoExecution(client, executionFence);
     return action(client);
   });

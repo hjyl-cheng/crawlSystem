@@ -1,3 +1,4 @@
+import { postponeSecondaryFinalize } from "./finalizeDeferral.js";
 import { sampleMigrationThroughput } from "./migrationThroughput.js";
 import { closeMigrationSourcePool } from "./migrationSource.js";
 import { createControllerWorkLoops } from "./controllerWorkLoops.js";
@@ -863,6 +864,7 @@ async function reconcileFinalizeQueue(actions, pipelineCycleId) {
   let enqueued = 0;
   for (const row of rows) {
     if (representedRunIds.has(String(row.run_id))) continue;
+    if (await postponeSecondaryFinalize(query,row.channel_id,row.run_id)) continue;
     await dispatchFinalizeForRun({
       query,
       queue: queues[queuesByRole.finalize],

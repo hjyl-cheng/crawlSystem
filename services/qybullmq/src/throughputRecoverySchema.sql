@@ -23,6 +23,14 @@ CREATE TABLE IF NOT EXISTS crawler.finalize_recovery_requests (
   requested_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+-- Additive migration: source triggers must not reset the independent deferral.
+ALTER TABLE crawler.finalize_recovery_requests
+  ADD COLUMN IF NOT EXISTS defer_until TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS defer_run_id TEXT,
+  ADD COLUMN IF NOT EXISTS defer_job_id TEXT,
+  ADD COLUMN IF NOT EXISTS defer_count INTEGER NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS first_deferred_at TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS defer_reason TEXT;
 CREATE INDEX IF NOT EXISTS finalize_recovery_requests_due
   ON crawler.finalize_recovery_requests(next_check_at,channel_id)
   WHERE requested_generation>handled_generation;

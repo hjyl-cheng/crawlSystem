@@ -1,3 +1,4 @@
+import { postponeSecondaryFinalize } from './finalizeDeferral.js';
 import { readFinalizeSource } from "./finalizeSourceFence.js";
 import { finalizedProfileIsCurrent } from "./finalizePolicy.js";
 import { loadFinalizeRecoveryCandidates } from './finalizeRecoveryPolicy.js';
@@ -13,6 +14,9 @@ export function createFinalizeChangeRecovery({ query, withTransaction, queue, li
     const rows = (await withTransaction(client => client.query(`WITH due AS (
       SELECT channel_id FROM crawler.finalize_recovery_requests
       WHERE requested_generation>handled_generation AND next_check_at<=now()
+        AND (defer_until IS NULL OR defer_until<=now()
+          OR defer_run_id IS DISTINCT FROM (SELECT CASE WHEN c.status='dormant' THEN c.registry_promotion_run_id ELSE c.latest_run_id END
+            FROM crawler.channels c WHERE c.channel_id=finalize_recovery_requests.channel_id))
         AND (lease_until IS NULL OR lease_until<now())
       ORDER BY next_check_at,channel_id LIMIT $1 FOR UPDATE SKIP LOCKED
     ) UPDATE crawler.finalize_recovery_requests r SET lease_token=gen_random_uuid(),
@@ -21,6 +25,22 @@ export function createFinalizeChangeRecovery({ query, withTransaction, queue, li
     let dispatched = 0;
     for (const row of rows) {
       try {
+        // Follow deferred work across source generations. A missing Redis Job
+        // leaves the durable request pending and is redispatched below.
+        if (row.defer_job_id) {
+          const currentRun = (await query(`SELECT CASE WHEN status='dormant' THEN registry_promotion_run_id ELSE latest_run_id END AS run_id
+            FROM crawler.channels WHERE channel_id=$1`, [row.channel_id])).rows[0]?.run_id;
+          const deferredJob = await queue.getJob(row.defer_job_id);
+          const deferredState = deferredJob ? await deferredJob.getState() : null;
+          if (currentRun === row.defer_run_id && ['waiting','active','delayed','prioritized','waiting-children','paused'].includes(deferredState)) {
+            await query(`UPDATE crawler.finalize_recovery_requests SET lease_token=NULL,lease_until=NULL,
+              next_check_at=now()+interval '10 seconds',last_decision='waiting_deferred_job'
+              WHERE channel_id=$1 AND lease_token=$2`, [row.channel_id,row.lease_token]);
+            continue;
+          }
+          await query(`UPDATE crawler.finalize_recovery_requests SET defer_job_id=NULL
+            WHERE channel_id=$1 AND lease_token=$2 AND defer_job_id=$3`, [row.channel_id,row.lease_token,row.defer_job_id]);
+        }
         // Once this exact generation has been dispatched, follow the existing
         // Job instead of recomputing all source aggregates on every poll.
         if (row.dispatched_job_id && row.dispatched_generation === row.requested_generation) {
@@ -55,6 +75,11 @@ export function createFinalizeChangeRecovery({ query, withTransaction, queue, li
         let completed = false;
         let decision = "not_ready";
         if (candidates.length) {
+          if (await postponeSecondaryFinalize(query, row.channel_id, candidates[0].run_id)) {
+            await query(`UPDATE crawler.finalize_recovery_requests SET lease_token=NULL,lease_until=NULL
+              WHERE channel_id=$1 AND lease_token=$2`, [row.channel_id,row.lease_token]);
+            continue;
+          }
           // A new source generation is the reason to do this bounded read once.
           // Compare the actual source fingerprint, not just wall-clock times.
           const source = await readFinalizeSource(query, { channelId: row.channel_id, runId: candidates[0].run_id });
