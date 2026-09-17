@@ -22,7 +22,11 @@ export async function flushWholeChannel({ client, spool }) {
       data: { input_sha256: result.input_sha256, manifest, chunk } });
     try { receipt = await client.uploadWholeChannel(pending, bytes); }
     catch (error) {
-      if (error.code !== 'STALE_LEASE' || error.status !== 409) throw error;
+      // Both are authoritative rejections of this execution. A durable NATS
+      // business-fence receipt is replayed unchanged, so retrying these same
+      // bytes cannot make them writable again. Retain them outside recovery.
+      if (error.status !== 409
+          || !['STALE_LEASE', 'INCREMENTAL_BUSINESS_FENCE_STALE'].includes(error.code)) throw error;
       await journal.put('stale', { code: error.code });
       await spool.archiveStaleResult('whole-pending.json');
       await spool.archiveWholeJournal(pending.command_id);

@@ -108,16 +108,51 @@ test('lost final ACK replays exact fsynced bytes, and only a durable receipt rem
   assert.equal(await f.spool.read('whole-pending.json'), null);
 });
 
-test('expired generation archives evidence once and no longer prevents intake', async t => {
+for (const code of ['STALE_LEASE', 'INCREMENTAL_BUSINESS_FENCE_STALE']) test(`${code} archives evidence once and no longer prevents intake`, async t => {
   const f = await fixture(t); await crash(f, 'before_pointer');
   let calls = 0;
-  const client = { transport: 'nats', uploadWholeChannel: async () => { calls++; throw new RemoteProtocolError('STALE_LEASE', 409); } };
+  const client = { transport: 'nats', uploadWholeChannel: async () => { calls++; throw new RemoteProtocolError(code, 409); } };
   await recoverWholeChannel({ client, spool: f.spool });
   await recoverWholeChannel({ client, spool: f.spool });
   assert.equal(calls, 1);
   assert.equal(await f.spool.read('whole-pending.json'), null);
   assert.equal(await f.spool.writable(), true);
+  const archived = await new Journal(join(f.directory, 'whole-archive', f.command.command_id)).init();
+  assert.equal(archived.get('stale').code, code);
+  assert.ok(archived.get('result'), 'retain the rejected result for inspection');
 });
+
+test('a rejected business execution releases its old claim and reaches new intake', async t => {
+  const { RemoteChannelPlanExecutor } = await import('../src/remoteNodes/channelPlanExecutor.js');
+  const f = await fixture(t); await crash(f, 'before_pointer');
+  await f.spool.save('claim.json', Buffer.from(JSON.stringify({ claim_id: randomUUID(), lease: f.lease })));
+  let uploads = 0; let claims = 0;
+  const worker = new RemoteChannelPlanExecutor({ spool: f.spool,
+    client: { transport: 'nats',
+      uploadWholeChannel: async () => { uploads++; throw new RemoteProtocolError('INCREMENTAL_BUSINESS_FENCE_STALE', 409); },
+      pollCommands: async () => { throw new RemoteProtocolError('STALE_LEASE', 409); },
+      claim: async () => { claims++; return null; },
+    },
+    youtube: { openChannel: () => assert.fail('no replayed network'), fetchDetail: () => assert.fail('no replayed network') },
+    withSession: () => assert.fail('no replayed network'),
+  });
+  assert.equal(await worker.runOnce(), 'expired');
+  assert.equal(await f.spool.read('claim.json'), null);
+  assert.equal(await worker.runOnce(), 'idle');
+  assert.equal(uploads, 1);
+  assert.equal(claims, 1);
+});
+
+for (const [code, status] of [['WHOLE_CHANNEL_RESULT_CONFLICT', 409], ['INCREMENTAL_BUSINESS_FENCE_STALE', 503]]) {
+  test(`${code}/${status} does not discard unacknowledged results`, async t => {
+    const f = await fixture(t); await crash(f, 'before_pointer');
+    await assert.rejects(recoverWholeChannel({ spool: f.spool, client: { transport: 'nats',
+      uploadWholeChannel: async () => { throw new RemoteProtocolError(code, status); },
+    } }), { code, status });
+    assert.equal((await f.spool.read('whole-pending.json')).task_id, f.lease.task_id);
+    assert.ok((await new Journal(join(f.directory, 'whole', f.command.command_id)).init()).get('result'));
+  });
+}
 
 test('restart between API outbox fsync and item checkpoint preserves the original API request', async t => {
   const f = await fixture(t);
