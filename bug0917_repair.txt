@@ -1,6 +1,6 @@
 2026-09-17：二次收尾与增量落库死锁修复方案
 
-状态：第一阶段代码与相关回归已完成；部署进展见文末实施记录。
+状态：第一阶段代码修改、相关测试及生产部署已完成；验收与限制见第十节。
 范围：先实施“二次收尾优先退让”，后续单独收窄重复收尾的业务触发条件。
 
 一、已确认的问题与证据
@@ -190,7 +190,7 @@
 
 九、第一阶段实施记录（2026-09-17）
 
-已实现，部署验证进行中：
+已实现（最终部署结果见第十节）：
 - 新增 finalizeDeferral.js，二次收尾的全部写事务使用频道 try-lock；行锁等待上限
   100ms，55P03/40P01 在完整回滚后转为正常延期，覆盖 COMMIT 延迟外键检查。
 - 初次收尾仍由原逻辑执行。识别依据是当前 Run 的 publication_finalized_at 和
@@ -224,3 +224,53 @@
 发布范围：Controller、Finalize、20 个本地 Incremental Worker、3 个 Agent Worker、
 Remote Center。远程浏览器采集节点不负责本次数据库锁协议，无需替换其镜像。
 先执行兼容字段迁移，再灰度 Finalize，随后分角色更新；保留旧镜像及容器配置。
+
+十、部署完成与验收（2026-09-17 UTC）
+
+第一阶段已完成代码、测试和生产部署；共修改 18 个文件（含方案与测试）。
+源码提交：ec3aeb050aa1674749fab203c152e9eac6e1da55。
+生产镜像：
+- qy-allpachong/qybullmq:pachongsys-ec3aeb0
+  sha256:0eb79cc351f412887b307d98a0fd18040753f78737eeecb5d131f77211b78f75
+- qy-allpachong/remote-node-center:pachongsys-ec3aeb0
+  sha256:6796d91189345a79a25cd629fba9e1fa2ef0f18b3fab635e168d4919e539f63a
+
+1. 生产数据库已事务性添加全部 6 个延期字段，旧版本兼容。
+2. 已部署 26 个服务：Finalize 1、Controller 1、本地 Incremental 20、Agent 3、
+   Remote Center 1。所有旧进程退出码为 0，未强制终止；新服务重启次数均为 0，
+   Center 健康检查通过。核验 OCI 完整提交号及关键线上源文件 SHA256 一致。
+3. Center 的持久 Compose 镜像配置已更新；本地 Docker 服务的精确重建配置、
+   原配置及旧镜像标识保存在 runtime/bug0917-deploy/。旧容器保留，后缀
+   -before-bug0917，并设置 restart=no，防止意外重新接单。
+4. 新生产 Node 20 镜像内的四组隔离回归均退出 0、无重启：
+   - 收尾争用、来源校验和延期恢复：23 项通过；
+   - Remote Center 执行归属、增量协调及 API 恢复：24 项通过；
+   - 首次发布、增量发布、outbox：13 项通过；
+   - 真实 Worker 迁移收尾、延期与重启恢复：3 项通过。
+   合计 63 项相关集成测试通过。初次组合运行因测试库上轮残留固定记录出现唯一键
+   冲突；重建本次专用测试库后，Center 镜像 24 项全部通过。测试容器已清理。
+5. 全量测试限制：Auth 网关断言和 Worker BeginTask Renew 超时均已在未修改基线
+   682575f 上复现；工作目录另有 3 个未跟踪运维文件触发静态隔离检查。没有将这些
+   结果标记为全绿。相关日志已保存到 runtime/bug0917-deploy/tests/。
+
+线上观察：
+- 旧版本最后一次死锁日志时间为 09:38:37 UTC。
+- 09:39 至 09:50:53 UTC 的观察窗口未发现新的 deadlock detected / 40P01，
+  数据库累计 deadlocks 保持在 6408；切换前的 9 次增长已按日志时间单独核对。
+- 早期 Finalize 灰度完成 425 次收尾，10 次行锁争用正常转为延期。
+- 全角色切换后的 09:48:00～09:50:53 UTC：增量完成 140，收尾完成 150；
+  crawler_outbox 已发布 245、pending 1；publication.outbox 已交付 240。
+- 新 Center 上线后可观察到 channel_writer_busy 正常退让，Controller 提前避让
+  incremental_executing 生效。不同频道仍可并行处理。
+- 该窗口也有 15 条增量 failed 事件，不能将本次结果描述为全系统零失败。
+  日志主要包含路由预算耗尽、代理控制请求和 STALE_LEASE；另在 09:50:17 出现
+  一条 23505：content_candidates_run_id_position_key，增量 Run
+  incremental:4d5589d8-d023-5a41-8b2f-b45e93939ae5 的 position=3 重复。
+  此唯一键问题需要单独排查；本次没有修改候选位置分配规则，也没有据此宣称
+  已排除所有增量失败。观察窗口有限，不能保证未来不出现其他锁环。
+
+回滚：
+- 使用 before.json 中的原镜像/资源/环境与原 RestartPolicy，优雅停止对应新服务，
+  恢复旧容器名称及重启策略后启动；Center 同步恢复保存的持久配置。
+- 保留新增兼容字段，不删除 generation 或延期需求。回滚旧程序会失去本次退让保护。
+- 第二阶段“收窄普通二次收尾业务触发条件”仍按原计划独立实施，未混入本次上线。
