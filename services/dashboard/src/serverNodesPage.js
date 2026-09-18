@@ -1,3 +1,5 @@
+import { nodeWorkerTypes } from './nodeWorkerTypes.js';
+
 export function renderServerNodesPage() {
   return `
   <link rel="stylesheet" href="/assets/server-nodes.css">
@@ -28,6 +30,7 @@ export function renderServerNodesPage() {
         <label class="nodes-field wide">服务器名称 <input name="name" required maxlength="80" placeholder="例如：增量采集节点 01" autocomplete="off"></label>
         <label class="nodes-field">节点类型<select name="kind"><option value="execution">执行节点</option><option value="center">中心节点</option></select></label>
         <label class="nodes-field">SSH 用户名<input name="username" required maxlength="64" placeholder="ubuntu" autocomplete="off"></label>
+        <label class="nodes-field wide" id="node-worker-role-field">Worker 功能类型<select name="workerRole" id="node-worker-role" required aria-describedby="node-worker-role-help">${Object.entries(nodeWorkerTypes).filter(([, type]) => type.selectable).map(([role, type]) => `<option value="${role}">${type.label} · ${type.queue}</option>`).join('')}</select><small id="node-worker-role-help"></small></label>
         <label class="nodes-field">IP 地址 / 主机名<input name="host" required maxlength="253" placeholder="服务器 IP 或主机名" autocomplete="off" spellcheck="false"></label>
         <label class="nodes-field">SSH 端口<input name="port" type="number" required min="1" max="65535" value="22"></label>
         <div class="nodes-field wide" id="node-password-section"><label for="node-password">服务器密码 <span class="nodes-optional">首次初始化使用</span></label><input id="node-password" type="password" autocomplete="new-password" disabled placeholder="首次登录密码；已有系统密钥时可留空" aria-describedby="node-password-help"><small id="node-password-help">首次接入使用密码，后续通过专用 SSH 密钥连接。SSH 别名由系统自动配置，无需手工填写。</small></div>
@@ -73,12 +76,12 @@ export function renderServerNodesPage() {
   </dialog>
   <dialog id="node-worker-manager" class="nodes-dialog nodes-worker-manager" aria-labelledby="node-worker-manager-title">
     <div class="nodes-dialog-heading"><div><div class="nodes-eyebrow" id="worker-manager-name"></div><h2 id="node-worker-manager-title">管理 Worker</h2></div><button type="button" class="nodes-icon-button" data-close="node-worker-manager" aria-label="关闭">×</button></div>
-    <p class="nodes-dialog-intro">先选择 Worker 类型，再填写本次新增数量；下方设置并发额度，开始与暂停通过服务器卡片上的按钮控制。</p>
+    <p class="nodes-dialog-intro">按服务器登记的功能类型新增 Worker；下方设置并发额度，开始与暂停通过服务器卡片上的按钮控制。</p>
     <div id="worker-manager-summary" class="nodes-manager-summary" aria-live="polite"></div>
     <section class="nodes-manager-section" id="worker-deployment-section">
       <form id="worker-deployment-form">
         <div class="nodes-section-heading"><h3>新增 Worker</h3><span id="worker-installed-label"></span></div>
-        <label class="nodes-field">Worker 类型<select id="worker-deployment-role"><option value="incremental">增量 Worker</option><option value="query" disabled>Query Worker（远程部署暂未开放）</option></select></label>
+        <label class="nodes-field">Worker 类型<select id="worker-deployment-role" disabled></select></label>
         <div class="nodes-manager-control"><label class="nodes-field" for="worker-deployment-count">本次新增几个<input id="worker-deployment-count" type="number" min="1" step="1" required></label><button type="submit" class="nodes-button primary" id="worker-deployment-save">部署 Worker</button></div>
         <p id="worker-deployment-impact" class="nodes-manager-help" role="status"></p>
         <p id="worker-deployment-memory" class="nodes-manager-help"></p>

@@ -1,11 +1,10 @@
+import { nodeWorkerTypes, nodeWorkerRole, nodeWorkerType, workerTypeDescription } from '/assets/node-worker-types.js';
+
 const $ = id => document.getElementById(id);
 const escapeHtml = value => String(value ?? "").replace(/[&<>"']/g, char => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[char]));
-const roles = {
-  fullcrawl: ["迁移 / Full Crawl", "频道首次采集与批量迁移"],
-  incremental: ["增量采集", "跟进频道内容与视频数据更新"],
-  discover: ["Query / 发现", "搜索与发现候选频道"],
-  query_quality: ["Query 质量评估", "评估关键词及发现结果"],
-};
+const workerRoleOptions = current => Object.entries(nodeWorkerTypes)
+  .filter(([role, type]) => type.selectable || role === current)
+  .map(([role, type]) => `<option value="${escapeHtml(role)}">${escapeHtml(type.label)} · ${escapeHtml(type.queue)}</option>`).join('');
 const serverIcon = '<svg width="27" height="27" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="3" y="3" width="18" height="7" rx="2"/><rect x="3" y="14" width="18" height="7" rx="2"/><path d="M7 6.5h.01M7 17.5h.01M11 6.5h6M11 17.5h6" stroke-linecap="round"/></svg>';
 let registry = null;
 let editor = null;
@@ -63,7 +62,7 @@ function metrics(node) {
 let workerManager = null;
 const installedCount = node => executionStates.get(node.id)?.counts?.deployed ?? node.deployment?.appliedCount ?? 0;
 function executionPanel(node) {
-  if (!node.deployment && !node.localIntake) return '<p class="nodes-worker-gate">尚未部署 Worker</p>';
+  if (!node.deployment && !node.localIntake) return `<p class="nodes-worker-gate">${nodeWorkerType(node)?.deployable ? '尚未部署 Worker' : escapeHtml(workerTypeDescription(nodeWorkerType(node)))}</p>`;
   const state = executionStates.get(node.id), known = state?.counts;
   const counts = state?.counts, allowed = state?.configuredCount ?? state?.allowedCount ?? 0;
   const intakeEnabled=state?.intakeEnabled??state?.requested??false;
@@ -95,7 +94,8 @@ function openWorkerManager(id) {
   $('node-detail').close();
   workerManager={id,version:registry.version,expectedInstalledCount:installedCount(node),deploymentDirty:false,intakeDirty:false,lastOperation:null,lastState:null};
   $('worker-deployment-count').value=1;
-  $('worker-deployment-role').value='incremental';
+  $('worker-deployment-role').innerHTML=workerRoleOptions(nodeWorkerRole(node));
+  $('worker-deployment-role').value=nodeWorkerRole(node);
   $('worker-intake-count').value=executionStates.get(id)?.configuredCount??executionStates.get(id)?.allowedCount??0;
   $('worker-deployment-password').value='';
   $('worker-removal-password').value='';
@@ -111,6 +111,8 @@ function renderWorkerManager() {
   const state=executionStates.get(node.id),counts=state?.counts,known=!!counts&&!state.error;
   const d=node.deployment,removing=node.workerRemoval&&!['completed','rejected'].includes(node.workerRemoval.state),running=deploymentRunning(node),busy=!!$('node-worker-manager').dataset.saving||!!removing;
   const installed=installedCount(node);
+  const workerType=nodeWorkerType(node),deployable=workerType?.deployable===true;
+  const workerLabel=workerType?.label??'未知类型';
   $('worker-manager-name').textContent=node.name;
   $('worker-manager-summary').innerHTML=executionPanel(node);
   $('worker-deployment-section').hidden=!!node.localIntake;
@@ -123,17 +125,17 @@ function renderWorkerManager() {
   const additional=Number($('worker-deployment-count').value),target=workerManager.expectedInstalledCount+additional;
   const valid=Number.isSafeInteger(additional)&&additional>0&&Number.isSafeInteger(target);
   $('worker-deployment-count').removeAttribute('max');
-  $('worker-deployment-count').disabled=busy||running;
-  $('worker-deployment-role').disabled=busy||running;
-  $('worker-deployment-password-field').hidden=running;
-  $('worker-deployment-impact').textContent=running?`正在部署至 ${d.desiredCount} 个。已确认部署 ${installed} 个，进度会自动更新。`
-    :valid?`已有 ${workerManager.expectedInstalledCount} 个增量 Worker ＋ 本次新增 ${additional} 个 ＝ 新增后共 ${target} 个。现有 Worker 继续运行，允许接任务数量保持不变。`
+  $('worker-deployment-count').disabled=busy||running||!deployable;
+  $('worker-deployment-role').disabled=true;
+  $('worker-deployment-password-field').hidden=running||!deployable;
+  $('worker-deployment-impact').textContent=!deployable?workerTypeDescription(workerType):running?`正在部署至 ${d.desiredCount} 个。已确认部署 ${installed} 个，进度会自动更新。`
+    :valid?`已有 ${workerManager.expectedInstalledCount} 个${workerLabel} Worker ＋ 本次新增 ${additional} 个 ＝ 新增后共 ${target} 个。现有 Worker 继续运行，允许接任务数量保持不变。`
     :'请输入有效的新增数量（正整数）。';
   const memoryRequired=(target*256+1536)/1024,memoryTotal=observations.get(node.id)?.metrics?.memoryTotalGiB;
-  $('worker-deployment-memory').textContent=valid
+  $('worker-deployment-memory').textContent=valid&&deployable
     ?`内存参考：按每个 Worker 256 MiB ＋ 系统预留 1.5 GiB 估算，${target} 个约需 ${memoryRequired.toFixed(2)} GiB。${Number.isFinite(memoryTotal)?` 本机总内存约 ${Number(memoryTotal).toFixed(2)} GiB。`:''}仅供参考，不限制新增数量，请按实际运行情况自行安排。`:'';
-  $('worker-deployment-save').disabled=busy||running||!workerDeploymentAvailable||node.runtime?.state!=='ready'||!valid;
-  $('worker-deployment-save').textContent=running?'正在新增…':`新增 ${Number.isInteger(additional)&&additional>0?additional:'—'} 个增量 Worker`;
+  $('worker-deployment-save').disabled=busy||running||!workerDeploymentAvailable||node.runtime?.state!=='ready'||!valid||!deployable;
+  $('worker-deployment-save').textContent=!deployable?'远程部署暂未开放':running?'正在新增…':`新增 ${Number.isInteger(additional)&&additional>0?additional:'—'} 个${workerLabel} Worker`;
   if(!workerManager.intakeDirty&&known){$('worker-intake-count').value=state.configuredCount??state.allowedCount;workerManager.expectedAllowedCount=state.configuredCount??state.allowedCount;}
   $('worker-intake-count').max=installed;
   $('worker-intake-count').disabled=busy||!known||!state.executionAvailable||!installed;
@@ -239,7 +241,7 @@ function card(node) {
   const ready=isReady(node),environmentAction=ready&&node.kind==='execution';
   const runtimeButton=`<button type="button" class="nodes-button primary" data-runtime="${escapeHtml(node.id)}">${runtimeRunning(node)?'查看环境准备进度':'准备运行环境'}</button>`;
   return `<article class="nodes-card"><div class="nodes-card-main"><div class="nodes-card-top"><div class="nodes-card-icon">${serverIcon}</div><div class="nodes-card-title"><h3>${escapeHtml(node.name)}</h3><div class="nodes-address">${escapeHtml(node.host)} · ${node.port}</div></div><details class="nodes-card-menu"><summary aria-label="${escapeHtml(node.name)}的更多操作">⋯</summary><div><button type="button" data-detail="${escapeHtml(node.id)}">服务器详情</button><button type="button" data-edit="${escapeHtml(node.id)}">编辑服务器</button><button type="button" class="danger" data-delete="${escapeHtml(node.id)}">删除服务器</button></div></details></div>
-    <div class="nodes-card-tags"><span class="nodes-badge ${node.kind==='center'?'center':''}">${node.kind==='center'?'中心节点':'执行节点'}</span><span class="nodes-badge ${ready?'center':'pending'}">${nodeState(node)}</span>${observations.has(node.id)?`<span class="nodes-badge">${observations.get(node.id).online?'监控在线':'监控暂无新数据'}</span>`:''}</div>
+    <div class="nodes-card-tags"><span class="nodes-badge ${node.kind==='center'?'center':''}">${node.kind==='center'?'中心节点':'执行节点'}</span>${node.kind==='execution'?`<span class="nodes-badge" title="${escapeHtml(nodeWorkerType(node)?.queue)}">${escapeHtml(nodeWorkerType(node)?.label??'未知功能类型')}</span>`:''}<span class="nodes-badge ${ready?'center':'pending'}">${nodeState(node)}</span>${observations.has(node.id)?`<span class="nodes-badge">${observations.get(node.id).online?'监控在线':'监控暂无新数据'}</span>`:''}</div>
     ${metrics(node)}${executionPanel(node)}${deploymentNotice(node)}${!ready?`<p class="nodes-worker-gate">${escapeHtml(node.provisioning?.error||'完成初始化后，准备环境并部署 Worker。')}</p>`:node.runtime?.state!=='ready'?`<p class="nodes-worker-gate">${runtimeState(node)}</p>`:''}
     </div><div class="nodes-card-footer">${environmentAction?node.runtime?.state==='ready'?workerActions(node):runtimeButton:`<button type="button" class="nodes-button primary" data-initialize="${escapeHtml(node.id)}">${isRunning(node)?'查看初始化进度':node.provisioning?.state==='failed'?'重试初始化':'初始化服务器'}</button>`}</div></article>`;
 }
@@ -254,7 +256,7 @@ function render() {
   $("nodes-add").disabled = false;
   const search = $("nodes-search").value.trim().toLowerCase();
   const kind = $("nodes-kind").value;
-  const nodes = registry.nodes.filter(node => (kind === "all" || node.kind === kind) && `${node.name} ${node.host}`.toLowerCase().includes(search));
+  const nodes = registry.nodes.filter(node => (kind === "all" || node.kind === kind) && `${node.name} ${node.host} ${nodeWorkerType(node)?.label??''} ${nodeWorkerType(node)?.queue??''}`.toLowerCase().includes(search));
   $("nodes-count").textContent = registry.nodes.length ? `${nodes.length} / ${registry.nodes.length}` : "";
   if (!registry.nodes.length) {
     $("nodes-list").innerHTML = `<div class="nodes-empty"><div class="nodes-empty-icon">${serverIcon}</div><h3>添加你的第一台服务器</h3><p>填写服务器地址与密码，自动验证 SSH、配置密钥并接入监控，节点就绪后再添加 Worker。</p><button type="button" class="nodes-button primary" data-add>＋ 添加服务器</button><div class="nodes-steps"><b>01 添加服务器</b><span>02 初始化与监控</span><span>03 配置 Worker</span></div></div>`;
@@ -308,6 +310,9 @@ function openEditor(node = null) {
   for (const field of ["name", "host", "port", "username", "kind", "notes"]) {
     form.elements[field].value = node?.[field] ?? ({ port: 22, kind: "execution" }[field] ?? "");
   }
+  form.elements.workerRole.innerHTML=workerRoleOptions(nodeWorkerRole(node));
+  form.elements.workerRole.value=nodeWorkerRole(node);
+  updateEditorWorkerType();
   $("node-editor-title").textContent = node ? "编辑服务器" : "添加服务器";
   $("node-editor-intro").textContent = node ? "更新服务器的登记信息。已初始化节点的连接信息固定，备注和名称可以修改。" : "填写登录信息，点击添加并初始化，自动完成 SSH 与 Beszel 接入。";
   for (const key of ["host", "port", "username", "kind"]) form.elements[key].disabled = !!node && (node.kind === "center" || ![undefined, "not_started"].includes(node.provisioning?.state));
@@ -323,6 +328,17 @@ function openEditor(node = null) {
   form.elements.name.focus();
 }
 
+function updateEditorWorkerType() {
+  const form=$('node-form'),role=form.elements.workerRole.value;
+  $('node-worker-role-field').hidden=form.elements.kind.value!=='execution';
+  form.elements.workerRole.disabled=!!editor?.node?.deployment;
+  $('node-worker-role-help').textContent=editor?.node?.deployment
+    ? '已有 Worker 部署记录，功能类型固定。'
+    : workerTypeDescription(nodeWorkerTypes[role]);
+}
+$('node-worker-role').addEventListener('change',updateEditorWorkerType);
+$('node-form').elements.kind.addEventListener('change',updateEditorWorkerType);
+
 function openDetail(id) {
   if (!registry.nodes.some(item => item.id === id)) return;
   detailId = id;
@@ -335,6 +351,7 @@ function renderDetail() {
   if (!node) { $("node-detail").close(); return; }
   $("node-detail-title").textContent = node.name;
   const fields = [["节点类型", node.kind === "center" ? "中心节点" : "执行节点"], ["服务器地址", node.host], ["SSH 用户名", node.username], ["SSH 端口", node.port], ["SSH 配置引用", node.sshAlias || "初始化时自动配置"], ["配置更新时间", new Date(node.updatedAt).toLocaleString("zh-CN")]];
+  if(node.kind==='execution')fields.splice(1,0,['Worker 功能类型',nodeWorkerType(node)?.label??'未知'],['任务队列',nodeWorkerType(node)?.queue??'未知']);
   $("node-detail-content").innerHTML = `<div class="nodes-detail-section"><dl class="nodes-detail-meta">${fields.map(([key, value]) => `<div><dt>${key}</dt><dd>${escapeHtml(value)}</dd></div>`).join("")}</dl>${node.notes ? `<p class="nodes-detail-notes">${escapeHtml(node.notes)}</p>` : ""}</div>
     <section class="nodes-detail-section"><h3>资源监控 <span class="nodes-badge">${observations.get(node.id)?.online ? "在线" : "暂无新数据"}</span></h3>${metrics(node)}<p class="nodes-footnote">${observations.get(node.id)?.sampleAt ? `最近数据：${escapeHtml(new Date(observations.get(node.id).sampleAt).toLocaleString("zh-CN"))}` : "等待接入 Beszel 监控"}</p></section>
     <p class="nodes-footnote">初始化状态：${nodeState(node)}。${runtimeState(node)}。</p>`;
@@ -528,7 +545,7 @@ $("node-form").addEventListener("submit", async event => {
   event.preventDefault();
   if (!editor || $("node-editor").dataset.saving) return;
   // Only metadata is submitted. A password must never enter the registry payload.
-  const values = Object.fromEntries(["name", "host", "port", "username", "kind", "notes"].map(key => [key, event.currentTarget.elements[key].value]));
+  const values = Object.fromEntries(["name", "host", "port", "username", "kind", "notes", "workerRole"].map(key => [key, event.currentTarget.elements[key].value]));
   const initialize = event.submitter?.id === "node-add-initialize";
   let password = initialize ? $("node-password").value : "";
   if (initialize && (!onboardingAvailable || values.kind !== "execution")) { announce("自动初始化只适用于执行节点", true); return; }

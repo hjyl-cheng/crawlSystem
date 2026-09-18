@@ -1,9 +1,11 @@
 import {plannedWorkerSlots} from './workerSlots.js';
 import { randomUUID, createHash } from 'node:crypto';
+import { assertNodeWorkerDeployment } from '../nodeWorkerTypes.js';
 
 // A reviewable deployment recipe. Producing it performs no SSH, registration,
 // Docker or queue operations. Secrets are referenced as files, never embedded.
 export function buildNodeConnectionDeployment({ node, gatewayUrl, image, deploymentId = randomUUID() }) {
+  assertNodeWorkerDeployment(node, 'incremental');
   if (node.kind !== 'execution' || node.provisioning?.state !== 'ready' || node.runtime?.state !== 'ready') throw new Error('请先完成节点初始化和运行环境准备');
   if (!/^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(node.id) || !/^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(deploymentId)) throw new Error('节点或部署标识无效');
   const url = new URL(gatewayUrl);

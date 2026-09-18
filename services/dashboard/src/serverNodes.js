@@ -1,14 +1,12 @@
 import {deploymentSlots} from './nodeRuntime/workerSlots.js';
 import { randomUUID } from "node:crypto";
 import { isIP } from "node:net";
+import { nodeWorkerTypes, nodeWorkerRole, assertNodeWorkerDeployment } from './nodeWorkerTypes.js';
 
 const settingKey = "dashboard_server_nodes_v1";
-export const workerRoles = Object.freeze({
-  fullcrawl: "迁移 / Full Crawl",
-  incremental: "增量采集",
-  discover: "Query / 发现",
-  query_quality: "Query 质量评估",
-});
+export const workerRoles = Object.freeze(Object.fromEntries(
+  Object.entries(nodeWorkerTypes).map(([role, type]) => [role, type.label]),
+));
 export const initializationSteps = ["ssh", "key", "monitoring", "metrics"];
 export const runtimeSteps = ["ssh", "check", "docker", "layout", "verify"];
 export const workerDeploymentSteps = ['center','ssh','files','pull','start','verify','connection'];
@@ -35,7 +33,7 @@ function integer(value, label, min, max) {
 
 export function normalizeServerNode(input) {
   if (!input || typeof input !== "object" || Array.isArray(input)) throw invalid("请填写服务器信息");
-  const allowed = new Set(["name", "host", "port", "username", "sshAlias", "kind", "notes", "workers"]);
+  const allowed = new Set(["name", "host", "port", "username", "sshAlias", "kind", "notes", "workers", "workerRole"]);
   if (Object.keys(input).some(key => !allowed.has(key))) throw invalid("包含不支持的字段；请勿填写密码或私钥");
   const name = text(input.name, "服务器名称", 80, true);
   const host = text(input.host, "服务器地址", 253, true).toLowerCase();
@@ -56,14 +54,16 @@ export function normalizeServerNode(input) {
     seen.add(worker.role);
     return { role: worker.role, count: integer(worker.count, "Worker 数量", 1, Number.MAX_SAFE_INTEGER) };
   });
-  return { name, host, port, username, sshAlias, kind: input.kind, notes, workers };
+  const workerRole = nodeWorkerRole({ ...input, workers });
+  if (typeof workerRole !== 'string' || !Object.hasOwn(nodeWorkerTypes, workerRole)) throw invalid('请选择有效的 Worker 功能类型');
+  return { name, host, port, username, sshAlias, kind: input.kind, notes, workers, workerRole };
 }
 
 export function serverNodeDeletionEligibility(node) {
   if (node.kind === "center") return { allowed: false, reason: "中心节点不能从此页面删除。" };
   // V1 records created before provisioning was introduced contain only these
   // metadata fields. A saved worker plan or SSH alias is not a deployment.
-  const metadataFields = new Set(["id", "name", "host", "port", "username", "sshAlias", "kind", "notes", "workers", "createdAt", "updatedAt", "provisioning"]);
+  const metadataFields = new Set(["id", "name", "host", "port", "username", "sshAlias", "kind", "notes", "workers", "workerRole", "createdAt", "updatedAt", "provisioning"]);
   const knownMetadata = Object.keys(node).every(key => metadataFields.has(key));
   const failedBeforeChanges = node.provisioning?.state === "failed" && node.provisioning.remoteChanges === false
     && node.provisioning.steps?.ssh === "failed"
@@ -82,7 +82,7 @@ export function serverNodeDeletionEligibility(node) {
 // The metadata-only remove() path deliberately remains stricter.
 export function unusedNodeDeletionEligibility(node) {
   if (node.kind !== 'execution' || node.deployment) return { allowed: false, reason: '中心节点或已有 Worker 部署记录的节点不能直接删除，请先完成退役检查。' };
-  const allowedFields = new Set(['id','name','host','port','username','sshAlias','kind','notes','workers','createdAt','updatedAt','provisioning','runtime','deletion']);
+  const allowedFields = new Set(['id','name','host','port','username','sshAlias','kind','notes','workers','workerRole','createdAt','updatedAt','provisioning','runtime','deletion']);
   if (!Object.keys(node).every(key => allowedFields.has(key)) || !nodeReady(node)
     || (node.runtime && !['ready','failed'].includes(node.runtime.state))) {
     return { allowed: false, reason: '初始化或运行环境尚未完成，或节点状态无法确认，暂时不能删除。' };
@@ -111,11 +111,16 @@ export function createServerNodeStore(query) {
 
   async function save({ id = null, version, node }) {
     integer(version, "配置版本", 0, Number.MAX_SAFE_INTEGER);
-    const normalized = normalizeServerNode(node);
+    let normalized = normalizeServerNode(node);
     const previous = await load();
     if (previous.version !== version) throw invalid("配置已被更新，请刷新页面后重试；你的输入仍保留在表单中", 409);
     if (id && !previous.nodes.some(item => item.id === id)) throw invalid("服务器不存在", 404);
     const existing = previous.nodes.find(item => item.id === id);
+    // Old clients omit the new metadata field when editing an existing node.
+    if (existing && node.workerRole === undefined) normalized = { ...normalized, workerRole: nodeWorkerRole(existing) };
+    if (existing?.deployment && normalized.workerRole !== nodeWorkerRole(existing)) {
+      throw invalid('已有 Worker 部署记录，不能通过编辑服务器切换功能类型', 409);
+    }
     assertNotDeleting(existing);
     if (existing?.provisioning?.state === "running" || existing?.runtime?.state === "running" || existing?.deployment?.state === 'running') throw invalid("服务器正在初始化、准备环境或部署，请完成后再编辑", 409);
     if (existing && (existing.kind === "center" || ![undefined, "not_started"].includes(existing.provisioning?.state))
@@ -286,6 +291,7 @@ export function createServerNodeStore(query) {
     return mutateNode(id,(node,registry)=>{
       if(registry.version!==version)throw invalid('配置已更新，请刷新后重试',409);
       if(node.kind!=='execution' || !nodeReady(node) || node.runtime?.state!=='ready')throw invalid('请先完成节点初始化和运行环境准备',409);
+      assertNodeWorkerDeployment(node, 'incremental');
       const prior=node.deployment;
       if(prior?.state==='running' && (!Number.isFinite(Date.parse(prior.deadline)) || Date.parse(prior.deadline)>Date.now()))throw invalid('Worker 正在部署，请勿重复提交',409);
       if(prior && (prior.mode!=='incremental_collect' || prior.deploymentId!==plan.deploymentId || prior.image!==plan.image

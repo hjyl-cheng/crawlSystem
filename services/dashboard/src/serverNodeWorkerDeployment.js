@@ -4,6 +4,7 @@ import {createNodeSsh,validateBootstrapPassword} from './serverNodeSsh.js';
 import {buildNodeCollectDeployment} from './nodeRuntime/collectDeployment.js';
 import {deploymentControlFromEnv} from './nodeRuntime/deploymentControlClient.js';
 import {registryCredentialsFromEnv} from './nodeRuntime/registryCredentials.js';
+import {assertNodeWorkerDeployment,nodeWorkerTypes} from './nodeWorkerTypes.js';
 
 export function createNodeWorkerDeployment({store,ssh,center,image,gatewayUrl,natsUrl,waitMs=60000,pollMs=1000,registryCredentials=async()=>null}){
   const active=new Map();
@@ -51,9 +52,11 @@ export function createNodeWorkerDeployment({store,ssh,center,image,gatewayUrl,na
       if(active.has(id))throw Object.assign(new Error('该节点正在部署 Worker'),{statusCode:409});
       const registry=await store.load();const node=registry.nodes.find(row=>row.id===id);
       if(!node)throw Object.assign(new Error('服务器不存在'),{statusCode:404});
+      assertNodeWorkerDeployment(node);
       if(additionalCount!==undefined){
         if(count!==undefined || !Number.isSafeInteger(additionalCount)||additionalCount<1)throw invalid('新增数量必须为正整数，且不能同时填写总数');
-        if(role!=='incremental')throw invalid(role==='query'?'Query Worker 的远程部署暂未开放':'仅支持增量、Query 两种 Worker 类型');
+        if(typeof role!=='string'||!Object.hasOwn(nodeWorkerTypes,role))throw invalid('请选择有效的 Worker 功能类型');
+        assertNodeWorkerDeployment(node, role);
         const installed=node.deployment?.appliedCount??0;
         if(!Number.isInteger(expectedInstalledCount)||expectedInstalledCount!==installed)throw Object.assign(new Error('已部署数量发生变化，请刷新后重新确认新增数量'),{statusCode:409});
         count=installed+additionalCount;
