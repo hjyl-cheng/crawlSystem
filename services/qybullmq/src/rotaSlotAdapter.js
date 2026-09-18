@@ -137,6 +137,7 @@ class ControlCommandLane {
     this.tail = Promise.resolve();
     this.sequence = 0;
     this.closed = false;
+    this.pending = 0;
   }
 
   enqueue(kind, command, { allowClosing = false } = {}) {
@@ -144,7 +145,8 @@ class ControlCommandLane {
       return Promise.reject(new RotaSlotContractError(`control lane is closing; cannot enqueue ${kind}`));
     }
     const sequence = ++this.sequence;
-    const result = this.tail.then(() => command(sequence));
+    this.pending += 1;
+    const result = this.tail.then(() => command(sequence)).finally(() => { this.pending -= 1; });
     this.tail = result.catch(() => {});
     return result;
   }
@@ -217,6 +219,7 @@ export class RotaSlotAdapter {
     this.renewTimer = null;
     this.renewPromise = null;
     this.reclaimPromise = null;
+    this.lastRecoveryError = null;
     this.started = false;
     this.closing = false;
     this.activeJob = false;
@@ -539,9 +542,14 @@ export class RotaSlotAdapter {
     return Object.freeze({
       started: this.started,
       closing: this.closing,
+      control_state: this.controlState,
+      reclaim_in_flight: Boolean(this.reclaimPromise),
+      control_in_flight: this.lane.pending > 0 || Boolean(this.renewPromise),
+      last_recovery_error: this.lastRecoveryError,
       active_job: this.activeJob,
       active_task_id: this.activeTask?.task_id ?? null,
-      recovery_pending: Boolean(this.attemptFinalization || this.pendingCompletion),
+      recovery_pending: Boolean(this.attemptFinalization || this.pendingCompletion
+        || this.finalizationRecoveryPromise || this.completionRecoveryPromise),
       assignment: this.assignment ? {
         ready: this.slotReady,
         control_state: this.controlState,
@@ -986,12 +994,22 @@ export class RotaSlotAdapter {
 
   #reclaimAssignment(frozen) {
     if (this.reclaimPromise) return this.reclaimPromise;
-    const reclaim = this.#reclaimGoneAssignment(frozen);
+    const reclaim = this.#reclaimGoneAssignment(frozen).catch(error => {
+      this.#recordRecoveryError(error);
+      throw error;
+    });
     const shared = reclaim.finally(() => {
       if (this.reclaimPromise === shared) this.reclaimPromise = null;
     });
     this.reclaimPromise = shared;
     return shared;
+  }
+
+  #recordRecoveryError(error) {
+    // Keep only bounded diagnostic identifiers, never upstream messages or payloads.
+    const code = /^[A-Z][A-Z0-9_]{0,79}$/.test(error?.code ?? '') ? error.code
+      : ['RotaSlotContractError', 'ProxyControlRequestError'].includes(error?.name) ? error.name : 'Error';
+    this.lastRecoveryError = Object.freeze({stage:'reclaim',code,at:new Date().toISOString()});
   }
 
   async #reclaimGoneAssignment(frozen) {
@@ -1025,6 +1043,7 @@ export class RotaSlotAdapter {
     this.controlState = "RECLAIMING";
     this.leaseSafeUntil = 0;
 
+    let retryDelayMs = 1000;
     while (!this.closing) {
       const requestStarted = this.monotonicNow();
       let claimed;
@@ -1039,10 +1058,13 @@ export class RotaSlotAdapter {
           identity_policy_version: this.policy.version,
         }));
       } catch (error) {
+        this.#recordRecoveryError(error);
         if (error?.retryable !== true) throw error;
-        await this.sleepImpl(1000);
+        await this.sleepImpl(retryDelayMs);
+        retryDelayMs = Math.min(30000, retryDelayMs * 2);
         continue;
       }
+      retryDelayMs = 1000;
       if (!claimed?.ready) {
         await this.sleepImpl(Math.max(100, Number(claimed?.retry_after_ms) || 1000));
         continue;
@@ -1067,7 +1089,9 @@ export class RotaSlotAdapter {
           if (this.assignment?.slot_name === frozen.slot_name
               && this.assignment?.lease_id === frozen.lease_id) {
             this.#fenceSlot(isLeaseGone(error) ? "LEASE_GONE" : "LEASE_CONFLICT", error);
-            await this.#reclaimAssignment(frozen);
+            // A terminal reclaim failure is observable even without an assignment.
+            // The idle supervisor can then recycle it; do not leak a background rejection.
+            await this.#reclaimAssignment(frozen).catch(() => {});
           }
           return;
         }

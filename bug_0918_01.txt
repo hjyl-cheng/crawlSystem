@@ -1,0 +1,71 @@
+问题：增量 Worker 在租约重新申请退出后永久未就绪
+日期：2026-09-18
+
+一、现场与已确认原因
+更新节点01的 incremental-22、incremental-28、incremental-41 心跳正常、允许接单，
+但采集线路未就绪。在线中心进程两次内存检查确认：
+controlState=RECLAIMING、assignment=null、renewTimer=null；
+renewPromise/reclaimPromise 均不存在，控制命令队列已完成；
+无活动任务、无任务收尾、无待恢复结果，Redis 和中心管理权正常。
+
+旧租约失效后，Adapter 清空 assignment 并进入 RECLAIMING。
+重申请流程退出后没有续租定时器或重申请继续运行，却仍保留 RECLAIMING。
+status() 只在 assignment 内提供 control_state，空 assignment 隐藏了恢复状态。
+中心30秒兜底只匹配 assignment.control_state 的 RENEW_FAILED/LEASE_GONE/LEASE_CONFLICT，
+因此漏掉这种空闲且恢复已退出的 RECLAIMING。使用真实 supervisor.tick() 已复现。
+首次重申请退出的具体错误码没有现场证据，不将其推测为某个确定的网络/认证错误。
+
+二、修复约束
+不增加 control_state 枚举，不修改 Rota 服务端协议或数据库状态。
+保留正在采集、任务收尾、正常重申请以及等待可用代理的 Worker。
+不得仅因超时就打断尚未完成的请求；不得删除 spool、任务结果或旧执行证据。
+
+三、实施方案
+1. Adapter 顶层独立暴露 control_state、reclaim_in_flight、control_in_flight，
+   即使 assignment=null 也保留恢复判断依据。
+2. 记录最后恢复错误的时间、阶段、错误码/类型；不输出错误正文、凭据或服务响应。
+   可重试的 Claim 错误有界退避重试；终止的重申请保留 RECLAIMING 和错误摘要，
+   清理 in-flight 标记，并显式处理后台恢复 Promise 的拒绝。
+3. 中心兜底读取顶层状态；对于无 assignment 且无正在执行重申请的 RECLAIMING，
+   持续未就绪超过30秒后，使用现有 closeEntry/startEntry 生命周期重建管理实例。
+   同时必须满足无活动业务/网络任务、无收尾/恢复、无控制请求，且仍在线并请求接单。
+4. 先补回归测试观察失败，再修复；验证正常恢复、退避等待、活动任务、收尾、
+   控制请求和无代理等待均不会被误重建。覆盖真实 Adapter 状态进入中心兜底的路径。
+5. 验证通过后，核对现场安全条件，恢复22、28、41并验证重新获取租约和完成任务；
+   生产操作与持久部署方式、验证结果在本文末尾记录。
+
+四、证据
+runtime/node01-unready-20260918/internal-state-confirmed.jsonl
+runtime/node01-unready-20260918/reproduce-watchdog.mjs
+runtime/node01-unready-20260918/report.md
+
+五、实施与验证结果
+已完成代码修复和测试：
+- Adapter 独立暴露控制状态/重申请标记/控制请求标记，控制命令队列跟踪待完成请求。
+- 保存不含错误正文的恢复错误摘要；Claim 重试采用1秒起、30秒上限的指数退避。
+- 后台重申请失败显式处理拒绝，中心在无任务、无收尾、无控制请求时回收失活恢复。
+- 专项45项通过；其中失败的真实 Adapter 已通过真实 supervisor.tick()/closeEntry() 验证。
+- 广泛回归共2021项：1775项通过、246项需外部fixture而跳过。
+  首轮精简中心镜像缺git/Python及历史runtime诊断脚本扫描导致8项失败；
+  用具备依赖的隔离环境和受版本管理runtime内容补跑7项、主机补跑构建测试1项，全部通过。
+- 修复镜像：qy-allpachong/remote-node-center:bug0918-01-bf933f05e0e3。
+- 中心已正常收尾升级，旧容器退出码0，无强杀；未重启远端采集容器。
+- 新中心2026-09-18 11:17:21（北京时间）启动，健康检查通过，异常重启0次。
+- 部署后两处源码SHA256与验证过的工作区文件一致；环境、命令、挂载、资源限制与网络保持。
+- 当前部署Compose及compose.env默认中心镜像已更新，旧容器与私有配置备份留作回滚。
+- 11:19:51现场：更新节点01为47/47就绪、未就绪0；节点02为15/15就绪、未就绪0。
+- 11:21:15复核：节点01仍47/47就绪、未就绪0，节点02仍15/15就绪、未就绪0。
+- 从11:18起按Job去重、Run=done且计划要求域全部complete统计：
+  incremental-22完整完成6个，incremental-28完整完成2个，incremental-41完整完成5个。
+  三个目标Worker均已恢复实际采集产出。
+- 没有新增control_state枚举，没有修改Rota服务端或数据库Schema。
+- 此次只发布远程中心（包含该中心使用的Adapter），本地采集Worker镜像未更换。
+- 源码、回归测试和问题记录纳入本次版本更新。
+- 部署和验证证据：runtime/bug0918-01/，包括失败回归、通过回归、镜像构建、正常退出、
+  配置核对和上线后的Worker/成功任务快照。
+
+六、版本更新原因
+租约重申请退出后，assignment=null 隐藏 RECLAIMING，导致中心兜底漏判，
+在线 Worker 永久未就绪。本次独立暴露恢复状态，在无任务、无收尾、无控制请求且
+重申请已退出时安全重建管理实例，使 Worker 自动恢复接单；不新增状态枚举。
+提交包含两处生产源码、对应回归测试及本文，不包含私有运行配置和诊断产物。

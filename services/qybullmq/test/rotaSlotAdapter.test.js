@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { RemoteCenterExecutionSupervisor, supervisionLockKey } from "../src/remoteNodes/centerExecutionSupervisor.js";
 import { resolveWorkerIdentityPolicy } from "../src/identityPolicyCatalog.js";
 import {
   RotaSlotAdapter,
@@ -1555,4 +1556,85 @@ test('failed quiescence blocks the next channel and renew recovers the original 
   await adapter.executeJob(job({id:'next'}),execute);
   assert.equal(calls.filter(c=>c.command==='begin').length,2);
  }finally{allowCleanup=true;await adapter.close();}
+});
+
+for(const failure of ['claim_rejected','invalid_assignment']){
+  test(`a failed periodic reclaim preserves diagnostics without an unhandled rejection (${failure})`,async()=>{
+    const timers=[];let count=0;
+    const {adapter,calls}=createFixture({clientOverrides:{
+      async claim(){
+        if(++count===1)return assignment(1);
+        if(failure==='invalid_assignment')return assignment(2,{worker_id:'foreign-worker'});
+        throw Object.assign(new Error('sensitive upstream message'),{code:'CLAIM_REJECTED',status:409,retryable:false});
+      },
+      async renew(){throw Object.assign(new Error('gone'),{code:'LEASE_GONE'});},
+    },adapterOverrides:{setTimeoutImpl:callback=>{timers.push(callback);return {unref(){}};},clearTimeoutImpl(){}}});
+    await adapter.start();timers.shift()();
+    await new Promise(resolve=>setImmediate(resolve));
+    await new Promise(resolve=>setImmediate(resolve));
+    const state=adapter.status();
+    assert.equal(state.assignment,null);
+    assert.equal(state.control_state,'RECLAIMING');
+    assert.equal(state.reclaim_in_flight,false);
+    assert.equal(state.control_in_flight,false);
+    assert.equal(state.last_recovery_error.stage,'reclaim');
+    assert.equal(state.last_recovery_error.code,failure==='claim_rejected'?'CLAIM_REJECTED':'RotaSlotContractError');
+    assert.ok(Number.isFinite(Date.parse(state.last_recovery_error.at)));
+    assert.ok(!JSON.stringify(state).includes('sensitive upstream'));
+    assert.equal(timers.length,0);
+    // Feed the actual failed Adapter into the supervisor, rather than inventing its status.
+    const row={node_id:'11111111-1111-4111-8111-111111111111',slot:'incremental-1',
+      activation_requested:true,alive:true,accepting:true,enabled:true,rota_worker_id:adapter.workerId};
+    const query=async sql=>({rows:sql.includes('SELECT w.*,s.rota_worker_id')?[row]:sql.includes('jsonb_to_recordset')?
+      [{pid:10,lock_key:supervisionLockKey(row)}]:[],rowCount:0});
+    const supervisor=new RemoteCenterExecutionSupervisor({store:{pool:{query},transaction:fn=>fn({query})},
+      channelStore:{},activation:{drain:async()=>{}},guardPool:{},connection:{},prefix:'isolated',allowedNodeIds:[row.node_id]});
+    const entry={row,owned:true,queueReady:true,backendPid:10,processing:false,closing:false,
+      redis:{status:'ready'},notReadySince:Date.now()-60000,rota:adapter,
+      worker:{opts:{name:'fixture'},toKey:k=>k,pause:async()=>{},close:async()=>{},client:Promise.resolve({set:async()=>{}})}};
+    supervisor.entries.set(`${row.node_id}/${row.slot}`,entry);
+    await supervisor.tick();
+    assert.equal(entry.closing,true,'the supervisor must reclaim this exact failed Adapter');
+    await entry.closed;
+    assert.equal(supervisor.entries.size,0);
+    assert.equal(adapter.status().closing,true);
+    assert.equal(calls.filter(c=>c.command==='release').length,0,'no expired lease is released again');
+  });
+}
+
+test('a retryable reclaim stays in flight through backoff and resumes renewal on success',async()=>{
+  const timers=[];let count=0,releaseDelay;const delays=[];
+  const {adapter}=createFixture({clientOverrides:{
+    async claim(){
+      if(++count===1)return assignment(1);
+      if(count<4)throw Object.assign(new Error('try later'),{code:'TEMPORARY',retryable:true});
+      return assignment(2,{lease_id:'lease-02'});
+    },
+    async renew(){throw Object.assign(new Error('gone'),{code:'LEASE_GONE'});},
+  },adapterOverrides:{
+    setTimeoutImpl:callback=>{timers.push(callback);return {unref(){}};},clearTimeoutImpl(){},
+    sleepImpl:ms=>{delays.push(ms);return new Promise(resolve=>{releaseDelay=resolve;});},
+  }});
+  await adapter.start();timers.shift()();await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(adapter.status().control_state,'RECLAIMING');
+  assert.equal(adapter.status().reclaim_in_flight,true);
+  assert.equal(adapter.status().assignment,null);
+  releaseDelay();await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(adapter.status().reclaim_in_flight,true);
+  assert.deepEqual(delays,[1000,2000]);
+  releaseDelay();await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(adapter.status().assignment.lease_id,'lease-02');
+  assert.equal(adapter.status().reclaim_in_flight,false);
+  assert.equal(timers.length,1);
+  await adapter.close();
+});
+
+test('status tracks an outstanding control command until it settles',async()=>{
+  let finish;
+  const {adapter}=createFixture();
+  const pending=adapter.lane.enqueue('probe',()=>new Promise(resolve=>{finish=resolve;}));
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(adapter.status().control_in_flight,true);
+  finish();await pending;
+  assert.equal(adapter.status().control_in_flight,false);
 });

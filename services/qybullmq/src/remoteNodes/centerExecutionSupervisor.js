@@ -229,13 +229,17 @@ export class RemoteCenterExecutionSupervisor {
       // idle, quiesced owner; never recycle an active/finalizing attempt or a
       // healthy owner merely waiting for reserve capacity.
       const route=entry.rota?.status();
+      const controlState=route?.control_state??route?.assignment?.control_state;
+      const abandonedReclaim=controlState==='RECLAIMING' && !route?.assignment
+        && route?.reclaim_in_flight===false;
       if(!entry.closing && !entry.blocked && entry.queueReady && !entry.processing
+        && route?.started && !route.closing && !route.reclaim_in_flight && !route.control_in_flight
         && !route?.active_job && !route?.active_task_id && !route?.recovery_pending
         && row.activation_requested && row.alive && row.accepting
         && entry.notReadySince && Date.now()-entry.notReadySince>=30000
-        && ['RENEW_FAILED','LEASE_GONE','LEASE_CONFLICT'].includes(route?.assignment?.control_state)){
+        && (abandonedReclaim || ['RENEW_FAILED','LEASE_GONE','LEASE_CONFLICT'].includes(controlState))){
         this.report({event:'remote_center_idle_route_recovering',node_id:row.node_id,slot:row.slot,
-          reason:route.assignment.control_state});
+          reason:controlState,last_recovery_error:route.last_recovery_error??null});
         void this.closeEntry(entry).catch(()=>{});continue;
       }
       if(entry.blocked){
