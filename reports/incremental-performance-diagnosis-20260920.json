@@ -1,0 +1,777 @@
+{
+  "generated_at": "2026-09-20T09:03:46.145349+00:00",
+  "read_only": true,
+  "window": {
+    "db_start": "2026-09-20T08:57:19.526Z",
+    "db_end": "2026-09-20T08:59:20.361Z",
+    "node_final": "2026-09-20T09:02:36Z"
+  },
+  "finding": "Shared central database IO/transaction waits and active swapping on the 15-worker node are the strongest observed constraints; central CPU quota is not saturated.",
+  "worker_distribution": {
+    "samples": 7,
+    "central_dominates_samples": 6,
+    "collecting_avg": 25,
+    "processing_avg": 37,
+    "preparing_avg": 29.285714285714285
+  },
+  "matched_stage_durations": {
+    "samples": 515,
+    "before_remote_task_avg_seconds": 3.5340466019417462,
+    "prepare_avg_seconds": 9.3238,
+    "collect_avg_seconds": 23.081246601941736,
+    "apply_avg_seconds": 8.501990291262132,
+    "after_apply_avg_seconds": 9.71936699029127,
+    "total_avg_seconds": 54.1604504854369,
+    "total_p50_seconds": 47.952,
+    "total_p95_seconds": 94.431,
+    "at": "2026-09-20T09:00:30.031Z"
+  },
+  "remote_stage_durations": {
+    "at": "2026-09-20T08:59:26.278Z",
+    "durations": [
+      {
+        "samples": 534,
+        "prepare_avg": 9.340400417603002,
+        "prepare_p95": 14.14713145,
+        "collect_avg": 22.657003835206,
+        "collect_p95": 56.89884934999998,
+        "apply_avg": 8.313325825842696,
+        "apply_p95": 14.7623811,
+        "total_avg": 40.31073007865167
+      }
+    ],
+    "events": [
+      {
+        "status": "completed",
+        "events": 606,
+        "duration_p50_ms": 47450.5,
+        "duration_p95_ms": 97368.5
+      },
+      {
+        "status": "failed",
+        "events": 28,
+        "duration_p50_ms": null,
+        "duration_p95_ms": null
+      },
+      {
+        "status": "started",
+        "events": 640,
+        "duration_p50_ms": null,
+        "duration_p95_ms": null
+      }
+    ],
+    "limitations": "Durations cover generation-1 applied remote tasks created in last 10 minutes; exclude queue wait, pre-task preparation and post-apply cleanup; unfinished/failed work excluded."
+  },
+  "db_activity_samples": [
+    {
+      "state": "active",
+      "wait_type": "CPU/runnable",
+      "event": "",
+      "samples": 24
+    },
+    {
+      "state": "active",
+      "wait_type": "Lock",
+      "event": "transactionid",
+      "samples": 23
+    },
+    {
+      "state": "idle in transaction",
+      "wait_type": "Client",
+      "event": "ClientRead",
+      "samples": 107
+    },
+    {
+      "state": "active",
+      "wait_type": "IO",
+      "event": "DataFileRead",
+      "samples": 64
+    },
+    {
+      "state": "active",
+      "wait_type": "IO",
+      "event": "WALSync",
+      "samples": 3
+    },
+    {
+      "state": "idle in transaction",
+      "wait_type": "CPU/runnable",
+      "event": "",
+      "samples": 4
+    },
+    {
+      "state": "active",
+      "wait_type": "Lock",
+      "event": "tuple",
+      "samples": 2
+    },
+    {
+      "state": "active",
+      "wait_type": "Client",
+      "event": "ClientRead",
+      "samples": 3
+    },
+    {
+      "state": "idle in transaction",
+      "wait_type": "LWLock",
+      "event": "WALWrite",
+      "samples": 1
+    },
+    {
+      "state": "idle in transaction (aborted)",
+      "wait_type": "Client",
+      "event": "ClientRead",
+      "samples": 1
+    }
+  ],
+  "query_samples": [
+    {
+      "shape": "SELECT *,lease_until>clock_timestamp() AS live, coordinator_until>clock_timestamp() AS coordinated FROM remote_ingestion.tasks WHERE task_id=$# FOR UPDATE",
+      "samples": 24,
+      "max_observed_seconds": 2.99625,
+      "blocked_samples": 21
+    },
+    {
+      "shape": "WITH claimable AS ( SELECT event_id FROM crawler.crawler_outbox WHERE (status='?' AND next_attempt_at<=now()) OR (status='?' AND lease_expires_at<=now()) ORDER BY created_at,event_id FOR UPDATE SKIP LOCKED LIMIT $# ) UPDATE crawler.crawler_outbox outbox SET status='?',attempts=outbox.attempts+#, lease_owner=$#,lease_expires_at=now()+($#::int*interval '?'), updated_at=now() FROM claimable WHERE outbox.event_id=claimable.event_id RETURNING outbox.*",
+      "samples": 13,
+      "max_observed_seconds": 17.341437,
+      "blocked_samples": 0
+    },
+    {
+      "shape": "/* publication-channel-mutation-lock:transaction-guard */ SAVEPOINT publication_channel_mutation_lock_guard",
+      "samples": 12,
+      "max_observed_seconds": 0.008074,
+      "blocked_samples": 0
+    },
+    {
+      "shape": "BEGIN",
+      "samples": 11,
+      "max_observed_seconds": 0.002401,
+      "blocked_samples": 0
+    },
+    {
+      "shape": "/* finalize-recovery:candidates */ WITH recovery_channels AS MATERIALIZED (SELECT * FROM crawler.channels WHERE channel_id=ANY($#::text[])) SELECT channel.channel_id,run.run_id, greatest( channel.updated_at, COALESCE(agent.updated_at,'?'::timestamptz), COALESCE(candidate_revision.updated_at,'?'::timestamptz), COALESCE(content_revision.updated_at,'?'::timestamptz) ) AS source_updated_at FROM recovery_channels channel JOIN crawler.channel_runs run ON run.run_id=CASE WHEN channel.status='?' THEN channel.registry_promotion_run_id ELSE channel.latest_run_id END LEFT JOIN crawler.agent_profiles agent ON agent.channel_id=channel.channel_id AND agent",
+      "samples": 9,
+      "max_observed_seconds": 1.536449,
+      "blocked_samples": 0
+    },
+    {
+      "shape": "SELECT # FROM pg_locks WHERE locktype='?' AND pid=$# AND granted AND classid=#::oid AND objid=(hashtext($#)::bigint & #)::oid AND objsubid=#",
+      "samples": 8,
+      "max_observed_seconds": 0.010425,
+      "blocked_samples": 0
+    },
+    {
+      "shape": "RELEASE SAVEPOINT publication_channel_mutation_lock_guard",
+      "samples": 8,
+      "max_observed_seconds": 0.002209,
+      "blocked_samples": 0
+    },
+    {
+      "shape": "UPDATE crawler.channel_runs run SET status='?',detail_status='?',finished_at=COALESCE(run.finished_at,now()),updated_at=now() FROM crawler.channels channel,crawler.finalized_profiles finalized WHERE channel.latest_run_id=run.run_id AND channel.status=ANY($#::text[]) AND finalized.channel_id=channel.channel_id AND finalized.run_id=run.run_id AND finalized.status=ANY($#::text[]) AND ($#::text IS NULL OR run.result_json->>'?'=$#::text) AND (run.status<>'?' OR run.detail_status<>'?' OR run.finished_at IS NULL) RETURNING run.run_id,run.channel_id",
+      "samples": 8,
+      "max_observed_seconds": 79.063521,
+      "blocked_samples": 0
+    },
+    {
+      "shape": "SELECT count(*)::int AS count FROM crawler.migration_control_items i WHERE i.batch_id=$# AND i.candidate_id IS NOT NULL AND EXISTS(SELECT # FROM crawler.channel_runs r WHERE r.candidate_id=i.candidate_id AND r.channel_id=i.channel_id AND r.detail_status='?')",
+      "samples": 7,
+      "max_observed_seconds": 24.935234,
+      "blocked_samples": 0
+    },
+    {
+      "shape": "SELECT count(*) FILTER(WHERE state='?')::int AS pending,count(*) FILTER(WHERE state='?')::int AS started, count(*) FILTER(WHERE state='?')::int AS terminal,count(*) FILTER(WHERE outcome='?')::int AS failed FROM crawler.migration_control_items WHERE batch_id=$#",
+      "samples": 6,
+      "max_observed_seconds": 1.70163,
+      "blocked_samples": 0
+    },
+    {
+      "shape": "WITH candidate_stats AS ( SELECT count(*)::int AS total, count(*) FILTER (WHERE status='?')::int AS accepted, count(*) FILTER (WHERE status='?')::int AS rejected, count(*) FILTER (WHERE status='?')::int AS failed, count(*) FILTER ( WHERE status IN ('?','?','?') )::int AS open FROM crawler.channel_candidates WHERE dispatch_batch_id=$# ), updated AS ( UPDATE crawler.query_dispatch_batches batch SET discovered_candidate_count=stats.total, total_channel_count=stats.total, accepted_channel_count=stats.accepted, rejected_channel_count=stats.rejected, failed_channel_count=stats.failed, status=CASE WHEN $#::boolean AND batch.discovery_closed_at IS NO",
+      "samples": 5,
+      "max_observed_seconds": 1.102398,
+      "blocked_samples": 0
+    },
+    {
+      "shape": "/* publication-channel-mutation-lock:channel */ SELECT pg_advisory_xact_lock(hashtextextended($#,$#))",
+      "samples": 5,
+      "max_observed_seconds": 0,
+      "blocked_samples": 0
+    },
+    {
+      "shape": "/* publication-auto-onboarding:backlog */ SELECT channel.channel_id,channel.registry_promotion_run_id AS run_id, current_finalized.finalized_at AS publication_as_of FROM crawler.channels AS channel JOIN crawler.channel_candidates AS promotion_candidate ON promotion_candidate.candidate_id=channel.registry_promotion_candidate_id AND promotion_candidate.channel_id=channel.channel_id AND promotion_candidate.status='?' AND promotion_candidate.accepted_at IS NOT NULL JOIN crawler.channel_runs AS promotion_run ON promotion_run.run_id=channel.registry_promotion_run_id AND promotion_run.channel_id=channel.channel_id AND promotion_run.candidate_id=prom",
+      "samples": 4,
+      "max_observed_seconds": 352.797567,
+      "blocked_samples": 0
+    },
+    {
+      "shape": "SELECT *,plan_day::text AS utc_plan_day FROM feature_clock.daily_channel_plans WHERE plan_id=$# FOR UPDATE",
+      "samples": 4,
+      "max_observed_seconds": 0,
+      "blocked_samples": 0
+    },
+    {
+      "shape": "SELECT * FROM crawler.channel_execution_attempts WHERE attempt_id=$# FOR UPDATE",
+      "samples": 4,
+      "max_observed_seconds": 0.000959,
+      "blocked_samples": 0
+    },
+    {
+      "shape": "SET LOCAL synchronous_commit = on",
+      "samples": 4,
+      "max_observed_seconds": 0.00728,
+      "blocked_samples": 0
+    },
+    {
+      "shape": "UPDATE remote_ingestion.tasks SET lease_until=clock_timestamp()+($# * interval '?') WHERE task_id=$# AND node_id=$# AND generation=$# AND state='?' AND lease_until>clock_timestamp() AND capability<>'?' RETURNING lease_until",
+      "samples": 3,
+      "max_observed_seconds": 2.708684,
+      "blocked_samples": 3
+    },
+    {
+      "shape": "SET LOCAL lock_timeout = '?'",
+      "samples": 3,
+      "max_observed_seconds": 0.00721,
+      "blocked_samples": 0
+    },
+    {
+      "shape": "SELECT * FROM crawler.business_run_bindings WHERE business_run_key=$# FOR UPDATE",
+      "samples": 3,
+      "max_observed_seconds": 0,
+      "blocked_samples": 0
+    },
+    {
+      "shape": "SELECT t.task_id FROM remote_ingestion.whole_channel_inputs w JOIN remote_ingestion.tasks t ON t.task_id=w.task_id WHERE w.pruned_at IS NULL AND t.state='?' AND t.applied_at<clock_timestamp()-($#*interval '?') ORDER BY t.applied_at LIMIT $# FOR UPDATE OF t SKIP LOCKED",
+      "samples": 3,
+      "max_observed_seconds": 13.91344,
+      "blocked_samples": 0
+    },
+    {
+      "shape": "COMMIT",
+      "samples": 3,
+      "max_observed_seconds": 0,
+      "blocked_samples": 0
+    },
+    {
+      "shape": "SELECT # WHERE EXISTS(SELECT # FROM remote_ingestion.tasks t LEFT JOIN crawler.channel_execution_attempts a ON a.attempt_id=t.context->>'?' WHERE t.target_node_id=$# AND t.target_worker_slot=$# AND (t.state IN ('?','?') OR (a.status='?' AND a.finished_at IS NULL))) OR EXISTS(SELECT # FROM remote_ingestion.network_bindings WHERE node_id=$# AND slot=$# AND (state<>'?' OR release_receipt->>'?' IS DISTINCT FROM '?'))",
+      "samples": 3,
+      "max_observed_seconds": 0.599829,
+      "blocked_samples": 0
+    },
+    {
+      "shape": "UPDATE remote_ingestion.tasks SET coordinator_until=clock_timestamp()+interval '?' WHERE task_id=$# AND state NOT IN ('?','?','?')",
+      "samples": 3,
+      "max_observed_seconds": 0,
+      "blocked_samples": 0
+    },
+    {
+      "shape": "UPDATE crawler.contents SET content_type=CASE WHEN $#::text IS NULL THEN content_type ELSE $# END, content_type_source=CASE WHEN $#::text IS NULL THEN content_type_source ELSE $# END, url=CASE WHEN $#::boolean THEN COALESCE($#,url) WHEN NULLIF(btrim(COALESCE(url,'?')),'?') IS NULL THEN COALESCE($#,url) ELSE url END, title=COALESCE($#,title), thumbnail_url=COALESCE($#,thumbnail_url), description=CASE WHEN $#::boolean AND (CASE WHEN NULLIF(btrim(COALESCE($#::text,'?')),'?') IS NOT NULL THEN '?' ELSE '?' END='?' OR (CASE WHEN NULLIF(btrim(COALESCE($#::text,'?')),'?') IS NOT NULL THEN '?' ELSE '?' END='?' AND NULLIF(btrim(COALESCE(description,'?'",
+      "samples": 2,
+      "max_observed_seconds": 0.022088,
+      "blocked_samples": 0
+    },
+    {
+      "shape": "SELECT run.*,attempt.status AS execution_status,attempt.finished_at AS execution_finished_at, attempt.identity_changed AS execution_identity_changed FROM crawler.channel_runs run JOIN crawler.channel_execution_attempts attempt ON attempt.attempt_id=$# AND attempt.run_id=run.run_id WHERE run.run_id=$# FOR UPDATE OF run,attempt",
+      "samples": 2,
+      "max_observed_seconds": 0,
+      "blocked_samples": 0
+    },
+    {
+      "shape": "SELECT status,first_seen_checkpoint_status FROM crawler.incremental_youtubejs_video_batches WHERE run_id=$# AND cycle_key=$# FOR UPDATE",
+      "samples": 2,
+      "max_observed_seconds": 0,
+      "blocked_samples": 0
+    },
+    {
+      "shape": "/* finalize-source-fence:run */ SELECT run.* FROM crawler.channel_runs run WHERE run.run_id=$# AND run.channel_id=$# ORDER BY run.run_id",
+      "samples": 2,
+      "max_observed_seconds": 0,
+      "blocked_samples": 0
+    },
+    {
+      "shape": "INSERT INTO crawler.contents ( content_key,channel_id,run_id,content_type,content_type_source, source_content_id,position,title,url,thumbnail_url, description,description_status,description_source,hashtags,keywords, published_at,published_at_status,published_at_source,published_at_precision, is_recent,duration_seconds,duration_status,duration_source, view_count,view_count_text,view_count_status,view_count_source, like_count,like_count_status,like_count_source, comment_count,comment_count_status,comments_disabled,comment_count_source, comments_first_page, is_members_only,access_status,access_status_source,extractor_version, raw_json,first_seen",
+      "samples": 2,
+      "max_observed_seconds": 0,
+      "blocked_samples": 0
+    },
+    {
+      "shape": "WITH candidate AS ( SELECT item.run_id,item.cycle_key,item.phase,item.video_id FROM crawler.incremental_youtubejs_video_items item JOIN crawler.incremental_youtubejs_video_batches batch ON batch.run_id=item.run_id AND batch.cycle_key=item.cycle_key WHERE item.run_id=$# AND item.cycle_key=$# AND item.phase=$# AND batch.status='?' AND NOT EXISTS ( SELECT # FROM crawler.incremental_youtubejs_video_items active WHERE active.run_id=item.run_id AND active.cycle_key=item.cycle_key AND active.status='?' AND active.claim_expires_at>clock_timestamp() ) AND ( $#<>'?' OR ( batch.first_seen_checkpoint_status='?' AND NOT EXISTS ( SELECT # FROM crawler.incr",
+      "samples": 2,
+      "max_observed_seconds": 0.000566,
+      "blocked_samples": 0
+    },
+    {
+      "shape": "SELECT set_config('?',$#,true)",
+      "samples": 2,
+      "max_observed_seconds": 0,
+      "blocked_samples": 0
+    },
+    {
+      "shape": "SELECT b.*, (SELECT result_json->>'?' FROM crawler.query_dispatch_batches WHERE dispatch_batch_id=b.batch_id) AS control_error, (SELECT count(*)::int FROM publication.outbox o JOIN publication.revision r USING(revision_id) JOIN crawler.migration_control_items i ON i.channel_id=r.channel_id WHERE i.batch_id=b.batch_id AND i.started_at IS NOT NULL AND o.created_at>=i.started_at AND o.status NOT IN ('?','?')) AS publishing_count, COALESCE(s.counts,'?'::jsonb) AS counts, GREATEST(#,EXTRACT(EPOCH FROM COALESCE(b.finished_at,now())-b.created_at)-b.paused_seconds- CASE WHEN b.paused_at IS NOT NULL THEN EXTRACT(EPOCH FROM COALESCE(b.finished_at,now()",
+      "samples": 2,
+      "max_observed_seconds": 0.597625,
+      "blocked_samples": 0
+    },
+    {
+      "shape": "/* finalize-source-fence:contents */ SELECT content.* FROM crawler.contents content WHERE content.channel_id=$# AND content.run_id=$# ORDER BY content.position ASC NULLS LAST,content.content_key",
+      "samples": 2,
+      "max_observed_seconds": 0.053819,
+      "blocked_samples": 0
+    },
+    {
+      "shape": "/* publication-readiness:contents */ SELECT to_jsonb(content) - '?' AS row FROM crawler.contents content LEFT JOIN crawler.channel_domain_cursors video_cursor ON video_cursor.channel_id=content.channel_id AND video_cursor.observation_kind='?' WHERE ($#::text[] IS NULL OR content.channel_id=ANY($#::text[])) AND ( content.published_at IS NULL OR content.published_at >= $#::timestamptz - interval '?' OR content.last_observation_id=video_cursor.latest_complete_observation_id ) ORDER BY content.channel_id,content.published_at DESC NULLS LAST, content.source_content_id,content.content_key",
+      "samples": 2,
+      "max_observed_seconds": 0.184166,
+      "blocked_samples": 0
+    },
+    {
+      "shape": "SELECT * FROM remote_ingestion.network_slots WHERE node_id=$# AND slot=$# FOR UPDATE",
+      "samples": 2,
+      "max_observed_seconds": 0.008995,
+      "blocked_samples": 0
+    },
+    {
+      "shape": "SELECT # FROM crawler.channel_execution_attempts WHERE workload_scope=$# AND business_run_id=$# AND attempt_number>$# LIMIT #",
+      "samples": 2,
+      "max_observed_seconds": 0,
+      "blocked_samples": 0
+    },
+    {
+      "shape": "SET LOCAL statement_timeout = '?'",
+      "samples": 2,
+      "max_observed_seconds": 0.000452,
+      "blocked_samples": 0
+    },
+    {
+      "shape": "SELECT * FROM crawler.youtube_api_detail_requests WHERE request_id=$#",
+      "samples": 2,
+      "max_observed_seconds": 0.004715,
+      "blocked_samples": 0
+    },
+    {
+      "shape": " WITH bounds AS ( SELECT $#::date AS target_day, (now() AT TIME ZONE '?')::date AS today_utc ), selected_plans AS MATERIALIZED ( SELECT DISTINCT ON (candidate.channel_id) candidate.* FROM feature_clock.daily_channel_plans candidate CROSS JOIN bounds WHERE candidate.plan_day=bounds.target_day OR (bounds.target_day=bounds.today_utc AND candidate.status IN ('?','?','?','?')) ORDER BY candidate.channel_id,(candidate.plan_day=bounds.target_day) DESC, candidate.plan_day DESC,candidate.created_at DESC ), scope AS ( SELECT clock.channel_id, COALESCE(channel.channel_url,'?' || clock.channel_id) AS channel_url, COALESCE(channel.handle,'?') AS handle, C",
+      "samples": 2,
+      "max_observed_seconds": 13.933222,
+      "blocked_samples": 0
+    },
+    {
+      "shape": "SELECT # FROM remote_ingestion.youtube_sessions WHERE binding_id=$#",
+      "samples": 2,
+      "max_observed_seconds": 0.009999,
+      "blocked_samples": 0
+    },
+    {
+      "shape": "/* publication-reconciler:lock-owner */ SELECT channel_state.status AS channel_status,channel_state.onboarding_mode, channel_state.seed_status,stream_state.status AS stream_status, stream_state.capture_enabled_at,stream_state.minimum_writer_version FROM publication.channel_stream_state AS channel_state JOIN publication.stream AS stream_state ON stream_state.publication_stream_id=channel_state.publication_stream_id WHERE channel_state.publication_stream_id=$#::uuid AND channel_state.channel_id=$# FOR SHARE OF stream_state FOR UPDATE OF channel_state",
+      "samples": 1,
+      "max_observed_seconds": 0,
+      "blocked_samples": 0
+    },
+    {
+      "shape": "SELECT task.*, COALESCE( task.status IN ('?','?') AND task.lease_expires_at>clock_timestamp(), false ) AS lease_live, COALESCE( task.next_retry_at<=clock_timestamp(), task.status IN ('?','?') ) AS retry_due FROM crawler.content_enrich_tasks task WHERE task.content_key=$# AND task.job_type=$# FOR UPDATE",
+      "samples": 1,
+      "max_observed_seconds": 0,
+      "blocked_samples": 0
+    },
+    {
+      "shape": "INSERT INTO remote_ingestion.whole_channel_inputs(command_id,task_id,generation,input_sha256,input_json) VALUES($#,$#,$#,$#,$#)",
+      "samples": 1,
+      "max_observed_seconds": 0,
+      "blocked_samples": 0
+    },
+    {
+      "shape": "SELECT *,lease_until>clock_timestamp() AS alive FROM remote_ingestion.tasks WHERE task_id=$# FOR UPDATE",
+      "samples": 1,
+      "max_observed_seconds": 0.410098,
+      "blocked_samples": 1
+    },
+    {
+      "shape": "SAVEPOINT about_observation_writer_guard",
+      "samples": 1,
+      "max_observed_seconds": 0,
+      "blocked_samples": 0
+    },
+    {
+      "shape": "SELECT * FROM remote_ingestion.network_bindings WHERE binding_id=$# FOR UPDATE",
+      "samples": 1,
+      "max_observed_seconds": 0,
+      "blocked_samples": 0
+    },
+    {
+      "shape": "SELECT * FROM remote_ingestion.nodes WHERE node_id=$# FOR SHARE",
+      "samples": 1,
+      "max_observed_seconds": 0.00347,
+      "blocked_samples": 0
+    },
+    {
+      "shape": "SELECT * FROM feature_clock.dispatch_outbox WHERE plan_id=$# FOR UPDATE",
+      "samples": 1,
+      "max_observed_seconds": 0.001293,
+      "blocked_samples": 0
+    },
+    {
+      "shape": "WITH input AS ( SELECT * FROM jsonb_to_recordset($#::jsonb) AS item( video_id text, position integer, published_at timestamptz, published_at_status text, published_at_precision text, published_at_source text ) ) UPDATE crawler.contents content SET playlist_last_seen_at=$#,last_seen_at=GREATEST(content.last_seen_at,$#::timestamptz), position=input.position, published_at=CASE WHEN (((CASE WHEN input.published_at_status='?' AND input.published_at IS NOT NULL AND NULLIF(btrim(input.published_at_source),'?') IS NOT NULL THEN CASE input.published_at_precision WHEN '?' THEN # WHEN '?' THEN # ELSE # END WHEN input.published_at_status='?' AND input.pu",
+      "samples": 1,
+      "max_observed_seconds": 0.003944,
+      "blocked_samples": 0
+    },
+    {
+      "shape": "SELECT * FROM crawler.channel_domain_cursors WHERE channel_id=$# AND observation_kind=$# FOR UPDATE",
+      "samples": 1,
+      "max_observed_seconds": 0,
+      "blocked_samples": 0
+    },
+    {
+      "shape": "/* finalize-source-fence:candidates */ SELECT candidate.* FROM crawler.content_candidates candidate WHERE candidate.run_id=$# AND candidate.channel_id=$# ORDER BY candidate.position,candidate.candidate_id FOR UPDATE",
+      "samples": 1,
+      "max_observed_seconds": 0.009395,
+      "blocked_samples": 0
+    },
+    {
+      "shape": "UPDATE crawler.browser_profiles SET cookie_ciphertext=$#,cookie_updated_at=now(),updated_at=now() WHERE profile_group_id=$# AND engine=$#",
+      "samples": 1,
+      "max_observed_seconds": 0,
+      "blocked_samples": 0
+    },
+    {
+      "shape": "SELECT * FROM crawler.channel_runs WHERE run_id=$# FOR UPDATE",
+      "samples": 1,
+      "max_observed_seconds": 0,
+      "blocked_samples": 0
+    },
+    {
+      "shape": "SELECT s.checkpoint_hash,s.checkpoint_request,b.node_id,n.state AS node_state FROM remote_ingestion.youtube_sessions s JOIN remote_ingestion.network_bindings b USING(binding_id) JOIN remote_ingestion.nodes n ON n.node_id=b.node_id WHERE s.binding_id=$#",
+      "samples": 1,
+      "max_observed_seconds": 0,
+      "blocked_samples": 0
+    },
+    {
+      "shape": "INSERT INTO remote_ingestion.youtube_sessions(binding_id,session_hash,session_cipher) VALUES($#,$#,$#) ON CONFLICT(binding_id) DO NOTHING",
+      "samples": 1,
+      "max_observed_seconds": 0,
+      "blocked_samples": 0
+    },
+    {
+      "shape": "SELECT r.status, count(cc.*) FILTER (WHERE cc.detail_status='?')::int AS failed_candidates FROM crawler.channels c JOIN crawler.channel_runs r ON r.run_id=c.latest_run_id LEFT JOIN crawler.content_candidates cc ON cc.run_id=r.run_id WHERE c.channel_id=$# GROUP BY r.run_id",
+      "samples": 1,
+      "max_observed_seconds": 0.017018,
+      "blocked_samples": 0
+    },
+    {
+      "shape": "UPDATE remote_ingestion.network_slots SET grant_cipher=NULL,grant_request=NULL WHERE node_id=$# AND slot=$#",
+      "samples": 1,
+      "max_observed_seconds": 0,
+      "blocked_samples": 0
+    },
+    {
+      "shape": "INSERT INTO remote_ingestion.tasks(task_id,work_key,capability,input,context,scope_key) VALUES($#,$#,$#,$#,$#,$#) ON CONFLICT(work_key) DO NOTHING",
+      "samples": 1,
+      "max_observed_seconds": 0,
+      "blocked_samples": 0
+    },
+    {
+      "shape": "SELECT node_id FROM remote_ingestion.nodes WHERE token_hash=$# AND state <> '?'",
+      "samples": 1,
+      "max_observed_seconds": 0,
+      "blocked_samples": 0
+    },
+    {
+      "shape": "RELEASE SAVEPOINT video_activity_evidence_page",
+      "samples": 1,
+      "max_observed_seconds": 0,
+      "blocked_samples": 0
+    },
+    {
+      "shape": "/* publication-reconciler:refresh-domains */ SELECT domain,contract_version,policy_version,readiness_status,readiness_reasons, payload_json,result_hash,source_refs,complete_observed_at, data_sequence,current_revision_id FROM publication.domain_current WHERE publication_stream_id=$#::uuid AND channel_id=$# AND domain=ANY($#::text[]) ORDER BY CASE domain WHEN '?' THEN # WHEN '?' THEN # ELSE # END",
+      "samples": 1,
+      "max_observed_seconds": 0,
+      "blocked_samples": 0
+    },
+    {
+      "shape": "UPDATE crawler.incremental_youtubejs_video_items item SET status='?',claim_token=NULL,claim_expires_at=NULL,updated_at=clock_timestamp() FROM crawler.incremental_youtubejs_video_batches batch WHERE item.run_id=$# AND item.cycle_key=$# AND item.status='?' AND batch.run_id=item.run_id AND batch.cycle_key=item.cycle_key AND batch.status='?'",
+      "samples": 1,
+      "max_observed_seconds": 0,
+      "blocked_samples": 0
+    },
+    {
+      "shape": "SELECT *,connected_until>clock_timestamp() AS alive FROM remote_ingestion.worker_connections WHERE node_id=$# AND slot=$#",
+      "samples": 1,
+      "max_observed_seconds": 0,
+      "blocked_samples": 0
+    },
+    {
+      "shape": "/* publication-auto-onboarding:find-owner */ SELECT channel_state.publication_stream_id,channel_state.onboarding_mode, channel_state.seed_status,channel_state.ownership_reference, stream_state.status AS stream_status, stream_state.capture_enabled_at FROM publication.channel_stream_state AS channel_state JOIN publication.stream AS stream_state ON stream_state.publication_stream_id=channel_state.publication_stream_id WHERE channel_state.channel_id=$# AND channel_state.status='?' ORDER BY channel_state.owned_at,channel_state.publication_stream_id FOR UPDATE OF channel_state FOR SHARE OF stream_state",
+      "samples": 1,
+      "max_observed_seconds": 0,
+      "blocked_samples": 0
+    },
+    {
+      "shape": "UPDATE remote_ingestion.whole_channel_inputs SET received_at=clock_timestamp() WHERE command_id=$#",
+      "samples": 1,
+      "max_observed_seconds": 0.002668,
+      "blocked_samples": 0
+    },
+    {
+      "shape": "WITH observed_uploads AS ( SELECT item.video_id,max(item.published_at) AS published_at FROM jsonb_to_recordset($#::jsonb) AS item(video_id text,published_at timestamptz) GROUP BY item.video_id ), candidate AS ( SELECT content.*, COALESCE(content.published_at,observed.published_at) AS sampling_published_at, EXISTS ( SELECT # FROM crawler.content_enrich_tasks task WHERE task.content_key=content.content_key AND task.job_type IN ('?','?') AND (task.job_type='?' OR $#::boolean) AND ( (task.status IN ('?','?') AND COALESCE(task.next_retry_at,now())<=now()) OR (task.status IN ('?','?') AND task.lease_expires_at<=now()) OR (task.status='?' AND task.n",
+      "samples": 1,
+      "max_observed_seconds": 0.012951,
+      "blocked_samples": 0
+    },
+    {
+      "shape": "UPDATE crawler.channel_runs SET detail_active_job_id=$#,detail_active_job_attempt=$#, detail_active_scope_key=$#,detail_active_job_epoch=$#,updated_at=now() WHERE run_id=$# RETURNING run_id",
+      "samples": 1,
+      "max_observed_seconds": 0,
+      "blocked_samples": 0
+    },
+    {
+      "shape": "SELECT * FROM remote_ingestion.network_bindings WHERE binding_id=$# AND task_id=$# AND generation=$#",
+      "samples": 1,
+      "max_observed_seconds": 0,
+      "blocked_samples": 0
+    },
+    {
+      "shape": "SELECT * FROM remote_ingestion.whole_channel_inputs WHERE command_id=$# AND task_id=$# AND generation=$# FOR UPDATE",
+      "samples": 1,
+      "max_observed_seconds": 0.009724,
+      "blocked_samples": 0
+    },
+    {
+      "shape": "/* publication-reconciler:lock-domains */ SELECT domain,contract_version,policy_version,readiness_status,readiness_reasons, payload_json,result_hash,source_refs,complete_observed_at, data_sequence,current_revision_id FROM publication.domain_current WHERE publication_stream_id=$#::uuid AND channel_id=$# AND domain=ANY($#::text[]) ORDER BY CASE domain WHEN '?' THEN # WHEN '?' THEN # ELSE # END FOR UPDATE",
+      "samples": 1,
+      "max_observed_seconds": 0,
+      "blocked_samples": 0
+    },
+    {
+      "shape": "WITH claimable AS ( SELECT outbox.dispatch_event_id,plan.scheduled_at AS plan_scheduled_at FROM feature_clock.dispatch_outbox outbox JOIN feature_clock.daily_channel_plans plan ON plan.plan_id=outbox.plan_id WHERE ( (outbox.status='?' AND outbox.next_attempt_at<=now()) OR (outbox.status='?' AND outbox.lease_expires_at<=now()) ) AND plan.status IN ('?','?') AND plan.scheduled_at<=now() AND (now() AT TIME ZONE '?')::time>=TIME '?' AND (now() AT TIME ZONE '?')::time<TIME '?' ORDER BY plan.due_day,plan.dispatch_slot,plan.channel_id, outbox.created_at,outbox.dispatch_event_id FOR UPDATE OF outbox SKIP LOCKED LIMIT $# ) UPDATE feature_clock.dispatc",
+      "samples": 1,
+      "max_observed_seconds": 0,
+      "blocked_samples": 0
+    },
+    {
+      "shape": "/* publication-reconciler:lock-deliveries */ SELECT destination,mode FROM publication.channel_delivery_state WHERE publication_stream_id=$#::uuid AND channel_id=$# ORDER BY destination FOR SHARE",
+      "samples": 1,
+      "max_observed_seconds": 0,
+      "blocked_samples": 0
+    },
+    {
+      "shape": "UPDATE crawler.incremental_youtubejs_video_items item SET status=$#,claim_token=NULL,claim_expires_at=NULL, detail_json=$#::jsonb,field_status_json=$#::jsonb,error_json=$#::jsonb, captured_at=clock_timestamp(),updated_at=clock_timestamp() FROM crawler.incremental_youtubejs_video_batches batch WHERE item.run_id=$# AND item.cycle_key=$# AND item.phase=$# AND item.video_id=$# AND item.status='?' AND item.claim_token=$#::uuid AND batch.run_id=item.run_id AND batch.cycle_key=item.cycle_key AND batch.status='?' RETURNING item.video_id",
+      "samples": 1,
+      "max_observed_seconds": 0,
+      "blocked_samples": 0
+    },
+    {
+      "shape": "INSERT INTO crawler.channel_domain_cursors (channel_id,observation_kind) VALUES ($#,$#) ON CONFLICT (channel_id,observation_kind) DO NOTHING",
+      "samples": 1,
+      "max_observed_seconds": 0,
+      "blocked_samples": 0
+    },
+    {
+      "shape": "SELECT command_id,operation,input FROM remote_ingestion.channel_commands WHERE task_id=$# AND generation=$# AND state='?' ORDER BY created_at,command_id LIMIT #",
+      "samples": 1,
+      "max_observed_seconds": 0,
+      "blocked_samples": 0
+    },
+    {
+      "shape": "SELECT profile_group_id,profile_revision,youtubejs_profile_id FROM crawler.channel_execution_attempts WHERE attempt_id=$#",
+      "samples": 1,
+      "max_observed_seconds": 0,
+      "blocked_samples": 0
+    },
+    {
+      "shape": "WITH ranked AS ( SELECT candidate.channel_id,candidate.source_content_id,candidate.candidate_id, candidate.disposition, row_number() OVER ( PARTITION BY candidate.source_content_id ORDER BY candidate.candidate_id DESC ) AS disposition_rank FROM crawler.content_candidates candidate WHERE candidate.channel_id=$# ) SELECT ranked.source_content_id AS video_id FROM ranked WHERE ranked.disposition_rank=# AND ranked.disposition='?' AND NOT EXISTS ( SELECT # FROM crawler.contents content WHERE content.channel_id=ranked.channel_id AND content.source_content_id=ranked.source_content_id ) ORDER BY ranked.candidate_id",
+      "samples": 1,
+      "max_observed_seconds": 0.002224,
+      "blocked_samples": 0
+    },
+    {
+      "shape": "SELECT DISTINCT ON(observation_kind) observation_kind,outcome FROM crawler.crawl_observations WHERE channel_id=$# AND run_id=$# ORDER BY observation_kind,kind_sequence DESC",
+      "samples": 1,
+      "max_observed_seconds": 0,
+      "blocked_samples": 0
+    },
+    {
+      "shape": "UPDATE remote_ingestion.tasks SET state='?',context=$#, target_node_id=$#,target_worker_slot=$#,node_id=NULL,worker_slot=NULL,lease_until=NULL, coordinator_id=NULL,coordinator_until=NULL,last_error=NULL,applied_result=NULL,received_at=NULL,applied_at=NULL WHERE task_id=$#",
+      "samples": 1,
+      "max_observed_seconds": 0,
+      "blocked_samples": 0
+    },
+    {
+      "shape": "SELECT * FROM crawler.incremental_youtubejs_video_items WHERE run_id=$# AND cycle_key=$# ORDER BY CASE phase WHEN '?' THEN # ELSE # END,ordinal,video_id",
+      "samples": 1,
+      "max_observed_seconds": 0,
+      "blocked_samples": 0
+    },
+    {
+      "shape": "UPDATE remote_ingestion.worker_connections SET instance_id=$#,relay_boot_id=$#, accepting=$#,runtime_revision=$#,enabled=CASE WHEN $# THEN false ELSE enabled END, last_seen_at=clock_timestamp(),connected_until=clock_timestamp()+($# * interval '?') WHERE node_id=$# AND slot=$# RETURNING *",
+      "samples": 1,
+      "max_observed_seconds": 0,
+      "blocked_samples": 0
+    },
+    {
+      "shape": "/* publication-readiness:channels */ SELECT to_jsonb(channel) AS row FROM crawler.channels channel WHERE ($#::text[] IS NULL OR channel.channel_id=ANY($#::text[])) ORDER BY channel.channel_id",
+      "samples": 1,
+      "max_observed_seconds": 0,
+      "blocked_samples": 0
+    },
+    {
+      "shape": "SELECT task.*, COALESCE( task.status IN ('?','?') AND task.lease_expires_at>clock_timestamp(), false ) AS lease_live, COALESCE( task.next_retry_at<=clock_timestamp(), task.status IN ('?','?') ) AS retry_due FROM crawler.content_enrich_tasks task WHERE task.content_key=$# AND task.job_type='?' FOR UPDATE",
+      "samples": 1,
+      "max_observed_seconds": 0,
+      "blocked_samples": 0
+    },
+    {
+      "shape": "/* finalize-source-fence:agent */ SELECT agent.* FROM crawler.agent_profiles agent WHERE agent.channel_id=$# AND agent.agent_mode='?' AND agent.status='?' ORDER BY agent.channel_id,agent.agent_mode LIMIT #",
+      "samples": 1,
+      "max_observed_seconds": 0,
+      "blocked_samples": 0
+    },
+    {
+      "shape": "SELECT input_json FROM remote_ingestion.whole_channel_inputs WHERE command_id=$# AND task_id=$# AND generation=$#",
+      "samples": 1,
+      "max_observed_seconds": 0.026483,
+      "blocked_samples": 0
+    },
+    {
+      "shape": "SELECT state FROM remote_ingestion.nodes WHERE node_id=$# FOR SHARE",
+      "samples": 1,
+      "max_observed_seconds": 0.01108,
+      "blocked_samples": 0
+    },
+    {
+      "shape": "/* finalize-source-fence:candidates */ SELECT candidate.* FROM crawler.content_candidates candidate WHERE candidate.run_id=$# AND candidate.channel_id=$# ORDER BY candidate.position,candidate.candidate_id",
+      "samples": 1,
+      "max_observed_seconds": 0,
+      "blocked_samples": 0
+    }
+  ],
+  "nodes": [
+    {
+      "nodeId": "54a7cdd3-eb9c-4713-8d2f-21f4a5279de0",
+      "at": "2026-09-20T09:02:36.703Z",
+      "stats": {
+        "cpus": 4,
+        "load": [
+          3.63671875,
+          3.0009765625,
+          2.845703125
+        ],
+        "cpuBusyPercent": 44.447320735179915,
+        "cpuIOWaitPercent": 1.4755371472948486,
+        "memory": {
+          "MemTotal": 7993507840,
+          "MemAvailable": 1381036032,
+          "SwapTotal": 2084564992,
+          "SwapFree": 1462087680
+        },
+        "swapDelta10Seconds": {
+          "pswpin": 0,
+          "pswpout": 0,
+          "pgmajfault": 0
+        },
+        "pageSize": 4096,
+        "memoryPressure": "some avg10=0.00 avg60=0.00 avg300=0.00 total=6174310\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=3387173",
+        "ioPressure": "some avg10=2.07 avg60=1.88 avg300=1.74 total=12194402682\nfull avg10=0.59 avg60=0.66 avg300=0.68 total=6600361320",
+        "runningContainers": 47,
+        "containerCpuPercentSum": 186.03
+      }
+    },
+    {
+      "nodeId": "0e108078-200a-4df0-9a58-a28abc97a692",
+      "at": "2026-09-20T09:02:36.365Z",
+      "stats": {
+        "cpus": 2,
+        "load": [
+          1.38623046875,
+          1.2294921875,
+          1.12890625
+        ],
+        "cpuBusyPercent": 21.798780487804876,
+        "cpuIOWaitPercent": 16.463414634146343,
+        "memory": {
+          "MemTotal": 2029690880,
+          "MemAvailable": 199700480,
+          "SwapTotal": 2084564992,
+          "SwapFree": 702431232
+        },
+        "swapDelta10Seconds": {
+          "pswpin": 29372,
+          "pswpout": 0,
+          "pgmajfault": 20671
+        },
+        "pageSize": 4096,
+        "memoryPressure": "some avg10=11.69 avg60=7.24 avg300=4.68 total=5519383342\nfull avg10=7.11 avg60=4.41 avg300=2.77 total=3580959537",
+        "ioPressure": "some avg10=23.25 avg60=19.42 avg300=15.46 total=31196433601\nfull avg10=15.29 avg60=13.31 avg300=10.71 total=24681729552",
+        "runningContainers": 15,
+        "containerCpuPercentSum": 38.019999999999996
+      }
+    }
+  ],
+  "central_cgroup_before": {
+    "at": "2026-09-20T08:58:30.082564+00:00",
+    "containers": [
+      {
+        "name": "qy-remote-node-center",
+        "cpuLimit": 4.0,
+        "memoryLimit": 1610612736,
+        "pid": 3703897,
+        "cpu.stat": "usage_usec 1763097033\nuser_usec 1558394801\nsystem_usec 204702232\ncore_sched.force_idle_usec 0\nnr_periods 17772\nnr_throttled 77\nthrottled_usec 2276605\nnr_bursts 0\nburst_usec 0",
+        "cpu.pressure": "some avg10=0.52 avg60=0.51 avg300=0.54 total=14575055\nfull avg10=0.15 avg60=0.21 avg300=0.25 total=11355541",
+        "memory.current": "337408000",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0",
+        "io.pressure": "some avg10=0.00 avg60=0.00 avg300=0.00 total=526818\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=518956"
+      },
+      {
+        "name": "qy-newcrawler-fresh-crawler-postgres-1",
+        "cpuLimit": 0.0,
+        "memoryLimit": 0,
+        "pid": 3750695,
+        "cpu.stat": "usage_usec 3839748488615\nuser_usec 2337098182538\nsystem_usec 1502650306076\ncore_sched.force_idle_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0",
+        "cpu.pressure": "some avg10=10.05 avg60=9.99 avg300=10.10 total=130198192044\nfull avg10=4.06 avg60=4.19 avg300=4.26 total=67597522916",
+        "memory.current": "4597063680",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0",
+        "io.pressure": "some avg10=23.43 avg60=22.69 avg300=23.08 total=117575264090\nfull avg10=15.96 avg60=15.74 avg300=16.00 total=79752998004"
+      }
+    ]
+  },
+  "central_cgroup_after": {
+    "at": "2026-09-20T09:02:29.408918+00:00",
+    "containers": [
+      {
+        "name": "qy-remote-node-center",
+        "cpu.stat": "usage_usec 2031321513\nuser_usec 1795884679\nsystem_usec 235436833\ncore_sched.force_idle_usec 0\nnr_periods 20165\nnr_throttled 95\nthrottled_usec 2708367\nnr_bursts 0\nburst_usec 0",
+        "cpu.pressure": "some avg10=0.22 avg60=0.36 avg300=0.45 total=16816957\nfull avg10=0.00 avg60=0.12 avg300=0.18 total=13114875",
+        "memory.current": "342294528",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0",
+        "io.pressure": "some avg10=0.00 avg60=0.00 avg300=0.00 total=552078\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=543565"
+      },
+      {
+        "name": "qy-newcrawler-fresh-crawler-postgres-1",
+        "cpu.stat": "usage_usec 3840683301046\nuser_usec 2337633783084\nsystem_usec 1503049517961\ncore_sched.force_idle_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0",
+        "cpu.pressure": "some avg10=7.14 avg60=8.61 avg300=9.47 total=130221042088\nfull avg10=3.20 avg60=3.85 avg300=4.09 total=67608359525",
+        "memory.current": "4877508608",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0",
+        "io.pressure": "some avg10=22.56 avg60=22.88 avg300=22.86 total=117630620496\nfull avg10=17.47 avg60=16.54 avg300=16.10 total=79792673149"
+      }
+    ]
+  },
+  "host_resources": {
+    "iowait_average_percent": 13.465,
+    "iowait_range_percent": [
+      10.2,
+      16.1
+    ],
+    "idle_average_percent": 19.2125,
+    "disk_read_average_MiBps": 332.4937,
+    "disk_read_range_MiBps": [
+      182.7407,
+      493.4852
+    ],
+    "disk_util_average_percent": 65.6467
+  },
+  "limits": [
+    "Observational samples, no load-changing intervention or causal speedup measurement.",
+    "Successful generation-1 jobs only; task stage timestamps include protocol and waiting overhead, not exclusive CPU or pure network time.",
+    "DB activity session samples are not percentages of job elapsed time; idle-in-transaction can be brief normal protocol gaps.",
+    "pg_stat_statements unavailable and track_io_timing off; no per-query aggregate IO attribution.",
+    "SQL candidates are slow/background competitors; execution plans and before/after tests are needed before selecting fixes.",
+    "No service restarted, worker count changed, query cancelled, index created, or channel imported."
+  ]
+}

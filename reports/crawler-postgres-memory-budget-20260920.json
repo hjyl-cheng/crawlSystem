@@ -1,0 +1,100 @@
+{
+  "at": "2026-09-20T09:15:16.341723+00:00",
+  "host": {
+    "MemTotal": 33645133824,
+    "MemAvailable": 5490327552,
+    "Cached": 15868116992,
+    "SwapTotal": 0,
+    "SwapFree": 0,
+    "Shmem": 11248693248
+  },
+  "groups": {
+    "qy-remote-node-center": {
+      "count": 1,
+      "charged": 341762048,
+      "workingSetApprox": 323182592,
+      "anon": 299073536,
+      "shmem": 0
+    },
+    "other_containers": {
+      "count": 72,
+      "charged": 5749510144,
+      "workingSetApprox": 5398106112,
+      "anon": 2604666880,
+      "shmem": 2347810816
+    },
+    "local_crawler_workers": {
+      "count": 66,
+      "charged": 5426393088,
+      "workingSetApprox": 5416435712,
+      "anon": 5205958656,
+      "shmem": 0
+    },
+    "youtube-rota-qy-core": {
+      "count": 1,
+      "charged": 1674276864,
+      "workingSetApprox": 1661366272,
+      "anon": 1641693184,
+      "shmem": 0
+    },
+    "qy-newcrawler-fresh-crawler-postgres-1": {
+      "count": 1,
+      "charged": 5066555392,
+      "workingSetApprox": 2603122688,
+      "anon": 736649216,
+      "shmem": 209850368
+    },
+    "qy-newcrawler-fresh-redis-1": {
+      "count": 1,
+      "charged": 897523712,
+      "workingSetApprox": 895782912,
+      "anon": 887881728,
+      "shmem": 0
+    },
+    "youtube-rota-qy-timescaledb": {
+      "count": 1,
+      "charged": 9324019712,
+      "workingSetApprox": 9300111360,
+      "anon": 313421824,
+      "shmem": 8666423296
+    }
+  },
+  "pressure": "some avg10=1.94 avg60=3.23 avg300=3.93 total=19889847447\nfull avg10=1.31 avg60=2.07 avg300=2.61 total=14140708640",
+  "recommendation": {
+    "database": "newcrawler_crawler",
+    "container": "qy-newcrawler-fresh-crawler-postgres-1",
+    "currentSharedBuffersBytes": 134217728,
+    "initialSharedBuffersBytes": 1073741824,
+    "nextCandidateBytes": 2147483648,
+    "otherRotaSharedBuffersBytes": 8410628096,
+    "postgresWorkMemBytes": 4194304,
+    "postgresMaxConnections": 100,
+    "currentClientConnections": 40,
+    "currentActiveClientConnections": 14,
+    "currentParallelWorkers": 2,
+    "restartRequired": true,
+    "productionChanged": false,
+    "limits": [
+      "Point-in-time budget, not a tested optimum or a guaranteed minimum available memory.",
+      "Working set estimates subtract inactive file cache; do not add shmem/file values to memory.current.",
+      "Additional shared buffers may displace OS page cache; no guaranteed performance gain."
+    ]
+  },
+  "simpleHeadroomScenarios": [
+    {
+      "sharedBuffersGiB": 1,
+      "additionalGiB": 0.875,
+      "headroomGiB": 4.2382659912109375
+    },
+    {
+      "sharedBuffersGiB": 2,
+      "additionalGiB": 1.875,
+      "headroomGiB": 3.2382659912109375
+    },
+    {
+      "sharedBuffersGiB": 4,
+      "additionalGiB": 3.875,
+      "headroomGiB": 1.2382659912109375
+    }
+  ]
+}

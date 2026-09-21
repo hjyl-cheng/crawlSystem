@@ -1,0 +1,1205 @@
+{
+  "at": "2026-09-20T09:07:55.620Z",
+  "readOnly": true,
+  "explainAnalyze": false,
+  "settings": [
+    {
+      "name": "autovacuum",
+      "setting": "on",
+      "unit": null,
+      "context": "sighup",
+      "pending_restart": false
+    },
+    {
+      "name": "autovacuum_analyze_scale_factor",
+      "setting": "0.1",
+      "unit": null,
+      "context": "sighup",
+      "pending_restart": false
+    },
+    {
+      "name": "autovacuum_vacuum_scale_factor",
+      "setting": "0.2",
+      "unit": null,
+      "context": "sighup",
+      "pending_restart": false
+    },
+    {
+      "name": "checkpoint_timeout",
+      "setting": "300",
+      "unit": "s",
+      "context": "sighup",
+      "pending_restart": false
+    },
+    {
+      "name": "effective_cache_size",
+      "setting": "524288",
+      "unit": "8kB",
+      "context": "user",
+      "pending_restart": false
+    },
+    {
+      "name": "effective_io_concurrency",
+      "setting": "1",
+      "unit": null,
+      "context": "user",
+      "pending_restart": false
+    },
+    {
+      "name": "maintenance_work_mem",
+      "setting": "65536",
+      "unit": "kB",
+      "context": "user",
+      "pending_restart": false
+    },
+    {
+      "name": "max_connections",
+      "setting": "100",
+      "unit": null,
+      "context": "postmaster",
+      "pending_restart": false
+    },
+    {
+      "name": "max_wal_size",
+      "setting": "1024",
+      "unit": "MB",
+      "context": "sighup",
+      "pending_restart": false
+    },
+    {
+      "name": "random_page_cost",
+      "setting": "4",
+      "unit": null,
+      "context": "user",
+      "pending_restart": false
+    },
+    {
+      "name": "shared_buffers",
+      "setting": "16384",
+      "unit": "8kB",
+      "context": "postmaster",
+      "pending_restart": false
+    },
+    {
+      "name": "shared_preload_libraries",
+      "setting": "",
+      "unit": null,
+      "context": "postmaster",
+      "pending_restart": false
+    },
+    {
+      "name": "track_io_timing",
+      "setting": "off",
+      "unit": null,
+      "context": "superuser",
+      "pending_restart": false
+    },
+    {
+      "name": "work_mem",
+      "setting": "4096",
+      "unit": "kB",
+      "context": "user",
+      "pending_restart": false
+    }
+  ],
+  "tables": [
+    {
+      "relation": "remote_ingestion.whole_channel_inputs",
+      "n_live_tup": "487116",
+      "n_dead_tup": "35697",
+      "n_mod_since_analyze": "22842",
+      "seq_scan": "77",
+      "seq_tup_read": "31547",
+      "idx_scan": "59142734",
+      "last_analyze": null,
+      "last_autoanalyze": "2026-09-20T07:20:25.389Z",
+      "last_vacuum": null,
+      "last_autovacuum": "2026-09-20T05:37:48.558Z",
+      "heap_bytes": "589602816",
+      "total_bytes": "29719166976",
+      "reloptions": null
+    },
+    {
+      "relation": "crawler.channel_runs",
+      "n_live_tup": "899443",
+      "n_dead_tup": "32076",
+      "n_mod_since_analyze": "81408",
+      "seq_scan": "394862",
+      "seq_tup_read": "3740770333",
+      "idx_scan": "5030154680",
+      "last_analyze": "2026-09-13T05:07:59.992Z",
+      "last_autoanalyze": "2026-09-20T07:04:25.889Z",
+      "last_vacuum": null,
+      "last_autovacuum": "2026-09-20T08:12:52.299Z",
+      "heap_bytes": "1380032512",
+      "total_bytes": "11558551552",
+      "reloptions": null
+    },
+    {
+      "relation": "crawler.finalized_profiles",
+      "n_live_tup": "396169",
+      "n_dead_tup": "7496",
+      "n_mod_since_analyze": "8792",
+      "seq_scan": "61203",
+      "seq_tup_read": "2611446478",
+      "idx_scan": "103113462",
+      "last_analyze": null,
+      "last_autoanalyze": "2026-09-20T06:26:24.251Z",
+      "last_vacuum": null,
+      "last_autovacuum": "2026-09-20T05:17:56.510Z",
+      "heap_bytes": "649035776",
+      "total_bytes": "6853009408",
+      "reloptions": null
+    },
+    {
+      "relation": "crawler.crawler_outbox",
+      "n_live_tup": "1671925",
+      "n_dead_tup": "131198",
+      "n_mod_since_analyze": "2494",
+      "seq_scan": "114",
+      "seq_tup_read": "63445",
+      "idx_scan": "7839263",
+      "last_analyze": null,
+      "last_autoanalyze": "2026-09-20T08:58:27.454Z",
+      "last_vacuum": null,
+      "last_autovacuum": "2026-09-19T16:11:24.634Z",
+      "heap_bytes": "1975009280",
+      "total_bytes": "3605700608",
+      "reloptions": null
+    },
+    {
+      "relation": "crawler.channels",
+      "n_live_tup": "398001",
+      "n_dead_tup": "8966",
+      "n_mod_since_analyze": "1562",
+      "seq_scan": "736122",
+      "seq_tup_read": "2677360783",
+      "idx_scan": "205527535",
+      "last_analyze": null,
+      "last_autoanalyze": "2026-09-20T08:58:55.833Z",
+      "last_vacuum": null,
+      "last_autovacuum": "2026-09-20T07:37:32.114Z",
+      "heap_bytes": "883122176",
+      "total_bytes": "2670952448",
+      "reloptions": null
+    },
+    {
+      "relation": "crawler.channel_candidates",
+      "n_live_tup": "401982",
+      "n_dead_tup": "67619",
+      "n_mod_since_analyze": "24400",
+      "seq_scan": "844602",
+      "seq_tup_read": "166389868306",
+      "idx_scan": "643697648",
+      "last_analyze": null,
+      "last_autoanalyze": "2026-09-20T06:51:31.442Z",
+      "last_vacuum": null,
+      "last_autovacuum": "2026-09-19T18:18:41.301Z",
+      "heap_bytes": "975781888",
+      "total_bytes": "2564210688",
+      "reloptions": null
+    },
+    {
+      "relation": "remote_ingestion.channel_commands",
+      "n_live_tup": "829625",
+      "n_dead_tup": "78029",
+      "n_mod_since_analyze": "72103",
+      "seq_scan": "95",
+      "seq_tup_read": "2994614",
+      "idx_scan": "8382098",
+      "last_analyze": null,
+      "last_autoanalyze": "2026-09-20T01:41:21.512Z",
+      "last_vacuum": null,
+      "last_autovacuum": "2026-09-19T10:38:37.756Z",
+      "heap_bytes": "659005440",
+      "total_bytes": "1565040640",
+      "reloptions": null
+    },
+    {
+      "relation": "remote_ingestion.tasks",
+      "n_live_tup": "456502",
+      "n_dead_tup": "77640",
+      "n_mod_since_analyze": "41148",
+      "seq_scan": "166772",
+      "seq_tup_read": "2436642644",
+      "idx_scan": "63511058",
+      "last_analyze": null,
+      "last_autoanalyze": "2026-09-20T08:41:26.979Z",
+      "last_vacuum": null,
+      "last_autovacuum": "2026-09-20T07:56:49.547Z",
+      "heap_bytes": "773496832",
+      "total_bytes": "977461248",
+      "reloptions": null
+    },
+    {
+      "relation": "publication.channel_stream_state",
+      "n_live_tup": "204360",
+      "n_dead_tup": "20784",
+      "n_mod_since_analyze": "2751",
+      "seq_scan": "27812",
+      "seq_tup_read": "40535203",
+      "idx_scan": "545588397",
+      "last_analyze": null,
+      "last_autoanalyze": "2026-09-20T08:49:25.512Z",
+      "last_vacuum": null,
+      "last_autovacuum": "2026-09-20T03:55:30.828Z",
+      "heap_bytes": "186515456",
+      "total_bytes": "243646464",
+      "reloptions": null
+    },
+    {
+      "relation": "publication.channel_delivery_state",
+      "n_live_tup": "204359",
+      "n_dead_tup": "0",
+      "n_mod_since_analyze": "10531",
+      "seq_scan": "24616",
+      "seq_tup_read": "7241138",
+      "idx_scan": "1779439",
+      "last_analyze": null,
+      "last_autoanalyze": "2026-09-15T13:40:32.667Z",
+      "last_vacuum": null,
+      "last_autovacuum": "2026-09-15T02:29:17.875Z",
+      "heap_bytes": "140238848",
+      "total_bytes": "183902208",
+      "reloptions": null
+    },
+    {
+      "relation": "publication.stream",
+      "n_live_tup": "2",
+      "n_dead_tup": "0",
+      "n_mod_since_analyze": "2",
+      "seq_scan": "7909525",
+      "seq_tup_read": "8114466",
+      "idx_scan": "3879780",
+      "last_analyze": null,
+      "last_autoanalyze": null,
+      "last_vacuum": null,
+      "last_autovacuum": null,
+      "heap_bytes": "8192",
+      "total_bytes": "49152",
+      "reloptions": null
+    }
+  ],
+  "indexes": [
+    {
+      "relation": "crawler.channel_candidates",
+      "name": "channel_candidates_dispatch_batch_id_channel_id_key",
+      "definition": "CREATE UNIQUE INDEX channel_candidates_dispatch_batch_id_channel_id_key ON crawler.channel_candidates USING btree (dispatch_batch_id, channel_id)",
+      "indisvalid": true,
+      "indisready": true,
+      "bytes": "57810944"
+    },
+    {
+      "relation": "crawler.channel_candidates",
+      "name": "channel_candidates_pkey",
+      "definition": "CREATE UNIQUE INDEX channel_candidates_pkey ON crawler.channel_candidates USING btree (candidate_id)",
+      "indisvalid": true,
+      "indisready": true,
+      "bytes": "44384256"
+    },
+    {
+      "relation": "crawler.channel_candidates",
+      "name": "idx_crawler_channel_candidates_channel",
+      "definition": "CREATE INDEX idx_crawler_channel_candidates_channel ON crawler.channel_candidates USING btree (channel_id, created_at DESC)",
+      "indisvalid": true,
+      "indisready": true,
+      "bytes": "37699584"
+    },
+    {
+      "relation": "crawler.channel_candidates",
+      "name": "idx_crawler_channel_candidates_claim",
+      "definition": "CREATE INDEX idx_crawler_channel_candidates_claim ON crawler.channel_candidates USING btree (dispatch_batch_id, status, priority DESC, created_at)",
+      "indisvalid": true,
+      "indisready": true,
+      "bytes": "83255296"
+    },
+    {
+      "relation": "crawler.channel_candidates",
+      "name": "ux_crawler_channel_candidates_identity",
+      "definition": "CREATE UNIQUE INDEX ux_crawler_channel_candidates_identity ON crawler.channel_candidates USING btree (candidate_id, channel_id)",
+      "indisvalid": true,
+      "indisready": true,
+      "bytes": "67117056"
+    },
+    {
+      "relation": "crawler.channel_runs",
+      "name": "channel_runs_pkey",
+      "definition": "CREATE UNIQUE INDEX channel_runs_pkey ON crawler.channel_runs USING btree (run_id)",
+      "indisvalid": true,
+      "indisready": true,
+      "bytes": "95059968"
+    },
+    {
+      "relation": "crawler.channel_runs",
+      "name": "idx_crawler_channel_runs_candidate",
+      "definition": "CREATE INDEX idx_crawler_channel_runs_candidate ON crawler.channel_runs USING btree (candidate_id) WHERE (candidate_id IS NOT NULL)",
+      "indisvalid": true,
+      "indisready": true,
+      "bytes": "20029440"
+    },
+    {
+      "relation": "crawler.channel_runs",
+      "name": "idx_crawler_channel_runs_channel",
+      "definition": "CREATE INDEX idx_crawler_channel_runs_channel ON crawler.channel_runs USING btree (channel_id, created_at DESC)",
+      "indisvalid": true,
+      "indisready": true,
+      "bytes": "70877184"
+    },
+    {
+      "relation": "crawler.channel_runs",
+      "name": "idx_crawler_runs_detail_done_candidate_channel",
+      "definition": "CREATE INDEX idx_crawler_runs_detail_done_candidate_channel ON crawler.channel_runs USING btree (candidate_id, channel_id) WHERE ((candidate_id IS NOT NULL) AND (detail_status = 'done'::text))",
+      "indisvalid": true,
+      "indisready": true,
+      "bytes": "29548544"
+    },
+    {
+      "relation": "crawler.channel_runs",
+      "name": "ux_crawler_channel_runs_identity",
+      "definition": "CREATE UNIQUE INDEX ux_crawler_channel_runs_identity ON crawler.channel_runs USING btree (run_id, channel_id, candidate_id)",
+      "indisvalid": true,
+      "indisready": true,
+      "bytes": "136413184"
+    },
+    {
+      "relation": "crawler.channel_runs",
+      "name": "ux_crawler_channel_runs_plan_id",
+      "definition": "CREATE UNIQUE INDEX ux_crawler_channel_runs_plan_id ON crawler.channel_runs USING btree (plan_id) WHERE (plan_id IS NOT NULL)",
+      "indisvalid": true,
+      "indisready": true,
+      "bytes": "23724032"
+    },
+    {
+      "relation": "crawler.channels",
+      "name": "channels_pkey",
+      "definition": "CREATE UNIQUE INDEX channels_pkey ON crawler.channels USING btree (channel_id)",
+      "indisvalid": true,
+      "indisready": true,
+      "bytes": "28368896"
+    },
+    {
+      "relation": "crawler.channels",
+      "name": "idx_crawler_channels_agent_ready",
+      "definition": "CREATE INDEX idx_crawler_channels_agent_ready ON crawler.channels USING btree (agent_status, ready_for_agent, priority DESC, created_at)",
+      "indisvalid": true,
+      "indisready": true,
+      "bytes": "45326336"
+    },
+    {
+      "relation": "crawler.channels",
+      "name": "idx_crawler_channels_dormant_recheck",
+      "definition": "CREATE INDEX idx_crawler_channels_dormant_recheck ON crawler.channels USING btree (dormant_recheck_day, channel_id) WHERE (status = 'dormant'::text)",
+      "indisvalid": true,
+      "indisready": true,
+      "bytes": "11935744"
+    },
+    {
+      "relation": "crawler.channels",
+      "name": "ux_crawler_channels_registry_promotion_candidate",
+      "definition": "CREATE UNIQUE INDEX ux_crawler_channels_registry_promotion_candidate ON crawler.channels USING btree (registry_promotion_candidate_id) WHERE (registry_promotion_candidate_id IS NOT NULL)",
+      "indisvalid": true,
+      "indisready": true,
+      "bytes": "22945792"
+    },
+    {
+      "relation": "crawler.channels",
+      "name": "ux_crawler_channels_registry_promotion_run",
+      "definition": "CREATE UNIQUE INDEX ux_crawler_channels_registry_promotion_run ON crawler.channels USING btree (registry_promotion_run_id) WHERE (registry_promotion_run_id IS NOT NULL)",
+      "indisvalid": true,
+      "indisready": true,
+      "bytes": "38715392"
+    },
+    {
+      "relation": "crawler.crawler_outbox",
+      "name": "crawler_outbox_observation_id_key",
+      "definition": "CREATE UNIQUE INDEX crawler_outbox_observation_id_key ON crawler.crawler_outbox USING btree (observation_id)",
+      "indisvalid": true,
+      "indisready": true,
+      "bytes": "74743808"
+    },
+    {
+      "relation": "crawler.crawler_outbox",
+      "name": "crawler_outbox_pkey",
+      "definition": "CREATE UNIQUE INDEX crawler_outbox_pkey ON crawler.crawler_outbox USING btree (event_id)",
+      "indisvalid": true,
+      "indisready": true,
+      "bytes": "74301440"
+    },
+    {
+      "relation": "crawler.crawler_outbox",
+      "name": "idx_crawler_outbox_created_at",
+      "definition": "CREATE INDEX idx_crawler_outbox_created_at ON crawler.crawler_outbox USING btree (created_at)",
+      "indisvalid": true,
+      "indisready": true,
+      "bytes": "69648384"
+    },
+    {
+      "relation": "crawler.crawler_outbox",
+      "name": "idx_crawler_outbox_publish",
+      "definition": "CREATE INDEX idx_crawler_outbox_publish ON crawler.crawler_outbox USING btree (status, next_attempt_at, lease_expires_at, created_at)",
+      "indisvalid": true,
+      "indisready": true,
+      "bytes": "175095808"
+    },
+    {
+      "relation": "crawler.finalized_profiles",
+      "name": "finalized_profiles_pkey",
+      "definition": "CREATE UNIQUE INDEX finalized_profiles_pkey ON crawler.finalized_profiles USING btree (channel_id)",
+      "indisvalid": true,
+      "indisready": true,
+      "bytes": "27918336"
+    },
+    {
+      "relation": "publication.channel_delivery_state",
+      "name": "channel_delivery_state_pkey",
+      "definition": "CREATE UNIQUE INDEX channel_delivery_state_pkey ON publication.channel_delivery_state USING btree (destination, publication_stream_id, channel_id)",
+      "indisvalid": true,
+      "indisready": true,
+      "bytes": "20447232"
+    },
+    {
+      "relation": "publication.channel_delivery_state",
+      "name": "idx_publication_channel_delivery_state_mode",
+      "definition": "CREATE INDEX idx_publication_channel_delivery_state_mode ON publication.channel_delivery_state USING btree (destination, mode, publication_stream_id, channel_id)",
+      "indisvalid": true,
+      "indisready": true,
+      "bytes": "23142400"
+    },
+    {
+      "relation": "publication.channel_stream_state",
+      "name": "channel_stream_state_pkey",
+      "definition": "CREATE UNIQUE INDEX channel_stream_state_pkey ON publication.channel_stream_state USING btree (publication_stream_id, channel_id)",
+      "indisvalid": true,
+      "indisready": true,
+      "bytes": "19079168"
+    },
+    {
+      "relation": "publication.channel_stream_state",
+      "name": "idx_publication_channel_stream_state_status",
+      "definition": "CREATE INDEX idx_publication_channel_stream_state_status ON publication.channel_stream_state USING btree (publication_stream_id, status, onboarding_mode, channel_id)",
+      "indisvalid": true,
+      "indisready": true,
+      "bytes": "24174592"
+    },
+    {
+      "relation": "publication.channel_stream_state",
+      "name": "ux_publication_channel_stream_owned",
+      "definition": "CREATE UNIQUE INDEX ux_publication_channel_stream_owned ON publication.channel_stream_state USING btree (channel_id) WHERE (status = 'owned'::text)",
+      "indisvalid": true,
+      "indisready": true,
+      "bytes": "13795328"
+    },
+    {
+      "relation": "publication.stream",
+      "name": "idx_publication_stream_deployment_status",
+      "definition": "CREATE INDEX idx_publication_stream_deployment_status ON publication.stream USING btree (source_deployment_key, status, created_at)",
+      "indisvalid": true,
+      "indisready": true,
+      "bytes": "16384"
+    },
+    {
+      "relation": "publication.stream",
+      "name": "stream_pkey",
+      "definition": "CREATE UNIQUE INDEX stream_pkey ON publication.stream USING btree (publication_stream_id)",
+      "indisvalid": true,
+      "indisready": true,
+      "bytes": "16384"
+    },
+    {
+      "relation": "remote_ingestion.channel_commands",
+      "name": "channel_commands_batch_id_key",
+      "definition": "CREATE UNIQUE INDEX channel_commands_batch_id_key ON remote_ingestion.channel_commands USING btree (batch_id)",
+      "indisvalid": true,
+      "indisready": true,
+      "bytes": "38510592"
+    },
+    {
+      "relation": "remote_ingestion.channel_commands",
+      "name": "channel_commands_pkey",
+      "definition": "CREATE UNIQUE INDEX channel_commands_pkey ON remote_ingestion.channel_commands USING btree (command_id)",
+      "indisvalid": true,
+      "indisready": true,
+      "bytes": "37355520"
+    },
+    {
+      "relation": "remote_ingestion.channel_commands",
+      "name": "channel_commands_task_id_generation_command_key_key",
+      "definition": "CREATE UNIQUE INDEX channel_commands_task_id_generation_command_key_key ON remote_ingestion.channel_commands USING btree (task_id, generation, command_key)",
+      "indisvalid": true,
+      "indisready": true,
+      "bytes": "136806400"
+    },
+    {
+      "relation": "remote_ingestion.channel_commands",
+      "name": "remote_channel_commands_pending",
+      "definition": "CREATE INDEX remote_channel_commands_pending ON remote_ingestion.channel_commands USING btree (task_id, generation, created_at) WHERE (state = 'pending'::text)",
+      "indisvalid": true,
+      "indisready": true,
+      "bytes": "9560064"
+    },
+    {
+      "relation": "remote_ingestion.tasks",
+      "name": "remote_channel_scope_lease",
+      "definition": "CREATE UNIQUE INDEX remote_channel_scope_lease ON remote_ingestion.tasks USING btree (scope_key) WHERE ((scope_key IS NOT NULL) AND (state = 'leased'::text))",
+      "indisvalid": true,
+      "indisready": true,
+      "bytes": "1654784"
+    },
+    {
+      "relation": "remote_ingestion.tasks",
+      "name": "remote_task_target_slot",
+      "definition": "CREATE INDEX remote_task_target_slot ON remote_ingestion.tasks USING btree (target_node_id, target_worker_slot, created_at)",
+      "indisvalid": true,
+      "indisready": true,
+      "bytes": "82550784"
+    },
+    {
+      "relation": "remote_ingestion.tasks",
+      "name": "remote_tasks_claim",
+      "definition": "CREATE INDEX remote_tasks_claim ON remote_ingestion.tasks USING btree (capability, created_at) WHERE (state = ANY (ARRAY['pending'::text, 'leased'::text]))",
+      "indisvalid": true,
+      "indisready": true,
+      "bytes": "2809856"
+    },
+    {
+      "relation": "remote_ingestion.tasks",
+      "name": "remote_tasks_live_lease_lookup",
+      "definition": "CREATE INDEX remote_tasks_live_lease_lookup ON remote_ingestion.tasks USING btree (node_id, lease_until, worker_slot) INCLUDE (task_id, generation, scope_key) WHERE (state = 'leased'::text)",
+      "indisvalid": true,
+      "indisready": true,
+      "bytes": "25690112"
+    },
+    {
+      "relation": "remote_ingestion.tasks",
+      "name": "remote_tasks_live_slot",
+      "definition": "CREATE INDEX remote_tasks_live_slot ON remote_ingestion.tasks USING btree (target_node_id, target_worker_slot) WHERE (state = ANY (ARRAY['pending'::text, 'leased'::text, 'received'::text]))",
+      "indisvalid": true,
+      "indisready": true,
+      "bytes": "1073152"
+    },
+    {
+      "relation": "remote_ingestion.tasks",
+      "name": "remote_tasks_node_leases",
+      "definition": "CREATE INDEX remote_tasks_node_leases ON remote_ingestion.tasks USING btree (node_id, lease_until) WHERE (state = 'leased'::text)",
+      "indisvalid": true,
+      "indisready": true,
+      "bytes": "2433024"
+    },
+    {
+      "relation": "remote_ingestion.tasks",
+      "name": "remote_tasks_process",
+      "definition": "CREATE INDEX remote_tasks_process ON remote_ingestion.tasks USING btree (next_process_at, received_at) WHERE (state = 'received'::text)",
+      "indisvalid": true,
+      "indisready": true,
+      "bytes": "32768"
+    },
+    {
+      "relation": "remote_ingestion.tasks",
+      "name": "remote_tasks_target_pending",
+      "definition": "CREATE INDEX remote_tasks_target_pending ON remote_ingestion.tasks USING btree (target_node_id, target_worker_slot, capability, created_at, task_id) WHERE (state = 'pending'::text)",
+      "indisvalid": true,
+      "indisready": true,
+      "bytes": "1982464"
+    },
+    {
+      "relation": "remote_ingestion.tasks",
+      "name": "remote_tasks_unassigned_claim",
+      "definition": "CREATE INDEX remote_tasks_unassigned_claim ON remote_ingestion.tasks USING btree (capability, created_at, task_id) WHERE ((target_node_id IS NULL) AND (state = ANY (ARRAY['pending'::text, 'leased'::text])))",
+      "indisvalid": true,
+      "indisready": true,
+      "bytes": "778240"
+    },
+    {
+      "relation": "remote_ingestion.tasks",
+      "name": "remote_whole_applied_retention",
+      "definition": "CREATE INDEX remote_whole_applied_retention ON remote_ingestion.tasks USING btree (applied_at) WHERE (state = 'applied'::text)",
+      "indisvalid": true,
+      "indisready": true,
+      "bytes": "10854400"
+    },
+    {
+      "relation": "remote_ingestion.tasks",
+      "name": "remote_worker_slot_lease",
+      "definition": "CREATE UNIQUE INDEX remote_worker_slot_lease ON remote_ingestion.tasks USING btree (node_id, worker_slot) WHERE ((worker_slot IS NOT NULL) AND (state = 'leased'::text))",
+      "indisvalid": true,
+      "indisready": true,
+      "bytes": "1015808"
+    },
+    {
+      "relation": "remote_ingestion.tasks",
+      "name": "tasks_pkey",
+      "definition": "CREATE UNIQUE INDEX tasks_pkey ON remote_ingestion.tasks USING btree (task_id)",
+      "indisvalid": true,
+      "indisready": true,
+      "bytes": "20824064"
+    },
+    {
+      "relation": "remote_ingestion.tasks",
+      "name": "tasks_work_key_key",
+      "definition": "CREATE UNIQUE INDEX tasks_work_key_key ON remote_ingestion.tasks USING btree (work_key)",
+      "indisvalid": true,
+      "indisready": true,
+      "bytes": "51757056"
+    },
+    {
+      "relation": "remote_ingestion.whole_channel_inputs",
+      "name": "remote_whole_unpruned_task",
+      "definition": "CREATE INDEX remote_whole_unpruned_task ON remote_ingestion.whole_channel_inputs USING btree (task_id) WHERE (pruned_at IS NULL)",
+      "indisvalid": true,
+      "indisready": true,
+      "bytes": "18292736"
+    },
+    {
+      "relation": "remote_ingestion.whole_channel_inputs",
+      "name": "whole_channel_inputs_pkey",
+      "definition": "CREATE UNIQUE INDEX whole_channel_inputs_pkey ON remote_ingestion.whole_channel_inputs USING btree (command_id)",
+      "indisvalid": true,
+      "indisready": true,
+      "bytes": "21110784"
+    },
+    {
+      "relation": "remote_ingestion.whole_channel_inputs",
+      "name": "whole_channel_inputs_task_id_generation_key",
+      "definition": "CREATE UNIQUE INDEX whole_channel_inputs_task_id_generation_key ON remote_ingestion.whole_channel_inputs USING btree (task_id, generation)",
+      "indisvalid": true,
+      "indisready": true,
+      "bytes": "27361280"
+    }
+  ],
+  "plans": {
+    "outbox_claim": [
+      {
+        "Plan": {
+          "Node Type": "ModifyTable",
+          "Operation": "Update",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Relation Name": "crawler_outbox",
+          "Alias": "outbox",
+          "Startup Cost": 13.36,
+          "Total Cost": 21.41,
+          "Plan Rows": 1,
+          "Plan Width": 130,
+          "Plans": [
+            {
+              "Node Type": "Limit",
+              "Parent Relationship": "InitPlan",
+              "Subplan Name": "CTE claimable",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Startup Cost": 12.92,
+              "Total Cost": 12.93,
+              "Plan Rows": 1,
+              "Plan Width": 30,
+              "Plans": [
+                {
+                  "Node Type": "LockRows",
+                  "Parent Relationship": "Outer",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Startup Cost": 12.92,
+                  "Total Cost": 12.93,
+                  "Plan Rows": 1,
+                  "Plan Width": 30,
+                  "Plans": [
+                    {
+                      "Node Type": "Sort",
+                      "Parent Relationship": "Outer",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Startup Cost": 12.92,
+                      "Total Cost": 12.92,
+                      "Plan Rows": 1,
+                      "Plan Width": 30,
+                      "Sort Key": [
+                        "crawler_outbox.created_at",
+                        "crawler_outbox.event_id"
+                      ],
+                      "Plans": [
+                        {
+                          "Node Type": "Bitmap Heap Scan",
+                          "Parent Relationship": "Outer",
+                          "Parallel Aware": false,
+                          "Async Capable": false,
+                          "Relation Name": "crawler_outbox",
+                          "Alias": "crawler_outbox",
+                          "Startup Cost": 8.88,
+                          "Total Cost": 12.91,
+                          "Plan Rows": 1,
+                          "Plan Width": 30,
+                          "Recheck Cond": "(((status = 'pending'::text) AND (next_attempt_at <= now())) OR ((status = 'publishing'::text) AND (lease_expires_at <= now())))",
+                          "Plans": [
+                            {
+                              "Node Type": "BitmapOr",
+                              "Parent Relationship": "Outer",
+                              "Parallel Aware": false,
+                              "Async Capable": false,
+                              "Startup Cost": 8.88,
+                              "Total Cost": 8.88,
+                              "Plan Rows": 1,
+                              "Plan Width": 0,
+                              "Plans": [
+                                {
+                                  "Node Type": "Bitmap Index Scan",
+                                  "Parent Relationship": "Member",
+                                  "Parallel Aware": false,
+                                  "Async Capable": false,
+                                  "Index Name": "idx_crawler_outbox_publish",
+                                  "Startup Cost": 0,
+                                  "Total Cost": 4.44,
+                                  "Plan Rows": 1,
+                                  "Plan Width": 0,
+                                  "Index Cond": "((status = 'pending'::text) AND (next_attempt_at <= now()))"
+                                },
+                                {
+                                  "Node Type": "Bitmap Index Scan",
+                                  "Parent Relationship": "Member",
+                                  "Parallel Aware": false,
+                                  "Async Capable": false,
+                                  "Index Name": "idx_crawler_outbox_publish",
+                                  "Startup Cost": 0,
+                                  "Total Cost": 4.44,
+                                  "Plan Rows": 1,
+                                  "Plan Width": 0,
+                                  "Index Cond": "((status = 'publishing'::text) AND (lease_expires_at <= now()))"
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "Node Type": "Nested Loop",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Join Type": "Inner",
+              "Startup Cost": 0.43,
+              "Total Cost": 8.48,
+              "Plan Rows": 1,
+              "Plan Width": 130,
+              "Inner Unique": true,
+              "Plans": [
+                {
+                  "Node Type": "CTE Scan",
+                  "Parent Relationship": "Outer",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "CTE Name": "claimable",
+                  "Alias": "claimable",
+                  "Startup Cost": 0,
+                  "Total Cost": 0.02,
+                  "Plan Rows": 1,
+                  "Plan Width": 56
+                },
+                {
+                  "Node Type": "Index Scan",
+                  "Parent Relationship": "Inner",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Scan Direction": "Forward",
+                  "Index Name": "crawler_outbox_pkey",
+                  "Relation Name": "crawler_outbox",
+                  "Alias": "outbox",
+                  "Startup Cost": 0.43,
+                  "Total Cost": 8.45,
+                  "Plan Rows": 1,
+                  "Plan Width": 26,
+                  "Index Cond": "(event_id = claimable.event_id)"
+                }
+              ]
+            }
+          ]
+        }
+      }
+    ],
+    "automatic_onboarding": [
+      {
+        "Plan": {
+          "Node Type": "Limit",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Startup Cost": 226899.19,
+          "Total Cost": 270441.22,
+          "Plan Rows": 1,
+          "Plan Width": 82,
+          "Plans": [
+            {
+              "Node Type": "Nested Loop",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Join Type": "Semi",
+              "Startup Cost": 226899.19,
+              "Total Cost": 270441.22,
+              "Plan Rows": 1,
+              "Plan Width": 82,
+              "Inner Unique": false,
+              "Join Filter": "(promotion_candidate.accepted_at >= stream.capture_enabled_at)",
+              "Plans": [
+                {
+                  "Node Type": "Nested Loop",
+                  "Parent Relationship": "Outer",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Join Type": "Anti",
+                  "Startup Cost": 193713.95,
+                  "Total Cost": 193717.64,
+                  "Plan Rows": 1,
+                  "Plan Width": 82,
+                  "Inner Unique": false,
+                  "Plans": [
+                    {
+                      "Node Type": "Nested Loop",
+                      "Parent Relationship": "Outer",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Join Type": "Inner",
+                      "Startup Cost": 193713.53,
+                      "Total Cost": 193715.75,
+                      "Plan Rows": 1,
+                      "Plan Width": 82,
+                      "Inner Unique": true,
+                      "Join Filter": "(promotion_run.run_id = channel.registry_promotion_run_id)",
+                      "Plans": [
+                        {
+                          "Node Type": "Gather Merge",
+                          "Parent Relationship": "Outer",
+                          "Parallel Aware": false,
+                          "Async Capable": false,
+                          "Startup Cost": 193713.11,
+                          "Total Cost": 193713.23,
+                          "Plan Rows": 1,
+                          "Plan Width": 148,
+                          "Workers Planned": 2,
+                          "Plans": [
+                            {
+                              "Node Type": "Sort",
+                              "Parent Relationship": "Outer",
+                              "Parallel Aware": false,
+                              "Async Capable": false,
+                              "Startup Cost": 192713.09,
+                              "Total Cost": 192713.09,
+                              "Plan Rows": 1,
+                              "Plan Width": 148,
+                              "Sort Key": [
+                                "promotion_candidate.accepted_at",
+                                "channel.channel_id"
+                              ],
+                              "Plans": [
+                                {
+                                  "Node Type": "Nested Loop",
+                                  "Parent Relationship": "Outer",
+                                  "Parallel Aware": false,
+                                  "Async Capable": false,
+                                  "Join Type": "Inner",
+                                  "Startup Cost": 110970.29,
+                                  "Total Cost": 192713.08,
+                                  "Plan Rows": 1,
+                                  "Plan Width": 148,
+                                  "Inner Unique": true,
+                                  "Join Filter": "((promotion_candidate.candidate_id = channel.registry_promotion_candidate_id) AND (promotion_candidate.channel_id = channel.channel_id))",
+                                  "Plans": [
+                                    {
+                                      "Node Type": "Hash Join",
+                                      "Parent Relationship": "Outer",
+                                      "Parallel Aware": true,
+                                      "Async Capable": false,
+                                      "Join Type": "Inner",
+                                      "Startup Cost": 110969.87,
+                                      "Total Cost": 192710.05,
+                                      "Plan Rows": 1,
+                                      "Plan Width": 107,
+                                      "Inner Unique": true,
+                                      "Hash Cond": "((current_finalized.channel_id = channel.channel_id) AND (current_finalized.run_id = channel.latest_run_id))",
+                                      "Plans": [
+                                        {
+                                          "Node Type": "Seq Scan",
+                                          "Parent Relationship": "Outer",
+                                          "Parallel Aware": true,
+                                          "Async Capable": false,
+                                          "Relation Name": "finalized_profiles",
+                                          "Alias": "current_finalized",
+                                          "Startup Cost": 0,
+                                          "Total Cost": 81291.38,
+                                          "Plan Rows": 85485,
+                                          "Plan Width": 74,
+                                          "Filter": "((finalized_at IS NOT NULL) AND (status = 'ready_auto'::text))"
+                                        },
+                                        {
+                                          "Node Type": "Hash",
+                                          "Parent Relationship": "Inner",
+                                          "Parallel Aware": true,
+                                          "Async Capable": false,
+                                          "Startup Cost": 110290.51,
+                                          "Total Cost": 110290.51,
+                                          "Plan Rows": 45291,
+                                          "Plan Width": 115,
+                                          "Plans": [
+                                            {
+                                              "Node Type": "Seq Scan",
+                                              "Parent Relationship": "Outer",
+                                              "Parallel Aware": true,
+                                              "Async Capable": false,
+                                              "Relation Name": "channels",
+                                              "Alias": "channel",
+                                              "Startup Cost": 0,
+                                              "Total Cost": 110290.51,
+                                              "Plan Rows": 45291,
+                                              "Plan Width": 115,
+                                              "Filter": "((status = 'active'::text) AND (agent_status = 'done'::text))"
+                                            }
+                                          ]
+                                        }
+                                      ]
+                                    },
+                                    {
+                                      "Node Type": "Index Scan",
+                                      "Parent Relationship": "Inner",
+                                      "Parallel Aware": false,
+                                      "Async Capable": false,
+                                      "Scan Direction": "Forward",
+                                      "Index Name": "idx_crawler_channel_candidates_channel",
+                                      "Relation Name": "channel_candidates",
+                                      "Alias": "promotion_candidate",
+                                      "Startup Cost": 0.42,
+                                      "Total Cost": 3.02,
+                                      "Plan Rows": 1,
+                                      "Plan Width": 41,
+                                      "Index Cond": "(channel_id = current_finalized.channel_id)",
+                                      "Filter": "((accepted_at IS NOT NULL) AND (status = 'accepted'::text))"
+                                    }
+                                  ]
+                                }
+                              ]
+                            }
+                          ]
+                        },
+                        {
+                          "Node Type": "Index Scan",
+                          "Parent Relationship": "Inner",
+                          "Parallel Aware": false,
+                          "Async Capable": false,
+                          "Scan Direction": "Forward",
+                          "Index Name": "idx_crawler_channel_runs_candidate",
+                          "Relation Name": "channel_runs",
+                          "Alias": "promotion_run",
+                          "Startup Cost": 0.42,
+                          "Total Cost": 2.51,
+                          "Plan Rows": 1,
+                          "Plan Width": 78,
+                          "Index Cond": "(candidate_id = promotion_candidate.candidate_id)",
+                          "Filter": "((publication_finalized_at IS NOT NULL) AND (crawl_mode = 'full'::text) AND (publication_finalized_status = 'ready_auto'::text) AND (promotion_candidate.channel_id = channel_id) AND (COALESCE((result_json #>> '{publication_gap_repair,status}'::text[]), ''::text) <> 'required'::text))"
+                        }
+                      ]
+                    },
+                    {
+                      "Node Type": "Index Scan",
+                      "Parent Relationship": "Inner",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Scan Direction": "Forward",
+                      "Index Name": "ux_publication_channel_stream_owned",
+                      "Relation Name": "channel_stream_state",
+                      "Alias": "owner",
+                      "Startup Cost": 0.42,
+                      "Total Cost": 1.88,
+                      "Plan Rows": 1,
+                      "Plan Width": 441,
+                      "Index Cond": "(channel_id = channel.channel_id)",
+                      "Filter": "(((onboarding_mode = 'bootstrap'::text) AND (seed_status = 'pending'::text) AND ((ownership_reference ->> 'onboarding_mode'::text) = 'automatic_bootstrap'::text) AND ((ownership_reference ->> 'initial_full_run_id'::text) = channel.registry_promotion_run_id)) IS NOT TRUE)"
+                    }
+                  ]
+                },
+                {
+                  "Node Type": "Nested Loop",
+                  "Parent Relationship": "Inner",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Join Type": "Semi",
+                  "Startup Cost": 33185.23,
+                  "Total Cost": 76723.56,
+                  "Plan Rows": 1,
+                  "Plan Width": 8,
+                  "Inner Unique": false,
+                  "Plans": [
+                    {
+                      "Node Type": "Nested Loop",
+                      "Parent Relationship": "Outer",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Join Type": "Anti",
+                      "Startup Cost": 1000.56,
+                      "Total Cost": 19265.9,
+                      "Plan Rows": 1,
+                      "Plan Width": 24,
+                      "Inner Unique": false,
+                      "Join Filter": "(delivery_1.publication_stream_id = stream.publication_stream_id)",
+                      "Plans": [
+                        {
+                          "Node Type": "Index Scan",
+                          "Parent Relationship": "Outer",
+                          "Parallel Aware": false,
+                          "Async Capable": false,
+                          "Scan Direction": "Forward",
+                          "Index Name": "stream_pkey",
+                          "Relation Name": "stream",
+                          "Alias": "stream",
+                          "Startup Cost": 0.14,
+                          "Total Cost": 52,
+                          "Plan Rows": 1,
+                          "Plan Width": 24,
+                          "Filter": "((capture_enabled_at IS NOT NULL) AND (status = 'active'::text))"
+                        },
+                        {
+                          "Node Type": "Gather",
+                          "Parent Relationship": "Inner",
+                          "Parallel Aware": false,
+                          "Async Capable": false,
+                          "Startup Cost": 1000.42,
+                          "Total Cost": 19213.82,
+                          "Plan Rows": 7,
+                          "Plan Width": 16,
+                          "Workers Planned": 2,
+                          "Single Copy": false,
+                          "Plans": [
+                            {
+                              "Node Type": "Nested Loop",
+                              "Parent Relationship": "Outer",
+                              "Parallel Aware": false,
+                              "Async Capable": false,
+                              "Join Type": "Inner",
+                              "Startup Cost": 0.42,
+                              "Total Cost": 18213.12,
+                              "Plan Rows": 3,
+                              "Plan Width": 16,
+                              "Inner Unique": true,
+                              "Plans": [
+                                {
+                                  "Node Type": "Seq Scan",
+                                  "Parent Relationship": "Outer",
+                                  "Parallel Aware": true,
+                                  "Async Capable": false,
+                                  "Relation Name": "channel_delivery_state",
+                                  "Alias": "delivery_1",
+                                  "Startup Cost": 0,
+                                  "Total Cost": 18187.77,
+                                  "Plan Rows": 3,
+                                  "Plan Width": 41,
+                                  "Filter": "(mode <> 'online'::text)"
+                                },
+                                {
+                                  "Node Type": "Index Scan",
+                                  "Parent Relationship": "Inner",
+                                  "Parallel Aware": false,
+                                  "Async Capable": false,
+                                  "Scan Direction": "Forward",
+                                  "Index Name": "ux_publication_channel_stream_owned",
+                                  "Relation Name": "channel_stream_state",
+                                  "Alias": "route_owner_1",
+                                  "Startup Cost": 0.42,
+                                  "Total Cost": 8.44,
+                                  "Plan Rows": 1,
+                                  "Plan Width": 41,
+                                  "Index Cond": "(channel_id = delivery_1.channel_id)",
+                                  "Filter": "(delivery_1.publication_stream_id = publication_stream_id)"
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "Node Type": "Hash Join",
+                      "Parent Relationship": "Inner",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Join Type": "Inner",
+                      "Startup Cost": 32184.67,
+                      "Total Cost": 57453.02,
+                      "Plan Rows": 464,
+                      "Plan Width": 32,
+                      "Inner Unique": true,
+                      "Hash Cond": "((delivery.publication_stream_id = route_owner.publication_stream_id) AND (delivery.channel_id = route_owner.channel_id))",
+                      "Join Filter": "(stream.publication_stream_id = delivery.publication_stream_id)",
+                      "Plans": [
+                        {
+                          "Node Type": "Seq Scan",
+                          "Parent Relationship": "Outer",
+                          "Parallel Aware": false,
+                          "Async Capable": false,
+                          "Relation Name": "channel_delivery_state",
+                          "Alias": "delivery",
+                          "Startup Cost": 0,
+                          "Total Cost": 19684.05,
+                          "Plan Rows": 205197,
+                          "Plan Width": 41,
+                          "Filter": "(mode = 'online'::text)"
+                        },
+                        {
+                          "Node Type": "Hash",
+                          "Parent Relationship": "Inner",
+                          "Parallel Aware": false,
+                          "Async Capable": false,
+                          "Startup Cost": 29753.01,
+                          "Total Cost": 29753.01,
+                          "Plan Rows": 102177,
+                          "Plan Width": 41,
+                          "Plans": [
+                            {
+                              "Node Type": "Bitmap Heap Scan",
+                              "Parent Relationship": "Outer",
+                              "Parallel Aware": false,
+                              "Async Capable": false,
+                              "Relation Name": "channel_stream_state",
+                              "Alias": "route_owner",
+                              "Startup Cost": 5452.31,
+                              "Total Cost": 29753.01,
+                              "Plan Rows": 102177,
+                              "Plan Width": 41,
+                              "Recheck Cond": "(stream.publication_stream_id = publication_stream_id)",
+                              "Filter": "(status = 'owned'::text)",
+                              "Plans": [
+                                {
+                                  "Node Type": "Bitmap Index Scan",
+                                  "Parent Relationship": "Outer",
+                                  "Parallel Aware": false,
+                                  "Async Capable": false,
+                                  "Index Name": "channel_stream_state_pkey",
+                                  "Startup Cost": 0,
+                                  "Total Cost": 5426.77,
+                                  "Plan Rows": 102180,
+                                  "Plan Width": 0,
+                                  "Index Cond": "(publication_stream_id = stream.publication_stream_id)"
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        "JIT": {
+          "Functions": 76,
+          "Options": {
+            "Inlining": false,
+            "Optimization": false,
+            "Expressions": true,
+            "Deforming": true
+          }
+        }
+      }
+    ]
+  }
+}

@@ -1,0 +1,790 @@
+{
+  "status": "shared_buffers_1gb_applied_recovery_verified",
+  "generated_at": "2026-09-20T09:46:01.391932+00:00",
+  "database": "newcrawler_crawler",
+  "before": "128MB",
+  "after": "1GB",
+  "production_modified": true,
+  "persistence": "postgresql.auto.conf on the original persistent PostgreSQL data volume",
+  "pool_pause_seconds": 3.041271,
+  "drain_center": [
+    {
+      "at": "2026-09-20T09:23:35.934749+00:00",
+      "draining": "qy-remote-node-center",
+      "forcedKill": false
+    },
+    {
+      "at": "2026-09-20T09:26:16.806786+00:00",
+      "drained": "qy-remote-node-center",
+      "exitCode": 0
+    }
+  ],
+  "drain_controller": [
+    {
+      "at": "2026-09-20T09:23:38.663535+00:00",
+      "draining": "qy-newcrawler-fresh-controller-fullcrawl-canary-1",
+      "forcedKill": false
+    },
+    {
+      "at": "2026-09-20T09:26:56.212371+00:00",
+      "drained": "qy-newcrawler-fresh-controller-fullcrawl-canary-1",
+      "exitCode": 0
+    }
+  ],
+  "restart": [
+    {
+      "at": "2026-09-20T09:27:27.746232+00:00",
+      "pausingPool": true
+    },
+    {
+      "at": "2026-09-20T09:27:27.955605+00:00",
+      "poolPaused": true
+    },
+    {
+      "at": "2026-09-20T09:27:28.172576+00:00",
+      "stoppingDatabase": true,
+      "clients": 0
+    },
+    {
+      "at": "2026-09-20T09:27:30.768567+00:00",
+      "databaseReady": true,
+      "shared_buffers": "1GB",
+      "oldExit": 0
+    },
+    {
+      "at": "2026-09-20T09:27:30.996876+00:00",
+      "poolResumed": true
+    }
+  ],
+  "start": [
+    {
+      "at": "2026-09-20T09:27:56.230551+00:00",
+      "started": "qy-remote-node-center"
+    },
+    {
+      "at": "2026-09-20T09:27:56.930340+00:00",
+      "started": "qy-newcrawler-fresh-controller-fullcrawl-canary-1"
+    }
+  ],
+  "verification": {
+    "at": "2026-09-20T09:43:25.659244+00:00",
+    "settings": [
+      {
+        "name": "max_connections",
+        "setting": "100",
+        "unit": null,
+        "source": "configuration file",
+        "sourcefile": "/var/lib/postgresql/data/postgresql.conf",
+        "pending_restart": false
+      },
+      {
+        "name": "shared_buffers",
+        "setting": "131072",
+        "unit": "8kB",
+        "source": "configuration file",
+        "sourcefile": "/var/lib/postgresql/data/postgresql.auto.conf",
+        "pending_restart": false
+      },
+      {
+        "name": "work_mem",
+        "setting": "4096",
+        "unit": "kB",
+        "source": "default",
+        "sourcefile": null,
+        "pending_restart": false
+      }
+    ],
+    "otherAutoConfigUnchanged": true,
+    "containers": [
+      {
+        "name": "qy-newcrawler-fresh-crawler-postgres-1",
+        "sameContainer": true,
+        "health": "healthy",
+        "running": true,
+        "startedAt": "2026-09-20T09:27:28.879622115Z",
+        "restartCount": 0
+      },
+      {
+        "name": "qy-newcrawler-fresh-crawler-pgbouncer-1",
+        "sameContainer": true,
+        "health": "healthy",
+        "running": true,
+        "startedAt": "2026-08-25T03:06:21.671288579Z",
+        "restartCount": 0
+      },
+      {
+        "name": "qy-remote-node-center",
+        "sameContainer": true,
+        "health": "healthy",
+        "running": true,
+        "startedAt": "2026-09-20T09:27:55.6475535Z",
+        "restartCount": 0
+      },
+      {
+        "name": "qy-newcrawler-fresh-controller-fullcrawl-canary-1",
+        "sameContainer": true,
+        "health": null,
+        "running": true,
+        "startedAt": "2026-09-20T09:27:56.306037275Z",
+        "restartCount": 0
+      }
+    ],
+    "pool": {
+      "name": "newcrawler_crawler",
+      "paused": "0",
+      "disabled": "0"
+    },
+    "hostMemory": {
+      "MemTotal": 33645133824,
+      "MemAvailable": 5636698112,
+      "SwapTotal": 0,
+      "SwapFree": 0
+    },
+    "memoryPressure": "some avg10=2.28 avg60=3.73 avg300=3.59 total=19956467513\nfull avg10=1.75 avg60=3.03 avg300=2.91 total=14193320695"
+  },
+  "startup_readonly_scan_cancel_check": {
+    "at": "2026-09-20T09:35:56.959541+00:00",
+    "action": "cancel_one_stale_readonly_startup_scan",
+    "result": []
+  },
+  "recovery_failure_category_sample": {
+    "at": "2026-09-20T09:38:06.548591+00:00",
+    "incrementalFailuresSinceRestart": [
+      {
+        "category": "other",
+        "n": 11
+      }
+    ]
+  },
+  "incremental_intake_exactly_preserved": true,
+  "incremental_recovery_samples": [
+    {
+      "at": "2026-09-20T09:44:41.718Z",
+      "rows": [
+        {
+          "node_id": "0e108078-200a-4df0-9a58-a28abc97a692",
+          "total": 15,
+          "connected": 15,
+          "ready": 15
+        },
+        {
+          "node_id": "54a7cdd3-eb9c-4713-8d2f-21f4a5279de0",
+          "total": 47,
+          "connected": 47,
+          "ready": 47
+        }
+      ],
+      "progress": {
+        "completed": 53,
+        "failed": 2
+      },
+      "stable": 1
+    },
+    {
+      "at": "2026-09-20T09:45:01.765Z",
+      "rows": [
+        {
+          "node_id": "0e108078-200a-4df0-9a58-a28abc97a692",
+          "total": 15,
+          "connected": 15,
+          "ready": 15
+        },
+        {
+          "node_id": "54a7cdd3-eb9c-4713-8d2f-21f4a5279de0",
+          "total": 47,
+          "connected": 47,
+          "ready": 47
+        }
+      ],
+      "progress": {
+        "completed": 49,
+        "failed": 9
+      },
+      "stable": 2
+    },
+    {
+      "at": "2026-09-20T09:45:21.811Z",
+      "rows": [
+        {
+          "node_id": "0e108078-200a-4df0-9a58-a28abc97a692",
+          "total": 15,
+          "connected": 15,
+          "ready": 15
+        },
+        {
+          "node_id": "54a7cdd3-eb9c-4713-8d2f-21f4a5279de0",
+          "total": 47,
+          "connected": 47,
+          "ready": 47
+        }
+      ],
+      "progress": {
+        "completed": 57,
+        "failed": 9
+      },
+      "stable": 3
+    }
+  ],
+  "full_node": {
+    "at": "2026-09-20T09:42:28.464Z",
+    "status": {
+      "nodeId": "8a07de4f-a3ee-428f-a959-2aee9c7b6be7",
+      "deploymentId": "b19c5c9a-4a09-4a61-bdb2-9b69bed02933",
+      "workers": [
+        {
+          "slot": "full-crawl-1",
+          "retiring": false,
+          "connected": true,
+          "preparation": null,
+          "executionPhase": "preparing",
+          "requested": false,
+          "enabled": false,
+          "active": false,
+          "processing": false,
+          "awaitingRecovery": false,
+          "readyForTasks": false
+        }
+      ],
+      "executionAvailable": true,
+      "adjusting": false,
+      "allowedCount": 0,
+      "requested": false,
+      "draining": false,
+      "counts": {
+        "deployed": 1,
+        "connected": 1,
+        "allowed": 0,
+        "ready": 0,
+        "active": 0,
+        "running": 0,
+        "draining": 0,
+        "collecting": 0,
+        "processing": 0,
+        "awaiting": 0,
+        "unready": 0,
+        "idle": 0,
+        "finishing": 0,
+        "standby": 1,
+        "offline": 0
+      },
+      "configuredCount": 1,
+      "intakeEnabled": false
+    }
+  },
+  "after_preflight": {
+    "at": "2026-09-20T09:45:27.911Z",
+    "readOnly": true,
+    "nodes": [
+      {
+        "id": "54a7cdd3-eb9c-4713-8d2f-21f4a5279de0",
+        "name": "更新节点 01",
+        "kind": "execution",
+        "explicit_role": null,
+        "workers": [
+          {
+            "role": "incremental",
+            "count": 47
+          }
+        ],
+        "provisioning": "ready",
+        "runtime": "ready",
+        "deployment_state": "connected",
+        "deployment_id": "41041afe-bc67-418b-90bc-8a1a81499d65"
+      },
+      {
+        "id": "0e108078-200a-4df0-9a58-a28abc97a692",
+        "name": "增量节点02",
+        "kind": "execution",
+        "explicit_role": null,
+        "workers": [
+          {
+            "role": "incremental",
+            "count": 15
+          }
+        ],
+        "provisioning": "ready",
+        "runtime": "ready",
+        "deployment_state": "connected",
+        "deployment_id": "107891a4-6088-4e0e-bad1-c38f9a2db4dc"
+      },
+      {
+        "id": "8a07de4f-a3ee-428f-a959-2aee9c7b6be7",
+        "name": "全量采集节点",
+        "kind": "execution",
+        "explicit_role": "fullcrawl",
+        "workers": [
+          {
+            "role": "fullcrawl",
+            "count": 1
+          }
+        ],
+        "provisioning": "ready",
+        "runtime": "ready",
+        "deployment_state": "connected",
+        "deployment_id": "b19c5c9a-4a09-4a61-bdb2-9b69bed02933"
+      }
+    ],
+    "workers": [
+      {
+        "node_id": "8a07de4f-a3ee-428f-a959-2aee9c7b6be7",
+        "role": "fullcrawl",
+        "mode": "full_crawl_collect",
+        "total": 1,
+        "connected": 1,
+        "enabled": 0,
+        "accepting": 1,
+        "activation_requested": 0
+      },
+      {
+        "node_id": "54a7cdd3-eb9c-4713-8d2f-21f4a5279de0",
+        "role": "incremental",
+        "mode": "incremental_collect",
+        "total": 47,
+        "connected": 47,
+        "enabled": 47,
+        "accepting": 47,
+        "activation_requested": 47
+      },
+      {
+        "node_id": "0e108078-200a-4df0-9a58-a28abc97a692",
+        "role": "incremental",
+        "mode": "incremental_collect",
+        "total": 15,
+        "connected": 15,
+        "enabled": 15,
+        "accepting": 15,
+        "activation_requested": 15
+      }
+    ],
+    "intake": [
+      {
+        "node_id": "54a7cdd3-eb9c-4713-8d2f-21f4a5279de0",
+        "deployment_id": "41041afe-bc67-418b-90bc-8a1a81499d65",
+        "selected_slots": [
+          "incremental-3",
+          "incremental-5",
+          "incremental-6",
+          "incremental-7",
+          "incremental-8",
+          "incremental-9",
+          "incremental-10",
+          "incremental-11",
+          "incremental-13",
+          "incremental-14",
+          "incremental-15",
+          "incremental-16",
+          "incremental-17",
+          "incremental-18",
+          "incremental-19",
+          "incremental-20",
+          "incremental-21",
+          "incremental-22",
+          "incremental-23",
+          "incremental-24",
+          "incremental-25",
+          "incremental-26",
+          "incremental-27",
+          "incremental-28",
+          "incremental-30",
+          "incremental-31",
+          "incremental-32",
+          "incremental-33",
+          "incremental-34",
+          "incremental-35",
+          "incremental-37",
+          "incremental-38",
+          "incremental-39",
+          "incremental-40",
+          "incremental-41",
+          "incremental-42",
+          "incremental-43",
+          "incremental-44",
+          "incremental-47",
+          "incremental-48",
+          "incremental-49",
+          "incremental-50",
+          "incremental-45",
+          "incremental-4",
+          "incremental-12",
+          "incremental-29",
+          "incremental-36"
+        ],
+        "revision": "29",
+        "updated_at": "2026-09-17T06:33:59.740Z"
+      },
+      {
+        "node_id": "0e108078-200a-4df0-9a58-a28abc97a692",
+        "deployment_id": "107891a4-6088-4e0e-bad1-c38f9a2db4dc",
+        "selected_slots": [
+          "incremental-1",
+          "incremental-2",
+          "incremental-3",
+          "incremental-4",
+          "incremental-5",
+          "incremental-6",
+          "incremental-7",
+          "incremental-8",
+          "incremental-9",
+          "incremental-10",
+          "incremental-11",
+          "incremental-12",
+          "incremental-13",
+          "incremental-14",
+          "incremental-15"
+        ],
+        "revision": "2",
+        "updated_at": "2026-09-17T07:39:17.404Z"
+      }
+    ],
+    "deployments": [
+      {
+        "node_id": "54a7cdd3-eb9c-4713-8d2f-21f4a5279de0",
+        "deployment_id": "41041afe-bc67-418b-90bc-8a1a81499d65",
+        "image": "newcrawdashboard.137-175-93-199.nip.io/qy-node-incremental@sha256:a1736b34c23108f2e26582d068ae992cb2b0bd98e563864806fb8c2f327019ea",
+        "worker_count": 47,
+        "updated_at": "2026-09-17T07:22:35.011Z"
+      },
+      {
+        "node_id": "0e108078-200a-4df0-9a58-a28abc97a692",
+        "deployment_id": "107891a4-6088-4e0e-bad1-c38f9a2db4dc",
+        "image": "newcrawdashboard.137-175-93-199.nip.io/qy-node-incremental@sha256:a1736b34c23108f2e26582d068ae992cb2b0bd98e563864806fb8c2f327019ea",
+        "worker_count": 15,
+        "updated_at": "2026-09-17T07:38:01.994Z"
+      },
+      {
+        "node_id": "8a07de4f-a3ee-428f-a959-2aee9c7b6be7",
+        "deployment_id": "b19c5c9a-4a09-4a61-bdb2-9b69bed02933",
+        "image": "newcrawdashboard.137-175-93-199.nip.io/qy-fullcrawl-node@sha256:eef3acf34ec19620d0baf111388136f0d622377831075d2576c3057ac5979164",
+        "worker_count": 1,
+        "updated_at": "2026-09-20T08:00:19.989Z"
+      }
+    ],
+    "schema": [
+      {
+        "name": "remote_ingestion.full_crawl_executions",
+        "relation": "remote_ingestion.full_crawl_executions"
+      },
+      {
+        "name": "remote_ingestion.full_crawl_stages",
+        "relation": "remote_ingestion.full_crawl_stages"
+      },
+      {
+        "name": "remote_ingestion.full_crawl_detail_reservations",
+        "relation": "remote_ingestion.full_crawl_detail_reservations"
+      },
+      {
+        "name": "remote_ingestion.full_crawl_result_batches",
+        "relation": "remote_ingestion.full_crawl_result_batches"
+      },
+      {
+        "name": "remote_ingestion.full_crawl_result_parts",
+        "relation": "remote_ingestion.full_crawl_result_parts"
+      }
+    ],
+    "database": [
+      {
+        "name": "newcrawler_crawler",
+        "numbackends": 42,
+        "xact_commit": "272884917",
+        "xact_rollback": "1288762",
+        "deadlocks": "6408",
+        "temp_bytes": "1664937302839",
+        "stats_reset": null
+      }
+    ],
+    "dbWaits": [
+      {
+        "state": "active",
+        "wait_event_type": "IO",
+        "n": 4
+      },
+      {
+        "state": "active",
+        "wait_event_type": "IPC",
+        "n": 2
+      },
+      {
+        "state": "active",
+        "wait_event_type": null,
+        "n": 1
+      },
+      {
+        "state": "idle",
+        "wait_event_type": "Client",
+        "n": 20
+      },
+      {
+        "state": "idle in transaction",
+        "wait_event_type": "Client",
+        "n": 14
+      },
+      {
+        "state": "idle in transaction",
+        "wait_event_type": null,
+        "n": 1
+      }
+    ],
+    "tasks": [
+      {
+        "capability": "youtube.incremental.plan.v1",
+        "state": "leased",
+        "n": 50,
+        "oldest": "2026-09-20T09:43:25.200Z"
+      },
+      {
+        "capability": "youtube.incremental.plan.v1",
+        "state": "pending",
+        "n": 3,
+        "oldest": "2026-09-20T09:45:26.711Z"
+      }
+    ],
+    "incrementalEvents": [
+      {
+        "bucket": "2026-09-20T09:15:00.000Z",
+        "status": "completed",
+        "events": 522,
+        "distinct_jobs": 522,
+        "successful_nonduplicate_events": 522
+      },
+      {
+        "bucket": "2026-09-20T09:15:00.000Z",
+        "status": "failed",
+        "events": 68,
+        "distinct_jobs": 59,
+        "successful_nonduplicate_events": 0
+      },
+      {
+        "bucket": "2026-09-20T09:15:00.000Z",
+        "status": "started",
+        "events": 531,
+        "distinct_jobs": 486,
+        "successful_nonduplicate_events": 0
+      },
+      {
+        "bucket": "2026-09-20T09:30:00.000Z",
+        "status": "completed",
+        "events": 150,
+        "distinct_jobs": 150,
+        "successful_nonduplicate_events": 150
+      },
+      {
+        "bucket": "2026-09-20T09:30:00.000Z",
+        "status": "failed",
+        "events": 27,
+        "distinct_jobs": 23,
+        "successful_nonduplicate_events": 0
+      },
+      {
+        "bucket": "2026-09-20T09:30:00.000Z",
+        "status": "started",
+        "events": 238,
+        "distinct_jobs": 220,
+        "successful_nonduplicate_events": 0
+      },
+      {
+        "bucket": "2026-09-20T09:45:00.000Z",
+        "status": "completed",
+        "events": 37,
+        "distinct_jobs": 37,
+        "successful_nonduplicate_events": 37
+      },
+      {
+        "bucket": "2026-09-20T09:45:00.000Z",
+        "status": "failed",
+        "events": 2,
+        "distinct_jobs": 2,
+        "successful_nonduplicate_events": 0
+      },
+      {
+        "bucket": "2026-09-20T09:45:00.000Z",
+        "status": "started",
+        "events": 39,
+        "distinct_jobs": 39,
+        "successful_nonduplicate_events": 0
+      }
+    ],
+    "transport": {
+      "httpStatus": 200,
+      "body": {
+        "pending": 0,
+        "unacknowledged": 1,
+        "rpc": {
+          "admitted": 2672,
+          "rejected": 0,
+          "timedOut": 0,
+          "cancelled": 0,
+          "peakActive": 32,
+          "peakPending": 35,
+          "active": 32,
+          "pending": 9,
+          "concurrency": 32,
+          "maxPending": 1024
+        },
+        "heartbeats": {
+          "admitted": 7034,
+          "rejected": 0,
+          "timedOut": 0,
+          "cancelled": 0,
+          "peakActive": 10,
+          "peakPending": 0,
+          "active": 1,
+          "pending": 0,
+          "concurrency": 16,
+          "maxPending": 1024
+        },
+        "waiting": {
+          "admitted": 2501,
+          "rejected": 0,
+          "timedOut": 0,
+          "cancelled": 0,
+          "peakActive": 57,
+          "peakPending": 0,
+          "active": 18,
+          "pending": 0,
+          "concurrency": 1024,
+          "maxPending": 0
+        }
+      }
+    },
+    "rota": {
+      "workload_scope": "qy-production",
+      "catalog_version": 1,
+      "catalog_digest": "sha256:9f46fe3c304d140dac6c2ee8f1d63a280827a1de6f982acb47562e3b2662c090",
+      "ok": true,
+      "active": 1073,
+      "cooldown": 80,
+      "total": 1804,
+      "archived": 7714,
+      "running": 128,
+      "reserve": 945,
+      "minimum_reserve": 32,
+      "reserve_below_minimum": false,
+      "roles": {
+        "channel": {
+          "identity_policy_id": "qy-br-channel-anonymous-v1",
+          "identity_policy_version": 1,
+          "identity_policy_hash": "sha256:379cb1cc65143db992f12edbfbcbe63dc5fec3981c52ab1e387d93798b1e9365",
+          "desired": 125,
+          "provisioned": 125,
+          "eligible": 1073,
+          "assigned": 125,
+          "ready": 125,
+          "claimed": 124,
+          "reserve": 945
+        },
+        "detail": {
+          "desired": 0,
+          "provisioned": 0,
+          "eligible": 0,
+          "assigned": 0,
+          "ready": 0,
+          "claimed": 0,
+          "reserve": 0
+        },
+        "discover": {
+          "identity_policy_id": "qy-br-discover-anonymous-v1",
+          "identity_policy_version": 1,
+          "identity_policy_hash": "sha256:f82d0fca865b2a2de9cc161171c7f6d87f40646192001e4c3f64b883acebce82",
+          "desired": 2,
+          "provisioned": 2,
+          "eligible": 1073,
+          "assigned": 2,
+          "ready": 2,
+          "claimed": 0,
+          "reserve": 945
+        },
+        "query_quality": {
+          "identity_policy_id": "qy-br-query-quality-anonymous-v1",
+          "identity_policy_version": 1,
+          "identity_policy_hash": "sha256:282070775512c114396a76c763b90bd58c70e23cf29ead8281421a49bba91032",
+          "desired": 1,
+          "provisioned": 1,
+          "eligible": 1073,
+          "assigned": 1,
+          "ready": 1,
+          "claimed": 0,
+          "reserve": 945
+        }
+      }
+    },
+    "redis": {
+      "queues": {
+        "youtube-channel-incremental": {
+          "wait": 57,
+          "active": 62,
+          "paused": 0,
+          "delayed": 0,
+          "failed": 1510,
+          "completed": 100000,
+          "prioritized": 0,
+          "waiting-children": 0,
+          "pausedFlag": null
+        },
+        "youtube-channel-crawl": {
+          "wait": 0,
+          "active": 0,
+          "paused": 0,
+          "delayed": 5,
+          "failed": 13145,
+          "completed": 3,
+          "prioritized": 0,
+          "waiting-children": 0,
+          "pausedFlag": null
+        },
+        "youtube-finalize": {
+          "wait": 0,
+          "active": 1,
+          "paused": 0,
+          "delayed": 3,
+          "failed": 0,
+          "completed": 10000,
+          "prioritized": 2,
+          "waiting-children": 0,
+          "pausedFlag": null
+        },
+        "youtube-data-api-batch": {
+          "wait": 0,
+          "active": 0,
+          "paused": 0,
+          "delayed": 0,
+          "failed": 1,
+          "completed": 90,
+          "prioritized": 0,
+          "waiting-children": 0,
+          "pausedFlag": null
+        }
+      },
+      "info": {
+        "redis_version": "7.4.9",
+        "connected_clients": "1764",
+        "blocked_clients": "48",
+        "used_memory": "748004952",
+        "used_memory_peak": "893395608",
+        "maxmemory": "0",
+        "instantaneous_ops_per_sec": "793",
+        "evicted_keys": "0"
+      },
+      "retainedCompletedSample": {
+        "from": "2026-09-20T09:15:31.302Z",
+        "to": "2026-09-20T09:45:31.302Z",
+        "limit": 3000,
+        "ids": 693,
+        "valid": 693,
+        "p95WaitMs": 809585,
+        "p95ExecutionMs": 99058,
+        "limitation": "Retained BullMQ completed jobs only; retries affect processedOn; not durable business completion."
+      }
+    },
+    "flags": {
+      "REMOTE_NODE_FULL_CRAWL_DEPLOYMENT_ENABLED": "true",
+      "REMOTE_NODE_FULL_CRAWL_EXECUTION_ENABLED": "true",
+      "REMOTE_NODE_LOCAL_CHANNEL_SLOTS": "62",
+      "REMOTE_NODE_QUEUE_PREFIX": "bull"
+    }
+  },
+  "limits": [
+    "Graceful drain and incremental reactivation temporarily reduced throughput; do not use the maintenance window for performance comparison.",
+    "Configuration and recovery validated; performance improvement is not yet demonstrated. Observe representative load for 1–2 hours.",
+    "Only crawler PostgreSQL shared_buffers changed. work_mem, connection count and Rota database settings retained."
+  ]
+}
