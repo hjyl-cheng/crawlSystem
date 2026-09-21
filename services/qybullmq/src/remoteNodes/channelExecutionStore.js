@@ -136,9 +136,18 @@ export class RemoteChannelExecutionStore {
   // Transport termination is safe after a business fence fails: it grants no
   // writes to crawler data, and only closes the exact original attempt's task.
   async stop(admission, error) {
-    await this.store.pool.query(`UPDATE remote_ingestion.tasks SET state='failed',last_error=$3,
-      coordinator_until=NULL WHERE task_id=$1 AND context->>'execution_attempt_id'=$2 AND state IN ('pending','leased')`,
-    [admission.taskId, admission.attemptId, String(error?.code || 'REMOTE_EXECUTION_STOPPED').slice(0,300)]);
+    await this.store.transaction(async client => {
+      // A sparse live-task index can look cheaper than the primary key while
+      // retaining a large history of dead entries. Locate and lock only this
+      // task before checking its state, so stop cannot scan that entire index.
+      const task = (await client.query(`SELECT state,context FROM remote_ingestion.tasks
+        WHERE task_id=$1 FOR UPDATE`, [admission.taskId])).rows[0];
+      if (task?.context.execution_attempt_id !== admission.attemptId || !['pending','leased'].includes(task.state)) return;
+      // The row lock preserves the attempt fence until this update commits.
+      await client.query(`UPDATE remote_ingestion.tasks SET state='failed',last_error=$2,
+        coordinator_until=NULL WHERE task_id=$1`,
+      [admission.taskId, String(error?.code || 'REMOTE_EXECUTION_STOPPED').slice(0,300)]);
+    });
   }
 
   async finish(admission, { status, error = null, result = {} }) {
