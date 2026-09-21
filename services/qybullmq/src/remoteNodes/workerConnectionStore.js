@@ -17,7 +17,8 @@ export class RemoteWorkerConnectionStore {
       await client.query(`INSERT INTO remote_ingestion.worker_connections(node_id,slot,deployment_id,config_hash,role)
         VALUES($1,$2,$3,$4,$5) ON CONFLICT(node_id,slot) DO NOTHING`, [nodeId, slot, deploymentId, configHash, role]);
       const row = (await client.query(`SELECT * FROM remote_ingestion.worker_connections WHERE node_id=$1 AND slot=$2 FOR UPDATE`, [nodeId, slot])).rows[0];
-      if (row.deployment_id !== deploymentId || row.config_hash !== configHash || row.role !== role) {
+      if (row.deployment_id !== deploymentId || row.config_hash !== configHash || row.role !== role
+        || (row.mode !== undefined && row.mode !== 'connect_only')) {
         // Updating/replacing a deployment requires a future drain operation;
         // connection expiry alone is not evidence that a worker has stopped.
         throw new RemoteProtocolError('WORKER_DEPLOYMENT_CONFLICT');
@@ -39,7 +40,9 @@ export class RemoteWorkerConnectionStore {
       if (!node || node.state === 'disabled') throw new RemoteProtocolError('UNAUTHORIZED', 401);
       const row = (await client.query(`SELECT *, connected_until > clock_timestamp() AS alive
         FROM remote_ingestion.worker_connections WHERE node_id=$1 AND slot=$2 FOR UPDATE`, [nodeId, value.slot])).rows[0];
-      if (!row || row.deployment_id !== value.deployment_id || row.config_hash !== value.config_hash) throw new RemoteProtocolError('WORKER_DEPLOYMENT_MISMATCH');
+      if (!row || row.role !== 'incremental' || (row.mode !== undefined && row.mode !== 'connect_only')
+        || row.retirement_id || row.retired_at || row.deployment_id !== value.deployment_id
+        || row.config_hash !== value.config_hash) throw new RemoteProtocolError('WORKER_DEPLOYMENT_MISMATCH');
       if (row.alive && (row.instance_id !== value.instance_id || row.relay_boot_id !== value.relay_boot_id)) throw new RemoteProtocolError('WORKER_INSTANCE_BUSY');
       const seen = (await client.query(`UPDATE remote_ingestion.worker_connections SET instance_id=$3,relay_boot_id=$4,
         last_seen_at=clock_timestamp(),connected_until=clock_timestamp()+($5 * interval '1 second')

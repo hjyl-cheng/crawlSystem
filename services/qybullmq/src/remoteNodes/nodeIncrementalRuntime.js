@@ -19,11 +19,11 @@ export async function checkNodeIncrementalHealth(path = nodeHealthFile) {
 // local readiness lease and the center's transactional claim gate are required.
 export class RemoteIncrementalProcess {
   constructor({config,client,localRota,spool,report=async()=>{},intervalMs=10000,
-    wholeChannel=process.env.REMOTE_NODE_WHOLE_CHANNEL==='true',createWorker=createRemoteIncrementalWorker}) {
-    if(config.mode!=='incremental_collect' || !Number.isInteger(intervalMs) || intervalMs<50)throw new TypeError('collecting configuration required');
+    workload=null,wholeChannel=process.env.REMOTE_NODE_WHOLE_CHANNEL==='true',createWorker=createRemoteIncrementalWorker}) {
+    if(config.mode!==(workload?.mode??'incremental_collect') || !Number.isInteger(intervalMs) || intervalMs<50)throw new TypeError('collecting configuration required');
     Object.assign(this,{config,client,localRota,spool,report,intervalMs});
     if(wholeChannel && client.transport!=='nats')throw new TypeError('whole-channel execution requires NATS');
-    this.runtimeRevision=wholeChannel?WHOLE_CHANNEL_RUNTIME_REVISION:REMOTE_RUNTIME_REVISION;
+    this.runtimeRevision=workload?.revisions?.[0]??(wholeChannel?WHOLE_CHANNEL_RUNTIME_REVISION:REMOTE_RUNTIME_REVISION);
     this.instanceId=randomUUID();this.connection=null;this.readyUntil=0;this.stopping=false;this.fatal=null;
     this.activationWaiters=new Set();
     this.worker=createWorker({client:{...client,waitForActivation:async()=>{
@@ -32,7 +32,9 @@ export class RemoteIncrementalProcess {
       }
     },claim:async(claimId,slot)=>{
       if(this.stopping || !this.connection || this.readyUntil<=uptime())return null;
-      return client.claim(claimId,slot,this.connection);
+      const connection=this.connection;
+      const lease=await client.claim(claimId,slot,connection);
+      return workload&&lease?{...lease,connection}:lease;
     }},localRota,spool,slot:config.slot});
   }
 

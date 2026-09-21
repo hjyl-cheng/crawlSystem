@@ -1,7 +1,8 @@
 import { delayFinalizeJob } from "./finalizeDeferral.js";
 import {MIGRATION_START_JOB,startControlledMigrationChannel,prepareControlledMigrationSnapshot,migrationBatchControlEnabled} from "./migrationBatchControl.js";
-import { Worker } from "bullmq";
-import { gateVideoApiJob, isVideoApiHandoff, runVideoApiResumable } from "./videoApiContinuation.js";
+import { Worker, DelayedError } from "bullmq";
+import { pathToFileURL } from "node:url";
+import { gateVideoApiJob, isVideoApiHandoff, runVideoApiResumable, withVideoApiReplay } from "./videoApiContinuation.js";
 import { runVideoExecutionResumable } from "./videoExecutionDeferral.js";
 import { isVideoExecutionRecoveryPending } from "./videoExecutionRecovery.js";
 import { localIntakeSignalsFromEnv } from './remoteNodes/localIntakeSignals.js';
@@ -61,6 +62,7 @@ import {
   processDataApiBatchV2,
   processFinalizeV2,
   signalReadyDiscoveryPageQualifications,
+  closePipelineV2Queues,
 } from "./pipelineV2.js";
 import { closeFullCrawlYoutubeJsQueues, executeFullCrawlYoutubeJs } from "./fullCrawlYoutubeJs.js";
 import { assertFullCrawlSnapshotRecoveryOwner } from "./finalRepairJobRecovery.js";
@@ -119,9 +121,10 @@ import {
 } from "./youtube.js";
 import { resolveYoutubeLocale } from "./youtubeLocale.js";
 
+// Embedded use shares the original processor and lifecycle without creating consumers.
+export function createWorkerRuntime({ embedded = false } = {}) {
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-const queues = createQueues();
 const incrementalVideoExecutorMode = resolveIncrementalVideoExecutorMode();
 const incrementalVideoExecutor = incrementalVideoExecutorMode === "youtubejs_checkpoint_v1"
   ? executeIncrementalYoutubeJsVideo
@@ -1675,6 +1678,7 @@ const workerQueueConfiguration = validateWorkerQueueConfiguration({
   enabledQueues,
   fixedProxy: fixedProxy !== null,
 });
+const queues = createQueues();
 
 let workers = [];
 let localIntake = null;
@@ -1704,93 +1708,25 @@ function shutdown(signal) {
     if (rotaSlot) await shutdownStep("rota_slot", () => rotaSlot.close());
     await shutdownStep("bullmq_workers", () => Promise.all(workers.map((worker) => worker.close())));
     await shutdownStep("full_crawl_youtubejs_queues", closeFullCrawlYoutubeJsQueues);
+    await shutdownStep("pipeline_queues", closePipelineV2Queues);
     await shutdownStep("proxy_control", closeProxyControlClient);
     await shutdownStep("http", closePersistentHttpClient);
     await shutdownStep("storage", async () => closeStorage());
     await shutdownStep("queues", () => closeQueues(queues));
     await shutdownStep("database", closeDb);
     console.log(JSON.stringify({ event: "shutdown_complete", signal }));
-    process.exit(0);
+    if (!embedded) process.exit(0);
   })().catch((error) => {
     console.error(JSON.stringify({ event: "shutdown_failed", signal, error: error?.stack || String(error) }));
-    process.exit(1);
+    if (!embedded) process.exit(1);
+    throw error;
   });
   return shutdownPromise;
 }
 
-process.once("SIGTERM", () => void shutdown("SIGTERM"));
-process.once("SIGINT", () => void shutdown("SIGINT"));
 
-async function startWorkerRuntime() {
-  console.log(JSON.stringify({
-    event: "worker_queue_configuration",
-    managed: workerQueueConfiguration.managed,
-    role: workerQueueConfiguration.role,
-    queues: workerQueueConfiguration.queues,
-  }));
-  await ensureSchema();
-  if (shuttingDown) return;
-  if (
-    enabledQueues.includes(queuesByRole.agentBatch)
-    || enabledQueues.includes(queuesByRole.agentIncremental)
-  ) await ensureDefaultAgentConfig();
-  if (shuttingDown) return;
-  const proxyReady = await waitForProxySlot();
-  if (!proxyReady || shuttingDown) return;
-  console.log(JSON.stringify({ event: "db_pool_warm", ...(await warmDb()) }));
-  if (shuttingDown) return;
 
-  if (channelExecutionEnabled() && !configuredForProxySlot()) {
-    if (channelCapabilities.some((capabilities) => capabilities.ytdlp)) {
-      const warmResult = await warmPersistentYtDlp();
-      console.log(JSON.stringify({ event: "ytdlp_pool_warm", ...warmResult }));
-    }
-    const youtubeJsWarmResult = await warmYoutubeJs();
-    console.log(JSON.stringify({ event: "youtubejs_pool_warm", ...youtubeJsWarmResult }));
-  }
-  if (shuttingDown) return;
-
-  const localControl=process.env.LOCAL_INCREMENTAL_INTAKE_CONTROL==='true';
-  if(localControl && (enabledQueues.length!==1 || enabledQueues[0]!==queuesByRole.channelIncremental || concurrencyFor(enabledQueues[0])!==1)) {
-    throw new Error('Local intake control requires one incremental Worker with concurrency 1');
-  }
-  workers = enabledQueues.map((queueName) => {
-    const worker = new Worker(queueName, (job,token)=>localControl?localIntake.process(job,token,()=>processJob(job,token)):processJob(job,token), {
-      connection: redisOptions,
-      concurrency: process.env.FULL_CRAWL_CANARY_WORKER === "true" ? 1 : concurrencyFor(queueName),
-      ...bullmqWorkerTimingOptions(),
-      ...(intakePrefix ? { prefix: intakePrefix } : {}),
-      ...(localControl?{autorun:false,name:intakeWorkerName('local',proxyWorkerId)}:{}),
-    });
-
-    worker.on("completed", async (job) => {
-      console.log(JSON.stringify({ event: "completed", queue: queueName, job_id: job.id, name: job.name }));
-      if (queueName === queuesByRole.dataApiBatch && job?.name === "youtube-data-api-batch") {
-        try {
-          const recovery = await settleTerminalDataApiBatchJob({
-            job,
-            withTransaction,
-            observationKind: "completed",
-          });
-          if (recovery.action === "settled") {
-            console.log(JSON.stringify({
-              event: "data_api_batch_execution_orphan_recovered",
-              job_id: job.id,
-              job_attempt: Number(job.attemptsStarted),
-              observation_kind: "completed",
-            }));
-          }
-        } catch (eventError) {
-          console.error(JSON.stringify({
-            event: "data_api_batch_execution_orphan_recovery_failed",
-            job_id: job.id,
-            error: eventError?.message || String(eventError),
-          }));
-        }
-      }
-    });
-
-    worker.on("failed", async (job, error) => {
+async function recordFailedJob(queueName, job, error) {
       const failure = describeChannelCandidateWorkerFailure(error);
       const {
         message,
@@ -1992,7 +1928,78 @@ async function startWorkerRuntime() {
       } catch (eventError) {
         console.error(JSON.stringify({ event: "task_event_failed", error: eventError?.message || String(eventError) }));
       }
+}
+
+async function startWorkerRuntime() {
+  console.log(JSON.stringify({
+    event: "worker_queue_configuration",
+    managed: workerQueueConfiguration.managed,
+    role: workerQueueConfiguration.role,
+    queues: workerQueueConfiguration.queues,
+  }));
+  await ensureSchema();
+  if (shuttingDown) return;
+  if (
+    enabledQueues.includes(queuesByRole.agentBatch)
+    || enabledQueues.includes(queuesByRole.agentIncremental)
+  ) await ensureDefaultAgentConfig();
+  if (shuttingDown) return;
+  const proxyReady = await waitForProxySlot();
+  if (!proxyReady || shuttingDown) return;
+  console.log(JSON.stringify({ event: "db_pool_warm", ...(await warmDb()) }));
+  if (shuttingDown) return;
+
+  if (channelExecutionEnabled() && !configuredForProxySlot()) {
+    if (channelCapabilities.some((capabilities) => capabilities.ytdlp)) {
+      const warmResult = await warmPersistentYtDlp();
+      console.log(JSON.stringify({ event: "ytdlp_pool_warm", ...warmResult }));
+    }
+    const youtubeJsWarmResult = await warmYoutubeJs();
+    console.log(JSON.stringify({ event: "youtubejs_pool_warm", ...youtubeJsWarmResult }));
+  }
+  if (shuttingDown) return;
+
+  const localControl=process.env.LOCAL_INCREMENTAL_INTAKE_CONTROL==='true';
+  if(localControl && (enabledQueues.length!==1 || enabledQueues[0]!==queuesByRole.channelIncremental || concurrencyFor(enabledQueues[0])!==1)) {
+    throw new Error('Local intake control requires one incremental Worker with concurrency 1');
+  }
+  workers = enabledQueues.map((queueName) => {
+    const worker = new Worker(queueName, (job,token)=>localControl?localIntake.process(job,token,()=>processJob(job,token)):processJob(job,token), {
+      connection: redisOptions,
+      concurrency: process.env.FULL_CRAWL_CANARY_WORKER === "true" ? 1 : concurrencyFor(queueName),
+      ...bullmqWorkerTimingOptions(),
+      ...(intakePrefix ? { prefix: intakePrefix } : {}),
+      ...(localControl?{autorun:false,name:intakeWorkerName('local',proxyWorkerId)}:{}),
     });
+
+    worker.on("completed", async (job) => {
+      console.log(JSON.stringify({ event: "completed", queue: queueName, job_id: job.id, name: job.name }));
+      if (queueName === queuesByRole.dataApiBatch && job?.name === "youtube-data-api-batch") {
+        try {
+          const recovery = await settleTerminalDataApiBatchJob({
+            job,
+            withTransaction,
+            observationKind: "completed",
+          });
+          if (recovery.action === "settled") {
+            console.log(JSON.stringify({
+              event: "data_api_batch_execution_orphan_recovered",
+              job_id: job.id,
+              job_attempt: Number(job.attemptsStarted),
+              observation_kind: "completed",
+            }));
+          }
+        } catch (eventError) {
+          console.error(JSON.stringify({
+            event: "data_api_batch_execution_orphan_recovery_failed",
+            job_id: job.id,
+            error: eventError?.message || String(eventError),
+          }));
+        }
+      }
+    });
+
+    worker.on("failed", (job, error) => recordFailedJob(queueName, job, error));
 
     console.log(`worker started queue=${queueName} concurrency=${worker.opts.concurrency}`);
     return worker;
@@ -2011,8 +2018,47 @@ async function startWorkerRuntime() {
   }
 }
 
-try {
-  await startWorkerRuntime();
-} catch (error) {
-  if (!shuttingDown) throw error;
+let compatibilityBusy = false;
+return {
+  async start() {
+    if (embedded) throw new Error('EMBEDDED_WORKER_CANNOT_START_CONSUMERS');
+    try { await startWorkerRuntime(); } catch (error) { if (!shuttingDown) throw error; }
+  },
+  shutdown,
+  async startCompatibility() {
+    if (!embedded || process.env.SKIP_SCHEMA_MIGRATION !== "true"
+      || enabledQueues.length !== 1 || enabledQueues[0] !== queuesByRole.channelCrawl
+      || proxySlotRole !== "channel" || !rotaSlot) {
+      throw new Error("FULL_CRAWL_COMPATIBILITY_CONFIG_INVALID");
+    }
+    await warmDb();
+    if (!await waitForProxySlot() || shuttingDown) throw new Error('FULL_CRAWL_COMPATIBILITY_STOPPED');
+  },
+  async execute(job, token) {
+    if (!embedded || job.queueName !== queuesByRole.channelCrawl) throw new Error("FULL_CRAWL_COMPATIBILITY_QUEUE_INVALID");
+    if (shuttingDown || compatibilityBusy) return deferJobForSlotPause(job, token);
+    compatibilityBusy = true;
+    try {
+      return await processJob(job, token);
+    } catch (error) {
+      if (!(error instanceof DelayedError) && !isVideoApiHandoff(error)) {
+        // The parent BullMQ consumer increments attemptsMade after this rejection.
+        const failedJob = Object.create(job);
+        failedJob.attemptsMade = Number(job.attemptsMade ?? 0) + 1;
+        await recordFailedJob(job.queueName, failedJob, error);
+      }
+      throw error;
+    } finally {
+      compatibilityBusy = false;
+    }
+  },
+  replay: job => withVideoApiReplay(() => processJobInner(job, { resumeMode: "api_continuation" })),
+};
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  const runtime = createWorkerRuntime();
+  process.once("SIGTERM", () => void runtime.shutdown("SIGTERM"));
+  process.once("SIGINT", () => void runtime.shutdown("SIGINT"));
+  await runtime.start();
 }

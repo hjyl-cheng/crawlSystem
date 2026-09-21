@@ -4,7 +4,7 @@ import { ManagedRequestTracker } from '../executionRuntimeSupport.js';
 import { withUploadsCountryExecution } from '../youtubeUploadsCountry.js';
 import { FingerprintGateway } from '../fingerprintGateway.js';
 import { acquireYoutubeJs, releaseYoutubeJs, closeYoutubeJs,
-  openYoutubeJsChannel, fetchYoutubeJsVideoDetail } from '../youtubeJs.js';
+  openYoutubeJsChannel, fetchYoutubeJsChannelUploads, fetchYoutubeJsVideoDetail } from '../youtubeJs.js';
 import { canonicalIncrementalJson } from '../incrementalPlan.js';
 import { hash, RemoteProtocolError } from './protocol.js';
 import { planFromTask } from './channelPlanContract.js';
@@ -15,8 +15,9 @@ import { sessionRequest, validateSession } from './youtubeSessionContract.js';
 // local execution. No DB imports, identity generation or direct-network path.
 let activeRuntime = false;
 export function createRemoteYoutubeRuntime({ client, spool, gateway = new FingerprintGateway(),
+  channelIdFromLease = lease => planFromTask(lease).channel_id,
   youtube = { acquire: acquireYoutubeJs, release: releaseYoutubeJs, close: closeYoutubeJs,
-    openChannel: openYoutubeJsChannel, fetchDetail: fetchYoutubeJsVideoDetail } }) {
+    openChannel: openYoutubeJsChannel, fetchUploads: fetchYoutubeJsChannelUploads, fetchDetail: fetchYoutubeJsVideoDetail } }) {
   const save = value => spool.save('youtube-session.json', Buffer.from(JSON.stringify(value)));
   const flush = async () => {
     const pending = await spool.read('youtube-session.json');
@@ -61,7 +62,7 @@ export function createRemoteYoutubeRuntime({ client, spool, gateway = new Finger
         attempt_id: bundle.attempt_id, proxy: bundle.proxy, get_proxy_snapshot: () => bundle.proxy,
         profile_group: group, fingerprint_gateway: transport, metrics, abort_signal: signal,
       }, async () => {
-        const acquired = await youtube.acquire(planFromTask(route.lease).channel_id,
+        const acquired = await youtube.acquire(channelIdFromLease(route.lease),
           { profile: group.clients.youtubejs_chrome, proxyUrl: route.proxyUrl });
         if (!acquired?.enabled) throw new Error('REMOTE_YOUTUBE_ACQUIRE_FAILED');
         signal.throwIfAborted();
@@ -96,5 +97,5 @@ export function createRemoteYoutubeRuntime({ client, spool, gateway = new Finger
     return result;
   };
   withRuntime.recover = flush;
-  return { withRuntime, youtube: { openChannel: youtube.openChannel, fetchDetail: youtube.fetchDetail } };
+  return { withRuntime, youtube: { openChannel: youtube.openChannel, fetchUploads: youtube.fetchUploads, fetchDetail: youtube.fetchDetail } };
 }

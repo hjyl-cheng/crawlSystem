@@ -90,6 +90,7 @@ function workerEnvironment({ database, prefix, redis, crashAfterCommit }) {
     REDIS_PASSWORD: redis.password ?? "",
     BULLMQ_PREFIX: prefix,
     WORKER_QUEUES: queuesByRole.channelCrawl,
+    FULL_CRAWL_FETCH_CONTRACT_DEFAULT: "legacy_full_v2",
     PROXY_SLOT_ROLE: "",
     ROTA_FIXED_PROXY_USER: "post-commit-test-worker",
     ROTA_BULLMQ_PROXY_PASSWORD: "post-commit-test-password",

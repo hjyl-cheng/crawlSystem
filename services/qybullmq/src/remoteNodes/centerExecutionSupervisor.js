@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { Worker } from 'bullmq';
-import { INCREMENTAL_QUEUE } from '../incrementalPlan.js';
+import { collectingWorkload } from './collectingWorkload.js';
 import { RotaSlotAdapter } from '../rotaSlotAdapter.js';
 import { RemoteManagedIncrementalRuntime } from './managedIncrementalRuntime.js';
 import { createCenterIncrementalProcessor } from './centerIncrementalProcessor.js';
@@ -15,7 +15,7 @@ import {reconcileIntakeRequests} from './intakeRequests.js';
 const key = row => `${row.node_id}/${row.slot}`;
 const same = (a,b) => ['node_id','slot','deployment_id','config_hash','instance_id','relay_boot_id','runtime_revision'].every(field=>a[field]===b[field]);
 export { supervisionLockKey };
-const identity = row => ({version:1,mode:'incremental_collect',node_id:row.node_id,slot:row.slot,
+const identity = row => ({version:1,mode:row.mode,node_id:row.node_id,slot:row.slot,
   deployment_id:row.deployment_id,config_hash:row.config_hash,instance_id:row.instance_id,
   relay_boot_id:row.relay_boot_id,runtime_revision:row.runtime_revision,accepting:true});
 
@@ -26,14 +26,20 @@ export class RemoteCenterExecutionSupervisor {
   constructor({store,channelStore,routes,youtubeSessions,activation,guardPool,connection,prefix,
     allowedNodeIds=[],dashboardManaged=false,resolvedPolicy,profileSecret,rotaClient,proxyBaseUrl,proxyPassword,
     createApiFallback=null,wholeChannels=null,loadWholeApiPolicy=null,intervalMs=1000,maxSlots=null,guardGroups=4,report=()=>{},WorkerClass=Worker,createRota=args=>new RotaSlotAdapter(args),
-    createRuntime=args=>new RemoteManagedIncrementalRuntime(args),createProcessor=createCenterIncrementalProcessor}) {
+    mode='incremental_collect',createRuntime=null,createProcessor=null,recoverSlot=null,settleHandoffs=null,slotUnsettled=null}) {
+    const workload=collectingWorkload(mode);
+    if(!workload)throw new TypeError('unknown collecting workload');
+    if(mode==='full_crawl_collect' && ([createRuntime,createProcessor,recoverSlot,slotUnsettled].some(fn=>typeof fn!=='function')||(settleHandoffs!==false&&typeof settleHandoffs!=='function')))throw new TypeError('explicit full-crawl runtime, processor and recovery required');
+    createRuntime??=args=>new RemoteManagedIncrementalRuntime(args);createProcessor??=createCenterIncrementalProcessor;
+    recoverSlot??=recoverRemoteSlot;settleHandoffs??=settleTerminalRemoteHandoffs;slotUnsettled??=remoteSlotUnsettled;
+    Object.assign(this,{workload,recoverSlot,settleHandoffs,slotUnsettled});
     if(!Array.isArray(allowedNodeIds)||(!allowedNodeIds.length&&!dashboardManaged)||allowedNodeIds.some(id=>!/^[a-f0-9-]{36}$/.test(id)))throw new TypeError('explicit admitted node IDs required');
     if(!guardPool || !connection || typeof prefix!=='string' || !prefix || intervalMs<50 || (maxSlots!==null && (!Number.isSafeInteger(maxSlots) || maxSlots<1)))throw new TypeError('explicit supervision database, Redis connection and queue prefix required');
     Object.assign(this,{store,channelStore,routes,youtubeSessions,activation,guardPool,connection,prefix,allowedNodeIds,dashboardManaged,
       resolvedPolicy,profileSecret,rotaClient,proxyBaseUrl,proxyPassword,createApiFallback,wholeChannels,loadWholeApiPolicy,intervalMs,maxSlots,report,WorkerClass,createRota,createRuntime,createProcessor});
     this.entries=new Map();this.stopping=false;this.loop=null;this.waitAbort=new AbortController();
     this.guards=new SupervisionGuards({pool:guardPool,groups:guardGroups});
-    this.recoveryCheckpoints=youtubeSessions?createRemoteYoutubeCheckpointConsumer({sessions:youtubeSessions,profileSecret}):null;
+    this.recoveryCheckpoints=mode==='incremental_collect'&&youtubeSessions?createRemoteYoutubeCheckpointConsumer({sessions:youtubeSessions,profileSecret}):null;
   }
   allowsNode(nodeId) { return this.dashboardManaged || this.allowedNodeIds.includes(nodeId); }
   isProcessing(row) { return this.entries.get(key(row))?.processing === true; }
@@ -60,6 +66,7 @@ export class RemoteCenterExecutionSupervisor {
   // Called under the node/connection row locks by activate, heartbeat and claim.
   executionReady(entry,row) {
     if(!entry?.owned || !entry.queueReady || !same(entry.row,row) || entry.aborting || entry.redis?.status!=='ready')return false;
+    if(this.workload.role==='fullcrawl' && entry.runtime?.readyForTasks()!==true)return false;
     const state=entry.rota.status();
     if(!state.started || state.closing || !state.assignment?.ready || (entry.closing && !entry.processing))return false;
     if(entry.rota.workerId!==entry.row.rota_worker_id || entry.rota.workerInstanceId!==entry.supervisorId)return false;
@@ -107,7 +114,7 @@ export class RemoteCenterExecutionSupervisor {
       }
       if(!row.alive || !row.accepting || !row.activation_requested){await this.closeEntry(entry);return;}
       const runtime=this.createRuntime({channelStore:this.channelStore,routes:this.routes,youtubeSessions:this.youtubeSessions,
-        nodeId:row.node_id,slot:row.slot,profileSecret:this.profileSecret,createApiFallback:this.createApiFallback,
+        workerConnection:identity(row),nodeId:row.node_id,slot:row.slot,profileSecret:this.profileSecret,createApiFallback:this.createApiFallback,
         wholeChannels:row.runtime_revision===WHOLE_CHANNEL_RUNTIME_REVISION?this.wholeChannels:null,
         loadWholeApiPolicy:this.loadWholeApiPolicy,
         assertAdmission:async client=>{
@@ -115,11 +122,12 @@ export class RemoteCenterExecutionSupervisor {
             FROM remote_ingestion.worker_connections WHERE node_id=$1 AND slot=$2`,[row.node_id,row.slot])).rows[0];
           return !!current?.alive && !current.retirement_id && current.enabled && same(entry.row,current) && await this.verifyExecution(client,current);
         }});
+      entry.runtime=runtime;
       entry.rota=this.createRota({client:this.rotaClient,role:'channel',workerId:row.rota_worker_id,workerInstanceId:entry.supervisorId,
         resolvedPolicy:this.resolvedPolicy,proxyBaseUrl:this.proxyBaseUrl,proxyPassword:this.proxyPassword,identityRuntime:runtime});
       const process=this.createProcessor({channelStore:this.channelStore,runtime,rota:entry.rota,resolvedPolicy:this.resolvedPolicy,
         createApiFallback:this.createApiFallback,ready:()=>this.ready(entry),report:this.report});
-      entry.worker=new this.WorkerClass(INCREMENTAL_QUEUE,async(job,token)=>{
+      entry.worker=new this.WorkerClass(this.workload.queue,async(job,token)=>{
         entry.processing=true;
         try{return await process(job,token);}finally{entry.processing=false;}
       },{connection:this.connection,prefix:this.prefix,
@@ -140,14 +148,14 @@ export class RemoteCenterExecutionSupervisor {
         await this.activation.activate(identity(row),{requireRequested:true});
         const ready=await this.ready(entry);await publishWorkerIntake(entry.worker,ready);
         if(ready)entry.worker.resume();
-      }).catch(()=>this.closeEntry(entry,{abort:true}));
-    } catch {
+      }).catch(error=>{this.report({event:'remote_center_slot_start_failed',node_id:row.node_id,slot:row.slot,code:error?.code??error?.name});return this.closeEntry(entry,{abort:true});});
+    } catch(error) {
       await this.closeEntry(entry,{abort:true});
-      this.report({event:'remote_center_slot_start_failed',node_id:row.node_id,slot:row.slot});
+      this.report({event:'remote_center_slot_start_failed',node_id:row.node_id,slot:row.slot,code:error?.code??error?.name});
     }
   }
   async unsettled(row) {
-    return remoteSlotUnsettled(this.store.pool,row);
+    return this.slotUnsettled(this.store.pool,row);
   }
   closeEntry(entry,{abort=false}={}) {
     if(entry.closed)return entry.closed;
@@ -181,9 +189,9 @@ export class RemoteCenterExecutionSupervisor {
   }
   async tick() {
     if(this.stopping)return;
-    if(!this.handoffRecovery && (!this.handoffCheckedAt || Date.now()-this.handoffCheckedAt>=30000)){
+    if(this.settleHandoffs && !this.handoffRecovery && (!this.handoffCheckedAt || Date.now()-this.handoffCheckedAt>=30000)){
       this.handoffCheckedAt=Date.now();
-      this.handoffRecovery=settleTerminalRemoteHandoffs(this.store)
+      this.handoffRecovery=this.settleHandoffs(this.store)
         .then(count=>{if(count)this.report({event:'remote_center_terminal_handoffs_settled',count});})
         .catch(error=>this.report({event:'remote_center_terminal_handoff_recovery_failed',code:error?.code??error?.name}))
         .finally(()=>{this.handoffRecovery=null;});
@@ -195,7 +203,7 @@ export class RemoteCenterExecutionSupervisor {
       JOIN remote_ingestion.network_slots s USING(node_id,slot)
       WHERE (w.node_id=ANY($1::uuid[]) OR ($2::boolean AND EXISTS(
         SELECT 1 FROM remote_ingestion.node_deployments d WHERE d.node_id=w.node_id AND d.deployment_id=w.deployment_id)))
-        AND n.state='active' AND w.mode='incremental_collect' AND w.retired_at IS NULL`,[this.allowedNodeIds,this.dashboardManaged]),
+        AND n.state='active' AND w.mode=$3 AND w.role=$4 AND w.retired_at IS NULL`,[this.allowedNodeIds,this.dashboardManaged,this.workload.mode,this.workload.role]),
       this.store.pool.query(`SELECT owner.pid,owner.lock_key FROM pg_locks AS guard
         JOIN jsonb_to_recordset($1::jsonb) AS owner(pid integer,lock_key text)
           ON guard.pid=owner.pid AND guard.objid=(hashtext(owner.lock_key)::bigint & 4294967295)::oid
@@ -247,7 +255,7 @@ export class RemoteCenterExecutionSupervisor {
         if(entry.recovered){void this.closeEntry(entry).catch(()=>{});continue;}
         // A slow recovery waits only on this slot; other queue consumers keep
         // reconciling. Do not release its guard until its transaction finishes.
-        entry.recovering=entry.guard.withSession(guard=>recoverRemoteSlot({guard,row,lockKey:supervisionLockKey(row),profileSecret:this.profileSecret,checkpoints:this.recoveryCheckpoints}))
+        entry.recovering=entry.guard.withSession(guard=>this.recoverSlot({guard,row,lockKey:supervisionLockKey(row),profileSecret:this.profileSecret,checkpoints:this.recoveryCheckpoints}))
           .then(result=>{entry.recovered=result.settled;
             if(result.closed || result.settled)this.report({event:'remote_center_execution_recovered',node_id:row.node_id,slot:row.slot,
               attempts_closed:result.closed,settled:result.settled});})

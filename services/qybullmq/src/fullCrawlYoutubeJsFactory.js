@@ -26,6 +26,8 @@ import { evaluateMigrationUploadsActivity } from "./migrationActivityPolicy.js";
 import { ParserContractError } from "./localizedParsing.js";
 import { publicationGapRepairJobIntent } from "./publicationGapRepairExecution.js";
 import { resolveYoutubeContentType } from "./youtubeContentType.js";
+import { assertFullCrawlCollector } from "./fullCrawlCollector.js";
+import { createLocalFullCrawlCollector } from "./localFullCrawlCollector.js";
 
 function text(value) {
   const output = String(value ?? "").trim();
@@ -202,18 +204,17 @@ function completedResult({ state, closeResult, executedPhases, phaseTimingsMs, s
 
 export function createFullCrawlYoutubeJsExecutor({
   store,
-  youtube,
+  collector,
+  youtube = null,
   videoApiFallback = null,
   handoff = {},
   clock = () => new Date(),
   locale = "en",
 } = {}) {
   if (!store || typeof store.restore !== "function") throw new TypeError("store is required");
-  if (!youtube || typeof youtube.fetchChannel !== "function"
-      || typeof youtube.fetchUploads !== "function"
-      || typeof youtube.fetchDetail !== "function") {
-    throw new TypeError("YouTubeJS Adapter is required");
-  }
+  const stageCollector = assertFullCrawlCollector(
+    collector ?? createLocalFullCrawlCollector({ youtube }),
+  );
 
   return async function executeFullCrawlYoutubeJs(job, { resumeMode = "initial" } = {}) {
     if (!isYoutubeJsFullCrawlFetchContract(job?.data?.fetch_contract)) {
@@ -258,7 +259,7 @@ export function createFullCrawlYoutubeJsExecutor({
         return { ok: true, repaired: true, already_complete: true, scope: "about_only",
           channel_id: state.identity.channelId, run_id: state.identity.runId };
       }
-      const snapshot = await youtube.fetchChannel(state.identity.channelId, {
+      const snapshot = await stageCollector.collectAdmission(state.identity.channelId, {
         includeAbout: true,
         signal: currentChannelExecutionAbortSignal(),
       });
@@ -290,7 +291,7 @@ export function createFullCrawlYoutubeJsExecutor({
       await store.beginAdmission(job);
       let snapshot;
       try {
-        snapshot = await youtube.fetchChannel(state.identity.channelId, {
+        snapshot = await stageCollector.collectAdmission(state.identity.channelId, {
           includeAbout: true,
           signal: currentChannelExecutionAbortSignal(),
         });
@@ -341,7 +342,7 @@ export function createFullCrawlYoutubeJsExecutor({
       const phaseStartedAt = Date.now();
       executedPhases.push("uploads");
       const frozen = uploadsSettings(state, settings);
-      const uploads = await youtube.fetchUploads(
+      const uploads = await stageCollector.collectUploads(
         state.identity.channelId,
         frozen.channelContentLimit,
         {
@@ -433,7 +434,7 @@ export function createFullCrawlYoutubeJsExecutor({
             }),
           };
         } else {
-          const fetch = () => youtube.fetchDetail(candidate.target.video_id, {
+          const fetch = () => stageCollector.collectDetail(candidate.target.video_id, {
             signal: currentChannelExecutionAbortSignal(),
             strictRequiredSurfaces: true,
             optionalComments,

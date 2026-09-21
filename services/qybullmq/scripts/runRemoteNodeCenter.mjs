@@ -1,6 +1,9 @@
 // Explicit opt-in gateway and incremental execution entry. Never applies schema
 // or generates Clock plans. Queue consumers require a reviewed node allowlist.
 import pg from 'pg';
+import {assertFullCrawlReleaseSchema} from '../src/remoteNodes/fullCrawlReleaseSchema.js';
+import {createFullCrawlReleaseRuntime} from '../src/remoteNodes/fullCrawlReleaseRuntime.js';
+import {createFullCrawlDeploymentRuntime} from '../src/remoteNodes/fullCrawlDeploymentRuntime.js';
 import {startRemoteNatsCenter} from '../src/remoteNodes/natsCenter.js';
 import {createTransportSignals} from '../src/remoteNodes/transportSignals.js';
 import {createNatsProvisioning} from '../src/remoteNodes/natsProvisioning.js';
@@ -27,8 +30,9 @@ import {createRemoteNodeGateway} from '../src/remoteNodes/gateway.js';
 
 const required=name=>{const value=process.env[name];if(!value)throw new Error('REMOTE_CENTER_CONFIG_REQUIRED');return value;};
 const secret=async name=>(await readNodeFile(required(name),{secret:true,maxBytes:16384})).toString().trim();
-let pool;let server;let guardPool;let supervisor;let capacity;let nats;let signals;let provisioning;let heartbeatPool;let resultPool;let natsMetrics;let wholeRetentionTimer;let retentionWork=null;let stage='credential_files';
+let fullCrawl;let fullGuardPool;let pool;let server;let guardPool;let supervisor;let capacity;let nats;let signals;let provisioning;let heartbeatPool;let resultPool;let natsMetrics;let wholeRetentionTimer;let retentionWork=null;let stage='credential_files';
 try{
+  if(process.env.REMOTE_NODE_FULL_CRAWL_EXECUTION_ENABLED==='true' && process.env.REMOTE_NODE_FULL_CRAWL_DEPLOYMENT_ENABLED!=='true')throw new Error('FULL_CRAWL_DEPLOYMENT_REQUIRED');
   const privateKey=await secret('REMOTE_NODE_ROUTE_PRIVATE_KEY_FILE');
   const encryptionKey=await secret('REMOTE_NODE_ENCRYPTION_KEY_FILE');
   if(!/^[a-f0-9]{64}$/.test(encryptionKey))throw new Error('REMOTE_CENTER_KEY_INVALID');
@@ -60,6 +64,31 @@ try{
   const routes=new RemoteChannelRouteStore({channelStore:channelPlans,privateKey,secretKey:Buffer.from(encryptionKey,'hex'),
     assertBusinessFence:assertRemoteIncrementalBusinessFence,readRotaRoute:createRotaRemoteRouteReader({
       url:required('REMOTE_NODE_ROTA_ROUTE_URL'),token:rotaToken,allowLoopbackHttp:true})});
+  fullCrawl=null;
+  if(process.env.REMOTE_NODE_FULL_CRAWL_DEPLOYMENT_ENABLED==='true'){
+    stage='full_crawl_deployment_schema';
+    if(!process.env.REMOTE_NODE_NATS_URL)throw new Error('FULL_CRAWL_NATS_REQUIRED');
+    for(const table of ['full_crawl_executions','full_crawl_stages','full_crawl_result_batches','full_crawl_result_parts','full_crawl_detail_reservations']){
+      if(!(await pool.query('SELECT to_regclass($1) AS relation',[`remote_ingestion.${table}`])).rows[0].relation)throw new Error('FULL_CRAWL_SCHEMA_REQUIRED');
+    }
+    const transportOptions={privateKey,secretKey:Buffer.from(encryptionKey,'hex'),isReady:()=>nats?.isReady()===true,
+      readRotaRoute:createRotaRemoteRouteReader({url:required('REMOTE_NODE_ROTA_ROUTE_URL'),token:rotaToken,allowLoopbackHttp:true})};
+    if(process.env.REMOTE_NODE_FULL_CRAWL_EXECUTION_ENABLED==='true'){
+      stage='full_crawl_execution_configuration';
+      await assertFullCrawlReleaseSchema(pool.query.bind(pool));
+      const profileSecret=await secret('REMOTE_NODE_PROFILE_SECRET_FILE');
+      const controlToken=await secret('REMOTE_NODE_ROTA_CONTROL_TOKEN_FILE');
+      if(controlToken.length<12 || controlToken===rotaToken)throw new Error('REMOTE_CENTER_CONTROL_CREDENTIAL_INVALID');
+      const resolvedPolicy=resolveWorkerIdentityPolicy({role:'channel',policyId:required('ROTA_IDENTITY_POLICY_ID'),expectedWorkloadScope:required('ROTA_WORKLOAD_SCOPE_EXPECTED')});
+      fullGuardPool=new pg.Pool({connectionString:required('REMOTE_NODE_DATABASE_URL'),max:5,connectionTimeoutMillis:5000,
+        application_name:'remote-full-crawl-supervisor-locks',options:`-c timezone=UTC -c publication.writer_version=${PUBLICATION_WRITER_VERSION}`});
+      fullCrawl=await createFullCrawlReleaseRuntime({store,guardPool:fullGuardPool,controlToken,profileSecret,resolvedPolicy,
+        rotaClient:new ProxyControlClient({controlUrl:required('ROTA_PROXY_CONTROL_URL'),token:controlToken}),
+        transportOptions,report:value=>console.log(JSON.stringify(value))});
+    }else{
+      fullCrawl=createFullCrawlDeploymentRuntime({store,image:required('REMOTE_NODE_FULL_CRAWL_IMAGE'),...transportOptions});
+    }
+  }
   const workerConnections=new RemoteWorkerActivationStore({store,verifyExecution:(client,row)=>supervisor?.verifyExecution(client,row)??false});
   const youtubeSessions=new RemoteYoutubeSessionStore({routes});
   if(process.env.REMOTE_NODE_AUTO_CAPACITY==='true') {
@@ -117,7 +146,7 @@ try{
     const heartbeatStore=new RemoteNodeStore({pool:heartbeatPool}),resultStore=new RemoteNodeStore({pool:resultPool});
     const resultChannelPlans=new RemoteChannelPlanStore({store:resultStore});
     stage='nats_connection';
-    nats=await startRemoteNatsCenter({url:required('REMOTE_NODE_NATS_URL'),password,store,channelPlans,wholeChannels,routes,youtubeSessions,workerConnections,signals,
+    nats=await startRemoteNatsCenter({url:required('REMOTE_NODE_NATS_URL'),password,store,channelPlans,wholeChannels,routes,youtubeSessions,workerConnections,signals,fullCrawls:fullCrawl?.transport.service,
       heartbeatStore,heartbeatConnections:new RemoteWorkerActivationStore({store:heartbeatStore,verifyExecution:workerConnections.verifyExecution}),
       resultStore,resultChannelPlans,resultWholeChannels:wholeChannels?new WholeChannelStore({channelPlans:resultChannelPlans,assertBusinessFence:assertRemoteIncrementalBusinessFence}):null,
       resultConcurrency:Number(process.env.REMOTE_NODE_NATS_RESULT_CONCURRENCY||8),
@@ -133,7 +162,7 @@ try{
   if(!['127.0.0.1','0.0.0.0'].includes(bind))throw new Error('REMOTE_CENTER_BIND_INVALID');
   const localIntake=process.env.LOCAL_INCREMENTAL_INTAKE_CONTROL==='true'
     ?createLocalIntakeAdmin({query:pool.query.bind(pool),transaction:action=>store.transaction(action)}):null;
-  const deploymentAdmin=createRemoteDeploymentAdmin({store,routes,token:adminToken,image:required('REMOTE_NODE_COLLECT_IMAGE'),gatewayUrl:required('REMOTE_NODE_GATEWAY_URL'),activation:workerConnections,execution:supervisor,capacity,localIntake,natsProvisioning:provisioning});
+  const deploymentAdmin=createRemoteDeploymentAdmin({store,routes,token:adminToken,image:required('REMOTE_NODE_COLLECT_IMAGE'),gatewayUrl:required('REMOTE_NODE_GATEWAY_URL'),activation:workerConnections,execution:supervisor,capacity,localIntake,natsProvisioning:provisioning,fullCrawl});
   server=createRemoteNodeGateway({store,channelPlans,routes,youtubeSessions,workerConnections,deploymentAdmin,transportHealth:()=>nats?nats.stats():{transport:'http'},
     maxConcurrentRequests:Number(process.env.REMOTE_NODE_GATEWAY_CONCURRENCY || 64)});
   server.listen(Number(process.env.REMOTE_NODE_CENTER_PORT||3187),bind);await once(server,'listening');
@@ -145,17 +174,21 @@ try{
       .finally(()=>{retentionWork=null;});
   },60000);
   let closing=false;
-  const stop=async()=>{if(closing)return;closing=true;await supervisor?.stop();
+  const stop=async()=>{if(closing)return;closing=true;await supervisor?.stop();await fullCrawl?.close?.();
     await new Promise(resolve=>{server.close(resolve);server.closeIdleConnections();});
     clearInterval(natsMetrics);await provisioning?.close();await signals?.close();await nats?.close();
     clearInterval(wholeRetentionTimer);await retentionWork;
-    await heartbeatPool?.end();await resultPool?.end();await guardPool?.end();await pool.end();};
+    await heartbeatPool?.end();await resultPool?.end();await guardPool?.end();await fullGuardPool?.end();await pool.end();};
   process.once('SIGTERM',()=>void stop().catch(()=>{process.exitCode=1;}));process.once('SIGINT',()=>void stop().catch(()=>{process.exitCode=1;}));
+  stage='full_crawl_compatibility_start';
+  await fullCrawl?.start?.();
   supervisor?.start();
   // Advertise readiness only once graceful signal handlers are installed.
-  console.log(JSON.stringify({event:'remote_node_center_listening',activation:supervisor?(supervisor.dashboardManaged?'dashboard_authorized':'explicit_node_allowlist'):'disabled'}));
+  console.log(JSON.stringify({event:'remote_node_center_listening',full_crawl_execution:process.env.REMOTE_NODE_FULL_CRAWL_EXECUTION_ENABLED==='true',activation:supervisor?(supervisor.dashboardManaged?'dashboard_authorized':'explicit_node_allowlist'):'disabled'}));
 }catch{
   clearInterval(wholeRetentionTimer);await retentionWork;
-  clearInterval(natsMetrics);await supervisor?.stop().catch(()=>{});await provisioning?.close();await signals?.close().catch(()=>{});await nats?.close().catch(()=>{});
-  await heartbeatPool?.end();await resultPool?.end();await guardPool?.end();await pool?.end();console.error(JSON.stringify({event:'remote_node_center_start_failed',stage}));process.exitCode=1;
+  clearInterval(natsMetrics);await supervisor?.stop().catch(()=>{});await fullCrawl?.close?.().catch(()=>{});
+  if(server)await new Promise(resolve=>{server.close(resolve);server.closeIdleConnections();});
+  await provisioning?.close();await signals?.close().catch(()=>{});await nats?.close().catch(()=>{});
+  await heartbeatPool?.end();await resultPool?.end();await guardPool?.end();await fullGuardPool?.end();await pool?.end();console.error(JSON.stringify({event:'remote_node_center_start_failed',stage}));process.exitCode=1;
 }

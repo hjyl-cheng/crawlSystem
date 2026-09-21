@@ -17,7 +17,7 @@ export async function createRemoteNatsClient({url,token,nodeId,slot,allowLoopbac
   };
   const upload=async(operation,taskId,bytes)=>{
     const value=resultEnvelope(nodeId,token,operation,taskId,bytes);
-    try{await js.publish(`qy.remote.results.${nodeId}`,encode(value),{msgID:value.receiptId});}
+    try{await js.publish(`${operation==='full_crawl_part'?'qy.remote.full.results':'qy.remote.results'}.${nodeId}`,encode(value),{msgID:value.receiptId});}
     catch{throw new RemoteProtocolError('NATS_RESULT_PENDING',503);}
     // Broker ACK does not pretend that the original SQL receipt was committed.
     // Leave the existing durable node spool intact until the writer confirms.
@@ -27,6 +27,11 @@ export async function createRemoteNatsClient({url,token,nodeId,slot,allowLoopbac
   };
   return {
     transport:'nats',close:()=>nc.close(),
+    fullCrawlPoll:value=>request('full_commands',value),fullCrawlHeartbeat:value=>request('full_heartbeat',value),
+    fullCrawlReceipt:value=>request('full_receipt',value),
+    fullCrawlRecovered:value=>request('full_recovered',value),
+    fullCrawlStarted:value=>request('full_started',value),
+    uploadFullCrawl:(request,part)=>upload('full_crawl_part',request.task_id,encode({request,...part,payload:part.payload.toString('base64')})),
     youtubeSession:value=>request('youtube_session',value),youtubeCheckpoint:value=>request('youtube_checkpoint',value),
     workerHeartbeat:value=>request('node_heartbeat',value),
     grantRoute:value=>request('network_grant',value),releaseRoute:value=>request('network_release',value),abandonRoute:value=>request('network_abandon',value),

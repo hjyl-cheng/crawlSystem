@@ -119,7 +119,7 @@ export function retryableSystemFailureDecision(error) {
 export function isStaleExecutionFailure(error) {
   return systemFailureNodes(error).some(node => (
     ["CANDIDATE_ATTEMPT_FENCE_STALE", "CONTENT_DETAIL_EXECUTION_FENCE_STALE",
-      "MIGRATION_RETRY_INTENT_FENCE_STALE"].includes(node?.code)
+      "MIGRATION_RETRY_INTENT_FENCE_STALE", "FULL_CRAWL_BUSINESS_FENCE_STALE", "FULL_CRAWL_DETAIL_FENCE_STALE"].includes(node?.code)
     || node?.name === "StaleChannelCandidateAttemptError"
   ));
 }

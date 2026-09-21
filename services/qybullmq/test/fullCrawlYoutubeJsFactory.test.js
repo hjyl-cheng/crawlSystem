@@ -307,6 +307,28 @@ function executor(fixture) {
   });
 }
 
+test("Full Crawl lifecycle accepts the shared Collector seam", async () => {
+  const fixture = scriptedFixture();
+  const collector = {
+    collectAdmission: fixture.youtube.fetchChannel,
+    collectUploads: fixture.youtube.fetchUploads,
+    collectDetail: fixture.youtube.fetchDetail,
+  };
+  const execute = createFullCrawlYoutubeJsExecutor({
+    store: fixture.store,
+    collector,
+    handoff: fixture.handoff,
+    clock: () => OBSERVED_AT,
+    locale: "en",
+  });
+
+  const result = await execute(job());
+  assert.equal(result.ok, true);
+  assert.equal(fixture.calls.includes("youtube:channel"), true);
+  assert.equal(fixture.calls.includes("youtube:uploads"), true);
+  assert.equal(fixture.calls.includes("youtube:detail:video-1"), true);
+});
+
 for (const cached of [false, true]) test(`Full Crawl continues after a login exclusion (cached=${cached})`, async () => {
   const detail = loginRequiredDetail("video-1", []);
   const fixture = scriptedFixture({ phase: "detail", candidates: [

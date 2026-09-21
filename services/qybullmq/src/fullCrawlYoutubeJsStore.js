@@ -749,11 +749,11 @@ export class FullCrawlYoutubeJsStore {
     });
   }
 
-  async claimDetailExecution(fence) {
-    return this.withTransaction(client => claimContentDetailExecution(client, fence, { recoverPending: true }));
+  async claimDetailExecution(fence, { recoverPending = true } = {}) {
+    return this.withTransaction(client => claimContentDetailExecution(client, fence, { recoverPending }));
   }
 
-  async claimNextDetail(fence) {
+  async claimNextDetail(fence, { reuseApiAttempt = false } = {}) {
     return this.withTransaction(async (client) => {
       if (!(await lockContentDetailExecution(client, fence))) {
         throw new FullCrawlYoutubeJsExecutionStaleError(fence.runId);
@@ -786,17 +786,19 @@ export class FullCrawlYoutubeJsStore {
       const excludedDetail = await loadLoginRequiredExclusion(
         client.query.bind(client), row.channel_id, row.source_content_id,
       );
+      let cachedApi = false;
       if (isVideoApiReplay() && !excludedDetail) {
         const existing = await client.query("SELECT 1 FROM crawler.youtube_api_detail_requests WHERE request_id=$1",
           [JSON.stringify(["full", fence.runId, row.source_content_id])]);
         if (!existing.rows.length) assertVideoApiNetworkAllowed();
+        cachedApi = existing.rows.length > 0;
       }
       const claimed = await client.query(
         `UPDATE crawler.content_candidates
-         SET detail_status='running',attempts=attempts+1,error_message=NULL,updated_at=now()
+         SET detail_status='running',attempts=attempts+$2,error_message=NULL,updated_at=now()
          WHERE candidate_id=$1 AND detail_status IN ('queued','failed')
          RETURNING *`,
-        [row.candidate_id],
+        [row.candidate_id,reuseApiAttempt && cachedApi && row.attempts > 0 ? 0 : 1],
       );
       if (claimed.rowCount !== 1) {
         throw checkpointError("Detail Candidate claim conflicted", { runId: fence.runId }, "detail");

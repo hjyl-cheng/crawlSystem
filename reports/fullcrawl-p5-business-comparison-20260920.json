@@ -1,0 +1,112 @@
+{
+  "format": 1,
+  "matched": true,
+  "fields": [
+    "candidate",
+    "channel",
+    "details",
+    "contents",
+    "run"
+  ],
+  "local": {
+    "candidate": {
+      "status": "accepted",
+      "snapshot_attempts": 1
+    },
+    "channel": {
+      "status": "active",
+      "country_code": "BR",
+      "subscriber_count": "10000"
+    },
+    "details": [
+      {
+        "detail_status": "done",
+        "attempts": 1,
+        "disposition": "stored"
+      }
+    ],
+    "contents": [
+      {
+        "id": "dQw4w9WgXcQ",
+        "type": "video",
+        "title": "P2 Detail dQw4w9WgXcQ",
+        "views": "100"
+      }
+    ],
+    "run": {
+      "status": "waiting_agent",
+      "detail_status": "done",
+      "selected": 1,
+      "stored": 1,
+      "excluded": 0
+    }
+  },
+  "remote": [
+    {
+      "candidate": {
+        "status": "accepted",
+        "snapshot_attempts": 1
+      },
+      "channel": {
+        "status": "active",
+        "country_code": "BR",
+        "subscriber_count": "10000"
+      },
+      "details": [
+        {
+          "detail_status": "done",
+          "attempts": 1,
+          "disposition": "stored"
+        }
+      ],
+      "contents": [
+        {
+          "id": "dQw4w9WgXcQ",
+          "type": "video",
+          "title": "P2 Detail dQw4w9WgXcQ",
+          "views": "100"
+        }
+      ],
+      "run": {
+        "status": "waiting_agent",
+        "detail_status": "done",
+        "selected": 1,
+        "stored": 1,
+        "excluded": 0
+      }
+    },
+    {
+      "candidate": {
+        "status": "accepted",
+        "snapshot_attempts": 1
+      },
+      "channel": {
+        "status": "active",
+        "country_code": "BR",
+        "subscriber_count": "10000"
+      },
+      "details": [
+        {
+          "detail_status": "done",
+          "attempts": 1,
+          "disposition": "stored"
+        }
+      ],
+      "contents": [
+        {
+          "id": "dQw4w9WgXcQ",
+          "type": "video",
+          "title": "P2 Detail dQw4w9WgXcQ",
+          "views": "100"
+        }
+      ],
+      "run": {
+        "status": "waiting_agent",
+        "detail_status": "done",
+        "selected": 1,
+        "stored": 1,
+        "excluded": 0
+      }
+    }
+  ]
+}

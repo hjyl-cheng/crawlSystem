@@ -225,7 +225,7 @@ test('remote work checks original Clock, managed run and execution records', { s
     await query("UPDATE remote_ingestion.network_bindings SET state='retired' WHERE binding_id=$1",[f.binding.binding_id]);
     await query("UPDATE crawler.channel_execution_attempts SET status='running',finished_at=NULL WHERE attempt_id=$1",[f.executionAttemptId]);
     assert.equal(await remoteSlotUnsettled(pool,binding),true,'applied result is not a finished execution');
-    await query("UPDATE crawler.channel_execution_attempts SET status='success',finished_at=now(),business_run_id='mismatch' WHERE attempt_id=$1",[f.executionAttemptId]);
+    await query("UPDATE crawler.channel_execution_attempts SET status='success',finished_at=now(),business_run_id=$2 WHERE attempt_id=$1",[f.executionAttemptId,`mismatch:${f.executionAttemptId}`]);
     assert.equal(await remoteSlotUnsettled(pool,binding),true,'mismatched evidence remains quarantined');
   });
 

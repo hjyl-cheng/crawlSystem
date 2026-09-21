@@ -26,7 +26,7 @@ export class RemoteChannelNetworkSession {
     if (!state) return;
     if (state.phase === 'closed') {
       try { if ((await this.client.pollCommands(state.lease)).status === 'leased') throw closedExecution(); }
-      catch (error) { if (error.code !== 'STALE_LEASE') throw error; }
+      catch (error) { if (!['STALE_LEASE','WORKER_CONNECTION_STALE'].includes(error.code)) throw error; }
       await this.spool.remove('network.json');
       return;
     }

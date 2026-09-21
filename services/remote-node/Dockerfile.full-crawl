@@ -1,0 +1,16 @@
+# Reuse the already verified Python/fingerprint/relay runtime, then replace the
+# application and entrypoint. Release builds must supply an immutable base digest.
+ARG COLLECT_RUNTIME_IMAGE
+FROM ${COLLECT_RUNTIME_IMAGE}
+WORKDIR /app
+COPY services/qybullmq/src ./src
+COPY services/qybullmq/scripts/fingerprint_gateway.py services/qybullmq/scripts/runRemoteNodeFullCrawl.mjs ./scripts/
+ARG QY_VCS_REF=uncommitted
+LABEL org.opencontainers.image.title="qy-remote-node-full-crawl" \
+      org.opencontainers.image.revision="${QY_VCS_REF}" \
+      qy.remote.mode="full_crawl_collect" \
+      qy.remote.capability="youtube.full-crawl.v1" \
+      qy.remote.runtimes="youtubejs-full-crawl-v1"
+USER 1000:1000
+HEALTHCHECK NONE
+CMD ["node","scripts/runRemoteNodeFullCrawl.mjs"]

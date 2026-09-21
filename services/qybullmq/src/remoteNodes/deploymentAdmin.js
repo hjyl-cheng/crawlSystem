@@ -1,6 +1,7 @@
 import {randomBytes,createPublicKey,timingSafeEqual} from 'node:crypto';
 import {parseWorkerConfig} from './workerConfig.js';
-import {CHANNEL_PLAN_CAPABILITY} from './channelPlanContract.js';
+import {collectingWorkload,FULL_CRAWL_WORKLOAD} from './collectingWorkload.js';
+import {fullCrawlSlotUnsettled} from './fullCrawlCenterRecovery.js';
 import {hash,RemoteProtocolError,uuid} from './protocol.js';
 import {selectIntakeWorkers,intakeStatus} from './intakeSelection.js';
 import {createWorkerRetirement} from './workerRetirement.js';
@@ -11,23 +12,28 @@ const fail=code=>{throw new RemoteProtocolError(code);};
 // A separate center credential authorizes Dashboard deployment. Node tokens can
 // neither enroll nodes nor enable Workers. Credentials are recoverable only by
 // the center, encrypted with the route store's existing authenticated cipher.
-export function createRemoteDeploymentAdmin({store,routes,token,image,gatewayUrl,activation=null,execution=null,capacity=null,localIntake=null,natsProvisioning=null}){
+export function createRemoteDeploymentAdmin({store,routes,token,image,gatewayUrl,activation=null,execution=null,capacity=null,localIntake=null,natsProvisioning=null,fullCrawl=null}){
   if(typeof token!=='string' || token.length<32 || !/^[a-z0-9][a-z0-9./:_-]*@sha256:[a-f0-9]{64}$/.test(image))throw new TypeError('fixed deployment image and admin token required');
+  if(fullCrawl&&(!/^[a-z0-9][a-z0-9./:_-]*@sha256:[a-f0-9]{64}$/.test(fullCrawl.image)||fullCrawl.image===image))throw new TypeError('dedicated fixed full-crawl image required');
+  const executionFor=row=>row.mode===FULL_CRAWL_WORKLOAD.mode?fullCrawl?.execution:execution;
+  const activationFor=row=>row.mode===FULL_CRAWL_WORKLOAD.mode?fullCrawl?.activation:activation;
   const endpoint=new URL(gatewayUrl);if(endpoint.protocol!=='https:' || endpoint.username || endpoint.password || endpoint.search || endpoint.hash)throw new TypeError('HTTPS gateway required');
   const publicKey=createPublicKey(routes.privateKey).export({type:'spki',format:'pem'});
   return {
-    retire:createWorkerRetirement({store,execution}),
+    retire:createWorkerRetirement({store,execution,fullCrawlExecution:fullCrawl?.execution}),
     authenticate(value){const bytes=Buffer.from(value??'');const secret=Buffer.from(token);if(bytes.length!==secret.length || !timingSafeEqual(bytes,secret))throw new RemoteProtocolError('UNAUTHORIZED',401);},
     async prepare(value){
-      if(!value || Object.keys(value).some(key=>!['nodeId','deploymentId','image','files'].includes(key)) || value.image!==image
+      if(!value || Object.keys(value).some(key=>!['nodeId','deploymentId','image','files'].includes(key)) || ![image,fullCrawl?.image].filter(Boolean).includes(value.image)
         || !value.files || typeof value.files!=='object' || Array.isArray(value.files))throw new RemoteProtocolError('INVALID_DEPLOYMENT',400);
       uuid(value.nodeId);uuid(value.deploymentId);
+      const workload=collectingWorkload(value.image===image?'incremental_collect':FULL_CRAWL_WORKLOAD.mode);
+      const slotPattern=workload.role==='fullcrawl'?/^full-crawl-[1-9][0-9]*\.json$/:/^incremental-[1-9][0-9]*\.json$/;
       const names=Object.keys(value.files);if(names.length<1)throw new RemoteProtocolError('INVALID_DEPLOYMENT',400);
       const configs=names.map(name=>{
-        if(!/^incremental-[1-9][0-9]*\.json$/.test(name))throw new RemoteProtocolError('INVALID_DEPLOYMENT',400);
+        if(!slotPattern.test(name))throw new RemoteProtocolError('INVALID_DEPLOYMENT',400);
         const slot=name.slice(0,-5);const bytes=value.files[`${slot}.json`];
         if(typeof bytes!=='string' || Buffer.byteLength(bytes)>16384)throw new RemoteProtocolError('INVALID_DEPLOYMENT',400);
-        const config=parseWorkerConfig(Buffer.from(bytes),{mode:'incremental_collect'});
+        const config=parseWorkerConfig(Buffer.from(bytes),{mode:workload.mode});
         if(config.node_id!==value.nodeId || config.deployment_id!==value.deploymentId || config.slot!==slot
           || new URL(config.gateway_url).href!==endpoint.href)throw new RemoteProtocolError('INVALID_DEPLOYMENT',400);
         return config;
@@ -36,6 +42,7 @@ export function createRemoteDeploymentAdmin({store,routes,token,image,gatewayUrl
         await client.query('SELECT pg_advisory_xact_lock(hashtext($1))',[`remote-deploy:${value.nodeId}`]);
         let node=(await client.query('SELECT * FROM remote_ingestion.nodes WHERE node_id=$1 FOR NO KEY UPDATE',[value.nodeId])).rows[0];
         const old=(await client.query('SELECT * FROM remote_ingestion.node_deployments WHERE node_id=$1 FOR UPDATE',[value.nodeId])).rows[0];
+        if(node && (node.capabilities.length!==1||node.capabilities[0]!==workload.capability))fail('REMOTE_DEPLOYMENT_NODE_CONFLICT');
         if(node && (!old || node.state!=='active'))fail('REMOTE_DEPLOYMENT_NODE_CONFLICT');
         if(old && (old.deployment_id!==value.deploymentId || old.image!==value.image))fail('REMOTE_DEPLOYMENT_REQUIRES_DRAIN');
         if(old){
@@ -57,7 +64,7 @@ export function createRemoteDeploymentAdmin({store,routes,token,image,gatewayUrl
         const registeredCount=Math.max(old?.worker_count??0,configs.length);
         const credentials=old?routes.decrypt(old.credentials_cipher,`node-deployment:${value.nodeId}`):{nodeToken:randomBytes(32).toString('hex'),relayTokens:{}};
         if(!node)await client.query(`INSERT INTO remote_ingestion.nodes(node_id,token_hash,capabilities,max_leases,slot_claims_required)
-          VALUES($1,$2,$3,$4,true)`,[value.nodeId,hash(credentials.nodeToken),[CHANNEL_PLAN_CAPABILITY],configs.length]);
+          VALUES($1,$2,$3,$4,true)`,[value.nodeId,hash(credentials.nodeToken),[workload.capability],configs.length]);
         for(const config of configs){
           credentials.relayTokens[config.slot]??=randomBytes(32).toString('hex');
           const workerId=`remote-${value.nodeId}-${config.slot}`;
@@ -65,11 +72,11 @@ export function createRemoteDeploymentAdmin({store,routes,token,image,gatewayUrl
           const slot=(await client.query('SELECT rota_worker_id FROM remote_ingestion.network_slots WHERE node_id=$1 AND slot=$2',[value.nodeId,config.slot])).rows[0];
           if(slot.rota_worker_id!==workerId)fail('NETWORK_SLOT_CONFLICT');
           await client.query(`INSERT INTO remote_ingestion.worker_connections(node_id,slot,deployment_id,config_hash,role,mode,activation_requested)
-            VALUES($1,$2,$3,$4,'incremental','incremental_collect',false) ON CONFLICT(node_id,slot) DO NOTHING`,[value.nodeId,config.slot,value.deploymentId,config.config_hash]);
+            VALUES($1,$2,$3,$4,$5,$6,false) ON CONFLICT(node_id,slot) DO NOTHING`,[value.nodeId,config.slot,value.deploymentId,config.config_hash,workload.role,workload.mode]);
           // The deployment lock serializes immutable registration changes.
           // Reading an existing slot must not wait for its live heartbeat.
           const row=(await client.query('SELECT * FROM remote_ingestion.worker_connections WHERE node_id=$1 AND slot=$2',[value.nodeId,config.slot])).rows[0];
-          if(row.deployment_id!==value.deploymentId || row.config_hash!==config.config_hash || row.mode!=='incremental_collect')fail('WORKER_DEPLOYMENT_CONFLICT');
+          if(row.deployment_id!==value.deploymentId || row.config_hash!==config.config_hash || row.mode!==workload.mode||row.role!==workload.role)fail('WORKER_DEPLOYMENT_CONFLICT');
         }
         await client.query('UPDATE remote_ingestion.nodes SET max_leases=$2,slot_claims_required=true WHERE node_id=$1',[value.nodeId,registeredCount]);
         await client.query(`INSERT INTO remote_ingestion.node_deployments(node_id,deployment_id,image,worker_count,credentials_cipher)
@@ -104,14 +111,14 @@ export function createRemoteDeploymentAdmin({store,routes,token,image,gatewayUrl
         if(!node || !deployment || deployment.deployment_id!==value.deploymentId || value.workerCount>deployment.worker_count)fail('WORKER_DEPLOYMENT_MISMATCH');
         const rows=(await client.query(`SELECT *,connected_until>clock_timestamp() AS alive
           FROM remote_ingestion.worker_connections WHERE node_id=$1 AND deployment_id=$2 AND retired_at IS NULL ORDER BY slot`,[value.nodeId,value.deploymentId])).rows;
-        if(rows.length!==deployment.worker_count || rows.some(r=>r.mode!=='incremental_collect'))fail('WORKER_DEPLOYMENT_MISMATCH');
+        if(rows.length!==deployment.worker_count || !collectingWorkload(rows[0]?.mode) || rows.some(r=>r.mode!==rows[0].mode))fail('WORKER_DEPLOYMENT_MISMATCH');
         const previous=(await client.query('SELECT * FROM remote_ingestion.node_intake_requests WHERE node_id=$1 FOR UPDATE',[value.nodeId])).rows[0];
         if(previous && previous.deployment_id!==value.deploymentId)fail('WORKER_DEPLOYMENT_MISMATCH');
         if(previous){const selected=new Set(previous.selected_slots);for(const row of rows)row.activation_requested=selected.has(row.slot);}
         const currentCount=rows.filter(r=>r.activation_requested).length;
         control=changeIntakeControl(await readIntakeControl(client,value.nodeId,currentCount,value.workerCount),value);
         const desired=control.effectiveCount;
-        if(desired>0 && !execution?.allowsNode(value.nodeId))fail('REMOTE_CENTER_EXECUTION_NOT_CONFIGURED');
+        if(desired>0 && !executionFor(rows[0])?.allowsNode(value.nodeId))fail('REMOTE_CENTER_EXECUTION_NOT_CONFIGURED');
         // Registration precedes installation. A failed additive deployment must
         // not remove control of the previously verified prefix of Worker slots.
         const installed=new Set(rows.filter(r=>!r.retirement_id).sort((a,b)=>a.slot.localeCompare(b.slot,'en',{numeric:true})).slice(0,value.workerCount).map(r=>r.slot));
@@ -156,19 +163,33 @@ export function createRemoteDeploymentAdmin({store,routes,token,image,gatewayUrl
           ) current_work ON true
           WHERE w.node_id=$1 AND deployment_id=$2 AND w.retired_at IS NULL ORDER BY slot`,[nodeId,deploymentId])).rows;
         const workers=[];
-        for(const row of rows)workers.push({slot:row.slot,retiring:!!row.retirement_id,connected:row.connected===true,preparation:execution?.preparationState?.(row)??null,
+        for(const row of rows){
+          const execution=executionFor(row),activation=activationFor(row);
+          const verify=activation?.verifier?.(row.mode)??activation?.verifyExecution;
+          if(row.mode===FULL_CRAWL_WORKLOAD.mode){
+            row.unsettled=await fullCrawlSlotUnsettled(client,row);
+            const current=(await client.query(`SELECT t.state,s.state AS stage_state FROM remote_ingestion.tasks t
+              LEFT JOIN LATERAL (SELECT CASE WHEN s.applied_at IS NOT NULL OR EXISTS(SELECT 1 FROM remote_ingestion.full_crawl_result_batches b WHERE b.stage_id=s.stage_id AND b.state IN ('received','applied')) THEN 'received' ELSE 'pending' END AS state FROM remote_ingestion.full_crawl_stages s WHERE task_id=t.task_id AND generation=t.generation ORDER BY created_at DESC LIMIT 1) s ON true
+              WHERE t.target_node_id=$1 AND t.target_worker_slot=$2 AND t.state IN ('pending','leased') ORDER BY t.created_at DESC LIMIT 1`,[row.node_id,row.slot])).rows[0];
+            row.task_state=current?.state;row.command_state=current?.stage_state==='received'?'received':'pending';
+          }
+          workers.push({slot:row.slot,retiring:!!row.retirement_id,connected:row.connected===true,preparation:execution?.preparationState?.(row)??null,
           executionPhase:row.task_state==='leased' && row.command_state==='pending' ? 'collecting'
             : row.task_state==='leased' && row.command_state==='received' ? 'processing' : 'preparing',
           requested:desired?desired.has(row.slot):row.activation_requested,enabled:row.enabled,active:execution?.isProcessing(row)===true || row.unsettled===true,
           processing:execution?.isProcessing(row)===true,awaitingRecovery:row.unsettled===true && execution?.isProcessing(row)!==true,
           readyForTasks:row.connected===true && (desired?desired.has(row.slot):row.activation_requested) && row.activation_requested && row.enabled && row.accepting && row.node_state==='active'
-            && typeof activation?.verifyExecution==='function' && await activation.verifyExecution(client,row)===true});
-        return {nodeId,deploymentId,workers,executionAvailable:execution?.allowsNode(nodeId)===true,
+            && typeof verify==='function' && await verify(client,row)===true});
+        }
+        return {nodeId,deploymentId,workers,executionAvailable:executionFor(rows[0]??{})?.allowsNode(nodeId)===true,
           adjusting:!!desired && rows.some(row=>row.activation_requested!==desired.has(row.slot)),
           ...intakeStatus(workers),...await readIntakeControl(client,nodeId,workers.filter(w=>w.requested).length,workers.length)};
       });
       // Network inspection must not hold a business database transaction open.
-      if(result.workers.some(w=>w.preparation==='waiting_network'))result.networkCapacity=await execution?.networkCapacity?.()??null;
+      if(result.workers.some(w=>w.preparation==='waiting_network')){
+        const owner=result.workers[0]?.slot.startsWith('full-crawl-')?fullCrawl?.execution:execution;
+        result.networkCapacity=await owner?.networkCapacity?.()??null;
+      }
       return result;
     },
   };

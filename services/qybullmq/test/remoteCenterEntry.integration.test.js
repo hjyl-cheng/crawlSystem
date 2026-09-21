@@ -17,7 +17,9 @@ test('real central entry requires explicit config, starts gateway and shuts down
   t.after(async()=>{for(const child of children)if(child.exitCode===null&&!child.killed)child.kill('SIGKILL');guard.release();await pool.end();await rm(folder,{recursive:true,force:true});});
   t.after(async()=>{if(originalAuth){await writeFile(process.env.REMOTE_NATS_TEST_AUTH_FILE,originalAuth,{mode:0o600});await delay(2500);}});
   await assertIsolatedRemoteDatabase(pool);await guard.query('SELECT pg_advisory_lock(781137981)');
-  for(const file of ['schema.sql','routeSchema.sql','youtubeSessionSchema.sql','workerConnectionSchema.sql','workerActivationSchema.sql'])await pool.query(await readFile(new URL(`../src/remoteNodes/${file}`,import.meta.url),'utf8'));
+  if(process.env.REMOTE_CENTER_TEST_PREPARED_SCHEMA!=='true'){
+    for(const file of ['schema.sql','routeSchema.sql','youtubeSessionSchema.sql','workerConnectionSchema.sql','workerActivationSchema.sql'])await pool.query(await readFile(new URL(`../src/remoteNodes/${file}`,import.meta.url),'utf8'));
+  }
   const files={REMOTE_NODE_ROUTE_PRIVATE_KEY_FILE:generateKeyPairSync('ed25519').privateKey.export({type:'pkcs8',format:'pem'}),
     REMOTE_NODE_ENCRYPTION_KEY_FILE:randomBytes(32).toString('hex'),REMOTE_NODE_ADMIN_TOKEN_FILE:randomBytes(32).toString('hex'),
     REMOTE_NODE_ROTA_TOKEN_FILE:randomBytes(32).toString('hex'),REMOTE_NODE_PROFILE_SECRET_FILE:randomBytes(32).toString('hex'),

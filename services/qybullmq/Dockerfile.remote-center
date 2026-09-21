@@ -1,0 +1,17 @@
+# Offline-capable release assembly. The caller verifies/pins the runtime image
+# and records the source tree hashes alongside the distributed manifest digest.
+ARG CENTER_RUNTIME_IMAGE
+FROM ${CENTER_RUNTIME_IMAGE}
+WORKDIR /app
+COPY services/qybullmq/src ./src
+COPY services/qybullmq/scripts ./scripts
+COPY services/rota/core/internal/proxycontrol/identity_policy_catalog.generated.json /app/config/identity-policy-catalog.json
+ARG QY_VCS_REF=uncommitted
+ARG QY_SOURCE_SHA256
+LABEL org.opencontainers.image.title="qy-remote-node-center" \
+      org.opencontainers.image.revision="${QY_VCS_REF}" \
+      qy.source.sha256="${QY_SOURCE_SHA256}"
+ENV REMOTE_NODE_FULL_CRAWL_DEPLOYMENT_ENABLED=false \
+    REMOTE_NODE_FULL_CRAWL_EXECUTION_ENABLED=false
+HEALTHCHECK NONE
+CMD ["node","scripts/runRemoteNodeCenter.mjs"]

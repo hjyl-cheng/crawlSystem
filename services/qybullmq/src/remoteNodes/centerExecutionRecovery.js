@@ -2,7 +2,7 @@ import { BrowserProfileStore } from '../browserProfileStore.js';
 import { CHANNEL_PLAN_CAPABILITY } from './channelPlanContract.js';
 import { RemoteProtocolError } from './protocol.js';
 
-export const supervisionLockKey = row => `remote-incremental-supervisor:${row.node_id}/${row.slot}`;
+export const supervisionLockKey = row => `remote-${row.mode==='full_crawl_collect'?'full-crawl':'incremental'}-supervisor:${row.node_id}/${row.slot}`;
 
 // This closes transport bookkeeping only. A completed API request alone is
 // never permission to finish/replay a Plan or release a live network owner.

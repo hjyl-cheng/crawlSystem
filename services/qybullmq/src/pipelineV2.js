@@ -240,9 +240,11 @@ const ACCESS_DETAIL_FIELDS = [
   "privacy_status",
   "is_unlisted",
 ];
-const queues = createQueues();
+let queues;
+function pipelineQueues() { return queues ??= createQueues(); }
 export async function closePipelineV2Queues() {
-  await Promise.all(Object.values(queues).map(queue => queue.close()));
+  await Promise.all(Object.values(queues ?? {}).map(queue => queue.close()));
+  queues = undefined;
 }
 const incrementalAgentResultStore = new IncrementalAgentResultStore({
   withTransaction,
@@ -966,7 +968,7 @@ async function applyMigrationActivityGate(runId, detailStatus, options = {}) {
 async function queueFinalize(channelId, runId, reason, { candidateAttemptFence = null } = {}) {
   const enqueue = (activeQuery) => dispatchFinalizeForRun({
     query: activeQuery,
-    queue: queues[queuesByRole.finalize],
+    queue: pipelineQueues()[queuesByRole.finalize],
     channelId,
     runId,
     reason,
@@ -1008,7 +1010,7 @@ async function queueContentDetailFromSnapshot({
         `a${candidateAttemptFence.bullmqAttempt}`,
       )
     : safeJobId("content-detail", runId);
-  const enqueue = () => queues[queuesByRole.contentDetail].add(
+  const enqueue = () => pipelineQueues()[queuesByRole.contentDetail].add(
     "content-detail-batch",
     payload,
     { jobId },
@@ -1029,7 +1031,7 @@ export async function signalReadyDiscoveryPageQualifications({ candidateId = nul
   try {
     const pageIds = await publishReadyDiscoveryPages({
       query,
-      queue: queues[queuesByRole.discoverPage],
+      queue: pipelineQueues()[queuesByRole.discoverPage],
       candidateId,
       pageId,
     });

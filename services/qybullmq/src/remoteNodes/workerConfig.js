@@ -2,6 +2,7 @@ import { constants } from 'node:fs';
 import { open } from 'node:fs/promises';
 import { createPublicKey } from 'node:crypto';
 import { hash, uuid } from './protocol.js';
+import { collectingSlotValid, collectingWorkload } from './collectingWorkload.js';
 
 export async function readNodeFile(path, { secret = false, maxBytes = 16384 } = {}) {
   const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
@@ -18,8 +19,11 @@ export function parseWorkerConfig(bytes, { allowLoopbackHttp = false, mode = 'co
   let value;
   try { value = JSON.parse(bytes.toString('utf8')); } catch { throw new Error('NODE_CONFIG_INVALID'); }
   const fields = ['version', 'mode', 'role', 'node_id', 'slot', 'deployment_id', 'gateway_url'];
+  const workload = collectingWorkload(mode);
+  const validRole = mode === 'connect_only' ? value?.role === 'incremental'
+    : workload && value?.role === workload.role && collectingSlotValid(workload, value.slot);
   if (!value || Object.keys(value).some(key => !fields.includes(key)) || value.version !== 1
-    || !['connect_only','incremental_collect'].includes(mode) || value.mode !== mode || value.role !== 'incremental' || typeof value.slot !== 'string'
+    || !validRole || value.mode !== mode || typeof value.slot !== 'string'
     || !/^[a-z0-9-]{1,60}$/.test(value.slot)) throw new Error('NODE_CONFIG_INVALID');
   uuid(value.node_id); uuid(value.deployment_id);
   const endpoint = new URL(value.gateway_url);

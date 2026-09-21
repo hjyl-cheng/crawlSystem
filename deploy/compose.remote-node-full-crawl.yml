@@ -1,0 +1,14 @@
+# Optional release overlay, applied only after P5/P6 gates. The private center.env
+# supplies the matching original worker DB/Redis/Rota settings documented in P5.
+services:
+  remote-node-center:
+    environment:
+      REMOTE_NODE_FULL_CRAWL_DEPLOYMENT_ENABLED: ${QY_REMOTE_FULL_CRAWL_DEPLOYMENT_ENABLED:-false}
+      REMOTE_NODE_FULL_CRAWL_EXECUTION_ENABLED: ${QY_REMOTE_FULL_CRAWL_EXECUTION_ENABLED:-false}
+      REMOTE_NODE_FULL_CRAWL_IMAGE: ${QY_REMOTE_FULL_CRAWL_IMAGE:-}
+      REMOTE_NODE_FULL_CRAWL_NODE_IDS: ${QY_REMOTE_FULL_CRAWL_NODE_IDS:-}
+      REMOTE_NODE_FULL_CRAWL_TOTAL_SLOTS: ${QY_REMOTE_FULL_CRAWL_TOTAL_SLOTS:-2}
+    # Explicitly budget the single local legacy/repair compatibility runtime.
+    mem_limit: 1536m
+    pids_limit: 192
+    tmpfs: ["/tmp:size=128m,mode=1777"]

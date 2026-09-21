@@ -55,9 +55,11 @@ export class RemoteYoutubeSessionStore {
       || !/^[a-f0-9]{48}$/.test(request.boot_id) || !Number.isSafeInteger(request.epoch)) fail('INVALID_YOUTUBE_SESSION_REQUEST');
     const node = (await client.query('SELECT state FROM remote_ingestion.nodes WHERE node_id=$1 FOR SHARE', [nodeId])).rows[0];
     if (!node || node.state === 'disabled') throw new RemoteProtocolError('UNAUTHORIZED', 401);
-    const task = (await client.query('SELECT *,lease_until>clock_timestamp() AS alive FROM remote_ingestion.tasks WHERE task_id=$1 FOR UPDATE', [request.task_id])).rows[0];
+    const task = finishing
+      ? (await client.query('SELECT *,lease_until>clock_timestamp() AS alive FROM remote_ingestion.tasks WHERE task_id=$1 FOR UPDATE', [request.task_id])).rows[0]
+      : await this.routes.channelStore.lock(client,{...request,node_id:nodeId});
     if (!task || task.node_id !== nodeId || task.generation !== request.generation
-      || task.worker_slot !== request.slot || (!finishing && (task.state !== 'leased' || !task.alive))) fail('STALE_LEASE');
+      || task.worker_slot !== request.slot || (!finishing && task.state !== 'leased')) fail('STALE_LEASE');
     if (!finishing) await this.routes.assertBusinessFence(client, task);
     const slot = (await client.query('SELECT *,grant_until>clock_timestamp() AS alive FROM remote_ingestion.network_slots WHERE node_id=$1 AND slot=$2 FOR UPDATE', [nodeId, request.slot])).rows[0];
     const binding = (await client.query('SELECT * FROM remote_ingestion.network_bindings WHERE binding_id=$1', [request.route_id])).rows[0];

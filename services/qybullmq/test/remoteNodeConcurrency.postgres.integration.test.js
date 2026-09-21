@@ -32,7 +32,18 @@ test('different worker heartbeats run concurrently; node disable and claim capac
   await assert.rejects(activation.heartbeat(nodeId,beats[0]),{code:'UNAUTHORIZED'});
   await store.setNodeState(nodeId,'active');
   for(let i=0;i<5;i++)await store.enqueue({workKey:`concurrent-${nodeId}-${i}`,capability:'fixture.concurrent',input:{},context:{}});
-  const leases=await Promise.all(beats.map(b=>activation.claim(nodeId,{claim_id:randomUUID(),slot:b.slot,connection:b})));
+  // Managed claims deliberately return CLAIM_BUSY while another slot holds
+  // the allocation lock. Retry the same claim identity as the transport does.
+  const results=await Promise.allSettled(beats.map(async b=>{
+   const request={claim_id:randomUUID(),slot:b.slot,connection:b};
+   for(let retry=0;retry<100;retry++){
+    try{return await activation.claim(nodeId,request);}
+    catch(error){if(error.code!=='CLAIM_BUSY')throw error;await delay(10);}
+   }
+   assert.fail('slot allocation stayed busy');
+  }));
+  for(const result of results)if(result.status==='rejected')throw result.reason;
+  const leases=results.map(result=>result.value);
   assert.equal(leases.filter(Boolean).length,2,'parallel claims still honor node capacity');
  }finally{
   await pool.query('DELETE FROM remote_ingestion.claims WHERE node_id=$1',[nodeId]);

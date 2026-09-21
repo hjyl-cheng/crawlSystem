@@ -126,6 +126,7 @@ function workerEnvironment({
     S3_ACCESS_KEY: "",
     S3_SECRET_KEY: "",
     YOUTUBEJS_EXTRACTOR_MODE: "disabled",
+    FULL_CRAWL_FETCH_CONTRACT_DEFAULT: "legacy_full_v2",
     YOUTUBE_DATA_API_FALLBACK_MODE: "disabled",
     YOUTUBE_CHANNEL_INLINE_DETAILS: "true",
     BULLMQ_LOCK_DURATION_MS: "500",

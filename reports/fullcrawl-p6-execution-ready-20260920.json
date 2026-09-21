@@ -1,0 +1,1053 @@
+{
+  "phase": "P6",
+  "status": "execution_preparation_complete_intake_zero",
+  "generated_at": "2026-09-20T08:39:09.900908+00:00",
+  "production_modified": true,
+  "full_crawl_execution_enabled": true,
+  "full_crawl_intake_enabled": false,
+  "canary_started": false,
+  "p6_acceptance_complete": false,
+  "config_validation": {
+    "valid": true,
+    "totalSlots": 2,
+    "remoteSlots": 1,
+    "compatibilitySlots": 1,
+    "actualSecretFilesMatched": true
+  },
+  "config_summary": {
+    "base_image": "sha256:3296e0621883fda8755304780d7ff54b910feab6034a490d6297bcd019430675",
+    "existing_values_changed": [
+      "REMOTE_NODE_FULL_CRAWL_EXECUTION_ENABLED",
+      "REMOTE_NODE_LOCAL_CHANNEL_SLOTS"
+    ],
+    "added_keys": [
+      "BROWSER_PROFILE_ENCRYPTION_KEY",
+      "BROWSER_PROFILE_TIMEZONE",
+      "BULLMQ_PREFIX",
+      "DATABASE_URL",
+      "FINGERPRINT_GATEWAY_PORT",
+      "FINGERPRINT_TRANSPORT_REQUIRED",
+      "FORBIDDEN_CRAWLER_DATABASE",
+      "MIN_SUBSCRIBER_COUNT",
+      "PROXY_SLOT_ROLE",
+      "PROXY_WORKER_ID",
+      "REMOTE_NODE_FULL_CRAWL_NODE_IDS",
+      "REMOTE_NODE_FULL_CRAWL_TOTAL_SLOTS",
+      "ROTA_BULLMQ_PROXY_PASSWORD",
+      "ROTA_PROXY_BASE_URL",
+      "ROTA_PROXY_CONTROL_TOKEN",
+      "SKIP_SCHEMA_MIGRATION",
+      "WORKER_QUEUES",
+      "YOUTUBEJS_MAX_TAB_PAGES",
+      "YOUTUBEJS_TIMEOUT_MS",
+      "YOUTUBE_CHANNEL_CONTENT_LIMIT",
+      "YOUTUBE_CHANNEL_CRAWL_CONCURRENCY",
+      "YOUTUBE_CHANNEL_INLINE_DETAILS",
+      "YOUTUBE_CONTENT_MAX_AGE_DAYS",
+      "YOUTUBE_CONTROL_LANGUAGE",
+      "YOUTUBE_COUNTRY",
+      "YOUTUBE_DATA_API_FALLBACK_MODE",
+      "YOUTUBE_DETAIL_CONCURRENCY",
+      "YOUTUBE_DETAIL_MAX_ATTEMPTS",
+      "YOUTUBE_LANGUAGE",
+      "YTDLP_COMMENT_FIRST_PAGE_MAX",
+      "YTDLP_PERSISTENT_POOL_ENABLED"
+    ],
+    "remote_slots": 1,
+    "compatibility_slots": 1,
+    "local_slots": 62,
+    "rota_total_required": 125,
+    "full_intake_target": 0,
+    "env_sha256": "8c1b0873075cb6c71383c81d93a4c8016a5264cb83598ff416852ab31b667a60"
+  },
+  "capacity_preparation": {
+    "at": "2026-09-20T08:21:58.706Z",
+    "before": {
+      "identity_policy_id": "qy-br-channel-anonymous-v1",
+      "identity_policy_version": 1,
+      "identity_policy_hash": "sha256:379cb1cc65143db992f12edbfbcbe63dc5fec3981c52ab1e387d93798b1e9365",
+      "desired": 124,
+      "provisioned": 124,
+      "eligible": 1142,
+      "assigned": 124,
+      "ready": 124,
+      "claimed": 123,
+      "reserve": 1015
+    },
+    "result": {
+      "ok": true,
+      "role": "channel",
+      "provisioned": 125
+    },
+    "after": {
+      "identity_policy_id": "qy-br-channel-anonymous-v1",
+      "identity_policy_version": 1,
+      "identity_policy_hash": "sha256:379cb1cc65143db992f12edbfbcbe63dc5fec3981c52ab1e387d93798b1e9365",
+      "desired": 125,
+      "provisioned": 125,
+      "eligible": 1142,
+      "assigned": 124,
+      "ready": 124,
+      "claimed": 123,
+      "reserve": 1015
+    },
+    "reserve": 1015,
+    "minimumReserve": 32
+  },
+  "rollout": [
+    {
+      "at": "2026-09-20T08:26:17.267260+00:00",
+      "draining": "qy-remote-node-center",
+      "stage": "execution",
+      "forcedKill": false
+    },
+    {
+      "at": "2026-09-20T08:28:41.368848+00:00",
+      "replaced": "qy-remote-node-center",
+      "stage": "execution",
+      "oldExit": 0,
+      "backup": "qy-remote-node-center-before-p6-execution"
+    }
+  ],
+  "startup": {
+    "at": "2026-09-20T08:29:53.042834+00:00",
+    "health": "healthy",
+    "running": true,
+    "startedAt": "2026-09-20T08:28:40.782621795Z",
+    "restarts": 0,
+    "events": [
+      {
+        "event": "rota_slot_ready",
+        "worker_id": "fullcrawl-center-compatibility-p6"
+      },
+      {
+        "event": "remote_full_crawl_execution_started",
+        "total_slots": 2,
+        "remote_slots": 1,
+        "compatibility_slots": 1
+      },
+      {
+        "event": "remote_node_center_listening",
+        "full_crawl_execution": true
+      }
+    ],
+    "eventCounts": {
+      "rota_slot_ready": 1,
+      "remote_full_crawl_execution_started": 1,
+      "remote_node_center_listening": 1,
+      "remote_nats_status": 2,
+      "incremental_youtubejs_video.scan_failed": 1,
+      "incremental_youtubejs_video.batch_created": 8,
+      "incremental_youtubejs_video.batch_resumed": 8,
+      "incremental_youtubejs_video.item_captured": 64,
+      "incremental_youtubejs_video.first_seen_checkpoint_complete": 6,
+      "incremental_youtubejs_video.batch_ready": 8,
+      "incremental_youtubejs_video.batch_finalized": 8,
+      "whole_channel_payloads_pruned": 1
+    }
+  },
+  "persistence": {
+    "at": "2026-09-20T08:31:03.974719+00:00",
+    "container": "qy-remote-node-center",
+    "health": "healthy",
+    "restarts": 0,
+    "imageMatches": true,
+    "environmentMatches": true,
+    "mismatchedKeys": [],
+    "memoryMatches": true,
+    "pidsMatch": true,
+    "memoryBytes": 1610612736,
+    "finalHealthAt": "2026-09-20T08:38:43.506120+00:00"
+  },
+  "node_status": {
+    "at": "2026-09-20T08:37:46.131Z",
+    "status": {
+      "nodeId": "8a07de4f-a3ee-428f-a959-2aee9c7b6be7",
+      "deploymentId": "b19c5c9a-4a09-4a61-bdb2-9b69bed02933",
+      "workers": [
+        {
+          "slot": "full-crawl-1",
+          "retiring": false,
+          "connected": true,
+          "preparation": null,
+          "executionPhase": "preparing",
+          "requested": false,
+          "enabled": false,
+          "active": false,
+          "processing": false,
+          "awaitingRecovery": false,
+          "readyForTasks": false
+        }
+      ],
+      "executionAvailable": true,
+      "adjusting": false,
+      "allowedCount": 0,
+      "requested": false,
+      "draining": false,
+      "counts": {
+        "deployed": 1,
+        "connected": 1,
+        "allowed": 0,
+        "ready": 0,
+        "active": 0,
+        "running": 0,
+        "draining": 0,
+        "collecting": 0,
+        "processing": 0,
+        "awaiting": 0,
+        "unready": 0,
+        "idle": 0,
+        "finishing": 0,
+        "standby": 1,
+        "offline": 0
+      },
+      "configuredCount": 1,
+      "intakeEnabled": false
+    }
+  },
+  "node_environment": {
+    "at": "2026-09-20T08:30:43.932Z",
+    "node": {
+      "id": "8a07de4f-a3ee-428f-a959-2aee9c7b6be7",
+      "name": "全量采集节点",
+      "host": "43.172.77.209",
+      "role": "fullcrawl",
+      "workers": [
+        {
+          "role": "fullcrawl",
+          "count": 1
+        }
+      ],
+      "provisioning": "ready",
+      "runtime": "ready",
+      "deployment": "connected"
+    },
+    "ssh": {
+      "authenticated": true,
+      "hostPinVerified": true
+    },
+    "remote": {
+      "at": "2026-09-20T08:30:43.482462+00:00",
+      "readOnly": true,
+      "uid": 0,
+      "architecture": "x86_64",
+      "cpuCount": 2,
+      "load": [
+        0.080078125,
+        0.0166015625,
+        0.01953125
+      ],
+      "os": {
+        "PRETTY_NAME": "\"Ubuntu 24.04.4 LTS\"",
+        "NAME": "\"Ubuntu\"",
+        "VERSION_ID": "\"24.04\"",
+        "VERSION": "\"24.04.4 LTS (Noble Numbat)\"",
+        "VERSION_CODENAME": "noble",
+        "ID": "ubuntu",
+        "ID_LIKE": "debian",
+        "HOME_URL": "\"https://www.ubuntu.com/\"",
+        "SUPPORT_URL": "\"https://help.ubuntu.com/\"",
+        "BUG_REPORT_URL": "\"https://bugs.launchpad.net/ubuntu/\"",
+        "PRIVACY_POLICY_URL": "\"https://www.ubuntu.com/legal/terms-and-policies/privacy-policy\"",
+        "UBUNTU_CODENAME": "noble",
+        "LOGO": "ubuntu-logo"
+      },
+      "memory": {
+        "MemTotal": 8059240448,
+        "MemAvailable": 7289782272,
+        "SwapTotal": 2084564992,
+        "SwapFree": 2084564992
+      },
+      "disk": {
+        "exitCode": 0,
+        "output": "Filesystem       1B-blocks       Used   Available Use% Mounted on\n/dev/vda2      84423806976 6893678592 73970323456   9% /\n/dev/vda2      84423806976 6893678592 73970323456   9% /\n/dev/vda2      84423806976 6893678592 73970323456   9% /"
+      },
+      "inode": {
+        "exitCode": 0,
+        "output": "Filesystem      Inodes  IUsed   IFree IUse% Mounted on\n/dev/vda2      5242880 136035 5106845    3% /"
+      },
+      "clock": {
+        "exitCode": 0,
+        "output": "Timezone=Asia/Shanghai\nNTPSynchronized=yes"
+      },
+      "dockerVersion": {
+        "exitCode": 0,
+        "output": "29.8.1"
+      },
+      "composeVersion": {
+        "exitCode": 0,
+        "output": "5.5.1"
+      },
+      "dockerInfo": {
+        "ServerVersion": "29.8.1",
+        "CgroupVersion": "2",
+        "CgroupDriver": "systemd",
+        "Driver": "overlayfs",
+        "DockerRootDir": "/var/lib/docker",
+        "Containers": 1,
+        "ContainersRunning": 1,
+        "Images": 1,
+        "NCPU": 2,
+        "MemTotal": 8059240448,
+        "MemoryLimit": true,
+        "PidsLimit": true
+      },
+      "containers": {
+        "exitCode": 0,
+        "output": "qy-node-8a07de4fa3ee428f-full-crawl-1-1 eef3acf34ec1 Up 23 minutes"
+      },
+      "workerContainers": [
+        {
+          "name": "/qy-node-8a07de4fa3ee428f-full-crawl-1-1",
+          "image": "newcrawdashboard.137-175-93-199.nip.io/qy-fullcrawl-node@sha256:eef3acf34ec19620d0baf111388136f0d622377831075d2576c3057ac5979164",
+          "imageId": "sha256:eef3acf34ec19620d0baf111388136f0d622377831075d2576c3057ac5979164",
+          "status": "running",
+          "restarts": 0,
+          "memoryLimit": 805306368,
+          "pidsLimit": 128,
+          "readOnlyRootfs": true,
+          "user": "1000:1000",
+          "labels": {
+            "qy.deployment.id": "b19c5c9a-4a09-4a61-bdb2-9b69bed02933",
+            "qy.node.id": "8a07de4f-a3ee-428f-a959-2aee9c7b6be7",
+            "qy.node.slot": "full-crawl-1",
+            "qy.remote.capability": "youtube.full-crawl.v1",
+            "qy.remote.mode": "full_crawl_collect",
+            "qy.remote.runtimes": "youtubejs-full-crawl-v1"
+          },
+          "mounts": [
+            {
+              "source": "/etc/qy-node/runtime/deployments/b19c5c9a-4a09-4a61-bdb2-9b69bed02933/full-crawl-1.json",
+              "destination": "/run/secrets/node-config.json",
+              "rw": false
+            },
+            {
+              "source": "/etc/qy-node/runtime/deployments/b19c5c9a-4a09-4a61-bdb2-9b69bed02933/node-token",
+              "destination": "/run/secrets/node-token",
+              "rw": false
+            },
+            {
+              "source": "/etc/qy-node/runtime/deployments/b19c5c9a-4a09-4a61-bdb2-9b69bed02933/full-crawl-1.relay-token",
+              "destination": "/run/secrets/relay-token",
+              "rw": false
+            },
+            {
+              "source": "/etc/qy-node/runtime/deployments/b19c5c9a-4a09-4a61-bdb2-9b69bed02933/route-public.pem",
+              "destination": "/run/secrets/route-public.pem",
+              "rw": false
+            },
+            {
+              "source": "/var/lib/qy-node/spool/full-crawl-1",
+              "destination": "/var/lib/qy-node/full-spool",
+              "rw": true
+            }
+          ]
+        }
+      ],
+      "spoolUsage": {
+        "exitCode": 0,
+        "output": "0\t/var/lib/qy-node/spool"
+      },
+      "monitor": {
+        "exitCode": 0,
+        "output": "active"
+      },
+      "nodeIdentityMatch": true,
+      "directories": {
+        "/etc/qy-node/runtime/secrets": {
+          "mode": "0o700",
+          "uid": 0,
+          "entries": 0
+        },
+        "/var/lib/qy-node/runtime/spool": {
+          "mode": "0o700",
+          "uid": 0,
+          "entries": 0
+        },
+        "/var/lib/qy-node/spool": {
+          "mode": "0o755",
+          "uid": 0,
+          "entries": 1
+        },
+        "/opt/qy-node/runtime": {
+          "mode": "0o755",
+          "uid": 0,
+          "entries": 1
+        }
+      },
+      "network": {
+        "gateway": {
+          "httpStatus": 401,
+          "tlsVerified": true
+        },
+        "registry": {
+          "httpStatus": 401,
+          "tlsVerified": true
+        },
+        "dns": [
+          "137.175.93.199"
+        ],
+        "tls": {
+          "verified": true,
+          "version": "TLSv1.3",
+          "notAfter": "Nov 18 02:34:02 2026 GMT"
+        },
+        "websocket": {
+          "statusLine": "HTTP/1.1 101 Switching Protocols",
+          "authenticatedNodeSession": false
+        }
+      }
+    },
+    "releaseFlags": {
+      "deploymentEnabled": true,
+      "fullImageConfigured": true
+    }
+  },
+  "database_check": {
+    "at": "2026-09-20T08:38:46.115Z",
+    "identity": {
+      "database": "newcrawler_crawler"
+    },
+    "budgetLocks": 1,
+    "executions": 0,
+    "fullTasks": []
+  },
+  "incremental_intake_exactly_preserved": true,
+  "incremental_workers": [
+    {
+      "node_id": "54a7cdd3-eb9c-4713-8d2f-21f4a5279de0",
+      "role": "incremental",
+      "mode": "incremental_collect",
+      "total": 47,
+      "connected": 47,
+      "enabled": 47,
+      "accepting": 47,
+      "activation_requested": 47
+    },
+    {
+      "node_id": "0e108078-200a-4df0-9a58-a28abc97a692",
+      "role": "incremental",
+      "mode": "incremental_collect",
+      "total": 15,
+      "connected": 15,
+      "enabled": 15,
+      "accepting": 15,
+      "activation_requested": 15
+    }
+  ],
+  "recovery_acceptance_samples": [
+    {
+      "at": "2026-09-20T08:35:36.671Z",
+      "rows": [
+        {
+          "node_id": "0e108078-200a-4df0-9a58-a28abc97a692",
+          "total": 15,
+          "connected": 15,
+          "ready": 15
+        },
+        {
+          "node_id": "54a7cdd3-eb9c-4713-8d2f-21f4a5279de0",
+          "total": 47,
+          "connected": 47,
+          "ready": 47
+        }
+      ],
+      "progress": {
+        "completed": 7,
+        "failed": 1
+      },
+      "stable": 1
+    },
+    {
+      "at": "2026-09-20T08:35:56.706Z",
+      "rows": [
+        {
+          "node_id": "0e108078-200a-4df0-9a58-a28abc97a692",
+          "total": 15,
+          "connected": 15,
+          "ready": 15
+        },
+        {
+          "node_id": "54a7cdd3-eb9c-4713-8d2f-21f4a5279de0",
+          "total": 47,
+          "connected": 47,
+          "ready": 47
+        }
+      ],
+      "progress": {
+        "completed": 22,
+        "failed": 1
+      },
+      "stable": 2
+    },
+    {
+      "at": "2026-09-20T08:36:16.738Z",
+      "rows": [
+        {
+          "node_id": "0e108078-200a-4df0-9a58-a28abc97a692",
+          "total": 15,
+          "connected": 15,
+          "ready": 15
+        },
+        {
+          "node_id": "54a7cdd3-eb9c-4713-8d2f-21f4a5279de0",
+          "total": 47,
+          "connected": 47,
+          "ready": 47
+        }
+      ],
+      "progress": {
+        "completed": 53,
+        "failed": 0
+      },
+      "stable": 3
+    }
+  ],
+  "event_error_sample": {
+    "at": "2026-09-20T08:31:48.155Z",
+    "rows": [
+      {
+        "period": "before_maintenance",
+        "category": "other",
+        "events": 34
+      },
+      {
+        "period": "before_maintenance",
+        "category": "timeout",
+        "events": 2
+      },
+      {
+        "period": "drain",
+        "category": "other",
+        "events": 5
+      },
+      {
+        "period": "recovery",
+        "category": "timeout",
+        "events": 4
+      }
+    ],
+    "limitation": "Unequal windows include drain/reactivation; event counts are not a comparable performance baseline."
+  },
+  "final_preflight": {
+    "at": "2026-09-20T08:37:41.048Z",
+    "readOnly": true,
+    "nodes": [
+      {
+        "id": "54a7cdd3-eb9c-4713-8d2f-21f4a5279de0",
+        "name": "更新节点 01",
+        "kind": "execution",
+        "explicit_role": null,
+        "workers": [
+          {
+            "role": "incremental",
+            "count": 47
+          }
+        ],
+        "provisioning": "ready",
+        "runtime": "ready",
+        "deployment_state": "connected",
+        "deployment_id": "41041afe-bc67-418b-90bc-8a1a81499d65"
+      },
+      {
+        "id": "0e108078-200a-4df0-9a58-a28abc97a692",
+        "name": "增量节点02",
+        "kind": "execution",
+        "explicit_role": null,
+        "workers": [
+          {
+            "role": "incremental",
+            "count": 15
+          }
+        ],
+        "provisioning": "ready",
+        "runtime": "ready",
+        "deployment_state": "connected",
+        "deployment_id": "107891a4-6088-4e0e-bad1-c38f9a2db4dc"
+      },
+      {
+        "id": "8a07de4f-a3ee-428f-a959-2aee9c7b6be7",
+        "name": "全量采集节点",
+        "kind": "execution",
+        "explicit_role": "fullcrawl",
+        "workers": [
+          {
+            "role": "fullcrawl",
+            "count": 1
+          }
+        ],
+        "provisioning": "ready",
+        "runtime": "ready",
+        "deployment_state": "connected",
+        "deployment_id": "b19c5c9a-4a09-4a61-bdb2-9b69bed02933"
+      }
+    ],
+    "workers": [
+      {
+        "node_id": "8a07de4f-a3ee-428f-a959-2aee9c7b6be7",
+        "role": "fullcrawl",
+        "mode": "full_crawl_collect",
+        "total": 1,
+        "connected": 1,
+        "enabled": 0,
+        "accepting": 1,
+        "activation_requested": 0
+      },
+      {
+        "node_id": "54a7cdd3-eb9c-4713-8d2f-21f4a5279de0",
+        "role": "incremental",
+        "mode": "incremental_collect",
+        "total": 47,
+        "connected": 47,
+        "enabled": 47,
+        "accepting": 47,
+        "activation_requested": 47
+      },
+      {
+        "node_id": "0e108078-200a-4df0-9a58-a28abc97a692",
+        "role": "incremental",
+        "mode": "incremental_collect",
+        "total": 15,
+        "connected": 15,
+        "enabled": 15,
+        "accepting": 15,
+        "activation_requested": 15
+      }
+    ],
+    "intake": [
+      {
+        "node_id": "54a7cdd3-eb9c-4713-8d2f-21f4a5279de0",
+        "deployment_id": "41041afe-bc67-418b-90bc-8a1a81499d65",
+        "selected_slots": [
+          "incremental-3",
+          "incremental-5",
+          "incremental-6",
+          "incremental-7",
+          "incremental-8",
+          "incremental-9",
+          "incremental-10",
+          "incremental-11",
+          "incremental-13",
+          "incremental-14",
+          "incremental-15",
+          "incremental-16",
+          "incremental-17",
+          "incremental-18",
+          "incremental-19",
+          "incremental-20",
+          "incremental-21",
+          "incremental-22",
+          "incremental-23",
+          "incremental-24",
+          "incremental-25",
+          "incremental-26",
+          "incremental-27",
+          "incremental-28",
+          "incremental-30",
+          "incremental-31",
+          "incremental-32",
+          "incremental-33",
+          "incremental-34",
+          "incremental-35",
+          "incremental-37",
+          "incremental-38",
+          "incremental-39",
+          "incremental-40",
+          "incremental-41",
+          "incremental-42",
+          "incremental-43",
+          "incremental-44",
+          "incremental-47",
+          "incremental-48",
+          "incremental-49",
+          "incremental-50",
+          "incremental-45",
+          "incremental-4",
+          "incremental-12",
+          "incremental-29",
+          "incremental-36"
+        ],
+        "revision": "29",
+        "updated_at": "2026-09-17T06:33:59.740Z"
+      },
+      {
+        "node_id": "0e108078-200a-4df0-9a58-a28abc97a692",
+        "deployment_id": "107891a4-6088-4e0e-bad1-c38f9a2db4dc",
+        "selected_slots": [
+          "incremental-1",
+          "incremental-2",
+          "incremental-3",
+          "incremental-4",
+          "incremental-5",
+          "incremental-6",
+          "incremental-7",
+          "incremental-8",
+          "incremental-9",
+          "incremental-10",
+          "incremental-11",
+          "incremental-12",
+          "incremental-13",
+          "incremental-14",
+          "incremental-15"
+        ],
+        "revision": "2",
+        "updated_at": "2026-09-17T07:39:17.404Z"
+      }
+    ],
+    "deployments": [
+      {
+        "node_id": "54a7cdd3-eb9c-4713-8d2f-21f4a5279de0",
+        "deployment_id": "41041afe-bc67-418b-90bc-8a1a81499d65",
+        "image": "newcrawdashboard.137-175-93-199.nip.io/qy-node-incremental@sha256:a1736b34c23108f2e26582d068ae992cb2b0bd98e563864806fb8c2f327019ea",
+        "worker_count": 47,
+        "updated_at": "2026-09-17T07:22:35.011Z"
+      },
+      {
+        "node_id": "0e108078-200a-4df0-9a58-a28abc97a692",
+        "deployment_id": "107891a4-6088-4e0e-bad1-c38f9a2db4dc",
+        "image": "newcrawdashboard.137-175-93-199.nip.io/qy-node-incremental@sha256:a1736b34c23108f2e26582d068ae992cb2b0bd98e563864806fb8c2f327019ea",
+        "worker_count": 15,
+        "updated_at": "2026-09-17T07:38:01.994Z"
+      },
+      {
+        "node_id": "8a07de4f-a3ee-428f-a959-2aee9c7b6be7",
+        "deployment_id": "b19c5c9a-4a09-4a61-bdb2-9b69bed02933",
+        "image": "newcrawdashboard.137-175-93-199.nip.io/qy-fullcrawl-node@sha256:eef3acf34ec19620d0baf111388136f0d622377831075d2576c3057ac5979164",
+        "worker_count": 1,
+        "updated_at": "2026-09-20T08:00:19.989Z"
+      }
+    ],
+    "schema": [
+      {
+        "name": "remote_ingestion.full_crawl_executions",
+        "relation": "remote_ingestion.full_crawl_executions"
+      },
+      {
+        "name": "remote_ingestion.full_crawl_stages",
+        "relation": "remote_ingestion.full_crawl_stages"
+      },
+      {
+        "name": "remote_ingestion.full_crawl_detail_reservations",
+        "relation": "remote_ingestion.full_crawl_detail_reservations"
+      },
+      {
+        "name": "remote_ingestion.full_crawl_result_batches",
+        "relation": "remote_ingestion.full_crawl_result_batches"
+      },
+      {
+        "name": "remote_ingestion.full_crawl_result_parts",
+        "relation": "remote_ingestion.full_crawl_result_parts"
+      }
+    ],
+    "database": [
+      {
+        "name": "newcrawler_crawler",
+        "numbackends": 42,
+        "xact_commit": "271895846",
+        "xact_rollback": "1281631",
+        "deadlocks": "6408",
+        "temp_bytes": "1659170842851",
+        "stats_reset": null
+      }
+    ],
+    "dbWaits": [
+      {
+        "state": "active",
+        "wait_event_type": "IO",
+        "n": 4
+      },
+      {
+        "state": "active",
+        "wait_event_type": "IPC",
+        "n": 2
+      },
+      {
+        "state": "active",
+        "wait_event_type": "Lock",
+        "n": 2
+      },
+      {
+        "state": "active",
+        "wait_event_type": null,
+        "n": 2
+      },
+      {
+        "state": "idle",
+        "wait_event_type": "Client",
+        "n": 24
+      },
+      {
+        "state": "idle in transaction",
+        "wait_event_type": "Client",
+        "n": 8
+      }
+    ],
+    "tasks": [
+      {
+        "capability": "youtube.incremental.plan.v1",
+        "state": "leased",
+        "n": 45,
+        "oldest": "2026-09-20T08:35:24.727Z"
+      },
+      {
+        "capability": "youtube.incremental.plan.v1",
+        "state": "pending",
+        "n": 2,
+        "oldest": "2026-09-20T08:37:40.467Z"
+      }
+    ],
+    "incrementalEvents": [
+      {
+        "bucket": "2026-09-20T08:00:00.000Z",
+        "status": "completed",
+        "events": 580,
+        "distinct_jobs": 580,
+        "successful_nonduplicate_events": 580
+      },
+      {
+        "bucket": "2026-09-20T08:00:00.000Z",
+        "status": "failed",
+        "events": 118,
+        "distinct_jobs": 105,
+        "successful_nonduplicate_events": 0
+      },
+      {
+        "bucket": "2026-09-20T08:00:00.000Z",
+        "status": "started",
+        "events": 735,
+        "distinct_jobs": 629,
+        "successful_nonduplicate_events": 0
+      },
+      {
+        "bucket": "2026-09-20T08:15:00.000Z",
+        "status": "completed",
+        "events": 759,
+        "distinct_jobs": 759,
+        "successful_nonduplicate_events": 759
+      },
+      {
+        "bucket": "2026-09-20T08:15:00.000Z",
+        "status": "failed",
+        "events": 60,
+        "distinct_jobs": 52,
+        "successful_nonduplicate_events": 0
+      },
+      {
+        "bucket": "2026-09-20T08:15:00.000Z",
+        "status": "started",
+        "events": 776,
+        "distinct_jobs": 727,
+        "successful_nonduplicate_events": 0
+      },
+      {
+        "bucket": "2026-09-20T08:30:00.000Z",
+        "status": "completed",
+        "events": 213,
+        "distinct_jobs": 213,
+        "successful_nonduplicate_events": 213
+      },
+      {
+        "bucket": "2026-09-20T08:30:00.000Z",
+        "status": "failed",
+        "events": 19,
+        "distinct_jobs": 19,
+        "successful_nonduplicate_events": 0
+      },
+      {
+        "bucket": "2026-09-20T08:30:00.000Z",
+        "status": "started",
+        "events": 278,
+        "distinct_jobs": 268,
+        "successful_nonduplicate_events": 0
+      }
+    ],
+    "transport": {
+      "httpStatus": 200,
+      "body": {
+        "pending": 0,
+        "unacknowledged": 0,
+        "rpc": {
+          "admitted": 2763,
+          "rejected": 0,
+          "timedOut": 0,
+          "cancelled": 0,
+          "peakActive": 32,
+          "peakPending": 30,
+          "active": 32,
+          "pending": 10,
+          "concurrency": 32,
+          "maxPending": 1024
+        },
+        "heartbeats": {
+          "admitted": 3796,
+          "rejected": 0,
+          "timedOut": 0,
+          "cancelled": 0,
+          "peakActive": 11,
+          "peakPending": 0,
+          "active": 1,
+          "pending": 0,
+          "concurrency": 16,
+          "maxPending": 1024
+        },
+        "waiting": {
+          "admitted": 2266,
+          "rejected": 0,
+          "timedOut": 0,
+          "cancelled": 0,
+          "peakActive": 55,
+          "peakPending": 0,
+          "active": 25,
+          "pending": 0,
+          "concurrency": 1024,
+          "maxPending": 0
+        }
+      }
+    },
+    "rota": {
+      "workload_scope": "qy-production",
+      "catalog_version": 1,
+      "catalog_digest": "sha256:9f46fe3c304d140dac6c2ee8f1d63a280827a1de6f982acb47562e3b2662c090",
+      "ok": true,
+      "active": 1202,
+      "cooldown": 59,
+      "total": 1810,
+      "archived": 7701,
+      "running": 128,
+      "reserve": 1074,
+      "minimum_reserve": 32,
+      "reserve_below_minimum": false,
+      "roles": {
+        "channel": {
+          "identity_policy_id": "qy-br-channel-anonymous-v1",
+          "identity_policy_version": 1,
+          "identity_policy_hash": "sha256:379cb1cc65143db992f12edbfbcbe63dc5fec3981c52ab1e387d93798b1e9365",
+          "desired": 125,
+          "provisioned": 125,
+          "eligible": 1202,
+          "assigned": 125,
+          "ready": 125,
+          "claimed": 124,
+          "reserve": 1074
+        },
+        "detail": {
+          "desired": 0,
+          "provisioned": 0,
+          "eligible": 0,
+          "assigned": 0,
+          "ready": 0,
+          "claimed": 0,
+          "reserve": 0
+        },
+        "discover": {
+          "identity_policy_id": "qy-br-discover-anonymous-v1",
+          "identity_policy_version": 1,
+          "identity_policy_hash": "sha256:f82d0fca865b2a2de9cc161171c7f6d87f40646192001e4c3f64b883acebce82",
+          "desired": 2,
+          "provisioned": 2,
+          "eligible": 1202,
+          "assigned": 2,
+          "ready": 2,
+          "claimed": 0,
+          "reserve": 1074
+        },
+        "query_quality": {
+          "identity_policy_id": "qy-br-query-quality-anonymous-v1",
+          "identity_policy_version": 1,
+          "identity_policy_hash": "sha256:282070775512c114396a76c763b90bd58c70e23cf29ead8281421a49bba91032",
+          "desired": 1,
+          "provisioned": 1,
+          "eligible": 1202,
+          "assigned": 1,
+          "ready": 1,
+          "claimed": 0,
+          "reserve": 1074
+        }
+      }
+    },
+    "redis": {
+      "queues": {
+        "youtube-channel-incremental": {
+          "wait": 55,
+          "active": 62,
+          "paused": 0,
+          "delayed": 0,
+          "failed": 1506,
+          "completed": 100000,
+          "prioritized": 0,
+          "waiting-children": 0,
+          "pausedFlag": null
+        },
+        "youtube-channel-crawl": {
+          "wait": 0,
+          "active": 0,
+          "paused": 0,
+          "delayed": 6,
+          "failed": 13887,
+          "completed": 3,
+          "prioritized": 0,
+          "waiting-children": 0,
+          "pausedFlag": null
+        },
+        "youtube-finalize": {
+          "wait": 0,
+          "active": 0,
+          "paused": 0,
+          "delayed": 2,
+          "failed": 0,
+          "completed": 10000,
+          "prioritized": 0,
+          "waiting-children": 0,
+          "pausedFlag": null
+        },
+        "youtube-data-api-batch": {
+          "wait": 0,
+          "active": 0,
+          "paused": 0,
+          "delayed": 0,
+          "failed": 1,
+          "completed": 89,
+          "prioritized": 0,
+          "waiting-children": 0,
+          "pausedFlag": null
+        }
+      },
+      "info": {
+        "redis_version": "7.4.9",
+        "connected_clients": "1764",
+        "blocked_clients": "50",
+        "used_memory": "746204128",
+        "used_memory_peak": "893395608",
+        "maxmemory": "0",
+        "instantaneous_ops_per_sec": "608",
+        "evicted_keys": "0"
+      },
+      "retainedCompletedSample": {
+        "from": "2026-09-20T08:07:43.452Z",
+        "to": "2026-09-20T08:37:43.452Z",
+        "limit": 3000,
+        "ids": 1363,
+        "valid": 1363,
+        "p95WaitMs": 246066,
+        "p95ExecutionMs": 94747,
+        "limitation": "Retained BullMQ completed jobs only; retries affect processedOn; not durable business completion."
+      }
+    },
+    "flags": {
+      "REMOTE_NODE_FULL_CRAWL_DEPLOYMENT_ENABLED": "true",
+      "REMOTE_NODE_FULL_CRAWL_EXECUTION_ENABLED": "true",
+      "REMOTE_NODE_LOCAL_CHANNEL_SLOTS": "62",
+      "REMOTE_NODE_QUEUE_PREFIX": "bull"
+    }
+  },
+  "limitations": [
+    "Maintenance and gradual activation temporarily reduce throughput; recovery is not performance acceptance.",
+    "A fresh comparable 30-minute incremental/resource baseline is required before canary intake.",
+    "No channel import, full task consumption, route/profile execution or stop receipt was exercised in this preparation."
+  ],
+  "next": [
+    "Check fresh comparable baseline, resource trends, and existing eligible channel supply.",
+    "Start one remote slot canary; observe at least 30 minutes and 10 effective channels, verify writes/publication and route/profile/stop receipts.",
+    "Only expand after canary acceptance; retain original consumers, checkpoints and spool."
+  ]
+}

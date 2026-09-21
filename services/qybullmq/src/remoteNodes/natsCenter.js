@@ -4,14 +4,24 @@ import {createRequestAdmission} from './requestAdmission.js';
 import {RESULT_STREAM,RESULT_CONSUMER,natsEndpoint,resultEnvelope,encode,decode,failure} from './natsProtocol.js';
 import {RemoteProtocolError,uuid} from './protocol.js';
 import {forwardLocalIntakeSignals} from './localIntakeSignals.js';
+import {startFullCrawlNatsResults} from './fullCrawlNatsResults.js';
 import {setTimeout as delay} from 'node:timers/promises';
 
 export async function startRemoteNatsCenter({url,user='center',password,tls,allowLoopback=false,store,channelPlans,wholeChannels=null,resultWholeChannels=wholeChannels,routes,youtubeSessions,workerConnections,
-  signals,heartbeatStore=store,heartbeatConnections=workerConnections,resultStore=store,resultChannelPlans=channelPlans,resultConcurrency=8,rpcConcurrency=32,heartbeatConcurrency=16,maxPending=1024,resultMaxBytes=1024*1024*1024,replicas=1,report=()=>{}}){
+  signals,fullCrawls=null,heartbeatStore=store,heartbeatConnections=workerConnections,resultStore=store,resultChannelPlans=channelPlans,resultConcurrency=8,rpcConcurrency=32,heartbeatConcurrency=16,maxPending=1024,resultMaxBytes=1024*1024*1024,replicas=1,report=()=>{}}){
   for(const value of [resultConcurrency,rpcConcurrency,heartbeatConcurrency,maxPending,resultMaxBytes,replicas])if(!Number.isSafeInteger(value)||value<1)throw new TypeError('positive NATS capacity required');
   if(typeof signals?.watch!=='function')throw new TypeError('committed SQL notifications required for NATS transport');
   const nc=await connect({servers:natsEndpoint(url,{allowLoopback}),user,pass:password,tls,maxReconnectAttempts:-1,reconnectTimeWait:1000,reconnectJitter:500});
-  const active=new Set();let closing=false,messages,subscription,stopForwarding;
+  const active=new Set();let closing=false,messages,subscription,stopForwarding,fullResults;
+  let connected=true;
+  const connectionStatus=(async()=>{
+    for await(const status of nc.status()){
+      if(status.type==='disconnect'||status.type==='reconnecting')connected=false;
+      if(status.type==='reconnect')connected=true;
+    }
+    connected=false;
+  })();
+  connectionStatus.catch(()=>{connected=false;});
   try{
     const jsm=await jetstreamManager(nc);const js=jetstream(nc);
     const config={name:RESULT_STREAM,subjects:['qy.remote.results.*'],storage:StorageType.File,retention:RetentionPolicy.Workqueue,
@@ -44,17 +54,30 @@ export async function startRemoteNatsCenter({url,user='center',password,tls,allo
         finally{watch.cancel();}
       }
     }
+    const full=()=>{if(!fullCrawls)throw new RemoteProtocolError('FULL_CRAWL_DISABLED',409);return fullCrawls;};
+    const service=async(p,name,fallback)=>{
+      if(!fullCrawls)return fallback;
+      const taskId=p?.task_id??p?.request?.task_id;
+      if(!taskId)return fallback;
+      const row=(await store.pool.query('SELECT capability FROM remote_ingestion.tasks WHERE task_id=$1',[uuid(taskId)])).rows[0];
+      return row?.capability==='youtube.full-crawl.v1'?full()[name]:fallback;
+    };
     const calls={
+      full_commands:(id,p)=>readAfterHint(`task:${uuid(p.task_id)}`,()=>full().poll(id,p),v=>v.status!=='leased'||v.commands.length>0),
+      full_receipt:(id,p)=>full().receipt(id,p),
+      full_recovered:(id,p)=>full().recovered(id,p),
+      full_heartbeat:(id,p)=>full().heartbeat(id,p),full_started:(id,p)=>full().started(id,p),
       whole_channel_input:(id,p)=>{
         if(!wholeChannels)throw new RemoteProtocolError('WHOLE_CHANNEL_DISABLED',409);
         return wholeChannels.input(id,p);
       },
-      youtube_session:(id,p)=>youtubeSessions.get(id,p),youtube_checkpoint:(id,p)=>youtubeSessions.checkpoint(id,p),
-      node_heartbeat:(id,p)=>heartbeatConnections.heartbeat(id,p),
-      network_grant:(id,p)=>routes.grant(id,p),network_release:(id,p)=>routes.release(id,p),network_abandon:(id,p)=>routes.abandon(id,p),
+      youtube_session:async(id,p)=>(await service(p,'youtubeSessions',youtubeSessions)).get(id,p),youtube_checkpoint:async(id,p)=>(await service(p,'youtubeSessions',youtubeSessions)).checkpoint(id,p),
+      node_heartbeat:(id,p)=>(p.mode==='full_crawl_collect'?full().executions.activation:heartbeatConnections).heartbeat(id,p),
+      network_grant:async(id,p)=>(await service(p,'routes',routes)).grant(id,p),network_release:async(id,p)=>(await service(p,'routes',routes)).release(id,p),network_abandon:async(id,p)=>(await service(p,'routes',routes)).abandon(id,p),
       heartbeat:(id,p)=>heartbeatStore.heartbeat(id,uuid(p.task_id),p.generation),
       claim:async(id,p)=>({lease:await readAfterHint(p.slot?`slot:${id}:${p.slot}`:`node:${id}`,async()=>{
         if(!await store.hasClaimWork(id,uuid(p.claim_id),p.slot??null))return null;
+        if(p.connection?.mode==='full_crawl_collect')return full().executions.activation.claim(id,p);
         return workerConnections?workerConnections.claim(id,p):store.claim(id,uuid(p.claim_id),p.slot??null);
       },Boolean)}),
       commands:(id,p)=>readAfterHint(`task:${uuid(p.task_id)}`,()=>channelPlans.poll(id,{task_id:p.task_id,generation:p.generation}),v=>v.status!=='leased'||v.commands.length>0),
@@ -69,10 +92,10 @@ export async function startRemoteNatsCenter({url,user='center',password,tls,allo
       try{
         const parts=msg.subject.split('.');const nodeId=uuid(parts[3]),operation=parts[4];
         if(parts.length!==5||!Object.hasOwn(calls,operation))throw new RemoteProtocolError('NOT_FOUND',404);
-        const lane=['commands','claim','result_receipt'].includes(operation)?waits:['heartbeat','node_heartbeat'].includes(operation)?heartbeats:normal;
+        const lane=['commands','full_commands','claim','result_receipt'].includes(operation)?waits:['heartbeat','node_heartbeat','full_heartbeat'].includes(operation)?heartbeats:normal;
         release=await lane.acquire();
         const value=decode(msg.data);if(value?.version!==1||!value.params||typeof value.params!=='object')throw new RemoteProtocolError('INVALID_REQUEST',400);
-        if(await (['heartbeat','node_heartbeat'].includes(operation)?heartbeatStore:store).authenticate(value.token)!==nodeId)throw new RemoteProtocolError('UNAUTHORIZED',401);
+        if(await (['heartbeat','node_heartbeat','full_heartbeat'].includes(operation)?heartbeatStore:store).authenticate(value.token)!==nodeId)throw new RemoteProtocolError('UNAUTHORIZED',401);
         msg.respond(encode({ok:true,value:await calls[operation](nodeId,value.params)}));
       }catch(error){msg.respond(encode(failure(error)));}finally{release?.();}
     }
@@ -84,7 +107,7 @@ export async function startRemoteNatsCenter({url,user='center',password,tls,allo
       const timer=setInterval(()=>msg.working(),10000);
       try{
         const value=decode(msg.data);const nodeId=uuid(msg.subject.split('.')[3]);
-        if(value?.nodeId!==nodeId||value.version!==1||typeof value.payload!=='string')throw new RemoteProtocolError('INVALID_RESULT',400);
+        if(value?.nodeId!==nodeId||value.version!==1||typeof value.payload!=='string'||value.operation==='full_crawl_part')throw new RemoteProtocolError('INVALID_RESULT',400);
         const bytes=Buffer.from(value.payload,'base64');const canonical=resultEnvelope(nodeId,value.token,value.operation,value.taskId,bytes);
         if(canonical.payload!==value.payload||canonical.receiptId!==value.receiptId)throw new RemoteProtocolError('INVALID_RESULT_ID',400);
         const old=(await resultStore.pool.query('SELECT node_id,response FROM remote_ingestion.transport_receipts WHERE receipt_id=$1',[value.receiptId])).rows[0];
@@ -116,10 +139,12 @@ export async function startRemoteNatsCenter({url,user='center',password,tls,allo
     }await Promise.allSettled([...processing]);})();
     let consumerFailed=false;
     run.catch(()=>{consumerFailed=true;report({event:'remote_nats_consumer_stopped'});void nc.close();});
+    if(fullCrawls)fullResults=await startFullCrawlNatsResults({nc,fullCrawls,resultMaxBytes,replicas,resultConcurrency,report});
     await nc.flush();
     return {connection:nc,
+      isReady:()=>!closing&&connected&&!consumerFailed&&!nc.isClosed()&&(!fullResults||fullResults.isReady()),
       async stats(){if(consumerFailed||nc.isClosed())throw Error('NATS_CONSUMER_UNAVAILABLE');const value=await jsm.consumers.info(RESULT_STREAM,RESULT_CONSUMER);return {pending:value.num_pending,unacknowledged:value.num_ack_pending,rpc:normal.snapshot(),heartbeats:heartbeats.snapshot(),waiting:waits.snapshot()};},
-      async close(){closing=true;stopForwarding?.();subscription.unsubscribe();messages.stop();await run.catch(()=>{});await Promise.allSettled([...active]);await nc.close();},
+      async close(){closing=true;stopForwarding?.();subscription.unsubscribe();messages.stop();await fullResults?.close();await run.catch(()=>{});await Promise.allSettled([...active]);await nc.close();},
     };
-  }catch(error){stopForwarding?.();subscription?.unsubscribe();messages?.stop();await nc.close();throw error;}
+  }catch(error){stopForwarding?.();subscription?.unsubscribe();messages?.stop();await fullResults?.close();await nc.close();throw error;}
 }

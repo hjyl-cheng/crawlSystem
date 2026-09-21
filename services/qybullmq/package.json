@@ -4,11 +4,13 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "node-full-crawl": "node scripts/runRemoteNodeFullCrawl.mjs",
     "node-connection": "node scripts/runRemoteNodeConnection.mjs",
     "test:remote-connections": "node --test --test-concurrency=1 test/remoteWorkerConnection.test.js test/remoteWorkerConnection.postgres.integration.test.js test/remoteNodeProtocol.test.js",
     "test:remote-connections:docker": "node scripts/testRemoteNodeConnectionDocker.mjs",
     "node-gateway:isolated": "node scripts/runRemoteNodeGatewayIsolated.mjs",
     "test:remote-nodes": "node --test --test-concurrency=1 test/remoteNodeProtocol.test.js test/remoteNodeIngestion.postgres.integration.test.js test/remoteChannelPlan.postgres.integration.test.js",
+    "test:remote-full-crawl": "node --test --test-concurrency=1 test/remoteFullCrawlProtocol.test.js test/remoteFullCrawlNode.postgres.integration.test.js test/remoteFullCrawlNats.postgres.integration.test.js test/remoteFullCrawlMessages.test.js test/remoteFullCrawlCoordinator.postgres.integration.test.js test/remoteFullCrawlCenter.postgres.integration.test.js test/remoteFullCrawlSchema.postgres.integration.test.js test/remoteFullCrawlActivation.postgres.integration.test.js test/remoteFullCrawlFence.postgres.integration.test.js",
     "test:remote-rota": "node --test --test-concurrency=1 test/remoteRota.test.js test/remoteRotaSource.test.js test/remoteRota.integration.test.js",
     "test:remote-network": "node --test --test-concurrency=1 test/remoteChannelNetwork.postgres.integration.test.js",
     "test:remote-youtube": "node --test --test-concurrency=1 test/remoteYoutubeRuntime.test.js test/remoteChannelNetwork.postgres.integration.test.js",

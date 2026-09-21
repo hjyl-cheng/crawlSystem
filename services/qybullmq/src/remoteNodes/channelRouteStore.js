@@ -14,10 +14,10 @@ const same = (a, b) => canonicalIncrementalJson(a) === canonicalIncrementalJson(
 // Durable mapping only. Rota's existing adapter still begins/renews/completes
 // its Task and chooses routes. Remote nodes cannot register slots or bind Tasks.
 export class RemoteChannelRouteStore {
-  constructor({ channelStore, readRotaRoute, assertBusinessFence, privateKey, secretKey, grantTtlMs = 30000 }) {
+  constructor({ channelStore, readRotaRoute, assertBusinessFence, businessRunId = task => `incremental:${planFromTask(task).plan_id}`, privateKey, secretKey, grantTtlMs = 30000 }) {
     if (typeof readRotaRoute !== 'function' || typeof assertBusinessFence !== 'function'
       || !Buffer.isBuffer(secretKey) || secretKey.length !== 32) throw new TypeError('route ownership adapters and 32-byte key required');
-    Object.assign(this, { channelStore, store: channelStore.store, readRotaRoute, assertBusinessFence, privateKey, grantTtlMs });
+    Object.assign(this, { channelStore, store: channelStore.store, readRotaRoute, assertBusinessFence, businessRunId, privateKey, grantTtlMs });
     this.encryptionKey = createHmac('sha256', secretKey).update('remote-route-encryption-v1').digest();
     this.identityKey = createHmac('sha256', secretKey).update('remote-route-identity-v1').digest();
     // Validate signer configuration eagerly.
@@ -68,7 +68,7 @@ export class RemoteChannelRouteStore {
   async bind(nodeId, lease, slotName, rotaFence, expectedIdentity = null, { youtubeSessionRequired = false } = {}) {
     const fence = Object.fromEntries(fenceFields.map(field => [field, rotaFence[field]]));
     const before = await this.store.transaction(client => this.owned(client, nodeId, lease, slotName));
-    if (fence.worker_id !== before.slot.rota_worker_id || fence.business_run_id !== `incremental:${planFromTask(before.task).plan_id}`) fail('ROTA_TASK_BINDING_MISMATCH');
+    if (fence.worker_id !== before.slot.rota_worker_id || fence.business_run_id !== this.businessRunId(before.task)) fail('ROTA_TASK_BINDING_MISMATCH');
     // Never hold a SQL transaction across Rota HTTP.
     const source = await this.readRotaRoute(fence);
     if (!fenceFields.every(field => source[field] === fence[field])) fail('ROTA_TASK_BINDING_MISMATCH');

@@ -10,7 +10,7 @@ export function natsEndpoint(value,{allowLoopback=false}={}) {
 }
 export function resultEnvelope(nodeId,token,operation,taskId,payload){
   uuid(nodeId);uuid(taskId);
-  if(!['channel_result','work_result','whole_channel_result'].includes(operation)||payload.length>MAX_GZIP_BYTES)throw new RemoteProtocolError('INVALID_RESULT',400);
+  if(!['channel_result','work_result','whole_channel_result','full_crawl_part'].includes(operation)||payload.length>MAX_GZIP_BYTES)throw new RemoteProtocolError('INVALID_RESULT',400);
   const value={version:1,nodeId,token,operation,taskId,payload:Buffer.from(payload).toString('base64')};
   value.receiptId=hash(`${nodeId}\n${operation}\n${taskId}\n${value.payload}`);
   return value;

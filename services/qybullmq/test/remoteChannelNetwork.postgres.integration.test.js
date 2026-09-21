@@ -10,6 +10,7 @@ import { createInterface } from 'node:readline';
 import { setTimeout as delay } from 'node:timers/promises';
 import net from 'node:net';
 import pg from 'pg';
+import {BrowserProfileStore} from '../src/browserProfileStore.js';
 import { RemoteNodeStore } from '../src/remoteNodes/store.js';
 import { RemoteChannelPlanStore } from '../src/remoteNodes/channelPlanStore.js';
 import { RemoteChannelRouteStore } from '../src/remoteNodes/channelRouteStore.js';
@@ -49,8 +50,20 @@ test('channel lease owns its durable Rota binding and complete local network ses
   const keypair = generateKeyPairSync('ed25519'); const secretKey = randomBytes(32);
   const store = new RemoteNodeStore({ pool }); const channelStore = new RemoteChannelPlanStore({ store });
   const contexts = new Map(); const sources = new Map(); let sourceHook = null;
-  const assertBusinessFence = async (_client, task) => {
+  const assertBusinessFence = async (client, task) => {
     if (contexts.get(task.task_id) !== task.context.execution_attempt_id) throw new Error('business fence stale');
+    // This transport fixture predates the shared video execution fence. Supply
+    // its original attempt once the coordinator has materialized the run.
+    const plan=task.input.plan;
+    if(plan.task_mask.video){
+      const profile=await new BrowserProfileStore({queryFn:client.query.bind(client),transactionFn:action=>action(client),secret:'transport-fixture-profile-key-only'}).loadOrCreate({
+        identityPolicyId:'transport-fixture',identityPolicyVersion:1,networkIdentityKey:task.task_id,profileEpoch:0,language:'en',country:'BR',timezone:'America/Sao_Paulo'});
+      await client.query(`INSERT INTO crawler.channel_execution_attempts
+        (attempt_id,channel_id,run_id,queue_name,job_id,job_attempt,dispatch_generation,worker_id,slot_name,proxy_user,profile_group_id,profile_revision)
+        SELECT $1,channel_id,run_id,$3,$4,0,$5,'transport-fixture','worker-1','worker-1',$6,$7 FROM crawler.channel_runs
+        WHERE plan_id=$2 ON CONFLICT(attempt_id) DO NOTHING`,
+        [task.context.execution_attempt_id,plan.plan_id,INCREMENTAL_QUEUE,plan.job_id,plan.dispatch_generation,profile.profile_group_id,profile.profile_revision]);
+    }
   };
   const options = { channelStore, assertBusinessFence, privateKey: keypair.privateKey, secretKey,
     readRotaRoute: async fence => {

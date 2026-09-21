@@ -120,3 +120,24 @@ docker exec qy-remote-node-center node scripts/checkRemoteNodeCenter.mjs
 页面位于「服务器节点 → 管理 Worker → 已部署的 Worker」。在线且没有执行/恢复任务的 Worker 可点击删除；状态未知的 Worker 不可删除。确认后先保存停止接单状态，等待监督器释放该 Worker 的执行锁，再由固定脚本移除它的容器并更新部署清单。不会删除频道、视频、评论、采集检查点或历史网络记录。允许删除至零个 Worker，之后仍可新增。
 
 中心内部接口为 `POST /internal/node-deployments/retire`，沿用管理员鉴权。`reserve`、`ready`、`finish` 使用同一个操作 ID；`ready` 与 `finish` 都重新核实未完成任务并取得排他执行锁。新增两个退役字段需显式运行 `scripts/applyRemoteWorkerRetirementUpgrade.mjs --apply` 并提供数据库身份校验变量，启动过程不自动迁移。旧版本没有退役拦截能力，已有退役记录后不可直接回滚到旧中心。
+
+## 全量节点部署包（P4，默认关闭）
+
+全量使用独立镜像 `Dockerfile.full-crawl`，`role=fullcrawl`、`mode=full_crawl_collect`、`capability=youtube.full-crawl.v1`、`runtime_revision=youtubejs-full-crawl-v1`、`full-crawl-N` 槽位。基础采集运行环境只复用 Python、fingerprint gateway、Node 依赖和 relay；镜像复制本次源码并替换启动入口。构建参数 `COLLECT_RUNTIME_IMAGE` 必须由发布清单指定；发布构建使用仓库摘要，不能自行换用 latest。
+
+```sh
+docker build -f services/remote-node/Dockerfile.full-crawl \
+  --build-arg COLLECT_RUNTIME_IMAGE="$VERIFIED_COLLECT_RUNTIME_DIGEST" \
+  --build-arg QY_VCS_REF="$SOURCE_REVISION" \
+  -t "$FULL_CRAWL_IMAGE_TAG" .
+```
+
+Dashboard 的 `SERVER_NODE_FULL_CRAWL_DEPLOYMENT_ENABLED=true` 与 `SERVER_NODE_FULL_CRAWL_IMAGE=<repository>@sha256:...` 显式开放部署。现有 Compose overlay 对应 `QY_REMOTE_FULL_CRAWL_DEPLOYMENT_ENABLED` 和 `QY_REMOTE_FULL_CRAWL_IMAGE`，默认关闭/空值。中心的独立 `center.env` 需要 `REMOTE_NODE_FULL_CRAWL_DEPLOYMENT_ENABLED=true` 和相同摘要的 `REMOTE_NODE_FULL_CRAWL_IMAGE`；增量镜像配置保持原值。两端使用原 HTTPS 管理端点和 TLS NATS/WSS 接入地址。
+
+这个部署开关只允许登记、安装和连接验证，**不创建全量 BullMQ consumer**。`runRemoteNodeCenter.mjs` 使用关闭接单的 `createFullCrawlDeploymentRuntime`；部署后显示已连接、待命，开始接单返回中心未开放。P5 发布装配必须把真实 `createFullCrawlCenter` 的 `supervisor`、`activation` 与 `transport.service` 分别传给部署管理的 `fullCrawl.execution`、`fullCrawl.activation` 和 NATS 中心的 `fullCrawls`，并配置原业务 handoff、完整 legacy/repair 兼容 processor 和 API fallback。隔离验收已验证这种连接的就绪与排空；生产入口开放须另过 P5/P6 门槛。
+
+每 Worker 固定内存保护上限 768 MiB、CPU 0.5、PID 128、spool 256 MiB。宿主 `/var/lib/qy-node/spool/full-crawl-N` 挂载到容器 `/var/lib/qy-node/full-spool`；UID 1000、目录 700、凭据文件 600、容器根文件系统只读。Rota 总容量为固定本地槽位加所有活跃节点登记数量，重试不累加；fullcrawl 仍使用 Rota `channel` role。
+
+扩容保留原 deployment ID、已有 slot、配置 hash 和凭据；已删除 slot 留墓碑，不复用。先暂停并排空，再逐 Worker 退役删除容器，保留配置、spool 和中心任务/结果证据；API 等待在原 attempt 结束且实际网络退役后不占采集槽位。已有历史的服务器登记不会当作“未使用节点”直接删除。更换镜像不能绕过现有部署身份与排空校验。
+
+P4 隔离记录和页面状态对照见 `docs/FULL_CRAWL_REMOTE_P4_DEPLOYMENT_20260920.md`。本阶段没有迁移生产 schema，也没有修改生产节点、接单额度或部署。

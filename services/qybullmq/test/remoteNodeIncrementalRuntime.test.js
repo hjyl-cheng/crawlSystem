@@ -92,3 +92,16 @@ test('paused worker sleeps between heartbeats, wakes on activation and can shut 
   const paused=iterations;await delay(1100);assert.equal(iterations,paused);
   const before=Date.now();abort.abort();await run;assert.ok(Date.now()-before<1500,'shutdown wakes a paused executor');
 });
+
+test('full collecting process advertises its own revision and freezes the connection on the claimed lease',async()=>{
+  const {FULL_CRAWL_WORKLOAD}=await import('../src/remoteNodes/collectingWorkload.js');
+  const full={...config(),mode:'full_crawl_collect',role:'fullcrawl',slot:'full-crawl-1'};
+  let exposed,seen;
+  const runner=new RemoteIncrementalProcess({config:full,wholeChannel:false,workload:FULL_CRAWL_WORKLOAD,
+    localRota:{boot:async()=>({boot_id:'b'.repeat(48)})},client:{transport:'nats',workerHeartbeat:async value=>{seen=value;return ack(value,true);},claim:async()=>({task_id:randomUUID()})},
+    createWorker:({client})=>{exposed=client;return {};}});
+  assert.equal(await exposed.claim(randomUUID(),full.slot),null);
+  await runner.probe();assert.equal(seen.runtime_revision,'youtubejs-full-crawl-v1');assert.equal(seen.mode,'full_crawl_collect');
+  const lease=await exposed.claim(randomUUID(),full.slot);assert.deepEqual(lease.connection,seen);
+  runner.connection={...runner.connection,accepting:false};assert.equal(lease.connection.accepting,true);
+});

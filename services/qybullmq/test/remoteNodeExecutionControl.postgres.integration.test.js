@@ -95,7 +95,10 @@ test('page-authorized nodes share the original queue; pause drains active work a
   assert.equal((await admin.status({nodeId,deploymentId})).allowedCount,0);
   // A failed expansion can register extra slots before they are installed.
   // The verified original fleet must remain controllable in that state.
-  await admin.setExecution({nodeId,deploymentId,workerCount:1,allowedCount:1,expectedAllowedCount:0});
+  const resizedPaused=await admin.setExecution({nodeId,deploymentId,workerCount:1,allowedCount:1,expectedAllowedCount:1});
+  assert.equal(resizedPaused.allowedCount,0,'changing capacity preserves the pause switch');
+  assert.equal(resizedPaused.configuredCount,1);
+  await control(true,false);
   assert.deepEqual((await admin.status({nodeId,deploymentId})).workers.filter(w=>w.requested).map(w=>w.slot),[slot]);
   await admin.setExecution({nodeId,deploymentId,workerCount:1,allowedCount:0,expectedAllowedCount:1});
   await count(2,0);await supervisor.tick();await until(async()=>(await admin.status({nodeId,deploymentId})).counts.ready===2);

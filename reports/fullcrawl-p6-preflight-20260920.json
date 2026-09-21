@@ -1,0 +1,948 @@
+{
+  "phase": "P6",
+  "status": "initial_readonly_preflight_complete_not_ready_for_canary",
+  "generated_at": "2026-09-20T07:10:03.052736+00:00",
+  "production_modified": false,
+  "canary_started": false,
+  "blockers": [
+    "dedicated_full_crawl_server_not_available_in_registered_inventory",
+    "shared_center_resource_headroom_requires_reassessment"
+  ],
+  "pending": [
+    "target_host_ssh_tls_spool_checks",
+    "fresh_comparable_incremental_baseline",
+    "production_image_distribution_and_complete_config_compatibility",
+    "schema_migration",
+    "controlled_center_and_dashboard_release"
+  ],
+  "snapshots": {
+    "production": {
+      "at": "2026-09-20T07:07:34.227Z",
+      "readOnly": true,
+      "nodes": [
+        {
+          "id": "54a7cdd3-eb9c-4713-8d2f-21f4a5279de0",
+          "name": "更新节点 01",
+          "kind": "execution",
+          "explicit_role": null,
+          "workers": [
+            {
+              "role": "incremental",
+              "count": 47
+            }
+          ],
+          "provisioning": "ready",
+          "runtime": "ready",
+          "deployment_state": "connected",
+          "deployment_id": "41041afe-bc67-418b-90bc-8a1a81499d65"
+        },
+        {
+          "id": "0e108078-200a-4df0-9a58-a28abc97a692",
+          "name": "增量节点02",
+          "kind": "execution",
+          "explicit_role": null,
+          "workers": [
+            {
+              "role": "incremental",
+              "count": 15
+            }
+          ],
+          "provisioning": "ready",
+          "runtime": "ready",
+          "deployment_state": "connected",
+          "deployment_id": "107891a4-6088-4e0e-bad1-c38f9a2db4dc"
+        }
+      ],
+      "workers": [
+        {
+          "node_id": "54a7cdd3-eb9c-4713-8d2f-21f4a5279de0",
+          "role": "incremental",
+          "mode": "incremental_collect",
+          "total": 47,
+          "connected": 47,
+          "enabled": 47,
+          "accepting": 47,
+          "activation_requested": 47
+        },
+        {
+          "node_id": "0e108078-200a-4df0-9a58-a28abc97a692",
+          "role": "incremental",
+          "mode": "incremental_collect",
+          "total": 15,
+          "connected": 15,
+          "enabled": 15,
+          "accepting": 15,
+          "activation_requested": 15
+        }
+      ],
+      "intake": [
+        {
+          "node_id": "54a7cdd3-eb9c-4713-8d2f-21f4a5279de0",
+          "deployment_id": "41041afe-bc67-418b-90bc-8a1a81499d65",
+          "selected_slots": [
+            "incremental-3",
+            "incremental-5",
+            "incremental-6",
+            "incremental-7",
+            "incremental-8",
+            "incremental-9",
+            "incremental-10",
+            "incremental-11",
+            "incremental-13",
+            "incremental-14",
+            "incremental-15",
+            "incremental-16",
+            "incremental-17",
+            "incremental-18",
+            "incremental-19",
+            "incremental-20",
+            "incremental-21",
+            "incremental-22",
+            "incremental-23",
+            "incremental-24",
+            "incremental-25",
+            "incremental-26",
+            "incremental-27",
+            "incremental-28",
+            "incremental-30",
+            "incremental-31",
+            "incremental-32",
+            "incremental-33",
+            "incremental-34",
+            "incremental-35",
+            "incremental-37",
+            "incremental-38",
+            "incremental-39",
+            "incremental-40",
+            "incremental-41",
+            "incremental-42",
+            "incremental-43",
+            "incremental-44",
+            "incremental-47",
+            "incremental-48",
+            "incremental-49",
+            "incremental-50",
+            "incremental-45",
+            "incremental-4",
+            "incremental-12",
+            "incremental-29",
+            "incremental-36"
+          ],
+          "revision": "29",
+          "updated_at": "2026-09-17T06:33:59.740Z"
+        },
+        {
+          "node_id": "0e108078-200a-4df0-9a58-a28abc97a692",
+          "deployment_id": "107891a4-6088-4e0e-bad1-c38f9a2db4dc",
+          "selected_slots": [
+            "incremental-1",
+            "incremental-2",
+            "incremental-3",
+            "incremental-4",
+            "incremental-5",
+            "incremental-6",
+            "incremental-7",
+            "incremental-8",
+            "incremental-9",
+            "incremental-10",
+            "incremental-11",
+            "incremental-12",
+            "incremental-13",
+            "incremental-14",
+            "incremental-15"
+          ],
+          "revision": "2",
+          "updated_at": "2026-09-17T07:39:17.404Z"
+        }
+      ],
+      "deployments": [
+        {
+          "node_id": "54a7cdd3-eb9c-4713-8d2f-21f4a5279de0",
+          "deployment_id": "41041afe-bc67-418b-90bc-8a1a81499d65",
+          "image": "newcrawdashboard.137-175-93-199.nip.io/qy-node-incremental@sha256:a1736b34c23108f2e26582d068ae992cb2b0bd98e563864806fb8c2f327019ea",
+          "worker_count": 47,
+          "updated_at": "2026-09-17T07:22:35.011Z"
+        },
+        {
+          "node_id": "0e108078-200a-4df0-9a58-a28abc97a692",
+          "deployment_id": "107891a4-6088-4e0e-bad1-c38f9a2db4dc",
+          "image": "newcrawdashboard.137-175-93-199.nip.io/qy-node-incremental@sha256:a1736b34c23108f2e26582d068ae992cb2b0bd98e563864806fb8c2f327019ea",
+          "worker_count": 15,
+          "updated_at": "2026-09-17T07:38:01.994Z"
+        }
+      ],
+      "schema": [
+        {
+          "name": "remote_ingestion.full_crawl_executions",
+          "relation": null
+        },
+        {
+          "name": "remote_ingestion.full_crawl_stages",
+          "relation": null
+        },
+        {
+          "name": "remote_ingestion.full_crawl_detail_reservations",
+          "relation": null
+        },
+        {
+          "name": "remote_ingestion.full_crawl_result_batches",
+          "relation": null
+        },
+        {
+          "name": "remote_ingestion.full_crawl_result_parts",
+          "relation": null
+        }
+      ],
+      "database": [
+        {
+          "name": "newcrawler_crawler",
+          "numbackends": 43,
+          "xact_commit": "268113591",
+          "xact_rollback": "1271578",
+          "deadlocks": "6408",
+          "temp_bytes": "1652496258525",
+          "stats_reset": null
+        }
+      ],
+      "dbWaits": [
+        {
+          "state": "active",
+          "wait_event_type": "IO",
+          "n": 5
+        },
+        {
+          "state": "active",
+          "wait_event_type": "IPC",
+          "n": 2
+        },
+        {
+          "state": "active",
+          "wait_event_type": "Lock",
+          "n": 3
+        },
+        {
+          "state": "active",
+          "wait_event_type": null,
+          "n": 4
+        },
+        {
+          "state": "idle",
+          "wait_event_type": "Client",
+          "n": 24
+        },
+        {
+          "state": "idle in transaction",
+          "wait_event_type": "Client",
+          "n": 5
+        }
+      ],
+      "tasks": [
+        {
+          "capability": "youtube.incremental.plan.v1",
+          "state": "leased",
+          "n": 45,
+          "oldest": "2026-09-20T07:01:38.049Z"
+        },
+        {
+          "capability": "youtube.incremental.plan.v1",
+          "state": "pending",
+          "n": 1,
+          "oldest": "2026-09-20T07:07:28.553Z"
+        }
+      ],
+      "incrementalEvents": [
+        {
+          "bucket": "2026-09-20T06:30:00.000Z",
+          "status": "completed",
+          "events": 1180,
+          "distinct_jobs": 1180,
+          "successful_nonduplicate_events": 1180
+        },
+        {
+          "bucket": "2026-09-20T06:30:00.000Z",
+          "status": "failed",
+          "events": 76,
+          "distinct_jobs": 63,
+          "successful_nonduplicate_events": 0
+        },
+        {
+          "bucket": "2026-09-20T06:30:00.000Z",
+          "status": "started",
+          "events": 1257,
+          "distinct_jobs": 1183,
+          "successful_nonduplicate_events": 0
+        },
+        {
+          "bucket": "2026-09-20T06:45:00.000Z",
+          "status": "completed",
+          "events": 1027,
+          "distinct_jobs": 1027,
+          "successful_nonduplicate_events": 1027
+        },
+        {
+          "bucket": "2026-09-20T06:45:00.000Z",
+          "status": "failed",
+          "events": 76,
+          "distinct_jobs": 69,
+          "successful_nonduplicate_events": 0
+        },
+        {
+          "bucket": "2026-09-20T06:45:00.000Z",
+          "status": "started",
+          "events": 1108,
+          "distinct_jobs": 1045,
+          "successful_nonduplicate_events": 0
+        },
+        {
+          "bucket": "2026-09-20T07:00:00.000Z",
+          "status": "completed",
+          "events": 412,
+          "distinct_jobs": 412,
+          "successful_nonduplicate_events": 412
+        },
+        {
+          "bucket": "2026-09-20T07:00:00.000Z",
+          "status": "failed",
+          "events": 58,
+          "distinct_jobs": 55,
+          "successful_nonduplicate_events": 0
+        },
+        {
+          "bucket": "2026-09-20T07:00:00.000Z",
+          "status": "started",
+          "events": 475,
+          "distinct_jobs": 433,
+          "successful_nonduplicate_events": 0
+        }
+      ],
+      "transport": {
+        "httpStatus": 200,
+        "body": {
+          "pending": 0,
+          "unacknowledged": 0,
+          "rpc": {
+            "admitted": 1759881,
+            "rejected": 0,
+            "timedOut": 15,
+            "cancelled": 0,
+            "peakActive": 32,
+            "peakPending": 48,
+            "active": 32,
+            "pending": 1,
+            "concurrency": 32,
+            "maxPending": 1024
+          },
+          "heartbeats": {
+            "admitted": 1413785,
+            "rejected": 0,
+            "timedOut": 0,
+            "cancelled": 0,
+            "peakActive": 16,
+            "peakPending": 15,
+            "active": 0,
+            "pending": 0,
+            "concurrency": 16,
+            "maxPending": 1024
+          },
+          "waiting": {
+            "admitted": 1331529,
+            "rejected": 0,
+            "timedOut": 0,
+            "cancelled": 0,
+            "peakActive": 64,
+            "peakPending": 0,
+            "active": 26,
+            "pending": 0,
+            "concurrency": 1024,
+            "maxPending": 0
+          }
+        }
+      },
+      "rota": {
+        "workload_scope": "qy-production",
+        "catalog_version": 1,
+        "catalog_digest": "sha256:9f46fe3c304d140dac6c2ee8f1d63a280827a1de6f982acb47562e3b2662c090",
+        "ok": true,
+        "active": 1255,
+        "cooldown": 104,
+        "total": 1832,
+        "archived": 7674,
+        "running": 126,
+        "reserve": 1129,
+        "minimum_reserve": 32,
+        "reserve_below_minimum": false,
+        "roles": {
+          "channel": {
+            "identity_policy_id": "qy-br-channel-anonymous-v1",
+            "identity_policy_version": 1,
+            "identity_policy_hash": "sha256:379cb1cc65143db992f12edbfbcbe63dc5fec3981c52ab1e387d93798b1e9365",
+            "desired": 123,
+            "provisioned": 123,
+            "eligible": 1255,
+            "assigned": 123,
+            "ready": 123,
+            "claimed": 123,
+            "reserve": 1129
+          },
+          "detail": {
+            "desired": 0,
+            "provisioned": 0,
+            "eligible": 0,
+            "assigned": 0,
+            "ready": 0,
+            "claimed": 0,
+            "reserve": 0
+          },
+          "discover": {
+            "identity_policy_id": "qy-br-discover-anonymous-v1",
+            "identity_policy_version": 1,
+            "identity_policy_hash": "sha256:f82d0fca865b2a2de9cc161171c7f6d87f40646192001e4c3f64b883acebce82",
+            "desired": 2,
+            "provisioned": 2,
+            "eligible": 1255,
+            "assigned": 2,
+            "ready": 2,
+            "claimed": 0,
+            "reserve": 1129
+          },
+          "query_quality": {
+            "identity_policy_id": "qy-br-query-quality-anonymous-v1",
+            "identity_policy_version": 1,
+            "identity_policy_hash": "sha256:282070775512c114396a76c763b90bd58c70e23cf29ead8281421a49bba91032",
+            "desired": 1,
+            "provisioned": 1,
+            "eligible": 1255,
+            "assigned": 1,
+            "ready": 1,
+            "claimed": 0,
+            "reserve": 1129
+          }
+        }
+      },
+      "redis": {
+        "queues": {
+          "youtube-channel-incremental": {
+            "wait": 54,
+            "active": 62,
+            "paused": 0,
+            "delayed": 0,
+            "failed": 1500,
+            "completed": 100000,
+            "prioritized": 0,
+            "waiting-children": 0,
+            "pausedFlag": null
+          },
+          "youtube-channel-crawl": {
+            "wait": 0,
+            "active": 2,
+            "paused": 0,
+            "delayed": 6,
+            "failed": 13887,
+            "completed": 2,
+            "prioritized": 0,
+            "waiting-children": 0,
+            "pausedFlag": null
+          },
+          "youtube-finalize": {
+            "wait": 0,
+            "active": 1,
+            "paused": 0,
+            "delayed": 2,
+            "failed": 0,
+            "completed": 10000,
+            "prioritized": 0,
+            "waiting-children": 0,
+            "pausedFlag": null
+          },
+          "youtube-data-api-batch": {
+            "wait": 0,
+            "active": 0,
+            "paused": 0,
+            "delayed": 0,
+            "failed": 1,
+            "completed": 91,
+            "prioritized": 0,
+            "waiting-children": 0,
+            "pausedFlag": null
+          }
+        },
+        "info": {
+          "redis_version": "7.4.9",
+          "connected_clients": "1753",
+          "blocked_clients": "49",
+          "used_memory": "737696584",
+          "used_memory_peak": "893395608",
+          "maxmemory": "0",
+          "instantaneous_ops_per_sec": "1148",
+          "evicted_keys": "0"
+        },
+        "retainedCompletedSample": {
+          "from": "2026-09-20T06:37:36.733Z",
+          "to": "2026-09-20T07:07:36.733Z",
+          "limit": 3000,
+          "ids": 2002,
+          "valid": 2002,
+          "p95WaitMs": 174907,
+          "p95ExecutionMs": 82777,
+          "limitation": "Retained BullMQ completed jobs only; retries affect processedOn; not durable business completion."
+        }
+      },
+      "flags": {
+        "REMOTE_NODE_FULL_CRAWL_DEPLOYMENT_ENABLED": null,
+        "REMOTE_NODE_FULL_CRAWL_EXECUTION_ENABLED": null,
+        "REMOTE_NODE_LOCAL_CHANNEL_SLOTS": "61",
+        "REMOTE_NODE_QUEUE_PREFIX": "bull"
+      }
+    },
+    "host": {
+      "at": "2026-09-20T07:07:34.764002+00:00",
+      "containers": [
+        {
+          "name": "/qy-remote-node-center",
+          "image": "qy-allpachong/remote-node-center:bug0918-01-bf933f05e0e3",
+          "imageId": "sha256:e0049b8ed64e8279a491983c5ba30076af93962dddf54c8db86172670b49d168",
+          "health": "healthy",
+          "startedAt": "2026-09-18T03:17:21.509436225Z",
+          "restartCount": 0,
+          "memoryLimitBytes": 805306368,
+          "pidsLimit": 96,
+          "configEnvSha256": "3e8e6c6ecea0cd20127826693c05a5ecb06ec774000241cdf3af05ef744e9931",
+          "mounts": [
+            {
+              "source": "/root/workspace/agent/pachongsys-release/runtime/remote-center-production/tls/ca.pem",
+              "destination": "/run/remote-center-ca/ca.pem",
+              "rw": false
+            },
+            {
+              "source": "/root/workspace/agent/pachongsys-release/runtime/remote-center-production/secrets",
+              "destination": "/run/remote-center-secrets",
+              "rw": false
+            },
+            {
+              "source": "/root/workspace/agent/pachongsys-release/runtime/remote-center-production/nats/auth",
+              "destination": "/run/nats-auth",
+              "rw": true
+            },
+            {
+              "source": "/root/workspace/agent/pachongsys-release/runtime/remote-center-production/nats/secrets",
+              "destination": "/run/nats-secrets",
+              "rw": false
+            }
+          ],
+          "ports": {}
+        },
+        {
+          "name": "/qy-remote-nats",
+          "image": "nats:2.12-alpine@sha256:b270f5e2428354c0335612694d7dd2fb588148e567a5757fdff325ef9c9332e6",
+          "imageId": "sha256:b270f5e2428354c0335612694d7dd2fb588148e567a5757fdff325ef9c9332e6",
+          "health": null,
+          "startedAt": "2026-09-11T11:18:53.572683869Z",
+          "restartCount": 0,
+          "memoryLimitBytes": 402653184,
+          "pidsLimit": null,
+          "configEnvSha256": "206efbc70a5df80efb8cbbb204ee78d23636c79dc0b068542acf5b9f73b0c0d9",
+          "mounts": [
+            {
+              "source": "/root/workspace/agent/pachongsys-release/runtime/remote-center-production/nats/server.conf",
+              "destination": "/etc/nats/server.conf",
+              "rw": false
+            },
+            {
+              "source": "/root/workspace/agent/pachongsys-release/deploy/nats/start.sh",
+              "destination": "/etc/nats/start.sh",
+              "rw": false
+            },
+            {
+              "source": "/root/workspace/agent/pachongsys-release/runtime/remote-center-production/nats/auth",
+              "destination": "/run/nats-auth",
+              "rw": false
+            },
+            {
+              "source": "/etc/letsencrypt",
+              "destination": "/run/nats-tls",
+              "rw": false
+            },
+            {
+              "source": "/root/workspace/agent/pachongsys-release/runtime/remote-center-production/nats/data",
+              "destination": "/data",
+              "rw": true
+            }
+          ],
+          "ports": {
+            "4222/tcp": [
+              {
+                "HostIp": "127.0.0.1",
+                "HostPort": "4222"
+              }
+            ],
+            "6222/tcp": null,
+            "8222/tcp": null
+          }
+        },
+        {
+          "name": "/youtube-rota-qy-core",
+          "image": "qy-allpachong/rota-core:auto-capacity-20260911",
+          "imageId": "sha256:9f0bbb53a1a42f62cfe5cbc2e094e4ebf18e63755d13bf6c3c7b8adf90de32d2",
+          "health": "healthy",
+          "startedAt": "2026-09-16T01:39:39.856506175Z",
+          "restartCount": 3,
+          "memoryLimitBytes": 0,
+          "pidsLimit": null,
+          "configEnvSha256": "f4eaa175293a2976ca01d3e6d2373ccbadee712b26da5ebfc4ccf50f660a47e6",
+          "mounts": [
+            {
+              "source": "/var/lib/docker/volumes/youtube-rota-qy-geoip-data/_data",
+              "destination": "/app/geoip/managed",
+              "rw": true
+            }
+          ],
+          "ports": {
+            "8000/tcp": [
+              {
+                "HostIp": "127.0.0.1",
+                "HostPort": "19284"
+              }
+            ],
+            "8001/tcp": [
+              {
+                "HostIp": "127.0.0.1",
+                "HostPort": "19283"
+              }
+            ]
+          }
+        },
+        {
+          "name": "/qy-newcrawler-fresh-crawler-postgres-1",
+          "image": "postgres:16-alpine",
+          "imageId": "sha256:fd1e8d0274f13f5a03a2673a207b28e14823c2f2efc3ca4bb4197c8a9f841bdc",
+          "health": "healthy",
+          "startedAt": "2026-08-31T04:48:49.446734413Z",
+          "restartCount": 0,
+          "memoryLimitBytes": 0,
+          "pidsLimit": null,
+          "configEnvSha256": "5ed0cf39ec4c5b9c852f6ef1f9a3c964f8b53decac35affd35aaf466047c5f32",
+          "mounts": [
+            {
+              "source": "/root/workspace/agent/pachongsys/.review-worktrees/migration-batch/database/init/10-crawler.sh",
+              "destination": "/docker-entrypoint-initdb.d/10-crawler.sh",
+              "rw": false
+            },
+            {
+              "source": "/var/lib/docker/volumes/qy-newcrawler-crawler-postgres-20260824-v1/_data",
+              "destination": "/var/lib/postgresql/data",
+              "rw": true
+            },
+            {
+              "source": "/root/workspace/agent/pachongsys/.review-worktrees/migration-batch/database/bootstrap/crawler.sql",
+              "destination": "/bootstrap/crawler.sql",
+              "rw": false
+            }
+          ],
+          "ports": {
+            "5432/tcp": null
+          }
+        },
+        {
+          "name": "/qy-newcrawler-fresh-redis-1",
+          "image": "redis:7-alpine",
+          "imageId": "sha256:6ab0b6e7381779332f97b8ca76193e45b0756f38d4c0dcda72dbb3c32061ab99",
+          "health": "healthy",
+          "startedAt": "2026-08-24T07:33:24.940519297Z",
+          "restartCount": 0,
+          "memoryLimitBytes": 0,
+          "pidsLimit": null,
+          "configEnvSha256": "e76529bd143c3ef263fb9a375c56d742349fc958f05872b232bbf4c877bf05ca",
+          "mounts": [
+            {
+              "source": "/var/lib/docker/volumes/qy-newcrawler-redis-20260824-v1/_data",
+              "destination": "/data",
+              "rw": true
+            }
+          ],
+          "ports": {
+            "6379/tcp": null
+          }
+        },
+        {
+          "name": "/qy-newcrawler-fresh-dashboard-1",
+          "image": "qy-allpachong/dashboard:node-worker-types-20260918-73c172237805",
+          "imageId": "sha256:bc457aad1295b97d3e96eee9f78a73119535f305d43e959c91f7e51669a691cd",
+          "health": "healthy",
+          "startedAt": "2026-09-18T06:25:35.500545815Z",
+          "restartCount": 0,
+          "memoryLimitBytes": 0,
+          "pidsLimit": null,
+          "configEnvSha256": "e474b6c79ebdbaf1f03217f7511050e7184807ebbdc2e7448721168cc0089442",
+          "mounts": [
+            {
+              "source": "/root/workspace/agent/pachongsys-release/runtime/remote-center-production/tls/ca.pem",
+              "destination": "/run/remote-deploy/ca.pem",
+              "rw": false
+            },
+            {
+              "source": "/root/workspace/agent/pachongsys/runtime/fresh-production/secrets/migration_database_url",
+              "destination": "/run/secrets/migration_database_url",
+              "rw": false
+            },
+            {
+              "source": "/root/workspace/agent/pachongsys/runtime/fresh-production/secrets/business_publication_audit_database_url",
+              "destination": "/run/secrets/business_publication_audit_database_url",
+              "rw": false
+            },
+            {
+              "source": "/root/workspace/agent/pachongsys/runtime/fresh-production/server-nodes",
+              "destination": "/var/lib/qy-server-nodes",
+              "rw": true
+            },
+            {
+              "source": "/root/workspace/agent/pachongsys-release/runtime/remote-center-production/secrets/admin-token",
+              "destination": "/run/remote-deploy/admin-token",
+              "rw": false
+            },
+            {
+              "source": "/root/workspace/agent/pachongsys-release/runtime/remote-center-production/secrets/registry-pull.json",
+              "destination": "/run/remote-deploy/registry-pull.json",
+              "rw": false
+            }
+          ],
+          "ports": {
+            "3000/tcp": null
+          }
+        },
+        {
+          "name": "/qy-node-registry",
+          "image": "registry@sha256:1be55279f18a2fe1a74edf2664cac61c1bea305b7b4642dab412e7affdcb3e33",
+          "imageId": "sha256:1be55279f18a2fe1a74edf2664cac61c1bea305b7b4642dab412e7affdcb3e33",
+          "health": null,
+          "startedAt": "2026-09-10T13:04:53.583866683Z",
+          "restartCount": 0,
+          "memoryLimitBytes": 268435456,
+          "pidsLimit": null,
+          "configEnvSha256": "961f5e4e298178c02ccf2c6f2f0ca4afd18417c2a96ee8472fe3ddcb5b7b608f",
+          "mounts": [
+            {
+              "source": "/root/workspace/agent/pachongsys-release/runtime/remote-center-production/registry",
+              "destination": "/var/lib/registry",
+              "rw": true
+            }
+          ],
+          "ports": {
+            "5000/tcp": [
+              {
+                "HostIp": "127.0.0.1",
+                "HostPort": "35000"
+              }
+            ]
+          }
+        }
+      ],
+      "stats": [
+        {
+          "BlockIO": "25.3GB / 27.6kB",
+          "CPUPerc": "176.89%",
+          "Container": "qy-remote-node-center",
+          "ID": "c50b57a0ed51",
+          "MemPerc": "48.88%",
+          "MemUsage": "375.4MiB / 768MiB",
+          "Name": "qy-remote-node-center",
+          "NetIO": "480GB / 163GB",
+          "PIDs": "23"
+        },
+        {
+          "BlockIO": "89.6GB / 406MB",
+          "CPUPerc": "2.56%",
+          "Container": "qy-remote-nats",
+          "ID": "825294e1eacb",
+          "MemPerc": "8.03%",
+          "MemUsage": "30.85MiB / 384MiB",
+          "Name": "qy-remote-nats",
+          "NetIO": "120GB / 118GB",
+          "PIDs": "12"
+        },
+        {
+          "BlockIO": "19.7GB / 0B",
+          "CPUPerc": "90.04%",
+          "Container": "youtube-rota-qy-core",
+          "ID": "551f74cdcfbd",
+          "MemPerc": "4.90%",
+          "MemUsage": "1.536GiB / 31.33GiB",
+          "Name": "youtube-rota-qy-core",
+          "NetIO": "752GB / 58.2GB",
+          "PIDs": "25"
+        },
+        {
+          "BlockIO": "114TB / 8.91TB",
+          "CPUPerc": "386.30%",
+          "Container": "qy-newcrawler-fresh-crawler-postgres-1",
+          "ID": "baa60b4d0458",
+          "MemPerc": "3.48%",
+          "MemUsage": "1.092GiB / 31.33GiB",
+          "Name": "qy-newcrawler-fresh-crawler-postgres-1",
+          "NetIO": "1.11TB / 7.65TB",
+          "PIDs": "51"
+        },
+        {
+          "BlockIO": "37.3GB / 4.57TB",
+          "CPUPerc": "108.29%",
+          "Container": "qy-newcrawler-fresh-redis-1",
+          "ID": "5cfa4f9b6365",
+          "MemPerc": "2.71%",
+          "MemUsage": "870.6MiB / 31.33GiB",
+          "Name": "qy-newcrawler-fresh-redis-1",
+          "NetIO": "102GB / 1.51TB",
+          "PIDs": "8"
+        },
+        {
+          "BlockIO": "4.6GB / 55.3kB",
+          "CPUPerc": "0.00%",
+          "Container": "qy-newcrawler-fresh-dashboard-1",
+          "ID": "01569709af54",
+          "MemPerc": "0.24%",
+          "MemUsage": "77.76MiB / 31.33GiB",
+          "Name": "qy-newcrawler-fresh-dashboard-1",
+          "NetIO": "101MB / 132MB",
+          "PIDs": "22"
+        },
+        {
+          "BlockIO": "74.5GB / 215MB",
+          "CPUPerc": "0.00%",
+          "Container": "qy-node-registry",
+          "ID": "8e12510dd728",
+          "MemPerc": "8.26%",
+          "MemUsage": "21.15MiB / 256MiB",
+          "Name": "qy-node-registry",
+          "NetIO": "220MB / 426MB",
+          "PIDs": "10"
+        }
+      ],
+      "host": {
+        "cpuCount": 16,
+        "load": [
+          19.1181640625,
+          19.900390625,
+          20.44580078125
+        ],
+        "memory": [
+          "MemTotal:       32856576 kB",
+          "MemAvailable:    5393324 kB",
+          "SwapTotal:             0 kB",
+          "SwapFree:              0 kB"
+        ],
+        "disk": "Filesystem        1B-blocks         Used    Available Use% Mounted on\n/dev/vda3      857101807616 750806188032 106295619584  88% /\n/dev/vda3      857101807616 750806188032 106295619584  88% /\n"
+      }
+    },
+    "business_baseline": {
+      "at": "2026-09-20T07:08:47.993Z",
+      "from": "2026-09-20T06:30:00Z",
+      "to": "2026-09-20T07:00:00Z",
+      "business": [
+        {
+          "bucket": "2026-09-20T06:30:00.000Z",
+          "effective_completed_jobs": 1178
+        },
+        {
+          "bucket": "2026-09-20T06:45:00.000Z",
+          "effective_completed_jobs": 1027
+        }
+      ],
+      "database": [
+        {
+          "at": "2026-09-20T07:08:52.048Z",
+          "numbackends": 39,
+          "deadlocks": "6408"
+        }
+      ],
+      "transport": {
+        "httpStatus": 200,
+        "body": {
+          "pending": 0,
+          "unacknowledged": 0,
+          "rpc": {
+            "admitted": 1760705,
+            "rejected": 0,
+            "timedOut": 15,
+            "cancelled": 0,
+            "peakActive": 32,
+            "peakPending": 48,
+            "active": 29,
+            "pending": 0,
+            "concurrency": 32,
+            "maxPending": 1024
+          },
+          "heartbeats": {
+            "admitted": 1414398,
+            "rejected": 0,
+            "timedOut": 0,
+            "cancelled": 0,
+            "peakActive": 16,
+            "peakPending": 15,
+            "active": 1,
+            "pending": 0,
+            "concurrency": 16,
+            "maxPending": 1024
+          },
+          "waiting": {
+            "admitted": 1331981,
+            "rejected": 0,
+            "timedOut": 0,
+            "cancelled": 0,
+            "peakActive": 64,
+            "peakPending": 0,
+            "active": 32,
+            "pending": 0,
+            "concurrency": 1024,
+            "maxPending": 0
+          }
+        }
+      }
+    },
+    "live_source": [
+      {
+        "path": "src/rotaSlotAdapter.js",
+        "liveSha256": "3ac22257a5983da4243239e1e782d58befd26c9a9ea03389b0e8f7e5b4e10d4a",
+        "workspaceSha256": "3ac22257a5983da4243239e1e782d58befd26c9a9ea03389b0e8f7e5b4e10d4a",
+        "identical": true
+      },
+      {
+        "path": "src/remoteNodes/centerExecutionSupervisor.js",
+        "liveSha256": "333b48cdca903b843f15ad0e455339aa5fe7e97d1857e6f7d2bb1ac91d21aa89",
+        "workspaceSha256": "8f22b2a1176f88a7fd6f9406c66af6f50d06ff929d9a9fa0c7e2cbeec4739387",
+        "identical": false
+      },
+      {
+        "path": "src/finalizeDeferral.js",
+        "liveSha256": "523966319742ee12882bb64f55f2c1dc862aff98ea6ab5dc3ba40854a42317ea",
+        "workspaceSha256": "523966319742ee12882bb64f55f2c1dc862aff98ea6ab5dc3ba40854a42317ea",
+        "identical": true
+      },
+      {
+        "path": "src/finalizeChangeRecovery.js",
+        "liveSha256": "b42ef42dd3ff0b4133a214ee14d5d305ce7f7d5286f43b3e1e48da4ec03b3c67",
+        "workspaceSha256": "b42ef42dd3ff0b4133a214ee14d5d305ce7f7d5286f43b3e1e48da4ec03b3c67",
+        "identical": true
+      },
+      {
+        "path": "src/incrementalYoutubeJsVideo.js",
+        "liveSha256": "6c08e6db081f96f845ce1d1b6db3f19cb8e8b8f978be2c7b4abdf93a07ab2230",
+        "workspaceSha256": "6c08e6db081f96f845ce1d1b6db3f19cb8e8b8f978be2c7b4abdf93a07ab2230",
+        "identical": true
+      },
+      {
+        "path": "src/incrementalChannelRunner.js",
+        "liveSha256": "5cda8a786fcd39ec554583048791e32d5d88d33a90aea614ead0bbf66ef57821",
+        "workspaceSha256": "5cda8a786fcd39ec554583048791e32d5d88d33a90aea614ead0bbf66ef57821",
+        "identical": true
+      },
+      {
+        "path": "src/remoteNodes/incrementalBusinessFence.js",
+        "liveSha256": "f0929bbc7d1af6c2f27a13614cc1d30e77bed3ee7b7e8ffc1e07c8ac850aa23c",
+        "workspaceSha256": "f0929bbc7d1af6c2f27a13614cc1d30e77bed3ee7b7e8ffc1e07c8ac850aa23c",
+        "identical": true
+      }
+    ]
+  },
+  "p5_source_validation": {
+    "file_count": 475,
+    "mismatches": []
+  }
+}

@@ -12,14 +12,14 @@ export function createNatsProvisioning({pool,routes,file,centerUser='center',cen
   if(localIntakePassword!==undefined && (typeof localIntakePassword!=='string'||localIntakePassword.length<32))throw new TypeError('strong local intake credential required');
   let pending=Promise.resolve();let loop;const stopped=new AbortController();
   async function write(){
-    const rows=(await pool.query(`SELECT d.node_id,d.credentials_cipher FROM remote_ingestion.node_deployments d
+    const rows=(await pool.query(`SELECT d.node_id,d.credentials_cipher,n.capabilities FROM remote_ingestion.node_deployments d
       JOIN remote_ingestion.nodes n USING(node_id) WHERE n.state <> 'disabled' ORDER BY d.node_id`)).rows;
     const users=[{user:centerUser,password:centerPassword}];
     if(localIntakePassword)users.push({user:'local-intake',password:localIntakePassword,permissions:{publish:{deny:['>']},subscribe:[LOCAL_INTAKE_SUBJECT]}});
     for(const row of rows){
       const id=uuid(row.node_id);const credentials=routes.decrypt(row.credentials_cipher,`node-deployment:${id}`);
       users.push({user:id,password:credentials.nodeToken,permissions:{
-        publish:[`qy.remote.rpc.${id}.*`,`qy.remote.results.${id}`],subscribe:[`_INBOX.${id}.>`],
+        publish:[`qy.remote.rpc.${id}.*`,row.capabilities?.includes('youtube.full-crawl.v1')?`qy.remote.full.results.${id}`:`qy.remote.results.${id}`],subscribe:[`_INBOX.${id}.>`],
       }});
     }
     const content=`users: ${JSON.stringify(users)}\n`;

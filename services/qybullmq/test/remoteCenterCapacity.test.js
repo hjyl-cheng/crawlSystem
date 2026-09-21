@@ -1,5 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import {collectingWorkload} from '../src/remoteNodes/collectingWorkload.js';
+import {settleTerminalRemoteHandoffs} from '../src/remoteNodes/centerExecutionRecovery.js';
 import {RemoteCenterExecutionSupervisor} from '../src/remoteNodes/centerExecutionSupervisor.js';
 
 function fixture() {
@@ -18,7 +20,7 @@ function fixture() {
    if(sql.includes('FROM remote_ingestion.node_intake_requests') || sql.includes('WITH settled AS'))return {rows:[],rowCount:0};
    assert.fail(`unexpected per-slot transaction: ${sql}`);
   }});}};
- const supervisor=Object.assign(Object.create(RemoteCenterExecutionSupervisor.prototype),{store,entries,guardPool:{options:{max:1}},stopping:false,maxSlots:32,allowedNodeIds:[],dashboardManaged:true,report:()=>{},channelStore:{}});
+ const supervisor=Object.assign(Object.create(RemoteCenterExecutionSupervisor.prototype),{store,entries,workload:collectingWorkload('incremental_collect'),settleHandoffs:settleTerminalRemoteHandoffs,guardPool:{options:{max:1}},stopping:false,maxSlots:32,allowedNodeIds:[],dashboardManaged:true,report:()=>{},channelStore:{}});
  return {supervisor,rows,writes,paused,transactions:()=>transactions};
 }
 test('20 remote consumers refresh capacity from a bulk snapshot without 20 serial readiness transactions',async()=>{

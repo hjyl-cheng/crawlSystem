@@ -3,6 +3,7 @@ export async function warmPersistentYtDlp() {
 }
 
 export async function closeYoutubeJs() {}
+export function youtubeJsDetailEnabled() { return false; }
 
 export async function warmYoutubeJs() {
   return { warmed: false, reason: "post_commit_test" };

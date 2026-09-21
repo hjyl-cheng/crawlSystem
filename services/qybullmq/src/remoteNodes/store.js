@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { PUBLICATION_WRITER_VERSION } from '../publicationWriterVersion.js';
 import { decodeResult, generation, hash, RemoteProtocolError, uuid } from './protocol.js';
+import { FULL_CRAWL_WORKLOAD } from './collectingWorkload.js';
 
 const conflict = (code) => { throw new RemoteProtocolError(code); };
 
@@ -120,7 +121,12 @@ export class RemoteNodeStore {
       // The unslotted legacy protocol retains its node last-seen update.
       const node = (await client.query(`SELECT * FROM remote_ingestion.nodes WHERE node_id=$1 ${slot === null ? 'FOR NO KEY UPDATE' : 'FOR SHARE'}`, [nodeId])).rows[0];
       if (!node || node.state === 'disabled') throw new RemoteProtocolError('UNAUTHORIZED', 401);
-      const permission = authorize ? await authorize(client) : { allowNew: true };
+      const permission = authorize ? await authorize(client,node) : { allowNew: true };
+      const capabilities = node.capabilities.filter(capability => (
+        (!permission.capability || capability === permission.capability)
+        && (capability !== FULL_CRAWL_WORKLOAD.capability
+          || (permission.capability === capability && typeof permission.assertTask === 'function'))
+      ));
       if (node.slot_claims_required && slot === null) conflict('WORKER_SLOT_REQUIRED');
       if (slot === null) await client.query('UPDATE remote_ingestion.nodes SET last_seen_at=clock_timestamp() WHERE node_id=$1', [nodeId]);
       const previous = (await client.query(`SELECT t.*, c.node_id AS claiming_node, c.generation AS claimed_generation,
@@ -132,6 +138,8 @@ export class RemoteNodeStore {
           || previous.claimed_generation !== previous.generation || previous.state !== 'leased' || !previous.alive) {
           conflict('CLAIM_EXPIRED');
         }
+        if (!capabilities.includes(previous.capability)) conflict('WORKER_TASK_CAPABILITY_MISMATCH');
+        if (previous.capability === FULL_CRAWL_WORKLOAD.capability) await permission.assertTask(client,previous);
         return this.lease(previous);
       }
       if (node.state !== 'active' || !permission.allowNew) return null;
@@ -169,8 +177,11 @@ export class RemoteNodeStore {
         AND (scope_key IS NULL OR NOT EXISTS (SELECT 1 FROM remote_ingestion.tasks owner
           WHERE owner.scope_key=candidate.scope_key AND owner.task_id<>candidate.task_id AND owner.state='leased'))
         ORDER BY (node_id=$2 AND worker_slot=$3 AND state='leased') DESC NULLS LAST,created_at,task_id
-        LIMIT 1 FOR UPDATE SKIP LOCKED`, [node.capabilities, nodeId, slot])).rows[0];
+        LIMIT 1 FOR UPDATE SKIP LOCKED`, [capabilities, nodeId, slot])).rows[0];
       if (!row) return null;
+      // Full Crawl supplies its own locked candidate/run/attempt fence. Neither
+      // a node capability nor the incremental verifier can waive that check.
+      if (row.capability === FULL_CRAWL_WORKLOAD.capability) await permission.assertTask(client,row);
       // A new ownership generation after an API handoff is not a failed execution.
       const leaseFailures = row.lease_failures + (row.state === 'leased' ? 1 : 0);
       if (leaseFailures >= this.maxExecutions) {
@@ -196,6 +207,7 @@ export class RemoteNodeStore {
     const row = (await this.pool.query(`UPDATE remote_ingestion.tasks
       SET lease_until=clock_timestamp()+($4 * interval '1 second')
       WHERE task_id=$1 AND node_id=$2 AND generation=$3 AND state='leased' AND lease_until>clock_timestamp()
+        AND capability<>'youtube.full-crawl.v1'
       RETURNING lease_until`, [taskId, nodeId, attempt, this.leaseSeconds])).rows[0];
     if (!row) conflict('STALE_LEASE');
     return row;
@@ -208,6 +220,7 @@ export class RemoteNodeStore {
       const task = (await client.query(`SELECT *,lease_until>clock_timestamp() AS alive
         FROM remote_ingestion.tasks WHERE task_id=$1 FOR UPDATE`, [taskId])).rows[0];
       if (task?.capability === 'youtube.incremental.plan.v1') conflict('CHANNEL_PLAN_REQUIRES_CENTRAL_COMPLETION');
+      if (task?.capability === FULL_CRAWL_WORKLOAD.capability) conflict('FULL_CRAWL_REQUIRES_CENTRAL_COMPLETION');
       const old = (await client.query('SELECT * FROM remote_ingestion.receipts WHERE batch_id=$1', [value.batch_id])).rows[0];
       if (old) {
         if (old.node_id !== nodeId || old.task_id !== taskId || old.generation !== value.generation || old.sha256 !== sha256) {
