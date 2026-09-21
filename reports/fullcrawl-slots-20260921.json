@@ -1,0 +1,125 @@
+{
+  "verified_at": "2026-09-21T03:46:47.553Z",
+  "container": "qy-remote-node-center",
+  "healthy": true,
+  "restart_count": 0,
+  "image_unchanged": true,
+  "configuration": {
+    "REMOTE_NODE_FULL_CRAWL_TOTAL_SLOTS": {
+      "before": 2,
+      "after": 6
+    },
+    "remote_worker_limit": 5,
+    "compatibility_slots": 1,
+    "allowed_node_ids": [
+      "8a07de4f-a3ee-428f-a959-2aee9c7b6be7"
+    ]
+  },
+  "capacity": {
+    "channel_provisioned": 129,
+    "channel_ready_verified": 129
+  },
+  "compose_path": "/root/workspace/agent/pachongsys-release/runtime/worker-slot-recovery-20260917/center.deploy.private.json",
+  "previous_container": "qy-remote-node-center-before-slots6-20260921",
+  "previous_exit_code": 0,
+  "nodes": [
+    {
+      "node_id": "8a07de4f-a3ee-428f-a959-2aee9c7b6be7",
+      "deployment_id": "b19c5c9a-4a09-4a61-bdb2-9b69bed02933",
+      "role": "fullcrawl",
+      "configuredCount": 3,
+      "allowedCount": 3,
+      "intakeEnabled": true,
+      "counts": {
+        "deployed": 3,
+        "connected": 3,
+        "allowed": 3,
+        "ready": 3,
+        "active": 0,
+        "running": 0,
+        "draining": 0,
+        "collecting": 0,
+        "processing": 0,
+        "awaiting": 0,
+        "unready": 0,
+        "idle": 3,
+        "finishing": 0,
+        "standby": 0,
+        "offline": 0
+      },
+      "workers": [
+        {
+          "slot": "full-crawl-1",
+          "connected": true,
+          "enabled": true,
+          "ready": true,
+          "active": false
+        },
+        {
+          "slot": "full-crawl-2",
+          "connected": true,
+          "enabled": true,
+          "ready": true,
+          "active": false
+        },
+        {
+          "slot": "full-crawl-3",
+          "connected": true,
+          "enabled": true,
+          "ready": true,
+          "active": false
+        }
+      ]
+    },
+    {
+      "node_id": "0e108078-200a-4df0-9a58-a28abc97a692",
+      "deployment_id": "107891a4-6088-4e0e-bad1-c38f9a2db4dc",
+      "role": "incremental",
+      "configuredCount": 15,
+      "allowedCount": 15,
+      "intakeEnabled": true,
+      "counts": {
+        "deployed": 15,
+        "connected": 15,
+        "allowed": 15,
+        "ready": 15,
+        "active": 15,
+        "running": 15,
+        "draining": 0,
+        "collecting": 2,
+        "processing": 13,
+        "awaiting": 0,
+        "unready": 0,
+        "idle": 0,
+        "finishing": 0,
+        "standby": 0,
+        "offline": 0
+      }
+    },
+    {
+      "node_id": "54a7cdd3-eb9c-4713-8d2f-21f4a5279de0",
+      "deployment_id": "41041afe-bc67-418b-90bc-8a1a81499d65",
+      "role": "incremental",
+      "configuredCount": 47,
+      "allowedCount": 47,
+      "intakeEnabled": true,
+      "counts": {
+        "deployed": 47,
+        "connected": 47,
+        "allowed": 47,
+        "ready": 47,
+        "active": 47,
+        "running": 47,
+        "draining": 0,
+        "collecting": 0,
+        "processing": 47,
+        "awaiting": 0,
+        "unready": 0,
+        "idle": 0,
+        "finishing": 0,
+        "standby": 0,
+        "offline": 0
+      }
+    }
+  ]
+}
