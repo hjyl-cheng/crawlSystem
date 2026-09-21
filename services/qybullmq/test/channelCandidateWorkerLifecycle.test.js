@@ -220,6 +220,20 @@ test("terminal business failure settles the Candidate and retry item in one tran
   assert.match(transactionStatements[1].sql, /UPDATE crawler\.migration_system_retry_items/);
   assert.match(transactionStatements[2].sql, /UPDATE crawler\.channel_runs/);
   assert.match(transactionStatements[2].sql, /candidate_id=\$4/);
+  assert.deepEqual(
+    JSON.parse(transactionStatements[2].params[2]),
+    {
+      channel_run_terminal_failure: {
+        failure_kind: "unknown",
+        retry_mode: "none",
+        attempts_made: 1,
+        max_attempts: 1,
+        permanent_failure: true,
+        error_message: "terminal channel business failure",
+      },
+    },
+    "a terminal Run failure must leave durable settlement evidence",
+  );
 });
 
 test("parser failure writes Candidate evidence and Run failure under one exact attempt Fence", async () => {

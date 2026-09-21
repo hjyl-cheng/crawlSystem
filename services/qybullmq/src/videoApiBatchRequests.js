@@ -112,7 +112,7 @@ export async function dispatchVideoApiRequests({ query, withTransaction, queue, 
         AND NOT EXISTS (SELECT 1 FROM crawler.youtube_api_batches b WHERE b.status IN ('queued','running') AND t.task_id=ANY(b.task_ids))`);
     await client.query(`UPDATE crawler.youtube_api_detail_requests r SET status='failed',
       error_message=t.error_message,finished_at=now() FROM crawler.youtube_api_tasks t
-      WHERE r.task_id=t.task_id AND r.status='pending' AND t.status IN ('failed','done','unavailable') AND t.attempts>=3
+      WHERE r.task_id=t.task_id AND r.status='pending' AND t.status IN ('pending','failed','done','unavailable') AND t.attempts>=3
         AND NOT EXISTS(SELECT 1 FROM crawler.youtube_api_batches b WHERE b.status IN ('queued','running') AND t.task_id=ANY(b.task_ids))`);
   });
   const queued = (await query(`SELECT * FROM crawler.youtube_api_batches WHERE status='queued'

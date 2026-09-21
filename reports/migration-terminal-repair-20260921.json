@@ -1,0 +1,381 @@
+{
+  "database_verification": {
+    "at": "2026-09-21T03:16:59.495Z",
+    "database": "newcrawler_crawler",
+    "batch": {
+      "batch_id": "migration-19eff406-4ec3-442e-a448-882b14caae69",
+      "status": "completed",
+      "version": "8",
+      "total_count": 376998,
+      "finished_at": "2026-09-21T03:13:19.809Z"
+    },
+    "items": [
+      {
+        "state": "terminal",
+        "outcome": "dormant",
+        "count": 189734
+      },
+      {
+        "state": "terminal",
+        "outcome": "failed",
+        "count": 2126
+      },
+      {
+        "state": "terminal",
+        "outcome": "rejected",
+        "count": 3491
+      },
+      {
+        "state": "terminal",
+        "outcome": "success",
+        "count": 181647
+      }
+    ],
+    "scheduler": {
+      "status": "stopped",
+      "stop_reason": "pipeline_complete"
+    },
+    "dispatch": {
+      "status": "completed",
+      "total_channel_count": 376998,
+      "accepted_channel_count": 373394,
+      "rejected_channel_count": 3491,
+      "failed_channel_count": 113,
+      "terminal_failed_count": "2126"
+    },
+    "channelQueuePaused": false,
+    "repairedApiRequests": [
+      {
+        "task_id": "33413",
+        "status": "failed"
+      },
+      {
+        "task_id": "33414",
+        "status": "failed"
+      },
+      {
+        "task_id": "33415",
+        "status": "failed"
+      },
+      {
+        "task_id": "33416",
+        "status": "failed"
+      },
+      {
+        "task_id": "33417",
+        "status": "failed"
+      },
+      {
+        "task_id": "33609",
+        "status": "failed"
+      }
+    ]
+  },
+  "runtime_verification": [
+    {
+      "name": "qy-newcrawler-fresh-worker-channel-1",
+      "image": "qy-allpachong/qybullmq:migration-terminal-20260921-69b717c",
+      "image_id": "sha256:8fbdca8e659e14b12b2dc5bcd5a3854cfe9bc4952383c2e586fad73db697f341",
+      "running": true,
+      "restart_count": 0
+    },
+    {
+      "name": "qy-newcrawler-fresh-worker-channel-2",
+      "image": "qy-allpachong/qybullmq:migration-terminal-20260921-69b717c",
+      "image_id": "sha256:8fbdca8e659e14b12b2dc5bcd5a3854cfe9bc4952383c2e586fad73db697f341",
+      "running": true,
+      "restart_count": 0
+    },
+    {
+      "name": "qy-newcrawler-fresh-worker-channel-3",
+      "image": "qy-allpachong/qybullmq:migration-terminal-20260921-69b717c",
+      "image_id": "sha256:8fbdca8e659e14b12b2dc5bcd5a3854cfe9bc4952383c2e586fad73db697f341",
+      "running": true,
+      "restart_count": 0
+    },
+    {
+      "name": "qy-newcrawler-fresh-worker-channel-4",
+      "image": "qy-allpachong/qybullmq:migration-terminal-20260921-69b717c",
+      "image_id": "sha256:8fbdca8e659e14b12b2dc5bcd5a3854cfe9bc4952383c2e586fad73db697f341",
+      "running": true,
+      "restart_count": 0
+    },
+    {
+      "name": "qy-newcrawler-fresh-worker-channel-5",
+      "image": "qy-allpachong/qybullmq:migration-terminal-20260921-69b717c",
+      "image_id": "sha256:8fbdca8e659e14b12b2dc5bcd5a3854cfe9bc4952383c2e586fad73db697f341",
+      "running": true,
+      "restart_count": 0
+    },
+    {
+      "name": "qy-newcrawler-fresh-worker-channel-6",
+      "image": "qy-allpachong/qybullmq:migration-terminal-20260921-69b717c",
+      "image_id": "sha256:8fbdca8e659e14b12b2dc5bcd5a3854cfe9bc4952383c2e586fad73db697f341",
+      "running": true,
+      "restart_count": 0
+    },
+    {
+      "name": "qy-newcrawler-fresh-worker-channel-7",
+      "image": "qy-allpachong/qybullmq:migration-terminal-20260921-69b717c",
+      "image_id": "sha256:8fbdca8e659e14b12b2dc5bcd5a3854cfe9bc4952383c2e586fad73db697f341",
+      "running": true,
+      "restart_count": 0
+    },
+    {
+      "name": "qy-newcrawler-fresh-worker-channel-8",
+      "image": "qy-allpachong/qybullmq:migration-terminal-20260921-69b717c",
+      "image_id": "sha256:8fbdca8e659e14b12b2dc5bcd5a3854cfe9bc4952383c2e586fad73db697f341",
+      "running": true,
+      "restart_count": 0
+    },
+    {
+      "name": "qy-newcrawler-fresh-worker-channel-9",
+      "image": "qy-allpachong/qybullmq:migration-terminal-20260921-69b717c",
+      "image_id": "sha256:8fbdca8e659e14b12b2dc5bcd5a3854cfe9bc4952383c2e586fad73db697f341",
+      "running": true,
+      "restart_count": 0
+    },
+    {
+      "name": "qy-newcrawler-fresh-worker-channel-10",
+      "image": "qy-allpachong/qybullmq:migration-terminal-20260921-69b717c",
+      "image_id": "sha256:8fbdca8e659e14b12b2dc5bcd5a3854cfe9bc4952383c2e586fad73db697f341",
+      "running": true,
+      "restart_count": 0
+    },
+    {
+      "name": "qy-newcrawler-fresh-worker-channel-11",
+      "image": "qy-allpachong/qybullmq:migration-terminal-20260921-69b717c",
+      "image_id": "sha256:8fbdca8e659e14b12b2dc5bcd5a3854cfe9bc4952383c2e586fad73db697f341",
+      "running": true,
+      "restart_count": 0
+    },
+    {
+      "name": "qy-newcrawler-fresh-worker-channel-12",
+      "image": "qy-allpachong/qybullmq:migration-terminal-20260921-69b717c",
+      "image_id": "sha256:8fbdca8e659e14b12b2dc5bcd5a3854cfe9bc4952383c2e586fad73db697f341",
+      "running": true,
+      "restart_count": 0
+    },
+    {
+      "name": "qy-newcrawler-fresh-worker-channel-13",
+      "image": "qy-allpachong/qybullmq:migration-terminal-20260921-69b717c",
+      "image_id": "sha256:8fbdca8e659e14b12b2dc5bcd5a3854cfe9bc4952383c2e586fad73db697f341",
+      "running": true,
+      "restart_count": 0
+    },
+    {
+      "name": "qy-newcrawler-fresh-worker-channel-14",
+      "image": "qy-allpachong/qybullmq:migration-terminal-20260921-69b717c",
+      "image_id": "sha256:8fbdca8e659e14b12b2dc5bcd5a3854cfe9bc4952383c2e586fad73db697f341",
+      "running": true,
+      "restart_count": 0
+    },
+    {
+      "name": "qy-newcrawler-fresh-worker-channel-15",
+      "image": "qy-allpachong/qybullmq:migration-terminal-20260921-69b717c",
+      "image_id": "sha256:8fbdca8e659e14b12b2dc5bcd5a3854cfe9bc4952383c2e586fad73db697f341",
+      "running": true,
+      "restart_count": 0
+    },
+    {
+      "name": "qy-newcrawler-fresh-worker-channel-16",
+      "image": "qy-allpachong/qybullmq:migration-terminal-20260921-69b717c",
+      "image_id": "sha256:8fbdca8e659e14b12b2dc5bcd5a3854cfe9bc4952383c2e586fad73db697f341",
+      "running": true,
+      "restart_count": 0
+    },
+    {
+      "name": "qy-newcrawler-fresh-worker-channel-17",
+      "image": "qy-allpachong/qybullmq:migration-terminal-20260921-69b717c",
+      "image_id": "sha256:8fbdca8e659e14b12b2dc5bcd5a3854cfe9bc4952383c2e586fad73db697f341",
+      "running": true,
+      "restart_count": 0
+    },
+    {
+      "name": "qy-newcrawler-fresh-worker-channel-18",
+      "image": "qy-allpachong/qybullmq:migration-terminal-20260921-69b717c",
+      "image_id": "sha256:8fbdca8e659e14b12b2dc5bcd5a3854cfe9bc4952383c2e586fad73db697f341",
+      "running": true,
+      "restart_count": 0
+    },
+    {
+      "name": "qy-newcrawler-fresh-worker-channel-19",
+      "image": "qy-allpachong/qybullmq:migration-terminal-20260921-69b717c",
+      "image_id": "sha256:8fbdca8e659e14b12b2dc5bcd5a3854cfe9bc4952383c2e586fad73db697f341",
+      "running": true,
+      "restart_count": 0
+    },
+    {
+      "name": "qy-newcrawler-fresh-worker-channel-20",
+      "image": "qy-allpachong/qybullmq:migration-terminal-20260921-69b717c",
+      "image_id": "sha256:8fbdca8e659e14b12b2dc5bcd5a3854cfe9bc4952383c2e586fad73db697f341",
+      "running": true,
+      "restart_count": 0
+    },
+    {
+      "name": "qy-newcrawler-fresh-worker-channel-21",
+      "image": "qy-allpachong/qybullmq:migration-terminal-20260921-69b717c",
+      "image_id": "sha256:8fbdca8e659e14b12b2dc5bcd5a3854cfe9bc4952383c2e586fad73db697f341",
+      "running": true,
+      "restart_count": 0
+    },
+    {
+      "name": "qy-newcrawler-fresh-worker-channel-22",
+      "image": "qy-allpachong/qybullmq:migration-terminal-20260921-69b717c",
+      "image_id": "sha256:8fbdca8e659e14b12b2dc5bcd5a3854cfe9bc4952383c2e586fad73db697f341",
+      "running": true,
+      "restart_count": 0
+    },
+    {
+      "name": "qy-newcrawler-fresh-worker-channel-23",
+      "image": "qy-allpachong/qybullmq:migration-terminal-20260921-69b717c",
+      "image_id": "sha256:8fbdca8e659e14b12b2dc5bcd5a3854cfe9bc4952383c2e586fad73db697f341",
+      "running": true,
+      "restart_count": 0
+    },
+    {
+      "name": "qy-newcrawler-fresh-worker-channel-24",
+      "image": "qy-allpachong/qybullmq:migration-terminal-20260921-69b717c",
+      "image_id": "sha256:8fbdca8e659e14b12b2dc5bcd5a3854cfe9bc4952383c2e586fad73db697f341",
+      "running": true,
+      "restart_count": 0
+    },
+    {
+      "name": "qy-newcrawler-fresh-worker-channel-25",
+      "image": "qy-allpachong/qybullmq:migration-terminal-20260921-69b717c",
+      "image_id": "sha256:8fbdca8e659e14b12b2dc5bcd5a3854cfe9bc4952383c2e586fad73db697f341",
+      "running": true,
+      "restart_count": 0
+    },
+    {
+      "name": "qy-newcrawler-fresh-worker-channel-26",
+      "image": "qy-allpachong/qybullmq:migration-terminal-20260921-69b717c",
+      "image_id": "sha256:8fbdca8e659e14b12b2dc5bcd5a3854cfe9bc4952383c2e586fad73db697f341",
+      "running": true,
+      "restart_count": 0
+    },
+    {
+      "name": "qy-newcrawler-fresh-worker-channel-27",
+      "image": "qy-allpachong/qybullmq:migration-terminal-20260921-69b717c",
+      "image_id": "sha256:8fbdca8e659e14b12b2dc5bcd5a3854cfe9bc4952383c2e586fad73db697f341",
+      "running": true,
+      "restart_count": 0
+    },
+    {
+      "name": "qy-newcrawler-fresh-worker-channel-28",
+      "image": "qy-allpachong/qybullmq:migration-terminal-20260921-69b717c",
+      "image_id": "sha256:8fbdca8e659e14b12b2dc5bcd5a3854cfe9bc4952383c2e586fad73db697f341",
+      "running": true,
+      "restart_count": 0
+    },
+    {
+      "name": "qy-newcrawler-fresh-worker-channel-29",
+      "image": "qy-allpachong/qybullmq:migration-terminal-20260921-69b717c",
+      "image_id": "sha256:8fbdca8e659e14b12b2dc5bcd5a3854cfe9bc4952383c2e586fad73db697f341",
+      "running": true,
+      "restart_count": 0
+    },
+    {
+      "name": "qy-newcrawler-fresh-worker-channel-30",
+      "image": "qy-allpachong/qybullmq:migration-terminal-20260921-69b717c",
+      "image_id": "sha256:8fbdca8e659e14b12b2dc5bcd5a3854cfe9bc4952383c2e586fad73db697f341",
+      "running": true,
+      "restart_count": 0
+    },
+    {
+      "name": "qy-newcrawler-fresh-worker-channel-31",
+      "image": "qy-allpachong/qybullmq:migration-terminal-20260921-69b717c",
+      "image_id": "sha256:8fbdca8e659e14b12b2dc5bcd5a3854cfe9bc4952383c2e586fad73db697f341",
+      "running": true,
+      "restart_count": 0
+    },
+    {
+      "name": "qy-newcrawler-fresh-worker-channel-32",
+      "image": "qy-allpachong/qybullmq:migration-terminal-20260921-69b717c",
+      "image_id": "sha256:8fbdca8e659e14b12b2dc5bcd5a3854cfe9bc4952383c2e586fad73db697f341",
+      "running": true,
+      "restart_count": 0
+    },
+    {
+      "name": "qy-newcrawler-fresh-worker-channel-33",
+      "image": "qy-allpachong/qybullmq:migration-terminal-20260921-69b717c",
+      "image_id": "sha256:8fbdca8e659e14b12b2dc5bcd5a3854cfe9bc4952383c2e586fad73db697f341",
+      "running": true,
+      "restart_count": 0
+    },
+    {
+      "name": "qy-newcrawler-fresh-worker-channel-34",
+      "image": "qy-allpachong/qybullmq:migration-terminal-20260921-69b717c",
+      "image_id": "sha256:8fbdca8e659e14b12b2dc5bcd5a3854cfe9bc4952383c2e586fad73db697f341",
+      "running": true,
+      "restart_count": 0
+    },
+    {
+      "name": "qy-newcrawler-fresh-worker-channel-35",
+      "image": "qy-allpachong/qybullmq:migration-terminal-20260921-69b717c",
+      "image_id": "sha256:8fbdca8e659e14b12b2dc5bcd5a3854cfe9bc4952383c2e586fad73db697f341",
+      "running": true,
+      "restart_count": 0
+    },
+    {
+      "name": "qy-newcrawler-fresh-worker-channel-36",
+      "image": "qy-allpachong/qybullmq:migration-terminal-20260921-69b717c",
+      "image_id": "sha256:8fbdca8e659e14b12b2dc5bcd5a3854cfe9bc4952383c2e586fad73db697f341",
+      "running": true,
+      "restart_count": 0
+    },
+    {
+      "name": "qy-newcrawler-fresh-worker-channel-37",
+      "image": "qy-allpachong/qybullmq:migration-terminal-20260921-69b717c",
+      "image_id": "sha256:8fbdca8e659e14b12b2dc5bcd5a3854cfe9bc4952383c2e586fad73db697f341",
+      "running": true,
+      "restart_count": 0
+    },
+    {
+      "name": "qy-newcrawler-fresh-worker-channel-38",
+      "image": "qy-allpachong/qybullmq:migration-terminal-20260921-69b717c",
+      "image_id": "sha256:8fbdca8e659e14b12b2dc5bcd5a3854cfe9bc4952383c2e586fad73db697f341",
+      "running": true,
+      "restart_count": 0
+    },
+    {
+      "name": "qy-newcrawler-fresh-worker-channel-39",
+      "image": "qy-allpachong/qybullmq:migration-terminal-20260921-69b717c",
+      "image_id": "sha256:8fbdca8e659e14b12b2dc5bcd5a3854cfe9bc4952383c2e586fad73db697f341",
+      "running": true,
+      "restart_count": 0
+    },
+    {
+      "name": "qy-newcrawler-fresh-worker-channel-40",
+      "image": "qy-allpachong/qybullmq:migration-terminal-20260921-69b717c",
+      "image_id": "sha256:8fbdca8e659e14b12b2dc5bcd5a3854cfe9bc4952383c2e586fad73db697f341",
+      "running": true,
+      "restart_count": 0
+    },
+    {
+      "name": "qy-newcrawler-fresh-controller-fullcrawl-canary-1",
+      "image": "qy-allpachong/qybullmq:migration-terminal-20260921-ec3aeb0-v2",
+      "image_id": "sha256:1dafa0a3ee79eec109fff8eb6d6b2efcb65dcc272477c322e386ff24e164a252",
+      "running": true,
+      "restart_count": 0
+    }
+  ],
+  "isolated_build": true,
+  "tests": {
+    "worker_lifecycle": 11,
+    "batch_control": 4,
+    "batch_completion": 8,
+    "postgres_settlement_and_completion": 1,
+    "postgres_api_requests": 1,
+    "all_passed": true,
+    "api_failure_reproduced_before_fix": true,
+    "completion_constraint_failure_reproduced_before_fix": true
+  },
+  "repair_counts": {
+    "run_evidence_backfilled": 5,
+    "stale_candidate_fences_cleared": 22,
+    "permanent_agent_failure_runs_settled": 10,
+    "snapshot_jobs_resumed": 6,
+    "exhausted_api_requests_automatically_failed": 6
+  }
+}

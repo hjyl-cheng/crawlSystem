@@ -84,6 +84,23 @@ test("shared API task delivery, batching, replay and bounded failures in Postgre
   assert.equal((await query("SELECT attempts FROM crawler.youtube_api_tasks WHERE source_content_id='failed-video'")).rows[0].attempts, 3);
   await assert.rejects(waitForVideoApiDetail(query, "failed2"), { code: "VIDEO_API_FALLBACK_UNRESOLVED" });
 
+  // A failed batch can return Tasks to pending after spending the attempt budget.
+  // Such requests must stop blocking their snapshot continuation forever.
+  for (const [id, attempts] of [["pending-exhausted", 3], ["pending-retryable", 2], ["pending-owned", 3]]) {
+    const request = await subscribe(id, id);
+    await query("UPDATE crawler.youtube_api_tasks SET status='pending',attempts=$2,next_retry_at=now()+interval '1 day',error_message='batch persistence failed' WHERE task_id=$1", [request.task_id, attempts]);
+    if (id === "pending-owned") await query(`INSERT INTO crawler.youtube_api_batches(batch_id,status,task_ids,video_ids)
+      VALUES('owned-batch','running',$1::bigint[],ARRAY['pending-owned'])`, [[request.task_id]]);
+  }
+  await dispatch();
+  await assert.rejects(waitForVideoApiDetail(query, "pending-exhausted"), { code: "VIDEO_API_FALLBACK_UNRESOLVED" });
+  for (const id of ["pending-retryable", "pending-owned"]) {
+    await assert.rejects(waitForVideoApiDetail(query, id), { code: "VIDEO_API_PENDING" });
+  }
+  await query("DELETE FROM crawler.youtube_api_batches WHERE batch_id='owned-batch'");
+  await query("DELETE FROM crawler.youtube_api_detail_requests WHERE request_id LIKE 'pending-%'");
+  await query("DELETE FROM crawler.youtube_api_tasks WHERE source_content_id LIKE 'pending-%'");
+
   const comments = await subscribe("comments1", "comment-video", "incremental", { requireComments: true });
   await transaction(client => completeVideoApiRequests(client, comments.task_id, { title: "metadata only" }, true));
   assert.equal((await query("SELECT status FROM crawler.youtube_api_detail_requests WHERE request_id='comments1'")).rows[0].status, "pending");
@@ -99,6 +116,20 @@ test("shared API task delivery, batching, replay and bounded failures in Postgre
   assert.equal(quota.deferred, true);
   assert.equal((await query("SELECT attempts FROM crawler.youtube_api_tasks WHERE task_id=$1", [quotaRequest.task_id])).rows[0].attempts, 0);
   await assert.rejects(waitForVideoApiDetail(query, "quota1"), { code: "VIDEO_API_PENDING" });
+
+  // Simulate the next quota window without waiting a day or changing the
+  // request identity. The delayed shared task must resume, not start over.
+  await query("UPDATE crawler.youtube_api_daily_usage SET request_count=0");
+  await query("UPDATE crawler.youtube_api_tasks SET next_retry_at=now()-interval '1 second' WHERE task_id=$1", [quotaRequest.task_id]);
+  await dispatch();
+  const resumedQuotaJob = [...jobs.values()].find(job => job !== quotaJob && job.data.video_ids.includes("quota-video"));
+  assert.ok(resumedQuotaJob);
+  assert.equal((await processDataApiBatchV2(resumedQuotaJob, {fetchDetails: async () => ({
+    detailsById: new Map([["quota-video", {title: "quota recovered", privacy_status: "public", comments_disabled: true}]]),
+    raw: {items: []}, returnedCount: 1,
+  })})).ok, true);
+  assert.equal((await waitForVideoApiDetail(query, "quota1")).title, "quota recovered");
+  assert.equal((await subscribe("quota1", "quota-video")).task_id, quotaRequest.task_id);
 
   // A shorter dispatcher period must not increase the total queued/running
   // batch budget. A running batch still consumes it after leaving queued.

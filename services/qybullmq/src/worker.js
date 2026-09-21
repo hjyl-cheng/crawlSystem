@@ -28,6 +28,7 @@ import {
   describeChannelCandidateWorkerFailure,
   failChannelCandidateWorkerJob,
   runChannelCandidateWorkerJobWithDurableSettlement,
+  terminalChannelRunFailureEvidence,
 } from "./channelCandidateWorkerLifecycle.js";
 import { activeChannelCandidateAttemptFence } from "./channelCandidateAttemptFence.js";
 import { settleTerminalDataApiBatchJob } from "./dataApiBatchJobRecovery.js";
@@ -1957,7 +1958,12 @@ async function startWorkerRuntime() {
             [
               String(job.data.run_id),
               message,
-              JSON.stringify(parserDetails ? { parser_contract_error: parserDetails } : {}),
+              JSON.stringify(terminalChannelRunFailureEvidence({
+                message,
+                parserDetails,
+                failureDecision,
+                permanentFailure,
+              }, { attemptsMade, maxAttempts })),
             ],
           );
         }

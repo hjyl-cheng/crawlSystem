@@ -38,6 +38,25 @@ function terminalFailure({
     || attemptsMade >= maxAttempts);
 }
 
+export function terminalChannelRunFailureEvidence(failure, {
+  attemptsMade,
+  maxAttempts,
+} = {}) {
+  if (failure?.parserDetails) {
+    return { parser_contract_error: failure.parserDetails };
+  }
+  return {
+    channel_run_terminal_failure: {
+      failure_kind: String(failure?.failureDecision?.kind ?? "unknown"),
+      retry_mode: String(failure?.failureDecision?.retry_mode ?? "unknown"),
+      attempts_made: Number(attemptsMade) || 0,
+      max_attempts: Number(maxAttempts) || 0,
+      permanent_failure: Boolean(failure?.permanentFailure),
+      error_message: String(failure?.message ?? "").slice(0, 2000),
+    },
+  };
+}
+
 export function describeChannelCandidateWorkerFailure(error) {
   const systemFailureDecision = retryableSystemFailureDecision(error);
   const systemFailure = systemFailureDecision?.evidence ?? null;
@@ -248,6 +267,10 @@ export async function failChannelCandidateWorkerJob({
       : 0;
     let runFailureCount = 0;
     if (shouldFailRun && ownsSettledCandidate) {
+      const runFailureEvidence = terminalChannelRunFailureEvidence(failure, {
+        attemptsMade,
+        maxAttempts,
+      });
       const failedRun = await transactionQuery(
         `UPDATE crawler.channel_runs
          SET status='failed',detail_status='failed',error_message=$2,
@@ -257,9 +280,7 @@ export async function failChannelCandidateWorkerJob({
         [
           String(job.data.run_id),
           failure.message,
-          JSON.stringify(failure.parserDetails
-            ? { parser_contract_error: failure.parserDetails }
-            : {}),
+          JSON.stringify(runFailureEvidence),
           Number(job.data.candidate_id),
         ],
       );

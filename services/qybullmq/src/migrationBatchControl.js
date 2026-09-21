@@ -352,26 +352,48 @@ export async function maintainMigrationControl({
     SELECT i.channel_id,CASE
       WHEN cc.status='rejected' THEN 'rejected'
       WHEN cc.status='existing' THEN 'existing'
-      WHEN manual.pending AND cc.status IN ('failed','accepted') THEN 'failed'
+      WHEN (manual.pending OR manual.terminal) AND cc.status IN ('failed','accepted') THEN 'failed'
       WHEN cc.status='failed' AND (cc.snapshot_attempts>=$2 OR cc.snapshot_json ? 'parser_contract_error') THEN 'failed'
-      WHEN r.status='failed' AND (r.result_json ? 'content_detail_recovery_terminal' OR r.result_json ? 'parser_contract_error') THEN 'failed'
+      WHEN r.status='failed' AND (
+        r.result_json ? 'content_detail_recovery_terminal'
+        OR r.result_json ? 'parser_contract_error'
+        OR r.result_json ? 'channel_run_terminal_failure'
+        OR (r.result_json->'proxy_control'->>'status')='business_run_budget_exhausted'
+        OR r.result_json ? 'terminal_channel'
+      ) THEN 'failed'
       WHEN cc.status='accepted' AND r.status='done' AND r.publication_finalized_status='ready_auto' THEN 'success'
       WHEN cc.status='accepted' AND r.status='done' AND r.publication_finalized_status='ready_partial' THEN 'dormant'
     END AS outcome
     FROM started i JOIN crawler.channel_candidates cc ON cc.candidate_id=i.candidate_id
     LEFT JOIN LATERAL(SELECT status,publication_finalized_status,result_json FROM crawler.channel_runs WHERE candidate_id=cc.candidate_id ORDER BY created_at DESC LIMIT 1) r ON true
-    LEFT JOIN LATERAL(SELECT EXISTS(
-      SELECT 1 FROM crawler.migration_system_retry_items retry WHERE retry.candidate_id=cc.candidate_id
-       AND retry.failed_dispatch_batch_id=i.batch_id AND retry.status='pending'
-       AND retry.failed_dispatch_generation=cc.snapshot_dispatch_generation
-       AND (retry.failed_job_id=cc.snapshot_active_job_id AND retry.failed_job_attempt=cc.snapshot_active_job_attempt
-         OR (cc.status='accepted' AND cc.snapshot_active_job_id IS NULL AND cc.snapshot_active_job_attempt IS NULL
-           AND cc.dispatch_batch_id=i.batch_id
-           AND cc.snapshot_json->>'failure_type'='retryable_system_failure'
-           AND cc.snapshot_json->>'failed_dispatch_batch_id'=i.batch_id
-           AND cc.snapshot_json#>>'{system_failure,code}'=retry.failure_code
-           AND r.result_json->>'job_id'=retry.failed_job_id))
-    ) AS pending) manual ON true
+    LEFT JOIN LATERAL(
+      SELECT
+        EXISTS(
+          SELECT 1 FROM crawler.migration_system_retry_items retry WHERE retry.candidate_id=cc.candidate_id
+           AND retry.failed_dispatch_batch_id=i.batch_id AND retry.status='pending'
+           AND retry.failed_dispatch_generation=cc.snapshot_dispatch_generation
+           AND (retry.failed_job_id=cc.snapshot_active_job_id AND retry.failed_job_attempt=cc.snapshot_active_job_attempt
+             OR (cc.status='accepted' AND cc.snapshot_active_job_id IS NULL AND cc.snapshot_active_job_attempt IS NULL
+               AND cc.dispatch_batch_id=i.batch_id
+               AND cc.snapshot_json->>'failure_type'='retryable_system_failure'
+               AND cc.snapshot_json->>'failed_dispatch_batch_id'=i.batch_id
+               AND cc.snapshot_json#>>'{system_failure,code}'=retry.failure_code
+               AND r.result_json->>'job_id'=retry.failed_job_id))
+        ) AS pending,
+        EXISTS(
+          SELECT 1 FROM crawler.migration_system_retry_items retry WHERE retry.candidate_id=cc.candidate_id
+           AND retry.failed_dispatch_batch_id=i.batch_id
+           AND retry.failed_dispatch_generation=cc.snapshot_dispatch_generation
+           AND retry.status='resolved'
+           AND r.status='failed'
+           AND retry.failed_job_id=r.result_json->>'job_id'
+           AND retry.resolution IN (
+             'retry_job_terminal_business_failure',
+             'retry_job_terminal_business_run_budget_exhausted',
+             'recovery_terminal_business_outcome'
+           )
+        ) AS terminal
+    ) manual ON true
     WHERE (cc.snapshot_active_job_id IS NULL OR manual.pending)
       AND NOT EXISTS(SELECT 1 FROM crawler.migration_system_retry_items retry WHERE retry.candidate_id=cc.candidate_id AND retry.status IN ('retrying','dispatched'))
    ) UPDATE crawler.migration_control_items i SET state='terminal',outcome=s.outcome,finished_at=now()
@@ -420,8 +442,20 @@ export async function maintainMigrationControl({
       );
       if (["ended", "completed"].includes(next)) {
         await c.query(
-          `UPDATE crawler.query_dispatch_batches SET status='completed',finished_at=now(),updated_at=now(),
-     total_channel_count=$3,failed_channel_count=$4,result_json=result_json||jsonb_build_object('controlled_batch_status',$2::text,'planned_total',$3::int) WHERE dispatch_batch_id=$1`,
+          `WITH candidate_stats AS (
+       SELECT count(*)::int AS total,
+         count(*) FILTER(WHERE status='accepted')::int AS accepted,
+         count(*) FILTER(WHERE status='rejected')::int AS rejected,
+         count(*) FILTER(WHERE status='failed')::int AS failed
+       FROM crawler.channel_candidates WHERE dispatch_batch_id=$1
+     ) UPDATE crawler.query_dispatch_batches batch
+     SET status='completed',finished_at=now(),updated_at=now(),
+       total_channel_count=candidate_stats.total,discovered_candidate_count=candidate_stats.total,
+       accepted_channel_count=candidate_stats.accepted,rejected_channel_count=candidate_stats.rejected,
+       failed_channel_count=candidate_stats.failed,
+       result_json=result_json||jsonb_build_object('controlled_batch_status',$2::text,
+         'planned_total',$3::int,'terminal_failed_count',$4::int)
+     FROM candidate_stats WHERE batch.dispatch_batch_id=$1`,
           [id, next, b.total_count, stats.failed],
         );
         await c.query(
