@@ -20,7 +20,7 @@ export function serverNodesRoutes({ store, layout, onboarding = null, runtime = 
   router.get("/assets/node-worker-types.js", (_req, res) => res.sendFile(fileURLToPath(new URL("./nodeWorkerTypes.js", import.meta.url))));
   router.get("/assets/server-nodes.css", (_req, res) => res.sendFile(fileURLToPath(new URL("./serverNodes.css", import.meta.url))));
   router.get("/api/server-nodes", async (_req, res, next) => {
-    try { const registry=await store.load();res.set("Cache-Control", "no-store").json({ ...registry,nodes:localNode?[localNode,...registry.nodes]:registry.nodes, capabilities: { onboarding: !!onboarding, runtime: !!runtime, workerDeployment: !!workerDeployment, workerRemoval: !!workerRemoval } }); }
+    try { const registry=await store.load();res.set("Cache-Control", "no-store").json({ ...registry,nodes:localNode?[localNode,...registry.nodes]:registry.nodes, capabilities: { onboarding: !!onboarding, runtime: !!runtime, workerDeployment: !!workerDeployment, ...(workerDeployment && deploymentEnvironment.SERVER_NODE_FULL_CRAWL_DEPLOYMENT_ENABLED==='true' && deploymentEnvironment.SERVER_NODE_FULL_CRAWL_IMAGE ? {fullCrawlDeployment:true}:{}), workerRemoval: !!workerRemoval } }); }
     catch (error) { next(error); }
   });
   const save = async (req, res, next) => {

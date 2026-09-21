@@ -33,7 +33,7 @@ export function createNodeWorkerRemoval({store,center,ssh,waitMs=60000,pollMs=50
   return {
     async start({id,version,slot,password=''}){
       validateBootstrapPassword(password);
-      if(!/^incremental-[1-9][0-9]*$/.test(slot??''))throw Object.assign(Error('Worker 编号无效'),{statusCode:400});
+      if(!/^(?:incremental|full-crawl)-[1-9][0-9]*$/.test(slot??''))throw Object.assign(Error('Worker 编号无效'),{statusCode:400});
       if(active.has(id))throw Object.assign(Error('该节点正在删除 Worker'),{statusCode:409});
       const updated=await store.beginWorkerRemoval({id,version,slot,operationId:randomUUID()});
       const task=execute(updated.nodes.find(n=>n.id===id),password);active.set(id,task);void task.catch(()=>{});

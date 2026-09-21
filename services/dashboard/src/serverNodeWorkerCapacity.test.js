@@ -27,8 +27,8 @@ with tempfile.TemporaryDirectory(prefix='worker-memory-test-') as directory:
             assert expected=='rejected' and str(error)=='NODE_DEPLOYMENT_INSUFFICIENT_MEMORY',str(error)
             writes.assert_not_called()
 `;
-  for(const count of [20,23,24,32,50,150]){
-    const plan=buildNodeCollectDeployment({node:{...node,workers:[{role:'incremental',count}]},image:'registry.example/worker@sha256:'+'a'.repeat(64),gatewayUrl:'https://center.example',natsUrl:'wss://messages.example/node-messages'});
+  for(const role of ['incremental','fullcrawl'])for(const count of [20,23,24,32,50,150]){
+    const plan=buildNodeCollectDeployment({node:{...node,workers:[{role,count}]},image:'registry.example/worker@sha256:'+'a'.repeat(64),gatewayUrl:'https://center.example',natsUrl:'wss://messages.example/node-messages'});
     assert.ok(Object.values(plan.compose.services).every(service=>service.mem_limit==='768m'),'container protection limit must remain unchanged');
     const result=spawnSync('python3',['-c',script,fileURLToPath(new URL('./nodeRuntime/deployWorkers.py',import.meta.url)),'accepted'],{input:JSON.stringify(plan),encoding:'utf8',timeout:10000});
     assert.equal(result.status,0,JSON.stringify({stderr:result.stderr,error:result.error?.message,signal:result.signal}));

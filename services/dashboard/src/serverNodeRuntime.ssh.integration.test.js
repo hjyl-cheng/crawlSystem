@@ -10,6 +10,8 @@ import { createNodeSsh } from './serverNodeSsh.js';
 // Only point this at test-fixtures/node-runtime, bound on loopback. No real
 // Docker daemon/socket or package manager is used by that SSH container.
 const port = Number(process.env.NODE_RUNTIME_TEST_SSH_PORT);
+const role=process.env.NODE_RUNTIME_TEST_ROLE==='fullcrawl'?'fullcrawl':'incremental';
+const prefix=role==='fullcrawl'?'full-crawl':'incremental';
 const quote = value => "'" + value.replaceAll("'", "'\\''") + "'";
 test('runtime script over real SSH, key login, SFTP and sudo in disposable fixture', { skip: !port }, async t => {
   assert.ok(Number.isInteger(port) && port > 1024 && port < 65536);
@@ -33,7 +35,7 @@ test('runtime script over real SSH, key login, SFTP and sudo in disposable fixtu
   });
   // Confirm the fixture identity before any mutation or script upload.
   assert.equal(await exec('cat /test-state/fixture-only'), 'qy-node-runtime-fixture-v1');
-  const root = command => exec(`sudo -S -p '' sh -c ${quote(command)}`, `${password}\n`);
+  const root = command => exec(`sudo -S -p '' sh -c ${quote(command.replaceAll('incremental-',prefix+'-'))}`, `${password}\n`);
   await ssh.verify(connection, password);
   await ssh.installKey(connection);
   ssh.close(connection);
@@ -99,20 +101,20 @@ test('runtime script over real SSH, key login, SFTP and sudo in disposable fixtu
     assert.equal(await root('cat /var/lib/qy-node/runtime/spool/retained-result'), 'existing-result');
   });
   const deploymentId=randomUUID();
-  const plan=count=>buildNodeCollectDeployment({node:{...node,kind:'execution',provisioning:{state:'ready'},runtime:{state:'ready'},workers:[{role:'incremental',count}]},
+  const plan=count=>buildNodeCollectDeployment({node:{...node,kind:'execution',provisioning:{state:'ready'},runtime:{state:'ready'},workers:[{role,count}]},
     image:'fixture.example/collect@sha256:'+'a'.repeat(64),gatewayUrl:'https://fixture.example',natsUrl:'wss://fixture.example/node-messages',deploymentId});
   const credentials={nodeId:node.id,deploymentId,nodeToken:randomBytes(32).toString('hex'),
     publicKey:generateKeyPairSync('ed25519').publicKey.export({type:'spki',format:'pem'}),
-    relayTokens:{'incremental-1':randomBytes(32).toString('hex'),'incremental-2':randomBytes(32).toString('hex')}};
+    relayTokens:{[`${prefix}-1`]:randomBytes(32).toString('hex'),[`${prefix}-2`]:randomBytes(32).toString('hex')}};
   const deploy=async recipe=>{
     const steps=[];await ssh.deployWorkers(connection,node,recipe,credentials,password,async step=>steps.push('start:'+step),async step=>steps.push('done:'+step));return steps;
   };
   const deploymentRoot='/etc/qy-node/runtime/deployments/'+deploymentId;
   await t.test('fixed installer deploys collecting containers and keeps secrets private',async()=>{
-    assert.deepEqual(await deploy(plan(1)),['start:files','done:files','start:start','done:start','start:verify','done:verify']);
+    assert.deepEqual(await deploy(plan(1)),['start:files','done:files','start:pull','done:pull','start:start','done:start','start:verify','done:verify']);
     assert.equal(await root(`stat -c '%a:%u' ${quote(deploymentRoot+'/node-token')}`),'600:1000');
     assert.equal(await root("stat -c '%a:%u' /var/lib/qy-node/spool/incremental-1"),'700:1000');
-    assert.equal(await root('cat '+quote(deploymentRoot+'/incremental-1.json')),plan(1).files['incremental-1.json'].trim());
+    assert.equal(await root('cat '+quote(deploymentRoot+'/incremental-1.json')),plan(1).files[`${prefix}-1.json`].trim());
     const commands=await root('cat /test-state/commands');
     assert.match(commands,/up -d --no-recreate --pull never/);
     assert.ok(!commands.includes(credentials.nodeToken));
@@ -136,7 +138,7 @@ test('runtime script over real SSH, key login, SFTP and sudo in disposable fixtu
     await root('printf retained > /var/lib/qy-node/spool/incremental-1/result');
     await deploy(plan(1));await deploy(plan(2));
     assert.equal(await root('cat /var/lib/qy-node/spool/incremental-1/result'),'retained');
-    assert.equal(await root('cat '+quote(deploymentRoot+'/incremental-1.json')),plan(1).files['incremental-1.json'].trim());
+    assert.equal(await root('cat '+quote(deploymentRoot+'/incremental-1.json')),plan(1).files[`${prefix}-1.json`].trim());
     await root('touch /test-state/fail-pull');
     await assert.rejects(deploy(plan(2)));
     await root('rm /test-state/fail-pull');await deploy(plan(2));
@@ -146,7 +148,7 @@ test('runtime script over real SSH, key login, SFTP and sudo in disposable fixtu
   await t.test('wrong identity, altered config and hostile volume are rejected before Docker start',async()=>{
     const original=credentials.nodeToken;credentials.nodeToken='c'.repeat(64);
     await assert.rejects(deploy(plan(2)));credentials.nodeToken=original;
-    const bad=plan(2);bad.compose.services['incremental-1'].volumes[0].source='/etc/shadow';
+    const bad=plan(2);bad.compose.services[`${prefix}-1`].volumes[0].source='/etc/shadow';
     await assert.rejects(deploy(bad));
     await root('printf wrong-node > /etc/qy-node/runtime/node-id');
     await assert.rejects(deploy(plan(2)));

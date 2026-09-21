@@ -69,10 +69,10 @@ test('full crawl registration cannot deploy incremental containers through new o
   for (const args of [{ count: 1 }, { additionalCount: 1, role: 'incremental', expectedInstalledCount: 0 },
     { additionalCount: 1, role: 'fullcrawl', expectedInstalledCount: 0 }]) {
     await assert.rejects(deployment.start({ id: node.id, version: 0, ...args }),
-      error => error.statusCode === 409 && error.message.includes('远程部署暂未开放'));
+      error => error.statusCode === 409 && error.message.includes('全量节点部署尚未开放'));
   }
   assert.equal((await store.load()).version, 0);
-  assert.throws(() => buildNodeCollectDeployment({ node: { ...node, workers: [{ role: 'incremental', count: 1 }] } }), { statusCode: 409 });
+  assert.throws(() => buildNodeCollectDeployment({ node: { ...node, workers: [{ role: 'incremental', count: 1 }] } }));
   await assert.rejects(store.beginWorkerDeployment({ id: node.id, version: 0, operationId: 'attempt', plan: {}, count: 1 }), { statusCode: 409 });
 });
 

@@ -1,20 +1,21 @@
 import {plannedWorkerSlots} from './workerSlots.js';
 import { randomUUID, createHash } from 'node:crypto';
-import { assertNodeWorkerDeployment } from '../nodeWorkerTypes.js';
+import { assertNodeWorkerDeployment, nodeWorkerRole } from '../nodeWorkerTypes.js';
 
 // A reviewable deployment recipe. Producing it performs no SSH, registration,
 // Docker or queue operations. Secrets are referenced as files, never embedded.
-export function buildNodeConnectionDeployment({ node, gatewayUrl, image, deploymentId = randomUUID() }) {
-  assertNodeWorkerDeployment(node, 'incremental');
+export function buildNodeConnectionDeployment({ node, gatewayUrl, image, deploymentId = randomUUID(), collecting = false }) {
+  const role=nodeWorkerRole(node);
+  assertNodeWorkerDeployment(node, collecting?role:'incremental');
   if (node.kind !== 'execution' || node.provisioning?.state !== 'ready' || node.runtime?.state !== 'ready') throw new Error('请先完成节点初始化和运行环境准备');
   if (!/^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(node.id) || !/^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(deploymentId)) throw new Error('节点或部署标识无效');
   const url = new URL(gatewayUrl);
   if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash) throw new Error('中心接入地址必须使用 HTTPS');
   if (typeof image !== 'string' || !/^[a-z0-9][a-z0-9./:_-]*@sha256:[a-f0-9]{64}$/.test(image)) throw new Error('节点接入镜像必须固定到 SHA256 摘要');
   const workers = node.workers ?? [];
-  if (workers.some(worker => worker.role !== 'incremental' && worker.count > 0)) throw new Error('当前接入包只支持增量节点，其他 Worker 计划请保留到对应入口接通后部署');
-  const count = workers.find(worker => worker.role === 'incremental')?.count ?? 0;
-  if (!Number.isSafeInteger(count) || count < 1) throw new Error('请先保存增量 Worker 数量（正整数）');
+  if (workers.some(worker => worker.role !== role && worker.count > 0)) throw new Error('Worker 计划与服务器功能类型不一致');
+  const count = workers.find(worker => worker.role === role)?.count ?? 0;
+  if (!Number.isSafeInteger(count) || count < 1) throw new Error('请先保存 Worker 数量（正整数）');
   // Every service/config exceeds this lower bound. Reject an impossible
   // installer payload before allocating its arrays; the existing wire limit
   // remains 1 MiB, independent of a per-node Worker limit.
@@ -23,10 +24,10 @@ export function buildNodeConnectionDeployment({ node, gatewayUrl, image, deploym
   const services = {}; const files = {}; const registrations = [];
   const {slots,allocationSlots,slotSequence}=plannedWorkerSlots(node,count);
   for (const slot of slots) {
-    const config = { version: 1, mode: 'connect_only', role: 'incremental', node_id: node.id, slot, deployment_id: deploymentId, gateway_url: url.href.replace(/\/$/, '') };
+    const config = { version: 1, mode: 'connect_only', role, node_id: node.id, slot, deployment_id: deploymentId, gateway_url: url.href.replace(/\/$/, '') };
     const bytes = JSON.stringify(config) + '\n';
     files[`${slot}.json`] = bytes;
-    registrations.push({ nodeId: node.id, slot, deploymentId, role: 'incremental', configHash: createHash('sha256').update(bytes).digest('hex') });
+    registrations.push({ nodeId: node.id, slot, deploymentId, role, configHash: createHash('sha256').update(bytes).digest('hex') });
     services[slot] = { image, init: true, restart: 'unless-stopped', healthcheck: { disable: true }, user: '1000:1000', read_only: true,
       cap_drop: ['ALL'], security_opt: ['no-new-privileges:true'], pids_limit: 64, mem_limit: '256m', cpus: 0.5,
       stop_grace_period: '25s', tmpfs: ['/tmp:rw,noexec,nosuid,size=16m,uid=1000,gid=1000', '/run/qy-node:rw,noexec,nosuid,size=1m,uid=1000,gid=1000'],

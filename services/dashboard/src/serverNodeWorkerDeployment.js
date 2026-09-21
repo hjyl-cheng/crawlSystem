@@ -4,9 +4,9 @@ import {createNodeSsh,validateBootstrapPassword} from './serverNodeSsh.js';
 import {buildNodeCollectDeployment} from './nodeRuntime/collectDeployment.js';
 import {deploymentControlFromEnv} from './nodeRuntime/deploymentControlClient.js';
 import {registryCredentialsFromEnv} from './nodeRuntime/registryCredentials.js';
-import {assertNodeWorkerDeployment,nodeWorkerTypes} from './nodeWorkerTypes.js';
+import {assertNodeWorkerDeployment,nodeWorkerTypes,nodeWorkerRole} from './nodeWorkerTypes.js';
 
-export function createNodeWorkerDeployment({store,ssh,center,image,gatewayUrl,natsUrl,waitMs=60000,pollMs=1000,registryCredentials=async()=>null}){
+export function createNodeWorkerDeployment({store,ssh,center,image,fullCrawlImage=null,fullCrawlDeploymentEnabled=false,gatewayUrl,natsUrl,waitMs=60000,pollMs=1000,registryCredentials=async()=>null}){
   const active=new Map();
   async function execute(node,operationId,plan,password){
     let connection;let step='ssh';
@@ -53,6 +53,8 @@ export function createNodeWorkerDeployment({store,ssh,center,image,gatewayUrl,na
       const registry=await store.load();const node=registry.nodes.find(row=>row.id===id);
       if(!node)throw Object.assign(new Error('服务器不存在'),{statusCode:404});
       assertNodeWorkerDeployment(node);
+      const workerRole=nodeWorkerRole(node);
+      if(workerRole==='fullcrawl'&&(!fullCrawlDeploymentEnabled||!fullCrawlImage))throw Object.assign(new Error('全量节点部署尚未开放'),{statusCode:409});
       if(additionalCount!==undefined){
         if(count!==undefined || !Number.isSafeInteger(additionalCount)||additionalCount<1)throw invalid('新增数量必须为正整数，且不能同时填写总数');
         if(typeof role!=='string'||!Object.hasOwn(nodeWorkerTypes,role))throw invalid('请选择有效的 Worker 功能类型');
@@ -62,7 +64,7 @@ export function createNodeWorkerDeployment({store,ssh,center,image,gatewayUrl,na
         count=installed+additionalCount;
         if(!Number.isSafeInteger(count))throw invalid('新增后的部署总数无效');
       }else if(role!==undefined||expectedInstalledCount!==undefined)throw invalid('请同时填写新增数量');
-      const plan=buildNodeCollectDeployment({node:count===undefined?node:{...node,workers:[{role:'incremental',count}]},image,gatewayUrl,natsUrl,...(node.deployment?.deploymentId?{deploymentId:node.deployment.deploymentId}:{})});
+      const plan=buildNodeCollectDeployment({node:count===undefined?node:{...node,workers:[{role:workerRole,count}]},image:workerRole==='fullcrawl'?fullCrawlImage:image,gatewayUrl,natsUrl,...(node.deployment?.deploymentId?{deploymentId:node.deployment.deploymentId}:{})});
       // Older pages may still send syncIntake. Deployment never changes intake:
       // enabling workers must go through the explicit execution-control action.
       syncIntake=false;
@@ -76,6 +78,6 @@ export function createNodeWorkerDeployment({store,ssh,center,image,gatewayUrl,na
 export function workerDeploymentFromEnv(store,env=process.env){
   const center=deploymentControlFromEnv(env);
   return center && env.SERVER_NODE_STATE_DIR && env.SERVER_NODE_COLLECT_IMAGE && env.SERVER_NODE_GATEWAY_URL && env.SERVER_NODE_NATS_URL
-    ?createNodeWorkerDeployment({store,center,image:env.SERVER_NODE_COLLECT_IMAGE,gatewayUrl:env.SERVER_NODE_GATEWAY_URL,natsUrl:env.SERVER_NODE_NATS_URL,
+    ?createNodeWorkerDeployment({store,center,image:env.SERVER_NODE_COLLECT_IMAGE,fullCrawlImage:env.SERVER_NODE_FULL_CRAWL_IMAGE,fullCrawlDeploymentEnabled:env.SERVER_NODE_FULL_CRAWL_DEPLOYMENT_ENABLED==='true',gatewayUrl:env.SERVER_NODE_GATEWAY_URL,natsUrl:env.SERVER_NODE_NATS_URL,
       registryCredentials:registryCredentialsFromEnv(env),ssh:createNodeSsh({stateDir:env.SERVER_NODE_STATE_DIR})}):null;
 }

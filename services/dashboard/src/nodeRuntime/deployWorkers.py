@@ -81,16 +81,19 @@ def deploy(bundle_file, step):
     node, deployment = plan['nodeId'], plan['deploymentId']
     require(re.fullmatch(r'[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}', node))
     require(re.fullmatch(r'[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}', deployment))
-    require(plan['mode'] == 'incremental_collect' and type(plan['count']) is int and plan['count'] >= 1)
+    require(plan['mode'] in ['incremental_collect', 'full_crawl_collect'] and type(plan['count']) is int and plan['count'] >= 1)
+    full = plan['mode'] == 'full_crawl_collect'
+    role, prefix = ('fullcrawl', 'full-crawl') if full else ('incremental', 'incremental')
+    require(not full or (plan.get('natsUrl') and not plan.get('wholeChannel')))
     require(type(plan.get('wholeChannel', False)) is bool)
     require(not plan.get('wholeChannel') or plan.get('natsUrl'))
     require(re.fullmatch(r'[a-z0-9][a-z0-9./:_-]*@sha256:[a-f0-9]{64}', plan['image']))
     require(credentials['nodeId'] == node and credentials['deploymentId'] == deployment)
     root = Path('/etc/qy-node/runtime/deployments') / deployment
     project = 'qy-node-' + node.replace('-', '')[:16]
-    slots = plan.get('slots', [f'incremental-{i}' for i in range(1, plan['count'] + 1)])
+    slots = plan.get('slots', [f'{prefix}-{i}' for i in range(1, plan['count'] + 1)])
     require(len(slots) == plan['count'] and len(set(slots)) == len(slots)
-            and all(re.fullmatch(r'incremental-[1-9][0-9]*', slot) for slot in slots))
+            and all(re.fullmatch(prefix + r'-[1-9][0-9]*', slot) for slot in slots))
     compose = plan['compose']
     require(compose['name'] == project and set(compose) == {'name', 'services'} and set(compose['services']) == set(slots))
     for slot, service in compose['services'].items():
@@ -107,17 +110,17 @@ def deploy(bundle_file, step):
                 expected_env['REMOTE_NODE_WHOLE_CHANNEL'] = 'true'
             require(service.get('environment') == expected_env)
         require(service['mem_limit'] == '768m' and service['cpus'] == 0.5 and service['pids_limit'] == 128)
-        require(service['labels'] == {'qy.node.id':node,'qy.node.slot':slot,'qy.deployment.id':deployment,'qy.remote.mode':'incremental_collect'})
+        require(service['labels'] == {'qy.node.id':node,'qy.node.slot':slot,'qy.deployment.id':deployment,'qy.remote.mode':plan['mode']})
         expected = {('/run/secrets/node-config.json', str(root / (slot + '.json')), True),
                     ('/run/secrets/node-token', str(root / 'node-token'), True),
                     ('/run/secrets/relay-token', str(root / (slot + '.relay-token')), True),
                     ('/run/secrets/route-public.pem', str(root / 'route-public.pem'), True),
-                    ('/var/lib/qy-node/spool', '/var/lib/qy-node/spool/' + slot, False)}
+                    ('/var/lib/qy-node/full-spool' if full else '/var/lib/qy-node/spool', '/var/lib/qy-node/spool/' + slot, False)}
         require(len(service['volumes']) == len(expected))
         require({(m['target'], m['source'], m['read_only']) for m in service['volumes']} == expected)
         require(all(m['type'] == 'bind' and m['bind'] == {'create_host_path':False} for m in service['volumes']))
         config = json.loads(plan['files'][slot + '.json'])
-        require(config['node_id'] == node and config['deployment_id'] == deployment and config['slot'] == slot and config['mode'] == 'incremental_collect')
+        require(config['node_id'] == node and config['deployment_id'] == deployment and config['slot'] == slot and config['mode'] == plan['mode'] and config['role'] == role)
     require(Path('/etc/qy-node/runtime/node-id').read_text().strip() == node)
     command = ['docker','compose','-p',project,'-f',str(root / 'compose.json')]
     if step == 'files':

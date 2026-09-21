@@ -6,6 +6,8 @@ services:
     image: ${QY_REMOTE_DASHBOARD_IMAGE:-qy-allpachong/dashboard:remote-deploy-overlay-20260910}
     environment:
       SERVER_NODE_COLLECT_IMAGE: ${QY_REMOTE_COLLECT_IMAGE:?registry image digest required}
+      SERVER_NODE_FULL_CRAWL_DEPLOYMENT_ENABLED: ${QY_REMOTE_FULL_CRAWL_DEPLOYMENT_ENABLED:-false}
+      SERVER_NODE_FULL_CRAWL_IMAGE: ${QY_REMOTE_FULL_CRAWL_IMAGE:-}
       SERVER_NODE_GATEWAY_URL: https://${QY_DASHBOARD_HOST}/node-execution
       SERVER_NODE_WORKER_CONTROL_URL: https://remote-center-private:3443
       SERVER_NODE_WORKER_CONTROL_TOKEN_FILE: /run/remote-deploy/admin-token

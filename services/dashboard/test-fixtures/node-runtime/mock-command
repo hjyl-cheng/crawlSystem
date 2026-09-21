@@ -30,6 +30,8 @@ case "$name" in
       shift 2
     fi
     case "$*" in
+      'image inspect '*) exit 1 ;;
+      'pull '*) [ ! -f /test-state/fail-pull ] ;;
       'ps -aq') [ ! -f /test-state/docker-unavailable ] || exit 99; if [ -f /test-state/has-containers ]; then printf 'fixture-container\n'; fi ;;
       'ps -a --filter label=qy.node.id='*)
         if [ -f /test-state/deployed-compose.json ]; then python3 -c 'import json; print("\n".join(json.load(open("/test-state/deployed-compose.json"))["services"]))'; fi ;;

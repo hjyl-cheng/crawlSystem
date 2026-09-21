@@ -2,7 +2,7 @@
 // makes it selectable; deployment still requires its own implemented executor.
 export const nodeWorkerTypes = Object.freeze({
   incremental: Object.freeze({ label: '增量抓取', queue: 'youtube-channel-incremental', selectable: true, deployable: true }),
-  fullcrawl: Object.freeze({ label: '全量抓取', queue: 'youtube-channel-crawl', selectable: true, deployable: false }),
+  fullcrawl: Object.freeze({ label: '全量抓取', queue: 'youtube-channel-crawl', selectable: true, deployable: true }),
   discover: Object.freeze({ label: 'Query / 发现', queue: 'youtube-discover-page', selectable: false, deployable: false }),
   query_quality: Object.freeze({ label: 'Query 质量评估', queue: 'youtube-query-quality', selectable: false, deployable: false }),
 });
@@ -11,6 +11,7 @@ export function nodeWorkerRole(node) {
   if (node?.workerRole !== undefined) return node.workerRole;
   // Existing deployments use the incremental runtime. Preserve old saved plans
   // when they name a single role; empty registrations default to incremental.
+  if (node?.deployment?.mode === 'full_crawl_collect') return 'fullcrawl';
   if (node?.deployment || node?.localIntake) return 'incremental';
   return node?.workers?.length === 1 ? node.workers[0].role : 'incremental';
 }

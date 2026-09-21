@@ -291,17 +291,19 @@ export function createServerNodeStore(query) {
     return mutateNode(id,(node,registry)=>{
       if(registry.version!==version)throw invalid('配置已更新，请刷新后重试',409);
       if(node.kind!=='execution' || !nodeReady(node) || node.runtime?.state!=='ready')throw invalid('请先完成节点初始化和运行环境准备',409);
-      assertNodeWorkerDeployment(node, 'incremental');
+      assertNodeWorkerDeployment(node);
+      const role=nodeWorkerRole(node);
+      if(plan.mode!==(role==='fullcrawl'?'full_crawl_collect':'incremental_collect'))throw invalid('部署类型不匹配',409);
       const prior=node.deployment;
       if(prior?.state==='running' && (!Number.isFinite(Date.parse(prior.deadline)) || Date.parse(prior.deadline)>Date.now()))throw invalid('Worker 正在部署，请勿重复提交',409);
-      if(prior && (prior.mode!=='incremental_collect' || prior.deploymentId!==plan.deploymentId || prior.image!==plan.image
+      if(prior && (prior.mode!==plan.mode || prior.deploymentId!==plan.deploymentId || prior.image!==plan.image
         || plan.count<(prior.state==='failed'?prior.appliedCount:prior.desiredCount)))throw invalid('缩容、更换镜像或替换部署需要先完成停止派发和任务收尾，当前入口仅支持首次部署、重试及增加数量',409);
       if(count!==undefined){
         integer(count,'部署数量',1,Number.MAX_SAFE_INTEGER);
-        if(count!==plan.count || node.workers.some(w=>w.role!=='incremental'))throw invalid('当前入口仅支持增量 Worker 部署',409);
-        node.workers=[{role:'incremental',count}];
+        if(count!==plan.count || node.workers.some(w=>w.role!==role))throw invalid('部署数量或 Worker 类型不匹配',409);
+        node.workers=[{role,count}];
       }
-      if(node.workers.length!==1 || node.workers[0].role!=='incremental' || node.workers[0].count!==plan.count)throw invalid('部署方案与已保存的增量数量不匹配',409);
+      if(node.workers.length!==1 || node.workers[0].role!==role || node.workers[0].count!==plan.count)throw invalid('部署方案与已保存的 Worker 数量不匹配',409);
       const now=new Date().toISOString();
       node.deployment={state:'running',mode:plan.mode,deploymentId:plan.deploymentId,operationId,image:plan.image,
         slots:plan.slots??plan.registrations.map(r=>r.slot),allocationSlots:plan.allocationSlots??plan.slots,slotSequence:plan.slotSequence??plan.count,
@@ -344,7 +346,7 @@ export function createServerNodeStore(query) {
       const count=slots.length;
       node.deployment={...node.deployment,slots,allocationSlots:(node.deployment.allocationSlots??deploymentSlots(node.deployment)).filter(s=>s!==node.workerRemoval.slot),slotSequence:node.deployment.slotSequence??node.deployment.desiredCount,
         appliedCount:count,desiredCount:count,intakeSync:null};
-      node.workers=count?[{role:'incremental',count}]:[];
+      node.workers=count?[{role:nodeWorkerRole(node),count}]:[];
       node.workerRemoval={...node.workerRemoval,state:'completed',finishedAt:new Date().toISOString(),error:null};
       return node;
     },true);
