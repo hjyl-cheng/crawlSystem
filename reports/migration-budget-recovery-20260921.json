@@ -1,0 +1,153 @@
+{
+  "date": "2026-09-21",
+  "problem": "Migration system recovery must finish before starting another crawler Batch",
+  "cause": "Budget-exhausted failed Runs with legacy job_completed recovery records were repeatedly reopened and their completed BullMQ Jobs retried.",
+  "source_file": "services/qybullmq/src/migrationSystemRetryRecovery.js",
+  "source_sha256": "45d430877682a080372e1e98085bc5a627ddb7ad32b0cfd9749d2f7356e08996",
+  "image": "qy-allpachong/qybullmq:migration-budget-recovery-20260921",
+  "repaired_retry_ids": [
+    795109,
+    805769,
+    806775
+  ],
+  "historical_detail_fences_released": 3,
+  "manual_batch_settled": "legacy-results-manual-v2",
+  "tests": {
+    "passed": 20,
+    "failed": 0,
+    "skipped": 0,
+    "postgres_regression": true
+  },
+  "api_start_verification": {
+    "selection": 100,
+    "source_id": "qy-migration-v1",
+    "passed": true,
+    "transaction_rolled_back": true,
+    "real_batch_created": false
+  },
+  "verification": {
+    "at": "2026-09-21T07:48:53.216Z",
+    "admission": {
+      "allowed": true,
+      "code": null,
+      "active_system_retry": null
+    },
+    "scheduler": {
+      "status": "stopped",
+      "paused_at": null,
+      "started_at": "2026-09-21T06:31:45.615Z",
+      "stopped_at": "2026-09-21T07:46:51.105Z",
+      "updated_at": "2026-09-21T07:46:51.105Z",
+      "updated_by": "controller",
+      "stop_reason": "pipeline_complete",
+      "completed_at": "2026-09-21T07:46:51.105Z",
+      "batch_outcome": "completed",
+      "batch_statistics": {
+        "total": 1,
+        "failed": 0,
+        "accepted": 1,
+        "rejected": 0
+      },
+      "pipeline_cycle_id": "legacy-results-manual-v2",
+      "repair_started_at": "2026-09-07T11:24:23.540Z",
+      "parser_failure_counts": {
+        "total": 0,
+        "discover": 0,
+        "channel_run": 0,
+        "query_quality": 0,
+        "content_detail": 0,
+        "channel_snapshot": 0
+      },
+      "superseded_pipeline_cycle_id": "legacy-results-canary-1787722516493-b0c4f370"
+    },
+    "retries": [
+      {
+        "system_retry_id": "805769",
+        "status": "resolved",
+        "resolution": "recovery_business_run_budget_exhausted",
+        "recovery_run_id": "run:95aa2f34-10fe-4c19-83e1-06410b7f6312",
+        "failed_job_id": "channel-snapshot__migration-19eff406-4ec3-442e-a448-882b14caae69__UCNIZ9cD5qPU5pY-sj6ZOOXw__g2",
+        "updated_at": "2026-09-21T07:43:14.533Z"
+      },
+      {
+        "system_retry_id": "806775",
+        "status": "resolved",
+        "resolution": "recovery_business_run_budget_exhausted",
+        "recovery_run_id": "run:45daa090-0708-4ec2-a06e-a3b76dd16f9c",
+        "failed_job_id": "channel-snapshot__migration-19eff406-4ec3-442e-a448-882b14caae69__UCxw5i4xHqDeM8rOPd9qIg4w__g2",
+        "updated_at": "2026-09-21T07:43:14.565Z"
+      }
+    ],
+    "jobs": [
+      {
+        "id": "805769",
+        "state": "completed",
+        "attemptsMade": 231684
+      },
+      {
+        "id": "806775",
+        "state": "completed",
+        "attemptsMade": 216210
+      }
+    ],
+    "counts": {
+      "youtube-discover-page": {
+        "active": 0,
+        "waiting": 0,
+        "delayed": 0,
+        "paused": 0,
+        "prioritized": 0,
+        "waiting-children": 0
+      },
+      "youtube-channel-crawl": {
+        "active": 0,
+        "waiting": 0,
+        "delayed": 0,
+        "paused": 0,
+        "prioritized": 0,
+        "waiting-children": 0
+      },
+      "youtube-content-detail": {
+        "active": 0,
+        "waiting": 0,
+        "delayed": 0,
+        "paused": 0,
+        "prioritized": 0,
+        "waiting-children": 0
+      },
+      "youtube-data-api-batch": {
+        "active": 0,
+        "waiting": 0,
+        "delayed": 0,
+        "paused": 0,
+        "prioritized": 0,
+        "waiting-children": 0
+      },
+      "youtube-agent-batch": {
+        "active": 0,
+        "waiting": 0,
+        "delayed": 0,
+        "paused": 0,
+        "prioritized": 0,
+        "waiting-children": 0
+      },
+      "youtube-finalize": {
+        "active": 1,
+        "waiting": 0,
+        "delayed": 0,
+        "paused": 0,
+        "prioritized": 208,
+        "waiting-children": 0
+      }
+    }
+  },
+  "limitations": [
+    "The existing legacy pipeline completion check still considers unrelated shared queue backlog. The already-finished one-channel manual batch was verified and settled via the normal transactional completion function. Controlled batch logic is unchanged."
+  ],
+  "rollout": {
+    "scope": "one recovery module overlaid on exact production controller image",
+    "previous_controller_exit": 137,
+    "previous_container_retained": true,
+    "active_crawl_workers_restarted": false
+  }
+}

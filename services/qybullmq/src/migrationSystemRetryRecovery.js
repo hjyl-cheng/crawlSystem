@@ -841,6 +841,8 @@ export class MigrationSystemRetryRecoveryReconciler {
               channel.updated_at AS channel_updated_at,
               run.run_id,run.channel_id AS run_channel_id,run.candidate_id AS run_candidate_id,
               run.status AS run_status,run.detail_status AS run_detail_status,
+              (run.result_json->'proxy_control'->>'status'='business_run_budget_exhausted')
+                AS run_budget_exhausted,
               run.expected_content_count,run.detail_job_epoch AS run_content_detail_job_epoch,
               run.result_json->'final_repair' AS run_final_repair,
               run.result_json->'fetch_contract' AS run_fetch_contract,
@@ -932,6 +934,59 @@ export class MigrationSystemRetryRecoveryReconciler {
       this.legacyScanCursor = String(available.legacy[indexes.legacy - 1].system_retry_id);
     }
     return selected;
+  }
+
+  async resolveBudgetExhaustedOutcome(row) {
+    const generation = expectedGeneration(row);
+    if (generation == null || !text(row.run_id)) return false;
+    return this.withTransaction(async (client) => {
+      // Use the Worker lock order. Revalidate after locking: the scan may have
+      // observed a previous generation, Run, or an ownership release in flight.
+      await client.query(`SELECT candidate_id FROM crawler.channel_candidates
+        WHERE candidate_id=$1 FOR UPDATE`, [Number(row.candidate_id)]);
+      await client.query(`SELECT system_retry_id FROM crawler.migration_system_retry_items
+        WHERE system_retry_id=$1 FOR UPDATE`, [Number(row.system_retry_id)]);
+      await client.query(`SELECT run_id FROM crawler.channel_runs
+        WHERE run_id=$1 FOR UPDATE`, [row.run_id]);
+      await client.query(`SELECT channel_id FROM crawler.channels
+        WHERE channel_id=$1 FOR UPDATE`, [row.candidate_channel_id]);
+      const result = await client.query(
+        `UPDATE crawler.migration_system_retry_items retry
+         SET status='resolved',resolution='recovery_business_run_budget_exhausted',
+             recovery_run_id=run.run_id,
+             resolved_at=COALESCE(retry.resolved_at,now()),updated_at=now()
+         FROM crawler.channel_candidates candidate,crawler.channels channel,
+              crawler.channel_runs run
+         WHERE retry.system_retry_id=$1 AND retry.candidate_id=$2
+           AND (retry.status IN ('retrying','dispatched')
+                OR (retry.status='resolved' AND retry.resolution='job_completed'))
+           AND COALESCE(retry.retry_dispatch_generation,retry.failed_dispatch_generation)=$3
+           AND (retry.status<>'retrying' OR retry.retry_dispatch_generation IS NULL)
+           AND (retry.status<>'dispatched' OR retry.retry_dispatch_generation=$3)
+           AND candidate.candidate_id=retry.candidate_id
+           AND candidate.dispatch_batch_id=retry.failed_dispatch_batch_id
+           AND candidate.snapshot_dispatch_generation=$3
+           AND candidate.status='accepted'
+           AND candidate.snapshot_active_job_id IS NULL
+           AND candidate.snapshot_active_job_attempt IS NULL
+           AND channel.channel_id=candidate.channel_id AND channel.latest_run_id=run.run_id
+           AND run.run_id=$4 AND run.candidate_id=candidate.candidate_id
+           AND run.channel_id=channel.channel_id
+           AND (retry.recovery_run_id IS NULL OR retry.recovery_run_id=run.run_id)
+           AND COALESCE(run.result_json->>'dispatch_batch_id',
+                        run.result_json->>'pipeline_cycle_id')=retry.failed_dispatch_batch_id
+           AND run.status='failed' AND run.detail_status='failed'
+           AND run.finished_at IS NOT NULL
+           AND run.result_json->'proxy_control'->>'status'='business_run_budget_exhausted'
+           AND run.result_json->'proxy_control'->>'business_run_id'=run.run_id
+           AND run.detail_active_job_id IS NULL AND run.detail_active_job_attempt IS NULL
+           AND retry.recovery_agent_active_job_id IS NULL
+           AND retry.recovery_agent_active_job_attempt IS NULL
+         RETURNING retry.system_retry_id`,
+        [Number(row.system_retry_id),Number(row.candidate_id),generation,row.run_id],
+      );
+      return result.rowCount === 1;
+    });
   }
 
   async reopenLegacyJobCompletion(row) {
@@ -1490,6 +1545,22 @@ export class MigrationSystemRetryRecoveryReconciler {
     };
     const rows = await this.loadRecoveries(normalizedLimit);
     for (const row of rows) {
+      // A completed BullMQ Job is not necessarily a successful business Run.
+      // Exhausted business budgets cannot be recovered by retrying the same Job.
+      if (row.run_budget_exhausted === true && row.run_status === "failed") {
+        if (await this.resolveBudgetExhaustedOutcome(row)) {
+          resolved += 1;
+          if (row.status === "resolved") legacyNormalized += 1;
+        } else if (!exactCandidateFence(row) && row.status !== "resolved"
+            && await this.resolveSupersededActiveFence(row)) {
+          resolved += 1;
+        } else if (row.status === "resolved" && await this.normalizeLegacyStaleCompletion(row)) {
+          legacyNormalized += 1;
+        } else {
+          stale += 1;
+        }
+        continue;
+      }
       if (row.status === "resolved") {
         if (terminalBusinessOutcome(row)) {
           if (await this.resolveBusinessOutcome(row, { legacy: true })) {
