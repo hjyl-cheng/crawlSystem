@@ -24,7 +24,7 @@ const identity = row => ({version:1,mode:row.mode,node_id:row.node_id,slot:row.s
 // another center from owning the same slot. All business policy stays in the original managed attempt and runner.
 export class RemoteCenterExecutionSupervisor {
   constructor({store,channelStore,routes,youtubeSessions,activation,guardPool,connection,prefix,
-    allowedNodeIds=[],dashboardManaged=false,resolvedPolicy,profileSecret,rotaClient,proxyBaseUrl,proxyPassword,
+    allowedNodeIds=[],dashboardManaged=false,pausedWorkers=[],resolvedPolicy,profileSecret,rotaClient,proxyBaseUrl,proxyPassword,
     createApiFallback=null,wholeChannels=null,loadWholeApiPolicy=null,intervalMs=1000,maxSlots=null,guardGroups=4,report=()=>{},WorkerClass=Worker,createRota=args=>new RotaSlotAdapter(args),
     mode='incremental_collect',createRuntime=null,createProcessor=null,recoverSlot=null,settleHandoffs=null,slotUnsettled=null}) {
     const workload=collectingWorkload(mode);
@@ -38,14 +38,16 @@ export class RemoteCenterExecutionSupervisor {
     Object.assign(this,{store,channelStore,routes,youtubeSessions,activation,guardPool,connection,prefix,allowedNodeIds,dashboardManaged,
       resolvedPolicy,profileSecret,rotaClient,proxyBaseUrl,proxyPassword,createApiFallback,wholeChannels,loadWholeApiPolicy,intervalMs,maxSlots,report,WorkerClass,createRota,createRuntime,createProcessor});
     this.entries=new Map();this.stopping=false;this.loop=null;this.waitAbort=new AbortController();
+    this.pausedWorkers=new Set(pausedWorkers);
     this.guards=new SupervisionGuards({pool:guardPool,groups:guardGroups});
     this.recoveryCheckpoints=mode==='incremental_collect'&&youtubeSessions?createRemoteYoutubeCheckpointConsumer({sessions:youtubeSessions,profileSecret}):null;
   }
   allowsNode(nodeId) { return this.dashboardManaged || this.allowedNodeIds.includes(nodeId); }
+  isWorkerPaused(row) { return this.pausedWorkers?.has(key(row))===true; }
   isProcessing(row) { return this.entries.get(key(row))?.processing === true; }
   preparationState(row) {
     const entry=this.entries.get(key(row));
-    if(!row.activation_requested || !entry || entry.closing || entry.blocked)return null;
+    if(this.isWorkerPaused(row) || !row.activation_requested || !entry || entry.closing || entry.blocked)return null;
     if(!entry.rota)return 'preparing';
     const state=entry.rota.status();
     return !state.started ? 'waiting_network' : !state.assignment?.ready ? 'network_unready' : null;
@@ -81,7 +83,7 @@ export class RemoteCenterExecutionSupervisor {
     return guard.rowCount===1;
   }
   async ready(entry) {
-    if(this.stopping || entry.closing || !entry.owned || !entry.queueReady)return false;
+    if(this.stopping || this.isWorkerPaused(entry.row) || entry.closing || !entry.owned || !entry.queueReady)return false;
     const row=(await this.store.pool.query(`SELECT w.*,n.state AS node_state,
       w.connected_until>clock_timestamp() AS alive,
       COALESCE((SELECT w.slot=ANY(p.selected_slots) FROM remote_ingestion.node_intake_requests p
@@ -96,12 +98,17 @@ export class RemoteCenterExecutionSupervisor {
 
   async startEntry(row) {
     const entry={row,supervisorId:randomUUID(),owned:false,queueReady:false,closing:false};
+    let stage='supervision_guard';
+    const reportFailure=error=>this.report({event:'remote_center_slot_start_failed',node_id:row.node_id,slot:row.slot,stage,
+      code:error?.code??(stage==='supervision_guard'&&error?.message==='timeout exceeded when trying to connect'
+        ?'SUPERVISION_POOL_TIMEOUT':error?.name)});
     this.entries.set(key(row),entry);
     try {
       entry.guard=await this.guards.acquire(supervisionLockKey(row),()=>{entry.owned=false;void this.closeEntry(entry,{abort:true}).catch(()=>{});});
       if(!entry.guard){this.entries.delete(key(row));return;}
       if(!entry.guard.alive)throw new Error('SUPERVISION_SESSION_LOST');
       entry.owned=true;entry.backendPid=entry.guard.backendPid;
+      stage='previous_execution';
       const unsettled=await this.unsettled(row);
       // A session can be lost while the initial SQL read is pending. Cleanup
       // may already have run; never create consumers after that point.
@@ -112,7 +119,8 @@ export class RemoteCenterExecutionSupervisor {
         this.report({event:'remote_center_previous_execution_unsettled',node_id:row.node_id,slot:row.slot});
         return;
       }
-      if(!row.alive || !row.accepting || !row.activation_requested){await this.closeEntry(entry);return;}
+      if(this.isWorkerPaused(row) || !row.alive || !row.accepting || !row.activation_requested){await this.closeEntry(entry);return;}
+      stage='runtime';
       const runtime=this.createRuntime({channelStore:this.channelStore,routes:this.routes,youtubeSessions:this.youtubeSessions,
         workerConnection:identity(row),nodeId:row.node_id,slot:row.slot,profileSecret:this.profileSecret,createApiFallback:this.createApiFallback,
         wholeChannels:row.runtime_revision===WHOLE_CHANNEL_RUNTIME_REVISION?this.wholeChannels:null,
@@ -120,7 +128,7 @@ export class RemoteCenterExecutionSupervisor {
         assertAdmission:async client=>{
           const current=(await client.query(`SELECT *,connected_until>clock_timestamp() AS alive
             FROM remote_ingestion.worker_connections WHERE node_id=$1 AND slot=$2`,[row.node_id,row.slot])).rows[0];
-          return !!current?.alive && !current.retirement_id && current.enabled && same(entry.row,current) && await this.verifyExecution(client,current);
+          return !!current?.alive && !this.isWorkerPaused(current) && !current.retirement_id && current.enabled && same(entry.row,current) && await this.verifyExecution(client,current);
         }});
       entry.runtime=runtime;
       entry.rota=this.createRota({client:this.rotaClient,role:'channel',workerId:row.rota_worker_id,workerInstanceId:entry.supervisorId,
@@ -134,6 +142,7 @@ export class RemoteCenterExecutionSupervisor {
         concurrency:1,autorun:false,name:intakeWorkerName('remote',`${row.node_id}-${row.slot}`)});
       entry.worker.on('error',()=>this.report({event:'remote_center_queue_error',node_id:row.node_id,slot:row.slot}));
       entry.worker.on('failed',(job,error)=>this.report({event:'remote_center_job_failed',node_id:row.node_id,slot:row.slot,job_id:job?.id,code:error?.code??error?.name}));
+      stage='queue';
       await entry.worker.waitUntilReady();
       // BullMQ waitUntilReady returns its blocking dequeue connection. That
       // connection is deliberately closed during a graceful drain; the main
@@ -141,17 +150,20 @@ export class RemoteCenterExecutionSupervisor {
       entry.redis=await entry.worker.client;
       await entry.worker.pause(true);
       // start() can wait for an available Rota route. Do not block other slots.
+      stage='rota';
       entry.starting=entry.rota.start().then(async()=>{
         if(entry.closing||this.stopping)return;
         entry.queueReady=true;
         entry.running=entry.worker.run().catch(()=>this.closeEntry(entry,{abort:true}));
+        stage='activation';
         await this.activation.activate(identity(row),{requireRequested:true});
+        stage='readiness';
         const ready=await this.ready(entry);await publishWorkerIntake(entry.worker,ready);
         if(ready)entry.worker.resume();
-      }).catch(error=>{this.report({event:'remote_center_slot_start_failed',node_id:row.node_id,slot:row.slot,code:error?.code??error?.name});return this.closeEntry(entry,{abort:true});});
+      }).catch(error=>{reportFailure(error);return this.closeEntry(entry,{abort:true});});
     } catch(error) {
       await this.closeEntry(entry,{abort:true});
-      this.report({event:'remote_center_slot_start_failed',node_id:row.node_id,slot:row.slot,code:error?.code??error?.name});
+      reportFailure(error);
     }
   }
   async unsettled(row) {
@@ -209,6 +221,9 @@ export class RemoteCenterExecutionSupervisor {
           ON guard.pid=owner.pid AND guard.objid=(hashtext(owner.lock_key)::bigint & 4294967295)::oid
         WHERE guard.locktype='advisory' AND guard.granted AND guard.classid=781138012::oid AND guard.objsubid=2`,[JSON.stringify(owners)])]);
     const rows=connections.rows,owned=new Set(locks.rows.map(r=>`${r.pid}/${r.lock_key}`));
+    // A maintenance pause overrides even an older persisted intake request.
+    // Keep the row visible so existing executions can finish recovery.
+    for(const row of rows)if(this.isWorkerPaused(row))row.activation_requested=false;
     const updates=[];
     // Refresh existing consumers together. Slow admission or recovery of one
     // slot cannot hold back the other slots' 15-second intake advertisements.

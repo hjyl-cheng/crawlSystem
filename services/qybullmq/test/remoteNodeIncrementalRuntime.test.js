@@ -105,3 +105,24 @@ test('full collecting process advertises its own revision and freezes the connec
   const lease=await exposed.claim(randomUUID(),full.slot);assert.deepEqual(lease.connection,seen);
   runner.connection={...runner.connection,accepting:false};assert.equal(lease.connection.accepting,true);
 });
+
+test('recovery readiness gates independent heartbeats and claims, including an in-flight ready receipt',async()=>{
+  let exposed, seen, release, claims=0;
+  const worker={intakeReady:false};
+  const runner=new RemoteIncrementalProcess({config:config(),wholeChannel:false,
+    localRota:{boot:async()=>({boot_id:'b'.repeat(48)})},
+    client:{workerHeartbeat:async value=>{seen=value;return ack(value,true);},claim:async()=>{claims++;return null;}},
+    createWorker:({client})=>{exposed=client;return worker;}});
+  assert.equal((await runner.probe()).ready_for_tasks,false);
+  assert.equal(seen.accepting,false);
+  await exposed.claim(randomUUID(),runner.config.slot);assert.equal(claims,0);
+  worker.intakeReady=true;
+  assert.equal((await runner.probe()).ready_for_tasks,true);
+  await exposed.claim(randomUUID(),runner.config.slot);assert.equal(claims,1);
+  runner.client.workerHeartbeat=async value=>{seen=value;return new Promise(resolve=>{release=()=>resolve(ack(value,true));});};
+  const pending=runner.probe();await until(()=>release);
+  worker.intakeReady=false;
+  await exposed.claim(randomUUID(),runner.config.slot);assert.equal(claims,1);
+  release();assert.equal((await pending).ready_for_tasks,false);
+  assert.equal(runner.readyUntil,0);
+});

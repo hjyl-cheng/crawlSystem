@@ -35,7 +35,11 @@ export function createWorkerRetirement({store,execution,fullCrawlExecution=null}
       if(busy)fail('WORKER_NOT_IDLE');
       if(value.phase==='reserve'){
         if(!row.retirement_id){
-          const selected=policy?.selected_slots??(await client.query(`SELECT slot FROM remote_ingestion.worker_connections
+          const intake=(await client.query('SELECT intake_enabled FROM remote_ingestion.intake_controls WHERE node_key=$1',[value.nodeId])).rows[0];
+          const selected=intake?.intake_enabled===true
+            ?(await client.query(`SELECT node_id,slot FROM remote_ingestion.worker_connections
+              WHERE node_id=$1 AND deployment_id=$2 AND retired_at IS NULL`,[value.nodeId,value.deploymentId])).rows.filter(w=>!selectedExecution?.isWorkerPaused?.(w)).map(w=>w.slot)
+            :policy?.selected_slots??(await client.query(`SELECT slot FROM remote_ingestion.worker_connections
             WHERE node_id=$1 AND activation_requested AND retired_at IS NULL`,[value.nodeId])).rows.map(w=>w.slot);
           await client.query(`INSERT INTO remote_ingestion.node_intake_requests(node_id,deployment_id,selected_slots)
             VALUES($1,$2,$3) ON CONFLICT(node_id) DO UPDATE SET selected_slots=EXCLUDED.selected_slots,

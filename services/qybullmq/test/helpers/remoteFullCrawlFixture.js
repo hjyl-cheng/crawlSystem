@@ -40,7 +40,7 @@ export async function fullCrawlFixture(t,{createAttempt=true,activate=true,verif
       for(const table of ['full_crawl_stages','full_crawl_executions','claims'])await query(`DELETE FROM remote_ingestion.${table} WHERE task_id=$1`,[ownTask]);
       await query('DELETE FROM remote_ingestion.tasks WHERE task_id=$1',[ownTask]);
     }
-    for(const table of ['worker_connections','network_slots','nodes'])await query(`DELETE FROM remote_ingestion.${table} WHERE node_id=$1`,[nodeId]);
+    for(const table of ['node_intake_requests','node_deployments','worker_connections','network_slots','nodes'])await query(`DELETE FROM remote_ingestion.${table} WHERE node_id=$1`,[nodeId]);
     await query('DELETE FROM crawler.channel_execution_attempts WHERE business_run_id=$1',[runId]);
     // Full business fixtures remain in the isolated DB as in the existing full
     // store integration suite; every identity is unique across repeated runs.

@@ -1,5 +1,13 @@
 import {databaseUrl} from '../databaseConnection.js';
 
+export function fullCrawlPausedWorkers(env) {
+  const workers=String(env.REMOTE_NODE_FULL_CRAWL_PAUSED_WORKERS ?? '').split(',').map(value=>value.trim()).filter(Boolean);
+  if(workers.some(value=>!/^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}\/full-crawl-[1-9][0-9]*$/.test(value))) {
+    throw new Error('FULL_CRAWL_PAUSED_WORKERS_INVALID');
+  }
+  return workers;
+}
+
 // Validate before importing/constructing the embedded local worker. Its legacy
 // modules use the original process environment for DB, queues and local Rota.
 export function fullCrawlReleaseConfig(env, {controlToken, profileSecret}) {
@@ -14,11 +22,7 @@ export function fullCrawlReleaseConfig(env, {controlToken, profileSecret}) {
     || env.FULL_CRAWL_CANARY_WORKER === 'true' || env.ROTA_FIXED_PROXY_USER) {
     throw new Error('FULL_CRAWL_COMPATIBILITY_CONFIG_INVALID');
   }
-  const allowedNodeIds = required('REMOTE_NODE_FULL_CRAWL_NODE_IDS').split(',').map(id => id.trim());
-  if (allowedNodeIds.some(id => !/^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(id))
-    || new Set(allowedNodeIds).size !== allowedNodeIds.length) throw new Error('FULL_CRAWL_ALLOWLIST_INVALID');
-  const totalSlots = Number(required('REMOTE_NODE_FULL_CRAWL_TOTAL_SLOTS'));
-  if (!Number.isSafeInteger(totalSlots) || totalSlots < 2) throw new Error('FULL_CRAWL_CAPACITY_INVALID');
+  const pausedWorkers = fullCrawlPausedWorkers(env);
   const prefix = required('REMOTE_NODE_QUEUE_PREFIX');
   const redis = new URL(required('REMOTE_NODE_REDIS_URL'));
   // Original queue producers have no username/TLS support. Reject unsupported
@@ -42,7 +46,10 @@ export function fullCrawlReleaseConfig(env, {controlToken, profileSecret}) {
     || (env.BROWSER_PROFILE_ENCRYPTION_KEY || env.ROTA_BULLMQ_PROXY_PASSWORD) !== profileSecret) {
     throw new Error('FULL_CRAWL_LOCAL_IDENTITY_MISMATCH');
   }
-  return {allowedNodeIds, maxSlots: totalSlots - 1, totalSlots, compatibilitySlots: 1, prefix,
+  // Keep one embedded compatibility consumer for the legacy full-crawl
+  // processor. Remote consumers follow the same dynamic capacity policy as
+  // incremental consumers; the supervisor itself has no fixed slot ceiling.
+  return {allowedNodeIds: [], dashboardManaged: true, pausedWorkers, maxSlots: null, compatibilitySlots: 1, prefix,
     connection: {host: redis.hostname, port: Number(redis.port || 6379),
       password: decodeURIComponent(redis.password) || undefined, maxRetriesPerRequest: null}};
 }

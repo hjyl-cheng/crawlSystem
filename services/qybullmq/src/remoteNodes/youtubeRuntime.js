@@ -34,6 +34,16 @@ export function createRemoteYoutubeRuntime({ client, spool, gateway = new Finger
       || ack.sha256 !== hash(canonicalIncrementalJson(pending.checkpoint))) throw new RemoteProtocolError('INVALID_YOUTUBE_CHECKPOINT_RECEIPT', 502);
     await spool.remove('youtube-session.json');
   };
+  const recover = async () => {
+    try { await flush(); }
+    catch (error) {
+      // The center conclusively fenced this execution. Keep its evidence, but
+      // never let its checkpoint block the next lease or replay after restart.
+      // Live-session flushes still fail: a stale checkpoint is not success.
+      if (error.code !== 'STALE_LEASE' || error.status !== 409) throw error;
+      await spool.archiveStaleResult('youtube-session.json');
+    }
+  };
   const withRuntime = async (route, invoke) => {
     if (activeRuntime) throw new Error('REMOTE_YOUTUBE_RUNTIME_BUSY');
     activeRuntime = true;
@@ -46,7 +56,7 @@ export function createRemoteYoutubeRuntime({ client, spool, gateway = new Finger
         || decodeURIComponent(proxyUrl.username) !== route.slot || !proxyUrl.password) throw new Error('LOCAL_ROTA_PROXY_REQUIRED');
       if (route.lease.worker_slot !== route.slot) throw new Error('WORKER_SLOT_MISMATCH');
       signal.throwIfAborted();
-      await spool.init(); await flush();
+      await spool.init(); await recover();
       request = sessionRequest(route, route.lease, route.slot, route.bootId);
       bundle = validateSession(await client.youtubeSession(request), request);
       signal.throwIfAborted();
@@ -96,6 +106,6 @@ export function createRemoteYoutubeRuntime({ client, spool, gateway = new Finger
     if (failure) throw failure;
     return result;
   };
-  withRuntime.recover = flush;
+  withRuntime.recover = recover;
   return { withRuntime, youtube: { openChannel: youtube.openChannel, fetchUploads: youtube.fetchUploads, fetchDetail: youtube.fetchDetail } };
 }

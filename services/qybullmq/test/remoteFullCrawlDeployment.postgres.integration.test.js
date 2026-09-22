@@ -56,14 +56,14 @@ test('full deployment isolates identity, retries capacity, restores intake and r
     const execution={allowsNode:id=>id===nodeId,isProcessing:()=>processing};
     const enabledArgs={...args,fullCrawl:{...fullRuntime,execution}};
     admin=createRemoteDeploymentAdmin(enabledArgs);
-    await admin.setExecution({...control,allowedCount:1,expectedAllowedCount:2});
+    await assert.rejects(admin.setExecution({...control,allowedCount:1,expectedAllowedCount:2}),{code:'EXECUTION_COUNT_CONTROL_REMOVED'});
     status=await admin.setExecution({...control,enabled:true,expectedRequested:false});
-    assert.equal(status.allowedCount,1);assert.equal(status.counts.standby,1);
+    assert.equal(status.allowedCount,2);assert.equal(status.counts.standby,0);
     admin=createRemoteDeploymentAdmin(enabledArgs);
-    assert.equal((await admin.status(control)).configuredCount,1,'center restart reads durable configuration');
+    assert.equal((await admin.status(control)).configuredCount,2,'capacity equals deployed workers after restart');
     processing=true;
     status=await admin.setExecution({...control,enabled:false,expectedRequested:true});
-    assert.equal(status.allowedCount,0);assert.equal(status.configuredCount,1);assert.equal(status.counts.finishing,2);
+    assert.equal(status.allowedCount,0);assert.equal(status.configuredCount,2);assert.equal(status.counts.finishing,2);
     const retirement={nodeId,deploymentId,slot:'full-crawl-2',operationId:randomUUID()};
     await assert.rejects(admin.retire({...retirement,phase:'reserve'}),{code:'WORKER_NOT_IDLE'});
     processing=false;

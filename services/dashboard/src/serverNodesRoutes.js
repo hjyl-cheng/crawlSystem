@@ -10,8 +10,8 @@ export function serverNodesRoutes({ store, layout, onboarding = null, runtime = 
     ?{id:'local-center',name:'中心服务器',kind:'center',localIntake:true,host:deploymentEnvironment.SERVER_NODE_LOCAL_HOST||'本机',workers:[]}:null;
   const findNode=(registry,id)=>id===localNode?.id?localNode:registry.nodes.find(n=>n.id===id);
   const installedCount=node=>node.deployment?.appliedCount??(node.deployment?.state==='connected'?node.deployment.desiredCount:0);
-  const installedStatus=(node,state)=>node.localIntake?state:{...state,
-    ...(Number.isInteger(state.configuredCount)?{configuredCount:Math.min(state.configuredCount,installedCount(node))}:{}),counts:state.counts?{...state.counts,
+  const installedStatus=(node,state)=>node.localIntake?{...state,configuredCount:state.counts?.deployed??state.configuredCount}:{...state,
+    configuredCount:installedCount(node),counts:state.counts?{...state.counts,
     registered:state.counts.deployed,deployed:installedCount(node)}:state.counts};
   router.get("/server-nodes", (_req, res) => {
     res.set("Cache-Control", "no-store").send(layout({ title: "服务器节点", active: "server-nodes", body: renderServerNodesPage() }));
@@ -89,11 +89,11 @@ export function serverNodesRoutes({ store, layout, onboarding = null, runtime = 
     try{
       if(!req.is('application/json'))return res.status(415).json({error:'请使用 JSON 提交部署信息'});
       if(!workerDeployment)return res.status(503).json({error:'中心 Worker 部署服务尚未配置'});
-      if(Object.keys(req.body??{}).some(key=>!['version','password','count','additionalCount','role','expectedInstalledCount','syncIntake','expectedAllowedCount'].includes(key)))return res.status(400).json({error:'部署不接受自定义脚本或镜像'});
+      if(Object.keys(req.body??{}).some(key=>!['version','password','count','additionalCount','role','expectedInstalledCount'].includes(key)))return res.status(400).json({error:'部署不接受自定义脚本或镜像'});
       const password=req.body?.password??'';if(req.body)delete req.body.password;
       res.set('Cache-Control','no-store').status(202).json(await workerDeployment.start({id:req.params.id,version:req.body?.version,password,
         count:req.body?.count,additionalCount:req.body?.additionalCount,role:req.body?.role,expectedInstalledCount:req.body?.expectedInstalledCount,
-        syncIntake:req.body?.syncIntake,expectedAllowedCount:req.body?.expectedAllowedCount}));
+      }));
     }catch(error){res.status(error.statusCode??503).json({error:error.statusCode?error.message:'Worker 部署暂时不可用，请检查中心配置'});}
   });
   router.post('/api/server-nodes/:id/remove-worker',async(req,res)=>{
@@ -117,9 +117,9 @@ export function serverNodesRoutes({ store, layout, onboarding = null, runtime = 
     try {
       if(!req.is('application/json'))return res.status(415).json({error:'请使用 JSON 提交接任务操作'});
       const input=req.body;
-      const byCount=Number.isInteger(input?.allowedCount);
-      if(!input || Object.keys(input).some(k=>!(byCount?['version','allowedCount','expectedAllowedCount']:['version','enabled','expectedRequested']).includes(k))
-        || !Number.isInteger(input.version) || (byCount?!Number.isInteger(input.expectedAllowedCount)||input.allowedCount<0||input.expectedAllowedCount<0:typeof input.enabled!=='boolean'||typeof input.expectedRequested!=='boolean'))return res.status(400).json({error:'接任务操作参数不正确'});
+      if(Number.isInteger(input?.allowedCount)||Number.isInteger(input?.expectedAllowedCount))return res.status(400).json({error:'并发额度由已部署 Worker 数量自动决定，不能单独设置'});
+      if(!input || Object.keys(input).some(k=>!['version','enabled','expectedRequested'].includes(k))
+        || !Number.isInteger(input.version) || typeof input.enabled!=='boolean'||typeof input.expectedRequested!=='boolean')return res.status(400).json({error:'接任务操作参数不正确'});
       if(!executionControl)return res.status(503).json({error:'中心接任务控制尚未配置'});
       const registry=await store.load();const node=findNode(registry,req.params.id);
       if(!node)return res.status(404).json({error:'服务器不存在'});
@@ -127,14 +127,14 @@ export function serverNodesRoutes({ store, layout, onboarding = null, runtime = 
       if(node.localIntake){
         const state=await executionControl.status({nodeId:node.id});
         return res.set('Cache-Control','no-store').json(await executionControl.setExecution({nodeId:node.id,
-          workerCount:state.counts.deployed,...(byCount?{allowedCount:input.allowedCount,expectedAllowedCount:input.expectedAllowedCount}:{enabled:input.enabled,expectedRequested:input.expectedRequested})}));
+          workerCount:state.counts.deployed,enabled:input.enabled,expectedRequested:input.expectedRequested}));
       }
       if(node.workerRemoval && !['completed','rejected'].includes(node.workerRemoval.state))return res.status(409).json({error:'请先完成或重试 Worker 删除'});
       if(node.kind!=='execution' || node.deletion || !node.deployment
-        || (!byCount && input.enabled && node.deployment.state!=='connected'))return res.status(409).json({error:'请先完成执行节点的 Worker 部署和连接检查'});
-      if(installedCount(node)<1 || (byCount&&input.allowedCount>installedCount(node)))return res.status(400).json({error:'允许接任务数量不能超过已确认部署数量'});
+        || (input.enabled && node.deployment.state!=='connected'))return res.status(409).json({error:'请先完成执行节点的 Worker 部署和连接检查'});
+      if(installedCount(node)<1)return res.status(400).json({error:'请先部署至少一个 Worker'});
       res.set('Cache-Control','no-store').json(installedStatus(node,await executionControl.setExecution({nodeId:node.id,deploymentId:node.deployment.deploymentId,
-        workerCount:installedCount(node),...(byCount?{allowedCount:input.allowedCount,expectedAllowedCount:input.expectedAllowedCount}:{enabled:input.enabled,expectedRequested:input.expectedRequested})})));
+        workerCount:installedCount(node),enabled:input.enabled,expectedRequested:input.expectedRequested})));
     }catch(error){res.status(error.statusCode??503).json({error:error.statusCode?error.message:'中心接任务控制暂时不可用，请稍后重试'});}
   });
   router.delete("/api/server-nodes/:id", async (req, res, next) => {

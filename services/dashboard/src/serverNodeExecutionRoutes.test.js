@@ -21,28 +21,27 @@ test('node intake actions are explicit, versioned and scoped to its saved deploy
   assert.deepEqual(calls[0],{nodeId:node.id,deploymentId:node.deployment.deploymentId,workerCount:3,enabled:true,expectedRequested:false});
   assert.equal((await send({version:52,enabled:false,expectedRequested:true})).status,200);
   assert.equal(calls[1].enabled,false);
-  assert.equal((await send({version:52,allowedCount:2,expectedAllowedCount:3})).status,200);
-  assert.deepEqual(calls[2],{nodeId:node.id,deploymentId:node.deployment.deploymentId,workerCount:3,allowedCount:2,expectedAllowedCount:3});
+  assert.equal((await send({version:52,allowedCount:2,expectedAllowedCount:3})).status,400);
+  assert.equal(calls.length,2);
   assert.equal((await send({version:52,allowedCount:-1,expectedAllowedCount:3})).status,400);
   assert.equal((await send({version:52,allowedCount:1.2,expectedAllowedCount:3})).status,400);
   node.deployment={...node.deployment,state:'failed',desiredCount:20,appliedCount:3};
-  assert.equal((await send({version:52,allowedCount:1,expectedAllowedCount:3})).status,200);
+  assert.equal((await send({version:52,enabled:false,expectedRequested:false})).status,200);
   assert.equal(calls.at(-1).workerCount,3,'failed registration growth must use the installed count');
   assert.equal((await send({version:52,allowedCount:20,expectedAllowedCount:3})).status,400);
-  assert.equal((await send({version:52,allowedCount:0,expectedAllowedCount:1})).status,200);
-  assert.equal((await send({version:52,allowedCount:3,expectedAllowedCount:0})).status,200,'failed expansion cannot prevent restarting the installed fleet');
-  assert.equal(calls.at(-1).workerCount,3);
   assert.equal(allowDashboardRequestDuringControlledMigration('POST','/queues/pause'),false);
 });
 
-test('the center exposes count control without remote deployment or editable registration',async t=>{
+test('the center derives intake capacity from its deployed Worker count',async t=>{
   const calls=[];const app=express();app.use(express.json());
   app.use((req,res,next)=>allowDashboardRequestDuringControlledMigration(req.method,req.path)?next():res.sendStatus(423));
   app.use(serverNodesRoutes({store:{load:async()=>({version:1,nodes:[]})},layout:()=>'',deploymentEnvironment:{SERVER_NODE_LOCAL_INTAKE_CONTROL:'true'},
-    executionControl:{status:async()=>({counts:{deployed:20}}),setExecution:async value=>{calls.push(value);return {allowedCount:value.allowedCount};}}}));
+    executionControl:{status:async()=>({counts:{deployed:20}}),setExecution:async value=>{calls.push(value);return {allowedCount:value.enabled?20:0,configuredCount:20};}}}));
   const server=app.listen(0,'127.0.0.1');await new Promise(r=>server.once('listening',r));t.after(()=>new Promise(r=>server.close(r)));
   const root=`http://127.0.0.1:${server.address().port}`;
   const list=await(await fetch(root+'/api/server-nodes')).json();assert.equal(list.nodes[0].id,'local-center');
-  const response=await fetch(root+'/api/server-nodes/local-center/execution',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({version:1,allowedCount:5,expectedAllowedCount:20})});
-  assert.equal(response.status,200);assert.deepEqual(calls,[{nodeId:'local-center',workerCount:20,allowedCount:5,expectedAllowedCount:20}]);
+  const response=await fetch(root+'/api/server-nodes/local-center/execution',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({version:1,enabled:true,expectedRequested:false})});
+  assert.equal(response.status,200);assert.deepEqual(calls,[{nodeId:'local-center',workerCount:20,enabled:true,expectedRequested:false}]);
+  const rejected=await fetch(root+'/api/server-nodes/local-center/execution',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({version:1,allowedCount:5,expectedAllowedCount:20})});
+  assert.equal(rejected.status,400);
 });

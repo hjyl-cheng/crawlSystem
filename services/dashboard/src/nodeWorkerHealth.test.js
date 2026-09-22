@@ -24,7 +24,7 @@ spec=importlib.util.spec_from_file_location('installer',sys.argv[1]);m=importlib
 v=json.load(sys.stdin);plan=v['plan'];real_path=pathlib.Path
 with tempfile.TemporaryDirectory() as directory:
  root=real_path(directory);(root/'node-id').write_text(plan['nodeId'])
- bundle=root/'bundle.json';bundle.write_text(json.dumps({'plan':plan,'credentials':{'nodeId':plan['nodeId'],'deploymentId':plan['deploymentId']}}))
+ bundle=root/'bundle.json';bundle.write_text(json.dumps({'plan':plan,'credentials':{'nodeId':plan['nodeId'],'deploymentId':plan['deploymentId'],'pausedSlots':v.get('pausedSlots',[])}}))
  def path(p):return root/'node-id' if str(p)=='/etc/qy-node/runtime/node-id' else real_path(p)
  def run(cmd,timeout):
   if cmd[-3:]==['ps','--all','-q']:return 'container-1 container-2'
@@ -66,4 +66,21 @@ test('installer rejects reused HTTP containers when NATS deployment was requeste
   assert.equal(verify(oldHttp),false,'--no-recreate must not falsely approve an old HTTP worker');
   const wrongEndpoint=structuredClone(containers);wrongEndpoint[0].Config.Env=['REMOTE_NODE_NATS_URL=wss://wrong.example/node-messages'];
   assert.equal(verify(wrongEndpoint),false);
+});
+
+test('installer accepts only stopped maintenance-paused containers with restart disabled',()=>{
+  const plan=buildNodeCollectDeployment({...args,node:{...args.node,workerRole:'fullcrawl',workers:[{role:'fullcrawl',count:2}]},natsUrl:'tls://center.example:4222'});
+  Object.assign(plan.compose.services['full-crawl-1'],{restart:'no',profiles:['paused']});
+  const containers=Object.entries(plan.compose.services).map(([slot,service])=>({Config:{Image:plan.image,Labels:service.labels,
+    Env:Object.entries(service.environment).map(([k,v])=>k+'='+v)},State:{Running:slot!=='full-crawl-1'},HostConfig:{RestartPolicy:{Name:service.restart}}}));
+  const verify=items=>{
+    const result=spawnSync('python3',['-c',harness,installer],{input:JSON.stringify({plan,pausedSlots:['full-crawl-1'],containers:items}),encoding:'utf8'});
+    assert.equal(result.status,0,result.stderr);return JSON.parse(result.stdout).passed;
+  };
+  assert.equal(verify(containers),true);
+  assert.equal(verify(containers.slice(1)),true,'a paused slot need not be created to deploy other workers');
+  const running=structuredClone(containers);running[0].State.Running=true;
+  assert.equal(verify(running),false,'a running paused process cannot pass verification');
+  const automatic=structuredClone(containers);automatic[0].HostConfig.RestartPolicy.Name='unless-stopped';
+  assert.equal(verify(automatic),false,'maintenance pause must survive Docker restart');
 });

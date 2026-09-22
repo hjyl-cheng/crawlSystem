@@ -4,7 +4,9 @@ export class SupervisionGuards {
   constructor({pool,groups=4}) {
     if(!pool || !Number.isSafeInteger(groups) || groups<1)throw new TypeError('guard pool and positive group count required');
     this.pool=pool;this.groups=groups;this.sessions=new Map();this.closed=false;
-    if(pool.options)pool.options.max=groups;
+    // The caller may reserve additional long-lived sessions (the full-crawl
+    // release guard shares this pool). Never consume that reservation.
+    if(pool.options)pool.options.max=Math.max(pool.options.max??0,groups);
   }
   groupFor(key) {
     let hash=2166136261;

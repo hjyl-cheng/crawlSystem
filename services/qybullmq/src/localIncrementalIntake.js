@@ -11,23 +11,24 @@ export function createLocalIntakeAdmin({query,transaction}) {
     async status() {
       const rows=(await query(`SELECT *,connected_until>clock_timestamp() AS alive
         FROM remote_ingestion.local_incremental_workers ORDER BY worker_id`)).rows;
-      const workers=rows.map(r=>({slot:r.worker_id,connected:r.alive,requested:r.activation_requested,
+      const control=await readIntakeControl({query},'local-center',rows.filter(r=>r.activation_requested).length,rows.length);
+      const workers=rows.map(r=>({slot:r.worker_id,connected:r.alive,requested:control.intakeEnabled&&r.activation_requested,
         enabled:r.alive&&r.accepting,active:r.alive&&r.active,
-        readyForTasks:r.alive&&r.accepting&&r.activation_requested}));
+        readyForTasks:control.intakeEnabled&&r.alive&&r.accepting&&r.activation_requested}));
       return {nodeId:'local-center',executionAvailable:true,workers,...intakeStatus(workers),
-        ...await readIntakeControl({query},'local-center',workers.filter(w=>w.requested).length,workers.length)};
+        ...control};
     },
     async setExecution(value) {
-      const byCount=Number.isInteger(value?.allowedCount);
-      if(!value || Object.keys(value).some(k=>!['allowedCount','expectedAllowedCount','workerCount','enabled','expectedRequested'].includes(k))
-        || (byCount?!Number.isInteger(value.expectedAllowedCount):typeof value.enabled!=='boolean'||typeof value.expectedRequested!=='boolean') || !Number.isInteger(value.workerCount))throw new RemoteProtocolError('INVALID_EXECUTION_CONTROL',400);
+      if(Number.isInteger(value?.allowedCount)||Number.isInteger(value?.expectedAllowedCount))throw new RemoteProtocolError('EXECUTION_COUNT_CONTROL_REMOVED',400);
+      if(!value || Object.keys(value).some(k=>!['workerCount','enabled','expectedRequested'].includes(k))
+        || typeof value.enabled!=='boolean'||typeof value.expectedRequested!=='boolean' || !Number.isSafeInteger(value.workerCount))throw new RemoteProtocolError('INVALID_EXECUTION_CONTROL',400);
       await transaction(async client=>{
         await client.query('SELECT pg_advisory_xact_lock(781138020)');
         const rows=(await client.query(`SELECT *,worker_id AS slot,connected_until>clock_timestamp() AS alive
           FROM remote_ingestion.local_incremental_workers ORDER BY worker_id FOR UPDATE`)).rows;
         if(rows.length!==value.workerCount)throw new RemoteProtocolError('WORKER_DEPLOYMENT_MISMATCH');
         const current=rows.filter(r=>r.activation_requested).length;
-        const control=changeIntakeControl(await readIntakeControl(client,'local-center',current,rows.length),value);
+        const control=changeIntakeControl(await readIntakeControl(client,'local-center',current,rows.length),value,rows.length);
         const selected=selectIntakeWorkers(rows,control.effectiveCount);
         if(selected.some(r=>!r.activation_requested&&!r.alive))throw new RemoteProtocolError('WORKER_NOT_READY');
         await client.query(`UPDATE remote_ingestion.local_incremental_workers
@@ -53,6 +54,11 @@ export class LocalIncrementalIntake {
       WHERE local_incremental_workers.connected_until<=clock_timestamp() OR local_incremental_workers.instance_id=$2
       RETURNING worker_id`,[this.workerId,this.instanceId]);
     if(!registered.rowCount)throw new Error('LOCAL_WORKER_INSTANCE_BUSY');
+    // A Worker added while the center is accepting work joins automatically;
+    // a paused center leaves it in standby until the next explicit enable.
+    const intake=(await this.query('SELECT intake_enabled FROM remote_ingestion.intake_controls WHERE node_key=$1',['local-center'])).rows[0];
+    if(intake?.intake_enabled===true)await this.query(`UPDATE remote_ingestion.local_incremental_workers
+      SET activation_requested=true,updated_at=clock_timestamp() WHERE worker_id=$1 AND instance_id=$2`,[this.workerId,this.instanceId]);
     const first=this.signals?.watch(`local-intake:${this.workerId}`,{timeoutMs:5000,signal:this.timer.signal});
     try{await this.tick();}catch(error){first?.cancel();throw error;}
     this.loop=(async()=>{let notification=first;while(!this.stopping){

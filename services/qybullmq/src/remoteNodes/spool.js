@@ -75,7 +75,7 @@ export class RemoteResultSpool {
   }
 
   async archiveStaleResult(name = 'pending.json') {
-    if (!['pending.json', 'whole-pending.json'].includes(name)) throw new TypeError('invalid pending spool file');
+    if (!['pending.json', 'whole-pending.json', 'youtube-session.json'].includes(name)) throw new TypeError('invalid pending spool file');
     return this.exclusive(async () => {
       // Keep the exact bytes for inspection. They still count toward the disk
       // cap, but a conclusively expired execution must not disable this Worker.

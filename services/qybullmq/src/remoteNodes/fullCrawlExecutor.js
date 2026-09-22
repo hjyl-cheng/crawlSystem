@@ -86,7 +86,9 @@ export class RemoteFullCrawlExecutor {
         if(['SPOOL_FULL','JOURNAL_FULL','JOURNAL_CORRUPT','JOURNAL_IDENTITY_CONFLICT'].includes(error.message)){
           onStatus({status:'blocked',code:error.message});return;
         }
-        if([400,401,403,404,413,415].includes(error.status))return;
+        // Preserve the actual protocol rejection for the process log. Returning
+        // here hid it behind NODE_EXECUTOR_STOPPED and obscured crash loops.
+        if([400,401,403,404,413,415].includes(error.status))throw error;
       }
       if(stoppedAt&&Date.now()-stoppedAt>=shutdownUploadMs)return;
       await delay(Math.min(30000,pollMs*2**Math.min(failures,4)));

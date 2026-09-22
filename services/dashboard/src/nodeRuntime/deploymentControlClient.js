@@ -19,6 +19,7 @@ export function createDeploymentControlClient({url,token,fetchImpl=fetch}){
           INVALID_WORKER_RETIREMENT:'Worker 删除参数无效',REMOTE_NETWORK_CAPACITY_UNAVAILABLE:'网络名额自动扩容暂未完成，请稍后重试；节点登记已保留',
           REMOTE_CONTROL_BUSY:'中心正在处理其他节点操作，本次操作未完成，请稍后重试',
           INVALID_EXECUTION_COUNT:'允许接任务数量应为 0 到实际已部署数量之间的整数',
+          EXECUTION_COUNT_CONTROL_REMOVED:'接单容量由已部署 Worker 数量自动决定，不能单独设置',
           LOCAL_INTAKE_NOT_CONFIGURED:'中心服务器接任务控制尚未就绪',
           REMOTE_NETWORK_CAPACITY_LIMIT:'所需网络名额超过当前系统上限，请调整 Worker 数量',
           REMOTE_CENTER_EXECUTION_NOT_CONFIGURED:'中心尚未开放此节点的接任务控制',

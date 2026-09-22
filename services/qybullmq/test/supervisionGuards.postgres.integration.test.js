@@ -41,3 +41,16 @@ test('shared sessions isolate ownership, recovery transactions and one-group dis
   await assert.rejects(leases[0].withSession(()=>assert.fail('stale execution')),/SESSION_LOST/);
   const replacement=await rival.acquire(keys[0],()=>{});assert.ok(replacement);assert.notEqual(replacement.backendPid,pid);
 });
+
+test('full-crawl global lock and all supervision groups retain five independent PostgreSQL sessions',{skip:!url,timeout:10000},async t=>{
+ const pool=new pg.Pool({connectionString:url,max:5,connectionTimeoutMillis:500});
+ const guards=new SupervisionGuards({pool});let budget;
+ t.after(async()=>{await guards.close();if(budget){await budget.query('SELECT pg_advisory_unlock(781138015,1)');budget.release();}await pool.end();});
+ budget=await pool.connect();await assertIsolatedRemoteDatabase(budget);
+ assert.equal((await budget.query('SELECT pg_try_advisory_lock(781138015,1) AS locked')).rows[0].locked,true);
+ const pids=new Set([(await budget.query('SELECT pg_backend_pid() AS pid')).rows[0].pid]);
+ const prefix=randomUUID(),keys=new Map();
+ for(let n=0;keys.size<4;n++){const key=prefix+n;keys.set(guards.groupFor(key),key);}
+ for(const key of keys.values())pids.add((await guards.acquire(key,()=>{})).backendPid);
+ assert.equal(pids.size,5);
+});

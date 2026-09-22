@@ -20,6 +20,9 @@ export function createNodeWorkerDeployment({store,ssh,center,image,fullCrawlImag
       if(credentials.nodeId!==node.id || credentials.deploymentId!==plan.deploymentId || credentials.readyForTasks!==false
         || !/^[a-f0-9]{64}$/.test(credentials.nodeToken) || typeof credentials.publicKey!=='string'
         || plan.registrations.some(row=>!/^[a-f0-9]{64}$/.test(credentials.relayTokens?.[row.slot])))throw new Error('中心部署登记返回内容不完整或与节点不匹配');
+      const pausedSlots=credentials.pausedSlots??[];
+      if(!Array.isArray(pausedSlots)||pausedSlots.some(slot=>!plan.slots.includes(slot)))throw new Error('中心暂停 Worker 列表无效');
+      for(const slot of pausedSlots)Object.assign(plan.compose.services[slot],{restart:'no',profiles:['paused']});
       await advance({steps:{center:'completed'}});
       if(registry)credentials.registry=registry;
       await ssh.deployWorkers(connection,node,plan,credentials,password,async next=>{
@@ -30,7 +33,7 @@ export function createNodeWorkerDeployment({store,ssh,center,image,fullCrawlImag
       for(;;){
         status=await center.status(plan);
         if(status.nodeId===node.id && status.deploymentId===plan.deploymentId
-          && status.workers?.length>=plan.count && plan.registrations.every(row=>status.workers.some(w=>w.slot===row.slot && w.connected)))break;
+          && status.workers?.length>=plan.count && plan.registrations.every(row=>status.workers.some(w=>w.slot===row.slot && (pausedSlots.includes(row.slot)?w.paused:w.connected))))break;
         if(Date.now()>=deadline)throw new Error('Worker 已启动，但尚未全部连接中心；可重试检查，不会重新生成凭据');
         await delay(pollMs);
       }
@@ -44,11 +47,10 @@ export function createNodeWorkerDeployment({store,ssh,center,image,fullCrawlImag
     }finally{password=undefined;ssh.close(connection);active.delete(node.id);}
   }
   return {
-    async start({id,version,password='',count,additionalCount,role,expectedInstalledCount,syncIntake=false,expectedAllowedCount}){
+    async start({id,version,password='',count,additionalCount,role,expectedInstalledCount}){
       validateBootstrapPassword(password);
       const invalid=message=>Object.assign(new Error(message),{statusCode:400});
       if(count!==undefined && (!Number.isSafeInteger(count)||count<1))throw invalid('部署数量必须为正整数');
-      if(typeof syncIntake!=='boolean' || (syncIntake&&(!Number.isSafeInteger(expectedAllowedCount)||expectedAllowedCount<0)))throw invalid('同步接单参数不正确');
       if(active.has(id))throw Object.assign(new Error('该节点正在部署 Worker'),{statusCode:409});
       const registry=await store.load();const node=registry.nodes.find(row=>row.id===id);
       if(!node)throw Object.assign(new Error('服务器不存在'),{statusCode:404});
@@ -65,11 +67,7 @@ export function createNodeWorkerDeployment({store,ssh,center,image,fullCrawlImag
         if(!Number.isSafeInteger(count))throw invalid('新增后的部署总数无效');
       }else if(role!==undefined||expectedInstalledCount!==undefined)throw invalid('请同时填写新增数量');
       const plan=buildNodeCollectDeployment({node:count===undefined?node:{...node,workers:[{role:workerRole,count}]},image:workerRole==='fullcrawl'?fullCrawlImage:image,gatewayUrl,natsUrl,...(node.deployment?.deploymentId?{deploymentId:node.deployment.deploymentId}:{})});
-      // Older pages may still send syncIntake. Deployment never changes intake:
-      // enabling workers must go through the explicit execution-control action.
-      syncIntake=false;
-      expectedAllowedCount=undefined;
-      const operationId=randomUUID();const updated=await store.beginWorkerDeployment({id,version,operationId,plan,count,syncIntake,expectedAllowedCount});
+      const operationId=randomUUID();const updated=await store.beginWorkerDeployment({id,version,operationId,plan,count});
       const task=execute(node,operationId,plan,password);active.set(id,task);void task.catch(()=>{});return updated;
     },
     waitForIdle:()=>Promise.allSettled([...active.values()]),

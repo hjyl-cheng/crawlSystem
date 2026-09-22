@@ -11,12 +11,12 @@ export function renderServerNodesPage() {
     <div id="nodes-message" role="status" aria-live="polite" hidden></div>
     <div class="nodes-summary" aria-label="节点概览">
       <div class="nodes-stat"><span>已登记服务器</span><strong id="nodes-total">—</strong><small>中心与执行节点</small></div>
-      <div class="nodes-stat"><span>已部署增量 Worker</span><strong id="nodes-planned">—</strong><small>实际部署数量</small></div>
-      <div class="nodes-stat"><span>并发额度合计</span><strong id="nodes-allowed">—</strong><small>各服务器设置的合计</small></div>
+      <div class="nodes-stat"><span>已部署 Worker</span><strong id="nodes-planned">—</strong><small>实际部署数量</small></div>
+      <div class="nodes-stat"><span>接单 Worker 合计</span><strong id="nodes-allowed">—</strong><small>已部署 Worker 的自动容量</small></div>
       <div class="nodes-stat"><span>采集 / 等待处理</span><strong id="nodes-active">—</strong><small>已领取任务的 Worker</small></div>
     </div>
-    <ol class="nodes-journey" aria-label="服务器接入流程"><li class="current"><b>01</b><div><strong>添加并初始化</strong><small>验证 SSH · 配置密钥 · 接入 Beszel</small></div></li><li><b>02</b><div><strong>准备运行环境</strong><small>Docker · Compose · 运行目录</small></div></li><li><b>03</b><div><strong>部署与接单</strong><small>部署实例 · 调整接单数量</small></div></li></ol>
-    <div class="nodes-stage"><span class="nodes-stage-icon" aria-hidden="true">i</span><div><strong>按步骤完成服务器接入</strong><p>添加并初始化后，在服务器卡片点击“准备运行环境”，查看各步骤进度。环境就绪后，在“管理 Worker”中部署实例并调整接单数量。</p></div></div>
+    <ol class="nodes-journey" aria-label="服务器接入流程"><li class="current"><b>01</b><div><strong>添加并初始化</strong><small>验证 SSH · 配置密钥 · 接入 Beszel</small></div></li><li><b>02</b><div><strong>准备运行环境</strong><small>Docker · Compose · 运行目录</small></div></li><li><b>03</b><div><strong>部署与接单</strong><small>部署实例 · 开启或暂停接单</small></div></li></ol>
+    <div class="nodes-stage"><span class="nodes-stage-icon" aria-hidden="true">i</span><div><strong>按步骤完成服务器接入</strong><p>添加并初始化后，在服务器卡片点击“准备运行环境”，查看各步骤进度。环境就绪后，在“管理 Worker”中部署实例并按需开启或暂停接单。</p></div></div>
     <div class="nodes-list-heading"><h2>服务器列表 <span id="nodes-count"></span></h2><div class="nodes-filters"><label class="nodes-search"><span class="nodes-sr-only">搜索服务器名称或地址</span><input id="nodes-search" type="search" placeholder="搜索名称或 IP 地址" autocomplete="off"></label><label><span class="nodes-sr-only">筛选节点类型</span><select id="nodes-kind"><option value="all">全部类型</option><option value="center">中心节点</option><option value="execution">执行节点</option></select></label></div></div>
     <div id="nodes-list" class="nodes-list" aria-live="polite"><div class="nodes-empty"><span class="nodes-loading">正在读取服务器列表…</span></div></div>
     <noscript><p class="nodes-stage">请启用 JavaScript 以加载和管理服务器。</p></noscript>
@@ -76,7 +76,7 @@ export function renderServerNodesPage() {
   </dialog>
   <dialog id="node-worker-manager" class="nodes-dialog nodes-worker-manager" aria-labelledby="node-worker-manager-title">
     <div class="nodes-dialog-heading"><div><div class="nodes-eyebrow" id="worker-manager-name"></div><h2 id="node-worker-manager-title">管理 Worker</h2></div><button type="button" class="nodes-icon-button" data-close="node-worker-manager" aria-label="关闭">×</button></div>
-    <p class="nodes-dialog-intro">按服务器登记的功能类型新增 Worker；下方设置并发额度，开始与暂停通过服务器卡片上的按钮控制。</p>
+    <p class="nodes-dialog-intro">按服务器登记的功能类型新增 Worker。每个已部署 Worker 自动占用一个接单容量，开始与暂停通过服务器卡片上的按钮控制。</p>
     <div id="worker-manager-summary" class="nodes-manager-summary" aria-live="polite"></div>
     <section class="nodes-manager-section" id="worker-deployment-section">
       <form id="worker-deployment-form">
@@ -85,22 +85,14 @@ export function renderServerNodesPage() {
         <div class="nodes-manager-control"><label class="nodes-field" for="worker-deployment-count">本次新增几个<input id="worker-deployment-count" type="number" min="1" step="1" required></label><button type="submit" class="nodes-button primary" id="worker-deployment-save">部署 Worker</button></div>
         <p id="worker-deployment-impact" class="nodes-manager-help" role="status"></p>
         <p id="worker-deployment-memory" class="nodes-manager-help"></p>
-        <p class="nodes-help">部署不改变接单设置。完成后，先保存并发额度，再点击“开始接任务”启用 Worker。</p>
-        <p class="nodes-manager-help">关闭窗口后部署仍会继续。若期间手动修改了接单设置，将保留较新的设置。</p>
+        <p class="nodes-help">部署完成并确认连接后，点击“开始接任务”即可让全部已部署 Worker 接单。</p>
+        <p class="nodes-manager-help">关闭窗口后部署仍会继续。接单状态由开始或暂停操作控制，部署不会改变暂停状态。</p>
         <label class="nodes-field" id="worker-deployment-password-field">sudo 密码（按需填写）<input id="worker-deployment-password" type="password" autocomplete="new-password" placeholder="已配置免密 sudo 时留空"></label>
         <p id="worker-deployment-error" class="nodes-form-error" role="alert" hidden></p>
       </form>
     </section>
-    <p id="worker-center-note" class="nodes-manager-help" hidden>中心现有增量 Worker 的部署数量暂不在此调整；可以直接设置允许接任务数量。</p>
-    <section class="nodes-manager-section">
-      <form id="worker-intake-form">
-        <div class="nodes-section-heading"><h3>并发额度</h3><span id="worker-allowed-label"></span></div>
-        <div class="nodes-manager-control"><label class="nodes-field" for="worker-intake-count">最多同时参与采集的 Worker<input id="worker-intake-count" type="number" min="0" step="1" required></label><button type="submit" class="nodes-button" id="worker-intake-save">保存额度</button></div>
-        <p id="worker-intake-impact" class="nodes-manager-help">保存只修改并发额度，不会开始或暂停接单。暂停后额度会保留；需点击“开始接任务”才会执行。调小后，已有任务先完成。</p>
-        <p id="worker-intake-result" class="nodes-manager-help" role="status"></p>
-        <p id="worker-intake-error" class="nodes-form-error" role="alert" hidden></p>
-      </form>
-    </section>
+    <p id="worker-center-note" class="nodes-manager-help" hidden>中心现有增量 Worker 的部署数量由中心自动统计。</p>
+    <section class="nodes-manager-section"><div class="nodes-section-heading"><h3>自动接单容量</h3><span id="worker-allowed-label"></span></div><p id="worker-intake-impact" class="nodes-manager-help">接单容量始终等于当前已部署 Worker 数量。开启接单后，全部已部署 Worker 参与采集；暂停后停止接收新任务，正在执行的任务继续收尾。</p></section>
     <section id="worker-removal-section" class="nodes-manager-section">
       <h3>已部署的 Worker</h3>
       <p class="nodes-manager-help">只能删除空闲 Worker。执行中、恢复中或状态未知时不能删除；删除前会再次检查并停止接单。已采集的数据会保留。</p>

@@ -17,6 +17,7 @@ export function createRemoteDeploymentAdmin({store,routes,token,image,gatewayUrl
   if(fullCrawl&&(!/^[a-z0-9][a-z0-9./:_-]*@sha256:[a-f0-9]{64}$/.test(fullCrawl.image)||fullCrawl.image===image))throw new TypeError('dedicated fixed full-crawl image required');
   const executionFor=row=>row.mode===FULL_CRAWL_WORKLOAD.mode?fullCrawl?.execution:execution;
   const activationFor=row=>row.mode===FULL_CRAWL_WORKLOAD.mode?fullCrawl?.activation:activation;
+  const paused=row=>executionFor(row)?.isWorkerPaused?.(row)===true;
   const endpoint=new URL(gatewayUrl);if(endpoint.protocol!=='https:' || endpoint.username || endpoint.password || endpoint.search || endpoint.hash)throw new TypeError('HTTPS gateway required');
   const publicKey=createPublicKey(routes.privateKey).export({type:'spki',format:'pem'});
   return {
@@ -82,13 +83,28 @@ export function createRemoteDeploymentAdmin({store,routes,token,image,gatewayUrl
         await client.query(`INSERT INTO remote_ingestion.node_deployments(node_id,deployment_id,image,worker_count,credentials_cipher)
           VALUES($1,$2,$3,$4,$5) ON CONFLICT(node_id) DO UPDATE SET worker_count=EXCLUDED.worker_count,
           credentials_cipher=EXCLUDED.credentials_cipher,updated_at=clock_timestamp()`,[value.nodeId,value.deploymentId,value.image,registeredCount,routes.encrypt(credentials,`node-deployment:${value.nodeId}`)]);
+        // Once a node is in intake mode, a successful expansion immediately
+        // includes every registered, non-retired Worker.  The supervisor will
+        // wait for each new Worker to heartbeat before admitting work.
+        const intake=(await client.query('SELECT intake_enabled FROM remote_ingestion.intake_controls WHERE node_key=$1',[value.nodeId])).rows[0];
+        if(intake?.intake_enabled===true){
+          const slots=(await client.query(`SELECT node_id,slot,mode FROM remote_ingestion.worker_connections
+            WHERE node_id=$1 AND deployment_id=$2 AND retired_at IS NULL ORDER BY slot`,[value.nodeId,value.deploymentId])).rows.filter(row=>!paused(row)).map(row=>row.slot);
+          await client.query(`INSERT INTO remote_ingestion.node_intake_requests(node_id,deployment_id,selected_slots)
+            VALUES($1,$2,$3) ON CONFLICT(node_id) DO UPDATE SET deployment_id=EXCLUDED.deployment_id,
+            selected_slots=EXCLUDED.selected_slots,revision=remote_ingestion.node_intake_requests.revision+1,
+            updated_at=clock_timestamp()`,[value.nodeId,value.deploymentId,slots]);
+        }
         return {nodeId:value.nodeId,deploymentId:value.deploymentId,nodeToken:credentials.nodeToken,relayTokens:credentials.relayTokens,publicKey,
-          readyForTasks:false};
+          pausedSlots:configs.filter(config=>paused(config)).map(config=>config.slot),readyForTasks:false};
       });
       // Registration is durable before provisioning. A failed capacity request
       // can retry the same deployment without adding slots or issuing new IDs.
       await capacity?.ensure();
       await natsProvisioning?.sync();
+      // Wake the activation reconciler for an already-enabled node so newly
+      // registered Workers join the desired set as soon as they heartbeat.
+      await reconcileIntakeRequests(store,value.nodeId).catch(()=>{});
       return result;
     },
     async setExecution(value){
@@ -96,12 +112,11 @@ export function createRemoteDeploymentAdmin({store,routes,token,image,gatewayUrl
         if(!localIntake)fail('LOCAL_INTAKE_NOT_CONFIGURED');
         const {nodeId,...control}=value;return localIntake.setExecution(control);
       }
-      const byCount=Number.isInteger(value?.allowedCount);
-      if(!value || Object.keys(value).some(k=>!['nodeId','deploymentId','enabled','workerCount','expectedRequested','allowedCount','expectedAllowedCount'].includes(k))
-        || (byCount ? !Number.isInteger(value.expectedAllowedCount) : typeof value.enabled!=='boolean' || typeof value.expectedRequested!=='boolean')
+      if(Number.isInteger(value?.allowedCount)||Number.isInteger(value?.expectedAllowedCount))throw new RemoteProtocolError('EXECUTION_COUNT_CONTROL_REMOVED',400);
+      if(!value || Object.keys(value).some(k=>!['nodeId','deploymentId','enabled','workerCount','expectedRequested'].includes(k))
+        || typeof value.enabled!=='boolean' || typeof value.expectedRequested!=='boolean'
         || !Number.isSafeInteger(value.workerCount) || value.workerCount<1)throw new RemoteProtocolError('INVALID_EXECUTION_CONTROL',400);
       uuid(value.nodeId);uuid(value.deploymentId);
-      if(byCount && (value.allowedCount<0 || value.allowedCount>value.workerCount))throw new RemoteProtocolError('INVALID_EXECUTION_COUNT',400);
       if(value.enabled===true)await capacity?.ensure();
       let control;
       await store.transaction(async client=>{
@@ -116,8 +131,8 @@ export function createRemoteDeploymentAdmin({store,routes,token,image,gatewayUrl
         if(previous && previous.deployment_id!==value.deploymentId)fail('WORKER_DEPLOYMENT_MISMATCH');
         if(previous){const selected=new Set(previous.selected_slots);for(const row of rows)row.activation_requested=selected.has(row.slot);}
         const currentCount=rows.filter(r=>r.activation_requested).length;
-        control=changeIntakeControl(await readIntakeControl(client,value.nodeId,currentCount,value.workerCount),value);
-        const desired=control.effectiveCount;
+        control=changeIntakeControl(await readIntakeControl(client,value.nodeId,currentCount,value.workerCount),value,value.workerCount);
+        let desired=control.effectiveCount;
         if(desired>0 && !executionFor(rows[0])?.allowsNode(value.nodeId))fail('REMOTE_CENTER_EXECUTION_NOT_CONFIGURED');
         // Registration precedes installation. A failed additive deployment must
         // not remove control of the previously verified prefix of Worker slots.
@@ -125,7 +140,10 @@ export function createRemoteDeploymentAdmin({store,routes,token,image,gatewayUrl
         const eligible=rows.filter(row=>installed.has(row.slot));
         if(rows.some(r=>r.retirement_id))fail('WORKER_RETIREMENT_CONFLICT');
         if(eligible.length!==value.workerCount)fail('WORKER_DEPLOYMENT_MISMATCH');
-        const selected=selectIntakeWorkers(eligible,desired);
+        const available=eligible.filter(row=>!paused(row));
+        desired=control.intakeEnabled?available.length:0;
+        control.effectiveCount=desired;
+        const selected=selectIntakeWorkers(available,desired);
         if(desired>0 && (node.state!=='active' || selected.some(r=>!r.activation_requested && (!r.alive || !r.accepting))))fail('WORKER_NOT_READY');
         // Commit the user's request independently of live Worker writes. The
         // owner retains enabled until its current channel has drained.
@@ -147,7 +165,6 @@ export function createRemoteDeploymentAdmin({store,routes,token,image,gatewayUrl
       uuid(nodeId);uuid(deploymentId);
       const result=await store.transaction(async client=>{
         const request=(await client.query('SELECT selected_slots FROM remote_ingestion.node_intake_requests WHERE node_id=$1 AND deployment_id=$2',[nodeId,deploymentId])).rows[0];
-        const desired=request?new Set(request.selected_slots):null;
         const rows=(await client.query(`SELECT w.*,n.state AS node_state,w.connected_until>clock_timestamp() AS connected,
           current_work.state AS task_state,current_work.command_state,
           EXISTS(SELECT 1 FROM remote_ingestion.tasks t WHERE t.target_node_id=w.node_id AND t.target_worker_slot=w.slot
@@ -162,6 +179,10 @@ export function createRemoteDeploymentAdmin({store,routes,token,image,gatewayUrl
             ORDER BY CASE WHEN t.state='received' THEN 1 ELSE 0 END,t.created_at DESC LIMIT 1
           ) current_work ON true
           WHERE w.node_id=$1 AND deployment_id=$2 AND w.retired_at IS NULL ORDER BY slot`,[nodeId,deploymentId])).rows;
+        const control=await readIntakeControl(client,nodeId,rows.filter(row=>row.activation_requested).length,rows.length);
+        // A stale request from the old count-control implementation must not
+        // reopen a paused node.  The durable switch is the source of truth.
+        const desired=control.intakeEnabled?(request?new Set(request.selected_slots):null):new Set();
         const workers=[];
         for(const row of rows){
           const execution=executionFor(row),activation=activationFor(row);
@@ -173,17 +194,17 @@ export function createRemoteDeploymentAdmin({store,routes,token,image,gatewayUrl
               WHERE t.target_node_id=$1 AND t.target_worker_slot=$2 AND t.state IN ('pending','leased') ORDER BY t.created_at DESC LIMIT 1`,[row.node_id,row.slot])).rows[0];
             row.task_state=current?.state;row.command_state=current?.stage_state==='received'?'received':'pending';
           }
-          workers.push({slot:row.slot,retiring:!!row.retirement_id,connected:row.connected===true,preparation:execution?.preparationState?.(row)??null,
+          workers.push({slot:row.slot,paused:paused(row),retiring:!!row.retirement_id,connected:row.connected===true,preparation:execution?.preparationState?.(row)??null,
           executionPhase:row.task_state==='leased' && row.command_state==='pending' ? 'collecting'
             : row.task_state==='leased' && row.command_state==='received' ? 'processing' : 'preparing',
-          requested:desired?desired.has(row.slot):row.activation_requested,enabled:row.enabled,active:execution?.isProcessing(row)===true || row.unsettled===true,
+          requested:!paused(row) && (desired?desired.has(row.slot):row.activation_requested),enabled:row.enabled,active:execution?.isProcessing(row)===true || row.unsettled===true,
           processing:execution?.isProcessing(row)===true,awaitingRecovery:row.unsettled===true && execution?.isProcessing(row)!==true,
-          readyForTasks:row.connected===true && (desired?desired.has(row.slot):row.activation_requested) && row.activation_requested && row.enabled && row.accepting && row.node_state==='active'
+          readyForTasks:!paused(row) && row.connected===true && (desired?desired.has(row.slot):row.activation_requested) && row.activation_requested && row.enabled && row.accepting && row.node_state==='active'
             && typeof verify==='function' && await verify(client,row)===true});
         }
         return {nodeId,deploymentId,workers,executionAvailable:executionFor(rows[0]??{})?.allowsNode(nodeId)===true,
           adjusting:!!desired && rows.some(row=>row.activation_requested!==desired.has(row.slot)),
-          ...intakeStatus(workers),...await readIntakeControl(client,nodeId,workers.filter(w=>w.requested).length,workers.length)};
+          ...intakeStatus(workers),...control};
       });
       // Network inspection must not hold a business database transaction open.
       if(result.workers.some(w=>w.preparation==='waiting_network')){

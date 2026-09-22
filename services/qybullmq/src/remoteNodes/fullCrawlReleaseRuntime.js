@@ -43,8 +43,8 @@ export async function createFullCrawlReleaseRuntime({env = process.env, controlT
       transportOptions, handoff, compatibility, createApiFallback, report});
     return {...center, image: env.REMOTE_NODE_FULL_CRAWL_IMAGE, execution: center.supervisor,
       async start() {
-        // The explicit total is shared by release processes, including the
-        // local compatibility slot. A rival must not reserve a second budget.
+        // Only one release process may own the local compatibility consumer.
+        // Remote concurrency is derived independently from registered Workers.
         budgetGuard = await guardPool.connect();
         budgetGuard.on('error', () => {
           report({event: 'remote_full_crawl_budget_guard_lost'});
@@ -56,8 +56,8 @@ export async function createFullCrawlReleaseRuntime({env = process.env, controlT
         }
         await compatibility.startCompatibility();
         center.supervisor.start();
-        report({event: 'remote_full_crawl_execution_started', total_slots: config.totalSlots,
-          remote_slots: config.maxSlots, compatibility_slots: config.compatibilitySlots});
+        report({event: 'remote_full_crawl_execution_started', compatibility_slots: config.compatibilitySlots,
+          remote_slots: null, capacity_policy: 'dynamic'});
       }, close};
   } catch (error) {
     await close();

@@ -4,6 +4,7 @@ import pg from 'pg';
 import {assertFullCrawlReleaseSchema} from '../src/remoteNodes/fullCrawlReleaseSchema.js';
 import {createFullCrawlReleaseRuntime} from '../src/remoteNodes/fullCrawlReleaseRuntime.js';
 import {createFullCrawlDeploymentRuntime} from '../src/remoteNodes/fullCrawlDeploymentRuntime.js';
+import {fullCrawlPausedWorkers} from '../src/remoteNodes/fullCrawlReleaseConfig.js';
 import {startRemoteNatsCenter} from '../src/remoteNodes/natsCenter.js';
 import {createTransportSignals} from '../src/remoteNodes/transportSignals.js';
 import {createNatsProvisioning} from '../src/remoteNodes/natsProvisioning.js';
@@ -86,7 +87,7 @@ try{
         rotaClient:new ProxyControlClient({controlUrl:required('ROTA_PROXY_CONTROL_URL'),token:controlToken}),
         transportOptions,report:value=>console.log(JSON.stringify(value))});
     }else{
-      fullCrawl=createFullCrawlDeploymentRuntime({store,image:required('REMOTE_NODE_FULL_CRAWL_IMAGE'),...transportOptions});
+      fullCrawl=createFullCrawlDeploymentRuntime({store,image:required('REMOTE_NODE_FULL_CRAWL_IMAGE'),pausedWorkers:fullCrawlPausedWorkers(process.env),...transportOptions});
     }
   }
   const workerConnections=new RemoteWorkerActivationStore({store,verifyExecution:(client,row)=>supervisor?.verifyExecution(client,row)??false});

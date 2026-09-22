@@ -8,7 +8,7 @@ import {DelayedError} from 'bullmq';
 const secrets = {controlToken: 'fixture-control-only', profileSecret: 'fixture-profile-only'};
 const config = () => ({REMOTE_NODE_FULL_CRAWL_DEPLOYMENT_ENABLED: 'true', SKIP_SCHEMA_MIGRATION: 'true',
   YOUTUBEJS_EXTRACTOR_MODE: 'full', PROXY_SLOT_ROLE: 'channel', WORKER_QUEUES: 'youtube-channel-crawl',
-  REMOTE_NODE_FULL_CRAWL_NODE_IDS: 'e6928a55-d46b-4234-b0b4-fc15b4d90f82', REMOTE_NODE_FULL_CRAWL_TOTAL_SLOTS: '3',
+  REMOTE_NODE_FULL_CRAWL_NODE_IDS: 'e6928a55-d46b-4234-b0b4-fc15b4d90f82',
   REMOTE_NODE_QUEUE_PREFIX: 'fixture-full', BULLMQ_PREFIX: 'fixture-full',
   REMOTE_NODE_REDIS_URL: 'redis://:fixture-redis@localhost:6379/0', REDIS_HOST: 'localhost', REDIS_PASSWORD: 'fixture-redis',
   DATABASE_URL: 'postgres://fixture@localhost/fixture', REMOTE_NODE_DATABASE_URL: 'postgres://fixture@localhost/fixture',
@@ -18,11 +18,19 @@ const config = () => ({REMOTE_NODE_FULL_CRAWL_DEPLOYMENT_ENABLED: 'true', SKIP_S
   ROTA_PROXY_CONTROL_TOKEN: secrets.controlToken, BROWSER_PROFILE_ENCRYPTION_KEY: secrets.profileSecret,
   ROTA_BULLMQ_PROXY_PASSWORD: 'fixture-proxy-only'});
 
-test('release explicitly reserves compatibility capacity and refuses cross-database/queue/identity configuration', () => {
-  assert.equal(fullCrawlReleaseConfig(config(), secrets).maxSlots, 2);
+test('release reserves compatibility capacity while remote slots use dynamic capacity', () => {
+  const result=fullCrawlReleaseConfig(config(), secrets);
+  assert.equal(result.maxSlots, null);
+  assert.equal(result.compatibilitySlots, 1);
+  assert.equal(result.dashboardManaged, true);
+  assert.deepEqual(result.allowedNodeIds, []);
+  for(const old of ['', 'invalid', config().REMOTE_NODE_FULL_CRAWL_NODE_IDS]) {
+    const dynamic=fullCrawlReleaseConfig({...config(),REMOTE_NODE_FULL_CRAWL_NODE_IDS:old,REMOTE_NODE_FULL_CRAWL_TOTAL_SLOTS:'2'},secrets);
+    assert.equal(dynamic.maxSlots,null);
+    assert.deepEqual(dynamic.allowedNodeIds,[]);
+  }
   for (const override of [
-    {REMOTE_NODE_FULL_CRAWL_TOTAL_SLOTS: '1'}, {REMOTE_NODE_FULL_CRAWL_TOTAL_SLOTS: '2.5'},
-    {REMOTE_NODE_FULL_CRAWL_NODE_IDS: ''}, {REMOTE_NODE_FULL_CRAWL_NODE_IDS: 'invalid'},
+    {REMOTE_NODE_FULL_CRAWL_PAUSED_WORKERS: 'full-crawl-1'},
     {SKIP_SCHEMA_MIGRATION: 'false'}, {WORKER_QUEUES: 'youtube-channel-incremental'},
     {DATABASE_URL: 'postgres://fixture@localhost/other'}, {BULLMQ_PREFIX: 'other'},
     {REDIS_PASSWORD: 'wrong'}, {REMOTE_NODE_REDIS_URL: 'rediss://:fixture-redis@localhost:6379/0'},
@@ -30,6 +38,13 @@ test('release explicitly reserves compatibility capacity and refuses cross-datab
     {BROWSER_PROFILE_ENCRYPTION_KEY: 'other'}, {ROTA_PROXY_CONTROL_TOKEN: 'other'},
     {REMOTE_NODE_FULL_CRAWL_DEPLOYMENT_ENABLED: 'false'},
   ]) assert.throws(() => fullCrawlReleaseConfig({...config(), ...override}, secrets), /FULL_CRAWL_/);
+});
+
+test('maintenance pause names a worker on one node, independently of node admission',()=>{
+  const worker=config().REMOTE_NODE_FULL_CRAWL_NODE_IDS+'/full-crawl-1';
+  assert.deepEqual(fullCrawlReleaseConfig({...config(),REMOTE_NODE_FULL_CRAWL_PAUSED_WORKERS:worker},secrets).pausedWorkers,[worker]);
+  const env=config();delete env.REMOTE_NODE_FULL_CRAWL_NODE_IDS;
+  assert.equal(fullCrawlReleaseConfig(env,secrets).dashboardManaged,true);
 });
 
 test('importing original worker starts no consumer, schema migration or signal handler', () => {

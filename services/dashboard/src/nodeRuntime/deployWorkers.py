@@ -94,12 +94,17 @@ def deploy(bundle_file, step):
     slots = plan.get('slots', [f'{prefix}-{i}' for i in range(1, plan['count'] + 1)])
     require(len(slots) == plan['count'] and len(set(slots)) == len(slots)
             and all(re.fullmatch(prefix + r'-[1-9][0-9]*', slot) for slot in slots))
+    paused = credentials.get('pausedSlots', [])
+    require(isinstance(paused, list) and all(slot in slots for slot in paused))
+    active_slots = [slot for slot in slots if slot not in paused]
     compose = plan['compose']
     require(compose['name'] == project and set(compose) == {'name', 'services'} and set(compose['services']) == set(slots))
     for slot, service in compose['services'].items():
         require(service['image'] == plan['image'] and service['user'] == '1000:1000' and service['read_only'] is True)
         require(service['cap_drop'] == ['ALL'] and service['security_opt'] == ['no-new-privileges:true'])
-        require(set(service) - ({'environment'} if plan.get('natsUrl') else set()) == {'image','init','restart','healthcheck','user','read_only','cap_drop','security_opt','pids_limit','mem_limit','cpus','stop_grace_period','tmpfs','volumes','logging','labels'})
+        require(set(service) - ({'environment'} if plan.get('natsUrl') else set()) - ({'profiles'} if slot in paused else set()) == {'image','init','restart','healthcheck','user','read_only','cap_drop','security_opt','pids_limit','mem_limit','cpus','stop_grace_period','tmpfs','volumes','logging','labels'})
+        if slot in paused:
+            require(service['restart'] == 'no' and service['profiles'] == ['paused'])
         require(service['healthcheck'] == {'disable': True})
         if plan.get('natsUrl'):
             from urllib.parse import urlparse
@@ -142,18 +147,29 @@ def deploy(bundle_file, step):
     elif step == 'pull':
         pull_image(plan['image'], credentials.get('registry'))
     elif step == 'start':
-        run(command + ['up','-d','--no-recreate','--pull','never'], 120)
+        # Maintenance-paused slots keep their spool and identity, but cannot be
+        # restarted by a retry or an expansion of another slot on this node.
+        if paused:
+            ids = run(command + ['--profile', 'paused', 'ps', '--all', '-q', *paused], 30).split()
+            if ids:
+                run(['docker', 'update', '--restart=no', *ids], 30)
+                run(['docker', 'stop', '--time', '-1', *ids], 1000)
+        if active_slots:
+            run(command + ['up','-d','--no-recreate','--pull','never',*active_slots], 120)
     else:
         deadline = time.monotonic() + 90
         while True:
-            ids = run(command + ['ps','--all','-q'], 30).split()
+            ids = run(command + ['--profile','paused','ps','--all','-q'], 30).split()
             containers = json.loads(run(['docker','inspect',*ids], 30)) if ids else []
+            paused_containers = [c for c in containers if c.get('Config', {}).get('Labels', {}).get('qy.node.slot') in paused]
+            require(all(not c['State']['Running'] and c['HostConfig']['RestartPolicy']['Name'] == 'no' for c in paused_containers))
+            containers = [c for c in containers if c not in paused_containers]
             # This step verifies the container layer only. The dashboard then
             # checks every registered slot's live center heartbeat before it
             # records deployment success or enables intake. Docker Health is
             # deliberately unused, including for older reused containers.
             actual_slots = [c.get('Config', {}).get('Labels', {}).get('qy.node.slot') for c in containers]
-            if (len(containers) == len(slots) and set(actual_slots) == set(slots)
+            if (len(containers) == len(active_slots) and set(actual_slots) == set(active_slots)
                     and all(c['State']['Running'] and not c['State'].get('Paused')
                             and not c['State'].get('Restarting')
                             and c['Config']['Image'] == plan['image']

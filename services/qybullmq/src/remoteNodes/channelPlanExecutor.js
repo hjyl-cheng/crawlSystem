@@ -16,6 +16,7 @@ export class RemoteChannelPlanExecutor {
     this.stopping = false;
     this.busy = false;
     this.recoveryNeeded = true;
+    this.intakeReady = false;
   }
 
   stop() { this.stopping = true; }
@@ -57,7 +58,8 @@ export class RemoteChannelPlanExecutor {
       // the center to close its task. Never let that wait strand durable data.
       await this.flush();
       if (recoveryError) throw recoveryError;
-      if (!(await this.spool.writable())) return 'blocked';
+      if (!(await this.spool.writable())) { this.intakeReady = false; return 'blocked'; }
+      this.intakeReady = true;
       let claim = await this.spool.read('claim.json');
       if (!claim && this.stopping) return 'stopped';
       if (claim?.lease) {
@@ -161,6 +163,7 @@ export class RemoteChannelPlanExecutor {
       // An interrupted command may have fsynced a delivery without its pointer.
       // Reconcile it before the next claim; successful idle passes need no replay.
       this.recoveryNeeded = true;
+      this.intakeReady = false;
       throw error;
     } finally { this.busy = false; }
   }

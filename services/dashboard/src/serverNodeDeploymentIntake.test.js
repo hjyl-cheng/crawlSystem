@@ -24,5 +24,28 @@ for (const initial of [null, 0, 2]) test(`deployment preserves intake ${initial 
   await deployment.waitForIdle();
   assert.equal(node.deployment.state,'connected');assert.equal(node.deployment.appliedCount,installed+1);
   assert.equal(allowed,initial??0,'deployment cannot authorize more intake');
-  assert.equal(saved.syncIntake,false,'persist no deferred auto-start operation');
+  assert.equal(saved.syncIntake,undefined,'persist no deferred auto-start operation');
+});
+
+test('deployment preserves a center-paused worker while starting and verifying other slots',async()=>{
+  const node={id:randomUUID(),kind:'execution',workerRole:'fullcrawl',workers:[{role:'fullcrawl',count:3}],
+    provisioning:{state:'ready'},runtime:{state:'ready'}};
+  let installed;
+  const store={load:async()=>({version:1,nodes:[node]}),beginWorkerDeployment:async()=>({}),
+    advanceWorkerDeployment:async(_id,_op,patch)=>Object.assign(node.deployment??={},patch)};
+  const center={prepare:async plan=>({nodeId:node.id,deploymentId:plan.deploymentId,readyForTasks:false,
+    pausedSlots:['full-crawl-1'],nodeToken:'a'.repeat(64),publicKey:'fixture',
+    relayTokens:Object.fromEntries(plan.registrations.map(r=>[r.slot,'b'.repeat(64)]))}),
+    status:async plan=>({nodeId:node.id,deploymentId:plan.deploymentId,workers:plan.registrations.map(r=>({slot:r.slot,
+      paused:r.slot==='full-crawl-1',connected:r.slot!=='full-crawl-1'}))})};
+  const deployment=createNodeWorkerDeployment({store,center,image:'fixture/incremental@sha256:'+'a'.repeat(64),
+    fullCrawlImage:'fixture/full@sha256:'+'b'.repeat(64),fullCrawlDeploymentEnabled:true,
+    gatewayUrl:'https://center.example',natsUrl:'tls://messages.example:4222',
+    ssh:{connect:async()=>({}),verify:async()=>{},deployWorkers:async(_c,_n,plan)=>{installed=plan;},close:()=>{}}});
+  await deployment.start({id:node.id,version:1});await deployment.waitForIdle();
+  assert.equal(node.deployment.state,'connected');assert.equal(node.deployment.appliedCount,3);
+  assert.equal(installed.compose.services['full-crawl-1'].restart,'no');
+  assert.deepEqual(installed.compose.services['full-crawl-1'].profiles,['paused']);
+  assert.equal(installed.compose.services['full-crawl-2'].restart,'unless-stopped');
+  assert.equal(installed.compose.services['full-crawl-2'].profiles,undefined);
 });

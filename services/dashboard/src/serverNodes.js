@@ -286,7 +286,7 @@ export function createServerNodeStore(query) {
       return node;
     });
   }
-  async function beginWorkerDeployment({id,version,operationId,plan,count,syncIntake=false,expectedAllowedCount}){
+  async function beginWorkerDeployment({id,version,operationId,plan,count}){
     integer(version,'配置版本',0,Number.MAX_SAFE_INTEGER);
     return mutateNode(id,(node,registry)=>{
       if(registry.version!==version)throw invalid('配置已更新，请刷新后重试',409);
@@ -309,7 +309,7 @@ export function createServerNodeStore(query) {
         slots:plan.slots??plan.registrations.map(r=>r.slot),allocationSlots:plan.allocationSlots??plan.slots,slotSequence:plan.slotSequence??plan.count,
         desiredCount:plan.count,appliedCount:prior?.appliedCount??0,startedAt:now,deadline:new Date(Date.now()+40*60000).toISOString(),
         remoteChanges:prior?.remoteChanges??false,error:null,
-        intakeSync:syncIntake?{state:'pending',allowedCount:plan.count,expectedAllowedCount}:null,
+        intakeSync:null,
         steps:Object.fromEntries(workerDeploymentSteps.map(step=>[step,'pending']))};
       node.updatedAt=now;return node;
     });

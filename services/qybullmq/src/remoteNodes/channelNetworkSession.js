@@ -90,7 +90,8 @@ export class RemoteChannelNetworkSession {
         throw new Error('NETWORK_BOOT_CHANGED'); // center resumes the Plan with a new execution generation
       }
       if (!state) {
-        state = { phase: 'activate', lease: { task_id: lease.task_id, generation: lease.generation }, boot_id: boot.boot_id,
+        state = { phase: 'activate', lease: { task_id: lease.task_id, generation: lease.generation,
+          ...(lease.connection ? {connection: structuredClone(lease.connection)} : {}) }, boot_id: boot.boot_id,
           request: { task_id: lease.task_id, generation: lease.generation, slot: this.slot, boot_id: boot.boot_id,
             request_id: randomUUID(), action: 'activate' } };
         await this.save(state);

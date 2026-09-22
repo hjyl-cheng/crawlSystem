@@ -31,19 +31,21 @@ export class RemoteIncrementalProcess {
         await new Promise(resolve=>this.activationWaiters.add(resolve));
       }
     },claim:async(claimId,slot)=>{
-      if(this.stopping || !this.connection || this.readyUntil<=uptime())return null;
+      if(!this.accepting() || !this.connection || this.readyUntil<=uptime())return null;
       const connection=this.connection;
       const lease=await client.claim(claimId,slot,connection);
       return workload&&lease?{...lease,connection}:lease;
-    }},localRota,spool,slot:config.slot});
+    }},localRota,spool,nodeId:config.node_id,slot:config.slot});
   }
+
+  accepting() { return !this.stopping && this.worker.intakeReady!==false; }
 
   async probe() {
     const started=Date.now();const startedUptime=uptime();
     const boot=await this.localRota.boot();
     const value={version:1,mode:this.config.mode,node_id:this.config.node_id,slot:this.config.slot,
       deployment_id:this.config.deployment_id,config_hash:this.config.config_hash,instance_id:this.instanceId,
-      relay_boot_id:boot.boot_id,runtime_revision:this.runtimeRevision,accepting:!this.stopping};
+      relay_boot_id:boot.boot_id,runtime_revision:this.runtimeRevision,accepting:this.accepting()};
     const ack=await this.client.workerHeartbeat(value);
     const expected=ack?.ready_for_tasks===true?'ready':!value.accepting?'draining':'connected_waiting_activation';
     if(Object.keys(value).some(key=>ack?.[key]!==value[key]) || typeof ack.ready_for_tasks!=='boolean'
@@ -52,10 +54,13 @@ export class RemoteIncrementalProcess {
     if(!Number.isFinite(serverTime) || serverTime<started-5000 || serverTime>Date.now()+5000
       || !Number.isFinite(remaining) || remaining<1000 || remaining>120000
       || startedUptime+remaining/1000<=uptime())throw new Error('NODE_CONNECTION_CLOCK_OR_LEASE_INVALID');
-    this.connection=value;this.readyUntil=ack.ready_for_tasks?startedUptime+remaining/1000:0;
+    // Recovery can fail while this heartbeat is in flight. An older ready ACK
+    // must not reopen intake or overwrite local recovery health.
+    const accepting=this.accepting();const ready=ack.ready_for_tasks && accepting;
+    this.connection=value;this.readyUntil=ready?startedUptime+remaining/1000:0;
     if(this.readyUntil>uptime())this.wakeActivation();
     return {version:1,node_id:value.node_id,slot:value.slot,deployment_id:value.deployment_id,
-      state:ack.state,ready_for_tasks:ack.ready_for_tasks,valid_until_uptime:startedUptime+remaining/1000};
+      state:accepting?ack.state:'draining',ready_for_tasks:ready,valid_until_uptime:startedUptime+remaining/1000};
   }
 
   wakeActivation() {

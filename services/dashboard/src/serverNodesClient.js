@@ -65,20 +65,20 @@ const installedCount = node => executionStates.get(node.id)?.counts?.deployed ??
 function executionPanel(node) {
   if (!node.deployment && !node.localIntake) return `<p class="nodes-worker-gate">${nodeWorkerType(node)?.deployable ? '尚未部署 Worker' : escapeHtml(workerTypeDescription(nodeWorkerType(node)))}</p>`;
   const state = executionStates.get(node.id), known = state?.counts;
-  const counts = state?.counts, allowed = state?.configuredCount ?? state?.allowedCount ?? 0;
+  const counts = state?.counts, allowed = counts?.deployed ?? state?.configuredCount ?? state?.allowedCount ?? 0;
   const intakeEnabled=state?.intakeEnabled??state?.requested??false;
   const label = !known ? state?.error ? '接任务状态暂不可用' : '正在读取接任务状态'
     : !intakeEnabled ? counts.draining?'已暂停接单，已有任务继续收尾':'已暂停接单'
-    : state.adjusting ? '接单设置已保存，正在调整'
+    : state.adjusting ? '接单 Worker 正在调整'
     : counts.draining ? '正在调整，当前频道完成后待命'
-    : allowed ? counts.ready ? '已开启接单' : '已开启接单，等待就绪' : '已开启接单，额度为 0';
-  return `<div class="nodes-execution"><div><strong>${label}${known && state.error ? '（上次状态）' : ''}</strong>${known ? `<small>已部署 ${counts.deployed} · 并发额度 ${allowed} · 当前启用 ${state.allowedCount??0} · 已连接 ${counts.connected}</small><small>采集 / 回传 ${counts.collecting ?? counts.running ?? counts.active} · 中心处理 / 派发 ${counts.processing ?? 0} · 等待恢复 ${counts.awaiting ?? 0} · 未就绪 ${counts.unready ?? 0} · 空闲 ${counts.idle} · 收尾 ${counts.finishing ?? counts.draining} · 待命 ${counts.standby} · 离线 ${counts.offline ?? 0}</small>` : ''}${known && state.error ? '<small>状态更新失败，正在重试；以上为上次读取结果。</small>' : ''}</div></div>`;
+    : allowed ? counts.ready ? '已开启接单' : '已开启接单，等待就绪' : '已开启接单，暂无 Worker';
+  return `<div class="nodes-execution"><div><strong>${label}${known && state.error ? '（上次状态）' : ''}</strong>${known ? `<small>已部署 ${counts.deployed} · 接单 Worker ${state.allowedCount??0} · 已连接 ${counts.connected}</small><small>采集 / 回传 ${counts.collecting ?? counts.running ?? counts.active} · 中心处理 / 派发 ${counts.processing ?? 0} · 等待恢复 ${counts.awaiting ?? 0} · 未就绪 ${counts.unready ?? 0} · 空闲 ${counts.idle} · 收尾 ${counts.finishing ?? counts.draining} · 待命 ${counts.standby} · 离线 ${counts.offline ?? 0}</small>` : ''}${known && state.error ? '<small>状态更新失败，正在重试；以上为上次读取结果。</small>' : ''}</div></div>`;
 }
 function workerActions(node) {
   const state=executionStates.get(node.id);
   const enabled=node.localIntake || (isReady(node) && node.runtime?.state==='ready');
   const installed=installedCount(node),pause=state?.intakeEnabled??state?.requested??false,busy=executionActions.has(node.id);
-  const toggle=installed?`<button type="button" class="nodes-button" data-toggle-intake="${escapeHtml(node.id)}" title="${pause?'停止接新任务，已领取频道继续收尾':`允许 ${(state?.configuredCount??state?.allowedCount??installed)} 个 Worker 接任务，可在管理窗口调整`}"
+  const toggle=installed?`<button type="button" class="nodes-button" data-toggle-intake="${escapeHtml(node.id)}" title="${pause?'停止接新任务，已领取频道继续收尾':`允许全部 ${installed} 个已部署 Worker 接任务`}"
     ${busy||!state||state.error||!state.executionAvailable?'disabled':''}>${busy?'正在切换…':pause?'暂停接任务':'开始接任务'}</button>`:'';
   return `<button type="button" class="nodes-button primary" data-manage="${escapeHtml(node.id)}" ${enabled?'':'disabled'}>${node.localIntake || installed>0 || node.deployment?'管理 Worker':'部署 Worker'}</button>${toggle}`;
 }
@@ -87,22 +87,19 @@ function deploymentNotice(node) {
   if(!d)return '';
   if(deploymentRunning(node))return `<p class="nodes-deployment-notice">正在部署至 ${d.desiredCount} 个 · 已确认部署 ${installedCount(node)} 个</p>`;
   if(d.state==='failed'||d.state==='running')return `<p class="nodes-deployment-notice error">本次部署未完成 · 已确认部署 ${installedCount(node)} 个。请在管理 Worker 中查看原因或重试。</p>`;
-  if(d.intakeSync?.state==='failed')return '<p class="nodes-deployment-notice error">部署已完成，接单数量未自动同步，请在管理 Worker 中核实。</p>';
   return '';
 }
 function openWorkerManager(id) {
   const node=registry.nodes.find(n=>n.id===id);if(!node)return;
   $('node-detail').close();
-  workerManager={id,version:registry.version,expectedInstalledCount:installedCount(node),deploymentDirty:false,intakeDirty:false,lastOperation:null,lastState:null};
+  workerManager={id,version:registry.version,expectedInstalledCount:installedCount(node),deploymentDirty:false,lastOperation:null,lastState:null};
   $('worker-deployment-count').value=1;
   $('worker-deployment-role').innerHTML=workerRoleOptions(nodeWorkerRole(node));
   $('worker-deployment-role').value=nodeWorkerRole(node);
-  $('worker-intake-count').value=executionStates.get(id)?.configuredCount??executionStates.get(id)?.allowedCount??0;
   $('worker-deployment-password').value='';
   $('worker-removal-password').value='';
   $('worker-removal-error').hidden=true;
-  for(const name of ['worker-deployment-error','worker-intake-error']){$(name).hidden=true;$(name).textContent='';}
-  $('worker-intake-result').textContent='';
+  $('worker-deployment-error').hidden=true;$('worker-deployment-error').textContent='';
   $('worker-deployment-history').open=false;
   renderWorkerManager();$('node-worker-manager').showModal();$('node-worker-manager').scrollTop=0;
 }
@@ -131,29 +128,24 @@ function renderWorkerManager() {
   $('worker-deployment-role').disabled=true;
   $('worker-deployment-password-field').hidden=running||!deployable;
   $('worker-deployment-impact').textContent=!deployable?(full?'全量节点部署尚未开放。':workerTypeDescription(workerType)):running?`正在部署至 ${d.desiredCount} 个。已确认部署 ${installed} 个，进度会自动更新。`
-    :valid?`已有 ${workerManager.expectedInstalledCount} 个${workerLabel} Worker ＋ 本次新增 ${additional} 个 ＝ 新增后共 ${target} 个。现有 Worker 继续运行，允许接任务数量保持不变。`
+    :valid?`已有 ${workerManager.expectedInstalledCount} 个${workerLabel} Worker ＋ 本次新增 ${additional} 个 ＝ 新增后共 ${target} 个。节点开启接单后全部 Worker 自动参与。`
     :'请输入有效的新增数量（正整数）。';
   const memoryRequired=(target*256+1536)/1024,memoryTotal=observations.get(node.id)?.metrics?.memoryTotalGiB;
   $('worker-deployment-memory').textContent=valid&&deployable
     ?full?`每个全量 Worker 内存上限 768 MiB，${target} 个合计上限 ${(target*768/1024).toFixed(2)} GiB；每个 Worker 采集暂存上限 256 MiB。请按实际内存和磁盘余量安排数量。`:`内存参考：按每个 Worker 256 MiB ＋ 系统预留 1.5 GiB 估算，${target} 个约需 ${memoryRequired.toFixed(2)} GiB。${Number.isFinite(memoryTotal)?` 本机总内存约 ${Number(memoryTotal).toFixed(2)} GiB。`:''}仅供参考，不限制新增数量，请按实际运行情况自行安排。`:'';
   $('worker-deployment-save').disabled=busy||running||!workerDeploymentAvailable||node.runtime?.state!=='ready'||!valid||!deployable;
   $('worker-deployment-save').textContent=!deployable?'远程部署暂未开放':running?'正在新增…':`新增 ${Number.isInteger(additional)&&additional>0?additional:'—'} 个${workerLabel} Worker`;
-  if(!workerManager.intakeDirty&&known){$('worker-intake-count').value=state.configuredCount??state.allowedCount;workerManager.expectedAllowedCount=state.configuredCount??state.allowedCount;}
-  $('worker-intake-count').max=installed;
-  $('worker-intake-count').disabled=busy||!known||!state.executionAvailable||!installed;
-  $('worker-allowed-label').textContent=known?`当前额度 ${state.configuredCount??state.allowedCount} 个 · ${(state.intakeEnabled??state.requested)?'已开启接单':'已暂停接单'} · 可设 0–${installed}`:'等待接单状态';
-  $('worker-intake-save').disabled=busy||!known||!state.executionAvailable||!installed;
+  $('worker-allowed-label').textContent=known?`已部署 ${installed} 个 · ${(state.intakeEnabled??state.requested)?'全部参与接单':'当前暂停接单'}`:'等待接单状态';
   renderWorkerRemoval(node,state);
   const history=$('worker-deployment-history');history.hidden=!d||!!node.localIntake;
   if(d){
     const changed=workerManager.lastOperation!==d.operationId||workerManager.lastState!==d.state;
-    if(changed)history.open=d.state!=='connected'||d.intakeSync?.state==='failed';
+    if(changed)history.open=d.state!=='connected';
     workerManager.lastOperation=d.operationId;workerManager.lastState=d.state;
     $('worker-deployment-history-title').textContent=running?`部署进度 · 目标 ${d.desiredCount} 个`:d.state==='connected'?'最近部署记录 · 已完成':'最近部署记录 · 未完成';
-    $('worker-deployment-status').textContent=d.error||d.intakeSync?.error||(running?'部署在后台执行，可以关闭窗口。':d.state==='connected'?`已确认部署 ${d.appliedCount} 个 Worker。${d.intakeSync?.state==='completed'?'接单数量已同步。':''}`:'上次部署未完成，可重试。');
+    $('worker-deployment-status').textContent=d.error||(running?'部署在后台执行，可以关闭窗口。':d.state==='connected'?`已确认部署 ${d.appliedCount} 个 Worker。`:'上次部署未完成，可重试。');
     const steps=[['ssh','连接与资源检查'],['center','准备中心接入'],['files','准备部署文件'],['pull','下载镜像（最长 30 分钟）'],['start','启动 Worker'],['verify','检查运行状态'],['connection','确认连接中心']];
-    if(d.intakeSync)steps.push(['intake','同步接单数量']);
-    $('worker-deployment-steps').innerHTML=steps.map(([key,label],i)=>{const status=key==='intake'?d.intakeSync.state:d.steps?.[key]??(key==='pull'&&d.steps?.start==='completed'?'completed':'pending');return `<li data-state="${escapeHtml(status)}"><b>${i+1}</b><div><strong>${label}</strong></div><span>${({pending:'待执行',running:'执行中',completed:'已完成',failed:'未完成'})[status]??'待执行'}</span></li>`;}).join('');
+    $('worker-deployment-steps').innerHTML=steps.map(([key,label],i)=>{const status=d.steps?.[key]??(key==='pull'&&d.steps?.start==='completed'?'completed':'pending');return `<li data-state="${escapeHtml(status)}"><b>${i+1}</b><div><strong>${label}</strong></div><span>${({pending:'待执行',running:'执行中',completed:'已完成',failed:'未完成'})[status]??'待执行'}</span></li>`;}).join('');
   }
 }
 function renderWorkerRemoval(node,state){
@@ -171,7 +163,7 @@ function renderWorkerRemoval(node,state){
     const retry=pending&&removal.slot===w.slot&&!inProgress;
     const idle=w.connected&&!w.active;
     const disabled=busy||node.deployment.state!=='connected'||(!retry&&(!idle||pending));
-    const label=w.retiring?'正在移除':!w.connected?'状态未知':w.active?'执行 / 恢复中':w.requested?'空闲，可接任务':'空闲，待命';
+    const label=w.retiring?'正在移除':w.paused?'维护暂停':!w.connected?'状态未知':w.active?'执行 / 恢复中':w.requested?'空闲，可接任务':'空闲，待命';
     return `<div class="nodes-worker-row"><span><strong>${escapeHtml(w.slot)}</strong><small>${label}</small></span><button type="button" class="nodes-button danger" data-remove-worker="${escapeHtml(w.slot)}" ${disabled?'disabled':''}>${retry?'重试删除':'删除'}</button></div>`;
   }).join('')||'<p class="nodes-manager-help">暂无已部署的 Worker。</p>':'<p class="nodes-manager-help">正在读取 Worker 状态，暂时不能删除。</p>';
   $('worker-removal-form').hidden=!workerManager.removalSlot;
@@ -186,21 +178,11 @@ async function removeIdleWorker(event){
   let password=$('worker-removal-password').value;$('worker-removal-password').value='';
   try{
     registry=await request(`/api/server-nodes/${encodeURIComponent(manager.id)}/remove-worker`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({version:registry.version,slot:manager.removalSlot,password})});
-    manager.removalSlot=null;manager.deploymentDirty=false;manager.intakeDirty=false;announce('已开始检查并删除空闲 Worker，进度会自动更新。');
+    manager.removalSlot=null;manager.deploymentDirty=false;announce('已开始检查并删除空闲 Worker，进度会自动更新。');
   }catch(error){$('worker-removal-error').textContent=error.message;$('worker-removal-error').hidden=false;}
   finally{password='';delete dialog.dataset.saving;render();renderWorkerManager();}
 }
-async function saveIntake(id,allowedCount,expectedAllowedCount) {
-  if(executionActions.has(id))return;
-  executionActions.add(id);
-  render();
-  try{
-    const result=await request(`/api/server-nodes/${encodeURIComponent(id)}/execution`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({version:registry.version,allowedCount,expectedAllowedCount})},false);
-    executionStates.set(id,result);return result;
-  }finally{executionActions.delete(id);render();}
-}
 $('worker-deployment-count').addEventListener('input',()=>{if(workerManager){workerManager.deploymentDirty=true;renderWorkerManager();}});
-$('worker-intake-count').addEventListener('input',()=>{if(workerManager)workerManager.intakeDirty=true;});
 $('worker-deployment-form').addEventListener('submit',async event=>{
   event.preventDefault();if(!workerManager||$('worker-deployment-save').disabled)return;
   const manager=workerManager,dialog=$('node-worker-manager');
@@ -212,26 +194,14 @@ $('worker-deployment-form').addEventListener('submit',async event=>{
   }catch(error){$('worker-deployment-error').textContent=error.message;$('worker-deployment-error').hidden=false;}
   finally{password=undefined;delete dialog.dataset.saving;render();renderWorkerManager();void refresh(true);}
 });
-$('worker-intake-form').addEventListener('submit',async event=>{
-  event.preventDefault();if(!workerManager||$('worker-intake-save').disabled)return;
-  const manager=workerManager,dialog=$('node-worker-manager');
-  dialog.dataset.saving='true';$('worker-intake-error').hidden=true;renderWorkerManager();
-  try{
-    const count=Number($('worker-intake-count').value);
-    await saveIntake(manager.id,count,manager.expectedAllowedCount);
-    manager.intakeDirty=false;$('worker-intake-result').textContent=`并发额度已保存为 ${count} 个，启停状态保持不变。暂停时需点击“开始接任务”才会接单。`;
-  }catch(error){$('worker-intake-error').textContent=error.message;$('worker-intake-error').hidden=false;}
-  finally{delete dialog.dataset.saving;renderWorkerManager();void refresh(true);}
-});
 async function toggleIntake(id){
   const state=executionStates.get(id);if(!state||state.error)return;
   const pause=state.intakeEnabled??state.requested??false;
-  if(!pause && !(state.configuredCount??state.allowedCount)){announce('请先保存大于 0 的并发额度。',true);return;}
   if(executionActions.has(id))return;
   executionActions.add(id);render();
   try{
     const result=await request(`/api/server-nodes/${encodeURIComponent(id)}/execution`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({version:registry.version,enabled:!pause,expectedRequested:pause})},false);
-    executionStates.set(id,result);announce(pause?'已暂停接新任务，并发额度已保留。':'已开启接单，按保存的并发额度接任务。');
+    executionStates.set(id,result);announce(pause?'已暂停接新任务，已有任务继续收尾。':'已开启接单，全部已部署 Worker 将参与采集。');
   }
   catch(error){announce(error.message,true);}
   finally{executionActions.delete(id);render();}
@@ -239,7 +209,7 @@ async function toggleIntake(id){
 }
 
 function card(node) {
-  if(node.localIntake)return `<article class="nodes-card"><div class="nodes-card-main"><div class="nodes-card-top"><div class="nodes-card-icon">${serverIcon}</div><div class="nodes-card-title"><h3>中心服务器</h3><div class="nodes-address">${escapeHtml(node.host)}</div></div></div><div class="nodes-card-tags"><span class="nodes-badge center">中心节点</span><span class="nodes-badge">增量采集</span></div>${executionPanel(node)}<p class="nodes-worker-gate">管理本机现有增量 Worker 的接单数量。</p></div><div class="nodes-card-footer">${workerActions(node)}</div></article>`;
+  if(node.localIntake)return `<article class="nodes-card"><div class="nodes-card-main"><div class="nodes-card-top"><div class="nodes-card-icon">${serverIcon}</div><div class="nodes-card-title"><h3>中心服务器</h3><div class="nodes-address">${escapeHtml(node.host)}</div></div></div><div class="nodes-card-tags"><span class="nodes-badge center">中心节点</span><span class="nodes-badge">增量采集</span></div>${executionPanel(node)}<p class="nodes-worker-gate">接单容量由本机已部署 Worker 数量自动决定。</p></div><div class="nodes-card-footer">${workerActions(node)}</div></article>`;
   const ready=isReady(node),environmentAction=ready&&node.kind==='execution';
   const runtimeButton=`<button type="button" class="nodes-button primary" data-runtime="${escapeHtml(node.id)}">${runtimeRunning(node)?'查看环境准备进度':'准备运行环境'}</button>`;
   return `<article class="nodes-card"><div class="nodes-card-main"><div class="nodes-card-top"><div class="nodes-card-icon">${serverIcon}</div><div class="nodes-card-title"><h3>${escapeHtml(node.name)}</h3><div class="nodes-address">${escapeHtml(node.host)} · ${node.port}</div></div><details class="nodes-card-menu"><summary aria-label="${escapeHtml(node.name)}的更多操作">⋯</summary><div><button type="button" data-detail="${escapeHtml(node.id)}">服务器详情</button><button type="button" data-edit="${escapeHtml(node.id)}">编辑服务器</button><button type="button" class="danger" data-delete="${escapeHtml(node.id)}">删除服务器</button></div></details></div>

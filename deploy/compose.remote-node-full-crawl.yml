@@ -6,7 +6,11 @@ services:
       REMOTE_NODE_FULL_CRAWL_DEPLOYMENT_ENABLED: ${QY_REMOTE_FULL_CRAWL_DEPLOYMENT_ENABLED:-false}
       REMOTE_NODE_FULL_CRAWL_EXECUTION_ENABLED: ${QY_REMOTE_FULL_CRAWL_EXECUTION_ENABLED:-false}
       REMOTE_NODE_FULL_CRAWL_IMAGE: ${QY_REMOTE_FULL_CRAWL_IMAGE:-}
-      REMOTE_NODE_FULL_CRAWL_NODE_IDS: ${QY_REMOTE_FULL_CRAWL_NODE_IDS:-}
+      # Registered deployments are admitted automatically; there is no node allowlist.
+      REMOTE_NODE_FULL_CRAWL_PAUSED_WORKERS: ${QY_REMOTE_FULL_CRAWL_PAUSED_WORKERS:-}
+      # Deprecated compatibility variable; current code ignores the old fixed
+      # slot budget. Keep it available so rollback to an older center remains
+      # possible without changing the private Compose source.
       REMOTE_NODE_FULL_CRAWL_TOTAL_SLOTS: ${QY_REMOTE_FULL_CRAWL_TOTAL_SLOTS:-2}
     # Explicitly budget the single local legacy/repair compatibility runtime.
     mem_limit: 1536m

@@ -1,13 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, readdir, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRemoteYoutubeRuntime } from '../src/remoteNodes/youtubeRuntime.js';
 import { RemoteResultSpool } from '../src/remoteNodes/spool.js';
 import { sessionRequest } from '../src/remoteNodes/youtubeSessionContract.js';
-import { hash } from '../src/remoteNodes/protocol.js';
+import { hash, RemoteProtocolError } from '../src/remoteNodes/protocol.js';
+import { createRemoteIncrementalWorker } from '../src/remoteNodes/incrementalWorker.js';
+import { RemoteIncrementalProcess } from '../src/remoteNodes/nodeIncrementalRuntime.js';
 import { canonicalIncrementalJson } from '../src/incrementalPlan.js';
 import { currentChannelExecution } from '../src/channelExecutionContext.js';
 import { fetchWithFingerprint } from '../src/fingerprintFetch.js';
@@ -144,4 +146,106 @@ test('restart reports an interrupted session instead of silently reacquiring its
   assert.equal(f.checkpoints[0].checkpoint.status, 'aborted');
   assert.equal(f.checkpoints[0].checkpoint.error_code, 'REMOTE_YOUTUBE_PROCESS_INTERRUPTED');
   assert.deepEqual(f.events, []);
+});
+
+for (const completed of [false, true]) test(`stale YouTube session recovery unblocks intake across restart (checkpoint=${completed})`, async t => {
+  const f = await fixture(t); let attempts = 0; let claims = 0;
+  const pending = { request: sessionRequest(f.route, f.route.lease, f.route.slot, f.route.bootId),
+    ...(completed ? { checkpoint: { status: 'success', cookies: { cookies: [] }, metrics: {}, active_managed_requests: 0, error_code: null } } : {}) };
+  await f.spool.save('youtube-session.json', Buffer.from(JSON.stringify(pending)));
+  await f.spool.save('claim.json', Buffer.from(JSON.stringify({ claim_id: randomUUID(), lease: f.route.lease })));
+  await f.spool.save('network.json', Buffer.from(JSON.stringify({ phase: 'closed', lease: f.route.lease })));
+  const client = { ...f.client,
+    youtubeCheckpoint: async () => { attempts++; throw new RemoteProtocolError('STALE_LEASE', 409); },
+    pollCommands: async () => { throw new RemoteProtocolError('STALE_LEASE', 409); },
+    claim: async () => { claims++; return null; } };
+  const worker = () => createRemoteIncrementalWorker({ client, spool: f.spool, slot: f.route.slot,
+    localRota: {}, gateway: f.gateway, youtube: f.youtube });
+  const first = worker();
+  assert.equal(await first.runOnce(), 'expired');
+  assert.equal(await first.runOnce(), 'idle');
+  assert.equal(claims, 1, 'stale session must not prevent new claims');
+  assert.equal(await f.spool.read('youtube-session.json'), null);
+  const archives = (await readdir(f.spool.directory)).filter(name => name.endsWith('.stale'));
+  assert.equal(archives.length, 1);
+  const archived = JSON.parse(await readFile(join(f.spool.directory, archives[0]), 'utf8'));
+  assert.deepEqual(archived.request, pending.request);
+  assert.equal(archived.checkpoint.status, completed ? 'success' : 'aborted');
+  if (completed) assert.deepEqual(archived, pending);
+  assert.equal(await worker().runOnce(), 'idle');
+  assert.equal(attempts, 1, 'restart must not replay the archived session');
+  assert.equal(claims, 2);
+  assert.deepEqual(f.events, [], 'recovery must never reacquire the old identity');
+});
+
+for (const [code, status] of [['TRANSPORT_ERROR', 503], ['STALE_LEASE', 503],
+  ['UNAUTHORIZED', 401], ['YOUTUBE_CHECKPOINT_CONFLICT', 409], ['YOUTUBE_SESSION_OWNERSHIP_MISMATCH', 409]]) {
+  test(`uncertain checkpoint rejection preserves recovery and blocks intake: ${code}/${status}`, async t => {
+    const f = await fixture(t); let claims = 0;
+    await f.spool.save('youtube-session.json', Buffer.from(JSON.stringify({
+      request: sessionRequest(f.route, f.route.lease, f.route.slot, f.route.bootId) })));
+    const client = { ...f.client, youtubeCheckpoint: async () => { throw new RemoteProtocolError(code, status); },
+      claim: async () => { claims++; return null; } };
+    const worker = createRemoteIncrementalWorker({ client, spool: f.spool, slot: f.route.slot,
+      localRota: {}, gateway: f.gateway, youtube: f.youtube });
+    await assert.rejects(worker.runOnce(), { code, status });
+    assert.equal(claims, 0);
+    assert.equal(worker.intakeReady, false);
+    assert.ok(await f.spool.read('youtube-session.json'));
+    assert.equal((await readdir(f.spool.directory)).some(name => name.endsWith('.stale')), false);
+    client.youtubeCheckpoint = f.client.youtubeCheckpoint;
+    assert.equal(await worker.runOnce(), 'idle');
+    assert.equal(worker.intakeReady, true);
+    assert.equal(claims, 1);
+  });
+}
+
+test('stale checkpoint during live execution still fails that execution and archives only on recovery', async t => {
+  const f = await fixture(t);
+  f.client.youtubeCheckpoint = async () => { throw new RemoteProtocolError('STALE_LEASE', 409); };
+  await assert.rejects(f.runtime.withRuntime(f.route, () => 'collected'), { code: 'STALE_LEASE' });
+  assert.ok(await f.spool.read('youtube-session.json'));
+  await f.runtime.withRuntime.recover();
+  assert.equal(await f.spool.read('youtube-session.json'), null);
+});
+
+test('failed stale-session archival retains the active file and prevents intake until durable recovery', async t => {
+  const f = await fixture(t); let claims = 0;
+  await f.spool.save('youtube-session.json', Buffer.from(JSON.stringify({
+    request: sessionRequest(f.route, f.route.lease, f.route.slot, f.route.bootId) })));
+  const archive = f.spool.archiveStaleResult.bind(f.spool);
+  f.spool.archiveStaleResult = async () => { throw new Error('disk unavailable'); };
+  const worker = createRemoteIncrementalWorker({ spool: f.spool, slot: f.route.slot,
+    localRota: {}, gateway: f.gateway, youtube: f.youtube, client: { ...f.client,
+      youtubeCheckpoint: async () => { throw new RemoteProtocolError('STALE_LEASE', 409); },
+      claim: async () => { claims++; return null; } } });
+  await assert.rejects(worker.runOnce(), /disk unavailable/);
+  assert.ok(await f.spool.read('youtube-session.json'));
+  assert.equal(worker.intakeReady, false); assert.equal(claims, 0);
+  f.spool.archiveStaleResult = archive;
+  assert.equal(await worker.runOnce(), 'idle'); assert.equal(claims, 1);
+});
+
+test('real executor recovery keeps process heartbeats unready and reopens intake after replay succeeds', async t => {
+  const f = await fixture(t); let offline = true; let claims = 0;
+  await f.spool.save('youtube-session.json', Buffer.from(JSON.stringify({
+    request: sessionRequest(f.route, f.route.lease, f.route.slot, f.route.bootId) })));
+  const runner = new RemoteIncrementalProcess({ wholeChannel: false, spool: f.spool,
+    config: { mode: 'incremental_collect', slot: f.route.slot, node_id: randomUUID(),
+      deployment_id: randomUUID(), config_hash: 'a'.repeat(64) },
+    localRota: { boot: async () => ({ boot_id: f.route.bootId }) },
+    client: { ...f.client,
+      youtubeCheckpoint: async value => { if (offline) throw new Error('offline'); return f.client.youtubeCheckpoint(value); },
+      claim: async () => { claims++; return null; },
+      workerHeartbeat: async value => ({ ...value, state: value.accepting ? 'ready' : 'draining',
+        ready_for_tasks: value.accepting, server_time: new Date().toISOString(),
+        connected_until: new Date(Date.now() + 45000).toISOString() }) },
+    createWorker: args => createRemoteIncrementalWorker({ ...args, gateway: f.gateway, youtube: f.youtube }) });
+  assert.equal((await runner.probe()).ready_for_tasks, false);
+  await assert.rejects(runner.worker.runOnce(), /offline/);
+  assert.equal((await runner.probe()).ready_for_tasks, false); assert.equal(claims, 0);
+  offline = false;
+  assert.equal(await runner.worker.runOnce(), 'idle'); assert.equal(claims, 0);
+  assert.equal((await runner.probe()).ready_for_tasks, true);
+  assert.equal(await runner.worker.runOnce(), 'idle'); assert.equal(claims, 1);
 });

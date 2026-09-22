@@ -18,6 +18,7 @@ import {LEGACY_FULL_CRAWL_FETCH_CONTRACT} from '../src/fullCrawlFetchContract.js
 import {fullCrawlFixture, channelSnapshot} from './helpers/remoteFullCrawlFixture.js';
 import {resolveWorkerIdentityPolicy} from '../src/identityPolicyCatalog.js';
 import {assertFullCrawlReleaseSchema, fullCrawlRollbackReadiness} from '../src/remoteNodes/fullCrawlReleaseSchema.js';
+import {createFullCrawlDeploymentRuntime} from '../src/remoteNodes/fullCrawlDeploymentRuntime.js';
 
 const url = process.env.REMOTE_NODE_TEST_DATABASE_URL;
 const natsUrl = process.env.FULL_CRAWL_NATS_TEST_URL;
@@ -94,8 +95,8 @@ test('release entry starts the actual compatibility runtime, preserves default-o
   const env = {...process.env, DATABASE_URL: url, REMOTE_NODE_DATABASE_URL: url, SKIP_SCHEMA_MIGRATION: 'true',
     EXPECTED_CRAWLER_DATABASE: new URL(url).pathname.slice(1), FORBIDDEN_CRAWLER_DATABASE: 'business',
     REMOTE_NODE_EXECUTION_ENABLED: 'false', REMOTE_NODE_FULL_CRAWL_DEPLOYMENT_ENABLED: 'true',
-    REMOTE_NODE_FULL_CRAWL_EXECUTION_ENABLED: 'true', REMOTE_NODE_FULL_CRAWL_NODE_IDS: f.nodeId,
-    REMOTE_NODE_FULL_CRAWL_TOTAL_SLOTS: '2', REMOTE_NODE_QUEUE_PREFIX: prefix, BULLMQ_PREFIX: prefix,
+    REMOTE_NODE_FULL_CRAWL_EXECUTION_ENABLED: 'true',
+    REMOTE_NODE_QUEUE_PREFIX: prefix, BULLMQ_PREFIX: prefix,
     REMOTE_NODE_REDIS_URL: 'redis://redis:6379/0', REDIS_HOST: 'redis', REDIS_PORT: '6379', REDIS_PASSWORD: '',
     PROXY_SLOT_ROLE: 'channel', WORKER_QUEUES: 'youtube-channel-crawl', PROXY_WORKER_ID: 'full-release-' + randomUUID(),
     ROTA_PROXY_CONTROL_URL: `http://127.0.0.1:${rota.address().port}`, ROTA_PROXY_BASE_URL: 'http://127.0.0.1:9',
@@ -111,6 +112,11 @@ test('release entry starts the actual compatibility runtime, preserves default-o
   for (const [name, value] of Object.entries(secrets)) {
     env[name] = join(folder, name); await writeFile(env[name], value, {mode: 0o600});
   }
+  const deploymentRuntime=createFullCrawlDeploymentRuntime({store:f.store,image:env.REMOTE_NODE_FULL_CRAWL_IMAGE,
+    privateKey:pair.privateKey,secretKey:Buffer.from(secrets.REMOTE_NODE_ENCRYPTION_KEY_FILE,'hex'),readRotaRoute:()=>{throw new Error('fixture does not allocate routes');}});
+  await f.query('INSERT INTO remote_ingestion.node_deployments(node_id,deployment_id,image,worker_count,credentials_cipher) VALUES($1,$2,$3,1,$4)',
+    [f.nodeId,f.connection.deployment_id,env.REMOTE_NODE_FULL_CRAWL_IMAGE,
+      deploymentRuntime.transport.routes.encrypt({nodeToken:token,relayTokens:{}},`node-deployment:${f.nodeId}`)]);
   const run = async (override, ready, beforeStop) => {
     const child = spawn(process.execPath, ['scripts/runRemoteNodeCenter.mjs'], {env: {...env, ...override}, stdio: ['ignore', 'pipe', 'pipe']});
     children.push(child); let output = '';
@@ -139,7 +145,7 @@ test('release entry starts the actual compatibility runtime, preserves default-o
   } finally {await rivalGuard.query('SELECT pg_advisory_unlock(781138015,1)'); rivalGuard.release();}
   const enabled = await run({}, true);
   assert.match(enabled, /remote_full_crawl_execution_started/);
-  assert.match(enabled, /"remote_slots":1,"compatibility_slots":1/);
+  assert.match(enabled, /"compatibility_slots":1,"remote_slots":null,"capacity_policy":"dynamic"/);
   assert.deepEqual(commands.filter(command => command !== '/renew'), ['/claim', '/release']);
   assert.equal((await f.query('SELECT count(*)::int AS n FROM remote_ingestion.tasks')).rows[0].n, before);
   assert.equal((await f.query('SELECT enabled,activation_requested FROM remote_ingestion.worker_connections WHERE node_id=$1', [f.nodeId])).rows[0].enabled, false);
