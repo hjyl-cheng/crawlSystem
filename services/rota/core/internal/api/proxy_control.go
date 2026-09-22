@@ -241,6 +241,9 @@ func writeControlError(w http.ResponseWriter, err error) {
 	case errors.Is(err, proxycontrol.ErrDisabled):
 		status = http.StatusServiceUnavailable
 		code = "PROXY_CONTROL_DISABLED"
+	case errors.Is(err, proxycontrol.ErrResourceSyncDeferred):
+		status = http.StatusServiceUnavailable
+		code = "RESOURCE_SYNC_DEFERRED"
 	}
 	message := "proxy control request failed"
 	if status != http.StatusInternalServerError {

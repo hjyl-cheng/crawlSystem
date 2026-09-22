@@ -23,6 +23,7 @@ var (
 	ErrAttemptNotQuiesced   = errors.New("proxy control attempt is not quiesced")
 	ErrCompletionConflict   = errors.New("proxy control task already has a different completion")
 	ErrObservationReference = errors.New("proxy control observation reference is invalid")
+	ErrResourceSyncDeferred = errors.New("proxy control resource sync deferred")
 )
 
 const (

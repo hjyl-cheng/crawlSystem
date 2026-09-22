@@ -2,8 +2,10 @@ package proxycontrol
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/alpkeskin/rota/core/internal/database"
@@ -67,6 +69,19 @@ type Manager struct {
 
 	reconcileMu       sync.Mutex
 	reconcileRequests chan struct{}
+
+	// resourceSyncMu serializes the periodic resource synchronizer. The
+	// synchronizer performs bcrypt work before acquiring controlAdvisoryLock;
+	// serializing it avoids duplicate preflight work when an operator or a
+	// capacity request triggers a sync at the same time.
+	resourceSyncMu sync.Mutex
+
+	managedCredentialMu    sync.Mutex
+	managedCredentialCache map[string]managedCredentialCacheEntry
+
+	resourceBcryptCount  atomic.Uint64
+	resourceBcryptNanos  atomic.Int64
+	resourceSyncDeferred atomic.Uint64
 }
 
 func (m *Manager) policyForRole(role string) (IdentityPolicy, bool) {
@@ -117,10 +132,11 @@ func New(
 		options.MaxNetworkAttemptsPerBusinessRun = 9
 	}
 	return &Manager{
-		db:                db,
-		options:           options,
-		logger:            log,
-		reconcileRequests: make(chan struct{}, 1),
+		db:                     db,
+		options:                options,
+		logger:                 log,
+		reconcileRequests:      make(chan struct{}, 1),
+		managedCredentialCache: make(map[string]managedCredentialCacheEntry),
 	}
 }
 
@@ -169,7 +185,11 @@ func (m *Manager) Run(ctx context.Context) {
 	}
 
 	if err := m.syncResources(ctx); err != nil {
-		m.logError("initial proxy control resource sync failed", err)
+		if errors.Is(err, ErrResourceSyncDeferred) {
+			m.logInfo("initial proxy control resource sync deferred", "reason", "control_advisory_lock_busy")
+		} else {
+			m.logError("initial proxy control resource sync failed", err)
+		}
 	} else if _, err := m.reconcile(ctx); err != nil {
 		m.logError("initial proxy control reconciliation failed", err)
 	}
@@ -193,7 +213,11 @@ func (m *Manager) Run(ctx context.Context) {
 			}
 		case <-resourceTicker.C:
 			if err := m.syncResources(ctx); err != nil {
-				m.logError("proxy control resource sync failed", err)
+				if errors.Is(err, ErrResourceSyncDeferred) {
+					m.logInfo("proxy control resource sync deferred", "reason", "control_advisory_lock_busy")
+				} else {
+					m.logError("proxy control resource sync failed", err)
+				}
 				continue
 			}
 			if _, err := m.reconcile(ctx); err != nil {
@@ -342,4 +366,16 @@ func (m *Manager) logError(message string, err error, attrs ...any) {
 	}
 	values := append([]any{"error", err}, attrs...)
 	m.logger.Error(message, values...)
+}
+
+func (m *Manager) logInfo(message string, attrs ...any) {
+	if m.logger == nil {
+		return
+	}
+	m.logger.Info(message, attrs...)
+}
+
+func (m *Manager) recordResourceBcrypt(started time.Time) {
+	m.resourceBcryptCount.Add(1)
+	m.resourceBcryptNanos.Add(time.Since(started).Nanoseconds())
 }
