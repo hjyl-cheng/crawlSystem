@@ -1,0 +1,657 @@
+{
+  "release_revision": "f3848c0d87fed0989275ab169319bff5e0b9847f",
+  "release_branch": "codex/fullcrawl-open-20260922",
+  "policy": {
+    "remote_fullcrawl_max_slots": null,
+    "admission": "registered_active_deployments",
+    "node_allowlist": false,
+    "paused_workers": [
+      "8a07de4f-a3ee-428f-a959-2aee9c7b6be7/full-crawl-1"
+    ],
+    "compatibility_slots": 1
+  },
+  "source_attestation": {
+    "qybullmq": {
+      "image": "qy-allpachong/qybullmq:pachongsys-f3848c0-fullcrawl-open-20260922",
+      "matched_files": 472,
+      "differences": []
+    },
+    "dashboard": {
+      "image": "qy-allpachong/dashboard:pachongsys-f3848c0-fullcrawl-open-20260922",
+      "matched_files": 81,
+      "differences": []
+    }
+  },
+  "pause": {
+    "at": "2026-09-22T02:05:29.402665+00:00",
+    "slot": "full-crawl-1",
+    "status": "exited",
+    "restart_policy": "no",
+    "compose_persisted": true,
+    "spool_preserved": true
+  },
+  "remote_check": {
+    "at": "2026-09-22T02:23:35.891467+00:00",
+    "workers": [
+      {
+        "slot": "full-crawl-7",
+        "state": "running",
+        "restart_policy": "unless-stopped",
+        "restart_count": 0,
+        "oom": false
+      },
+      {
+        "slot": "full-crawl-9",
+        "state": "running",
+        "restart_policy": "unless-stopped",
+        "restart_count": 0,
+        "oom": false
+      },
+      {
+        "slot": "full-crawl-6",
+        "state": "running",
+        "restart_policy": "unless-stopped",
+        "restart_count": 0,
+        "oom": false
+      },
+      {
+        "slot": "full-crawl-4",
+        "state": "running",
+        "restart_policy": "unless-stopped",
+        "restart_count": 0,
+        "oom": false
+      },
+      {
+        "slot": "full-crawl-10",
+        "state": "running",
+        "restart_policy": "unless-stopped",
+        "restart_count": 0,
+        "oom": false
+      },
+      {
+        "slot": "full-crawl-5",
+        "state": "running",
+        "restart_policy": "unless-stopped",
+        "restart_count": 0,
+        "oom": false
+      },
+      {
+        "slot": "full-crawl-8",
+        "state": "running",
+        "restart_policy": "unless-stopped",
+        "restart_count": 0,
+        "oom": false
+      },
+      {
+        "slot": "full-crawl-3",
+        "state": "restarting",
+        "restart_policy": "unless-stopped",
+        "restart_count": 819,
+        "oom": false
+      },
+      {
+        "slot": "full-crawl-2",
+        "state": "running",
+        "restart_policy": "unless-stopped",
+        "restart_count": 0,
+        "oom": false
+      },
+      {
+        "slot": "full-crawl-1",
+        "state": "exited",
+        "restart_policy": "no",
+        "restart_count": 820,
+        "oom": false
+      }
+    ],
+    "pause_persisted": true
+  },
+  "before": {
+    "at": "2026-09-22T02:18:46.990Z",
+    "nodes": [
+      {
+        "node_id": "8a07de4f-a3ee-428f-a959-2aee9c7b6be7",
+        "deployment_id": "b19c5c9a-4a09-4a61-bdb2-9b69bed02933",
+        "role": "fullcrawl",
+        "counts": {
+          "deployed": 10,
+          "connected": 9,
+          "allowed": 0,
+          "ready": 0,
+          "active": 0,
+          "running": 0,
+          "draining": 0,
+          "collecting": 0,
+          "processing": 0,
+          "awaiting": 0,
+          "unready": 0,
+          "idle": 0,
+          "finishing": 0,
+          "standby": 9,
+          "offline": 1
+        },
+        "configuredCount": 3,
+        "intakeEnabled": false,
+        "executionAvailable": true,
+        "workers": [
+          {
+            "slot": "full-crawl-1",
+            "retiring": false,
+            "connected": false,
+            "preparation": null,
+            "executionPhase": "preparing",
+            "requested": false,
+            "enabled": false,
+            "active": false,
+            "processing": false,
+            "awaitingRecovery": false,
+            "readyForTasks": false
+          },
+          {
+            "slot": "full-crawl-10",
+            "retiring": false,
+            "connected": true,
+            "preparation": null,
+            "executionPhase": "preparing",
+            "requested": false,
+            "enabled": false,
+            "active": false,
+            "processing": false,
+            "awaitingRecovery": false,
+            "readyForTasks": false
+          },
+          {
+            "slot": "full-crawl-2",
+            "retiring": false,
+            "connected": true,
+            "preparation": null,
+            "executionPhase": "preparing",
+            "requested": false,
+            "enabled": false,
+            "active": false,
+            "processing": false,
+            "awaitingRecovery": false,
+            "readyForTasks": false
+          },
+          {
+            "slot": "full-crawl-3",
+            "retiring": false,
+            "connected": true,
+            "preparation": null,
+            "executionPhase": "preparing",
+            "requested": false,
+            "enabled": false,
+            "active": false,
+            "processing": false,
+            "awaitingRecovery": false,
+            "readyForTasks": false
+          },
+          {
+            "slot": "full-crawl-4",
+            "retiring": false,
+            "connected": true,
+            "preparation": null,
+            "executionPhase": "preparing",
+            "requested": false,
+            "enabled": false,
+            "active": false,
+            "processing": false,
+            "awaitingRecovery": false,
+            "readyForTasks": false
+          },
+          {
+            "slot": "full-crawl-5",
+            "retiring": false,
+            "connected": true,
+            "preparation": null,
+            "executionPhase": "preparing",
+            "requested": false,
+            "enabled": false,
+            "active": false,
+            "processing": false,
+            "awaitingRecovery": false,
+            "readyForTasks": false
+          },
+          {
+            "slot": "full-crawl-6",
+            "retiring": false,
+            "connected": true,
+            "preparation": null,
+            "executionPhase": "preparing",
+            "requested": false,
+            "enabled": false,
+            "active": false,
+            "processing": false,
+            "awaitingRecovery": false,
+            "readyForTasks": false
+          },
+          {
+            "slot": "full-crawl-7",
+            "retiring": false,
+            "connected": true,
+            "preparation": null,
+            "executionPhase": "preparing",
+            "requested": false,
+            "enabled": false,
+            "active": false,
+            "processing": false,
+            "awaitingRecovery": false,
+            "readyForTasks": false
+          },
+          {
+            "slot": "full-crawl-8",
+            "retiring": false,
+            "connected": true,
+            "preparation": null,
+            "executionPhase": "preparing",
+            "requested": false,
+            "enabled": false,
+            "active": false,
+            "processing": false,
+            "awaitingRecovery": false,
+            "readyForTasks": false
+          },
+          {
+            "slot": "full-crawl-9",
+            "retiring": false,
+            "connected": true,
+            "preparation": null,
+            "executionPhase": "preparing",
+            "requested": false,
+            "enabled": false,
+            "active": false,
+            "processing": false,
+            "awaitingRecovery": false,
+            "readyForTasks": false
+          }
+        ]
+      },
+      {
+        "node_id": "0e108078-200a-4df0-9a58-a28abc97a692",
+        "deployment_id": "107891a4-6088-4e0e-bad1-c38f9a2db4dc",
+        "role": "incremental",
+        "counts": {
+          "deployed": 15,
+          "connected": 15,
+          "allowed": 15,
+          "ready": 15,
+          "active": 15,
+          "running": 15,
+          "draining": 0,
+          "collecting": 4,
+          "processing": 11,
+          "awaiting": 0,
+          "unready": 0,
+          "idle": 0,
+          "finishing": 0,
+          "standby": 0,
+          "offline": 0
+        },
+        "configuredCount": 15,
+        "intakeEnabled": true,
+        "executionAvailable": true
+      },
+      {
+        "node_id": "4dd3a5b8-b128-49a6-867f-81264e9acee4",
+        "deployment_id": "0ba128b5-48ad-42b6-97b4-8a40782b255d",
+        "role": "incremental",
+        "counts": {
+          "deployed": 20,
+          "connected": 20,
+          "allowed": 20,
+          "ready": 20,
+          "active": 20,
+          "running": 20,
+          "draining": 0,
+          "collecting": 4,
+          "processing": 16,
+          "awaiting": 0,
+          "unready": 0,
+          "idle": 0,
+          "finishing": 0,
+          "standby": 0,
+          "offline": 0
+        },
+        "configuredCount": 20,
+        "intakeEnabled": true,
+        "executionAvailable": true
+      },
+      {
+        "node_id": "54a7cdd3-eb9c-4713-8d2f-21f4a5279de0",
+        "deployment_id": "41041afe-bc67-418b-90bc-8a1a81499d65",
+        "role": "incremental",
+        "counts": {
+          "deployed": 47,
+          "connected": 47,
+          "allowed": 47,
+          "ready": 47,
+          "active": 47,
+          "running": 47,
+          "draining": 0,
+          "collecting": 11,
+          "processing": 36,
+          "awaiting": 0,
+          "unready": 0,
+          "idle": 0,
+          "finishing": 0,
+          "standby": 0,
+          "offline": 0
+        },
+        "configuredCount": 47,
+        "intakeEnabled": true,
+        "executionAvailable": true
+      }
+    ]
+  },
+  "after": {
+    "at": "2026-09-22T02:25:38.783Z",
+    "nodes": [
+      {
+        "node_id": "8a07de4f-a3ee-428f-a959-2aee9c7b6be7",
+        "deployment_id": "b19c5c9a-4a09-4a61-bdb2-9b69bed02933",
+        "role": "fullcrawl",
+        "counts": {
+          "deployed": 10,
+          "connected": 8,
+          "allowed": 0,
+          "ready": 0,
+          "active": 0,
+          "running": 0,
+          "draining": 0,
+          "collecting": 0,
+          "processing": 0,
+          "awaiting": 0,
+          "unready": 0,
+          "idle": 0,
+          "finishing": 0,
+          "standby": 8,
+          "offline": 2
+        },
+        "configuredCount": 10,
+        "intakeEnabled": false,
+        "executionAvailable": true,
+        "workers": [
+          {
+            "slot": "full-crawl-1",
+            "paused": true,
+            "retiring": false,
+            "connected": false,
+            "preparation": null,
+            "executionPhase": "preparing",
+            "requested": false,
+            "enabled": false,
+            "active": false,
+            "processing": false,
+            "awaitingRecovery": false,
+            "readyForTasks": false
+          },
+          {
+            "slot": "full-crawl-10",
+            "paused": false,
+            "retiring": false,
+            "connected": true,
+            "preparation": null,
+            "executionPhase": "preparing",
+            "requested": false,
+            "enabled": false,
+            "active": false,
+            "processing": false,
+            "awaitingRecovery": false,
+            "readyForTasks": false
+          },
+          {
+            "slot": "full-crawl-2",
+            "paused": false,
+            "retiring": false,
+            "connected": true,
+            "preparation": null,
+            "executionPhase": "preparing",
+            "requested": false,
+            "enabled": false,
+            "active": false,
+            "processing": false,
+            "awaitingRecovery": false,
+            "readyForTasks": false
+          },
+          {
+            "slot": "full-crawl-3",
+            "paused": false,
+            "retiring": false,
+            "connected": false,
+            "preparation": null,
+            "executionPhase": "preparing",
+            "requested": false,
+            "enabled": false,
+            "active": false,
+            "processing": false,
+            "awaitingRecovery": false,
+            "readyForTasks": false
+          },
+          {
+            "slot": "full-crawl-4",
+            "paused": false,
+            "retiring": false,
+            "connected": true,
+            "preparation": null,
+            "executionPhase": "preparing",
+            "requested": false,
+            "enabled": false,
+            "active": false,
+            "processing": false,
+            "awaitingRecovery": false,
+            "readyForTasks": false
+          },
+          {
+            "slot": "full-crawl-5",
+            "paused": false,
+            "retiring": false,
+            "connected": true,
+            "preparation": null,
+            "executionPhase": "preparing",
+            "requested": false,
+            "enabled": false,
+            "active": false,
+            "processing": false,
+            "awaitingRecovery": false,
+            "readyForTasks": false
+          },
+          {
+            "slot": "full-crawl-6",
+            "paused": false,
+            "retiring": false,
+            "connected": true,
+            "preparation": null,
+            "executionPhase": "preparing",
+            "requested": false,
+            "enabled": false,
+            "active": false,
+            "processing": false,
+            "awaitingRecovery": false,
+            "readyForTasks": false
+          },
+          {
+            "slot": "full-crawl-7",
+            "paused": false,
+            "retiring": false,
+            "connected": true,
+            "preparation": null,
+            "executionPhase": "preparing",
+            "requested": false,
+            "enabled": false,
+            "active": false,
+            "processing": false,
+            "awaitingRecovery": false,
+            "readyForTasks": false
+          },
+          {
+            "slot": "full-crawl-8",
+            "paused": false,
+            "retiring": false,
+            "connected": true,
+            "preparation": null,
+            "executionPhase": "preparing",
+            "requested": false,
+            "enabled": false,
+            "active": false,
+            "processing": false,
+            "awaitingRecovery": false,
+            "readyForTasks": false
+          },
+          {
+            "slot": "full-crawl-9",
+            "paused": false,
+            "retiring": false,
+            "connected": true,
+            "preparation": null,
+            "executionPhase": "preparing",
+            "requested": false,
+            "enabled": false,
+            "active": false,
+            "processing": false,
+            "awaitingRecovery": false,
+            "readyForTasks": false
+          }
+        ]
+      },
+      {
+        "node_id": "0e108078-200a-4df0-9a58-a28abc97a692",
+        "deployment_id": "107891a4-6088-4e0e-bad1-c38f9a2db4dc",
+        "role": "incremental",
+        "counts": {
+          "deployed": 15,
+          "connected": 15,
+          "allowed": 15,
+          "ready": 15,
+          "active": 15,
+          "running": 15,
+          "draining": 0,
+          "collecting": 4,
+          "processing": 11,
+          "awaiting": 0,
+          "unready": 0,
+          "idle": 0,
+          "finishing": 0,
+          "standby": 0,
+          "offline": 0
+        },
+        "configuredCount": 15,
+        "intakeEnabled": true,
+        "executionAvailable": true
+      },
+      {
+        "node_id": "4dd3a5b8-b128-49a6-867f-81264e9acee4",
+        "deployment_id": "0ba128b5-48ad-42b6-97b4-8a40782b255d",
+        "role": "incremental",
+        "counts": {
+          "deployed": 20,
+          "connected": 20,
+          "allowed": 20,
+          "ready": 20,
+          "active": 20,
+          "running": 20,
+          "draining": 0,
+          "collecting": 1,
+          "processing": 19,
+          "awaiting": 0,
+          "unready": 0,
+          "idle": 0,
+          "finishing": 0,
+          "standby": 0,
+          "offline": 0
+        },
+        "configuredCount": 20,
+        "intakeEnabled": true,
+        "executionAvailable": true
+      },
+      {
+        "node_id": "54a7cdd3-eb9c-4713-8d2f-21f4a5279de0",
+        "deployment_id": "41041afe-bc67-418b-90bc-8a1a81499d65",
+        "role": "incremental",
+        "counts": {
+          "deployed": 47,
+          "connected": 47,
+          "allowed": 47,
+          "ready": 47,
+          "active": 47,
+          "running": 47,
+          "draining": 0,
+          "collecting": 10,
+          "processing": 37,
+          "awaiting": 0,
+          "unready": 0,
+          "idle": 0,
+          "finishing": 0,
+          "standby": 0,
+          "offline": 0
+        },
+        "configuredCount": 47,
+        "intakeEnabled": true,
+        "executionAvailable": true
+      }
+    ]
+  },
+  "validation": {
+    "immutable_image_integration": {
+      "passed": 9,
+      "failed": 0,
+      "skipped": 0
+    },
+    "qybullmq": {
+      "passed": 1797,
+      "failed": 0,
+      "skipped": 276
+    },
+    "dashboard": {
+      "passed": 99,
+      "failed": 0,
+      "skipped": 12
+    },
+    "targeted_pause_and_capacity": {
+      "passed": 12,
+      "failed": 0
+    },
+    "python_installer": {
+      "passed": 7,
+      "failed": 0
+    },
+    "source_verify": "passed",
+    "full_repo_check": "Blocked at pre-existing auth gatewayConfig.test.js:73 assertion; auth/nginx unchanged by this release."
+  },
+  "outstanding": [
+    "full-crawl-3 still restarts with NODE_EXECUTOR_STOPPED; full node intake remains disabled",
+    "Full node prior failed deployment still records appliedCount=3 for desiredCount=10; no deployment retry or collection start was performed."
+  ],
+  "verified_at": "2026-09-22T02:25:38.783Z",
+  "containers": {
+    "center": {
+      "health": "healthy",
+      "restarts": 0
+    },
+    "dashboard": {
+      "health": "healthy",
+      "restarts": 0
+    }
+  },
+  "incremental_ready": 82,
+  "persistence": {
+    "center": {
+      "at": "2026-09-22T02:22:00.174751+00:00",
+      "role": "center",
+      "persisted": true,
+      "healthy": true,
+      "restarts": 0
+    },
+    "dashboard": {
+      "at": "2026-09-22T02:20:30.737327+00:00",
+      "role": "dashboard",
+      "persisted": true,
+      "healthy": true,
+      "restarts": 0
+    }
+  },
+  "live_configuration_verified_at": "2026-09-22T02:22:21.663Z",
+  "legacy_environment_variables_removed": [
+    "REMOTE_NODE_FULL_CRAWL_TOTAL_SLOTS",
+    "REMOTE_NODE_FULL_CRAWL_NODE_IDS"
+  ]
+}

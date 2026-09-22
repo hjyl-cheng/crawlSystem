@@ -1,0 +1,132 @@
+{
+  "status": "deployed_verified",
+  "revision": "83130582ae91ae7aea2ffbe588b54a7633fd6a46",
+  "images": {
+    "revision": "83130582ae91ae7aea2ffbe588b54a7633fd6a46",
+    "node": "newcrawdashboard.137-175-93-199.nip.io/qy-fullcrawl-node@sha256:310e98b063f63a193e7f99a4c4932627a2a5f7f132b454f026a2dbd17f2a3c85",
+    "center": "qy-allpachong/qybullmq:pachongsys-8313058-fullcrawl-fix-20260922"
+  },
+  "verified_at": "2026-09-22T03:24:08.630Z",
+  "nodes": [
+    {
+      "node_id": "8a07de4f-a3ee-428f-a959-2aee9c7b6be7",
+      "role": "fullcrawl",
+      "counts": {
+        "deployed": 10,
+        "connected": 9,
+        "allowed": 9,
+        "ready": 9,
+        "active": 9,
+        "running": 9,
+        "draining": 0,
+        "collecting": 0,
+        "processing": 9,
+        "awaiting": 0,
+        "unready": 0,
+        "idle": 0,
+        "finishing": 0,
+        "standby": 0,
+        "offline": 1
+      }
+    },
+    {
+      "node_id": "0e108078-200a-4df0-9a58-a28abc97a692",
+      "role": "incremental",
+      "counts": {
+        "deployed": 15,
+        "connected": 15,
+        "allowed": 15,
+        "ready": 15,
+        "active": 15,
+        "running": 15,
+        "draining": 0,
+        "collecting": 0,
+        "processing": 15,
+        "awaiting": 0,
+        "unready": 0,
+        "idle": 0,
+        "finishing": 0,
+        "standby": 0,
+        "offline": 0
+      }
+    },
+    {
+      "node_id": "4dd3a5b8-b128-49a6-867f-81264e9acee4",
+      "role": "incremental",
+      "counts": {
+        "deployed": 20,
+        "connected": 20,
+        "allowed": 20,
+        "ready": 20,
+        "active": 20,
+        "running": 20,
+        "draining": 0,
+        "collecting": 0,
+        "processing": 20,
+        "awaiting": 0,
+        "unready": 0,
+        "idle": 0,
+        "finishing": 0,
+        "standby": 0,
+        "offline": 0
+      }
+    },
+    {
+      "node_id": "54a7cdd3-eb9c-4713-8d2f-21f4a5279de0",
+      "role": "incremental",
+      "counts": {
+        "deployed": 47,
+        "connected": 47,
+        "allowed": 47,
+        "ready": 47,
+        "active": 47,
+        "running": 47,
+        "draining": 0,
+        "collecting": 3,
+        "processing": 44,
+        "awaiting": 0,
+        "unready": 0,
+        "idle": 0,
+        "finishing": 0,
+        "standby": 0,
+        "offline": 0
+      }
+    }
+  ],
+  "full_worker_restarts": {
+    "full-crawl-2": 0,
+    "full-crawl-3": 0,
+    "full-crawl-4": 0,
+    "full-crawl-5": 0,
+    "full-crawl-6": 0,
+    "full-crawl-7": 0,
+    "full-crawl-8": 0,
+    "full-crawl-9": 0,
+    "full-crawl-10": 0
+  },
+  "pause_persisted": true,
+  "persistence": [
+    {
+      "role": "center",
+      "image": "qy-allpachong/qybullmq:pachongsys-8313058-fullcrawl-fix-20260922",
+      "healthy": true,
+      "restarts": 0,
+      "persisted": true
+    },
+    {
+      "role": "dashboard",
+      "image": "qy-allpachong/dashboard:pachongsys-f3848c0-fullcrawl-open-20260922",
+      "healthy": true,
+      "restarts": 0,
+      "persisted": true
+    }
+  ],
+  "tests": {
+    "qybullmq_pass": 1807,
+    "dashboard_pass": 99,
+    "center_image_pass": 57,
+    "node_image_pass": 8,
+    "verify": "pass",
+    "known_unrelated_failure": "auth gatewayConfig.test.js"
+  }
+}
