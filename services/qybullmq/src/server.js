@@ -1,3 +1,5 @@
+import { createMigrationQueueControl } from './migrationQueueControl.js';
+import { createControllerDatabase } from './controllerDatabase.js';
 import { createMigrationProgressReader } from "./migrationThroughput.js";
 import { controlledMigrationGuard } from './controlledMigrationGuard.js';
 import {createMigrationControlBatch,controlMigrationBatch,loadMigrationControlProgress,migrationBatchControlEnabled} from "./migrationBatchControl.js";
@@ -47,7 +49,14 @@ import { closeQueues, createQueues, getQueueStats, queueNames, queuesByRole, saf
 const port = Number(process.env.PORT || 3000);
 const basePath = process.env.BULL_BOARD_BASE_PATH || "/queues";
 const queues = createQueues();
-const managedIdentityPolicies = [...loadIdentityPolicyCatalog().policies.values()];
+const managedIdentityPolicyCatalog = loadIdentityPolicyCatalog();
+const migrationQueueDatabase = createControllerDatabase('migration-queue-api', { max: 2 });
+const migrationQueueControl = createMigrationQueueControl({
+  withTransaction: migrationQueueDatabase.withTransaction, queues,
+  report: value => console.log(JSON.stringify(value)),
+});
+
+const managedIdentityPolicies = [...managedIdentityPolicyCatalog.policies.values()];
 const managedJobIntentStore = new ManagedJobIntentStore({
   repository: new PostgresManagedJobIntentRepository({ withTransaction }),
   policies: managedIdentityPolicies,
@@ -311,17 +320,26 @@ app.post("/api/migration/channels/batch", asyncRoute(async (req, res) => {
   const result = migrationBatchControlEnabled()
     ? await createMigrationControlBatch({withTransaction,selection:req.body?.selection})
     : await dispatchManualMigrationBatch({ selection: req.body?.selection });
+  if (migrationBatchControlEnabled()) result.queue_control = await migrationQueueControl.request();
   res.status(result.status === "preparing" ? 202 : result.created ? 201 : 200).json(result);
 }));
 
 const readSampledMigrationProgress = createMigrationProgressReader(query);
 app.get("/api/migration/batches", asyncRoute(async (_req,res)=>{
-  res.json(migrationBatchControlEnabled()?await (process.env.CONTROLLER_THROUGHPUT_ENABLED === "true" ? readSampledMigrationProgress() : loadMigrationControlProgress(query)):{ok:true,batches:[],active:null});
+  const result = migrationBatchControlEnabled() ? await (process.env.CONTROLLER_THROUGHPUT_ENABLED === "true"
+    ? readSampledMigrationProgress() : loadMigrationControlProgress(query)) : {ok:true,batches:[],active:null};
+  if (migrationBatchControlEnabled()) {
+    result.queue_control = (await migrationQueueDatabase.query(
+      "SELECT value_json FROM crawler.settings WHERE setting_key='migration_queue_control'",
+    )).rows[0]?.value_json ?? null;
+  }
+  res.json(result);
 }));
 app.post("/api/migration/batches/:batchId/:action", asyncRoute(async(req,res)=>{
   if(!migrationBatchControlEnabled())return res.status(409).json({ok:false,error:"批次控制尚未启用"});
   const batch=await controlMigrationBatch({withTransaction,batchId:req.params.batchId,action:req.params.action,version:req.body?.version});
-  res.json({ok:true,batch});
+  const queue_control = await migrationQueueControl.request();
+  res.json({ok:true,batch,queue_control});
 }));
 
 app.get("/api/migration/system-retries", asyncRoute(async (req, res) => {

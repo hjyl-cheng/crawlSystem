@@ -1,3 +1,4 @@
+import { createMigrationQueueControl, createMigrationPressureReader, MIGRATION_QUEUE_WAKE } from './migrationQueueControl.js';
 import { postponeSecondaryFinalize } from "./finalizeDeferral.js";
 import { sampleMigrationThroughput } from "./migrationThroughput.js";
 import { closeMigrationSourcePool } from "./migrationSource.js";
@@ -180,6 +181,16 @@ let latestMigrationSystemRecovery = {
 };
 let backgroundLoops = null;
 const recoveryDatabases = [];
+let migrationQueueLoops = null;
+const migrationQueueDatabase = createControllerDatabase('migration-queue-control', { max: 2 });
+recoveryDatabases.push(migrationQueueDatabase);
+let recoveryQueueDemandAt = 0;
+const migrationQueueControl = createMigrationQueueControl({
+  withTransaction: migrationQueueDatabase.withTransaction, queues,
+  loadPressure: createMigrationPressureReader({ catalog: managedIdentityPolicyCatalog, queues }),
+  recoveryQueues: () => Date.now() - recoveryQueueDemandAt < 15000 ? latestMigrationSystemRecovery.requiredQueues : [],
+  report: value => console.log(JSON.stringify(value)),
+});
 const intervalMs = intEnv("CONTROLLER_INTERVAL_MS", 15000, 1000, 300000);
 const wakeupDelayMs = intEnv("CONTROLLER_WAKEUP_DELAY_MS", 25, 0, 1000);
 const tickSampleMs = intEnv("CONTROLLER_TICK_SAMPLE_MS", 60000, 15000, 3600000);
@@ -701,7 +712,8 @@ function backlog(stats, queueName) {
     + Number(row["waiting-children"] ?? 0);
 }
 
-async function setPaused(queueName, paused, reason, actions) {
+async function setPaused(queueName, paused, reason, actions, expectedScheduler) {
+  if (migrationBatchControlEnabled() && await migrationQueueControl.legacy({ queueName, paused, reason, actions, expectedScheduler })) return;
   const queue = queues[queueName];
   if (!queue) return;
   const isPaused = await queue.isPaused();
@@ -2966,20 +2978,20 @@ async function tick() {
   const pressureReason = discoveryPressureReason(pressureMetrics, pressureLimits);
 
   if (!querySchedulerAllowsDiscovery(queryScheduler)) {
-    await setPaused(queuesByRole.discoverPage, true, `query_scheduler_${queryScheduler.status}`, actions);
+    await setPaused(queuesByRole.discoverPage, true, `query_scheduler_${queryScheduler.status}`, actions, queryScheduler);
   } else if (
     Number.isFinite(discoverProxyReady)
       ? discoverProxyReady === 0
       : Number.isFinite(proxyCapacity.active) && proxyCapacity.active < 3
   ) {
-    await setPaused(queuesByRole.discoverPage, true, "proxy_capacity_low", actions);
+    await setPaused(queuesByRole.discoverPage, true, "proxy_capacity_low", actions, queryScheduler);
   } else if (pressureReason) {
     activeDiscoverPressureReason = pressureReason;
     await setPaused(
       queuesByRole.discoverPage,
       true,
       pressureReason,
-      actions,
+      actions, queryScheduler,
     );
   } else if (
     !activeDiscoverPressureReason
@@ -2991,7 +3003,7 @@ async function tick() {
       queuesByRole.discoverPage,
       false,
       recoveredReason ? `${recoveredReason}_recovered` : "backlog_recovered",
-      actions,
+      actions, queryScheduler,
     );
   }
 
@@ -3004,45 +3016,45 @@ async function tick() {
     ? channelProxyReady === 0
     : Number.isFinite(proxyCapacity.active) && proxyCapacity.active < 2;
   if (pipelineHalted && !recoveryConsumerRequired(queuesByRole.channelCrawl)) {
-    await setPaused(queuesByRole.channelCrawl, true, `query_scheduler_${queryScheduler.status}`, actions);
+    await setPaused(queuesByRole.channelCrawl, true, `query_scheduler_${queryScheduler.status}`, actions, queryScheduler);
   } else if (noChannelProxy || effectiveDetailBacklog >= channelPauseDetailBacklog) {
-    await setPaused(queuesByRole.channelCrawl, true, effectiveDetailBacklog >= channelPauseDetailBacklog ? "content_detail_backlog_high" : "proxy_capacity_low", actions);
+    await setPaused(queuesByRole.channelCrawl, true, effectiveDetailBacklog >= channelPauseDetailBacklog ? "content_detail_backlog_high" : "proxy_capacity_low", actions, queryScheduler);
   } else if (effectiveDetailBacklog <= channelResumeDetailBacklog) {
-    await setPaused(queuesByRole.channelCrawl, false, "content_detail_backlog_recovered", actions);
+    await setPaused(queuesByRole.channelCrawl, false, "content_detail_backlog_recovered", actions, queryScheduler);
   }
   if (Number.isFinite(queryQualityProxyReady)) {
     await setPaused(
       queuesByRole.queryQuality,
       queryQualityProxyReady === 0,
       queryQualityProxyReady === 0 ? "proxy_capacity_low" : "proxy_available",
-      actions,
+      actions, queryScheduler,
     );
   }
   const noDetailProxy = Number.isFinite(detailProxyReady)
     ? detailProxyReady === 0
     : Number.isFinite(proxyCapacity.active) && proxyCapacity.active === 0;
   if (pipelineHalted && !recoveryConsumerRequired(queuesByRole.contentDetail)) {
-    await setPaused(queuesByRole.contentDetail, true, `query_scheduler_${queryScheduler.status}`, actions);
+    await setPaused(queuesByRole.contentDetail, true, `query_scheduler_${queryScheduler.status}`, actions, queryScheduler);
   } else if (channelInlineDetails && !recoveryConsumerRequired(queuesByRole.contentDetail)) {
-    await setPaused(queuesByRole.contentDetail, true, "details_run_inside_channel_queue", actions);
+    await setPaused(queuesByRole.contentDetail, true, "details_run_inside_channel_queue", actions, queryScheduler);
   } else if (noDetailProxy) {
-    await setPaused(queuesByRole.contentDetail, true, "no_active_proxy", actions);
+    await setPaused(queuesByRole.contentDetail, true, "no_active_proxy", actions, queryScheduler);
   } else {
-    await setPaused(queuesByRole.contentDetail, false, "proxy_available", actions);
+    await setPaused(queuesByRole.contentDetail, false, "proxy_available", actions, queryScheduler);
   }
   for (const queueName of [queuesByRole.dataApiBatch, queuesByRole.agentBatch]) {
     if (pipelineHalted && !recoveryConsumerRequired(queueName)) {
-      await setPaused(queueName, true, `query_scheduler_${queryScheduler.status}`, actions);
+      await setPaused(queueName, true, `query_scheduler_${queryScheduler.status}`, actions, queryScheduler);
     } else {
-      await setPaused(queueName, false, "query_scheduler_active", actions);
+      await setPaused(queueName, false, "query_scheduler_active", actions, queryScheduler);
     }
   }
-  await setPaused(queuesByRole.finalize, false, "database_finalize_recovery", actions);
+  await setPaused(queuesByRole.finalize, false, "database_finalize_recovery", actions, queryScheduler);
   await setPaused(
     queuesByRole.agentIncremental,
     false,
     "incremental_clock_independent",
-    actions,
+    actions, queryScheduler,
   );
   await maybeScheduleQuerySlice(actions, queryScheduler, stats);
   await maybeDispatchContentCompletenessRepairs(actions, stats, queryScheduler, proxyCapacity);
@@ -3124,6 +3136,7 @@ async function runControllerTick() {
 }
 
 async function closeControllerResources() {
+  await migrationQueueLoops?.shutdown();
   await backgroundLoops?.shutdown();
   await Promise.all(recoveryDatabases.map(database => database.close()));
   if (wakeSubscriber) {
@@ -3197,12 +3210,13 @@ if (independentRecoveryEnabled) {
     migration_system_recovery: { intervalMs: 2000, run: async () => {
       const result = await migrationRecovery.reconcileAvailable({ limit: 100 });
       latestMigrationSystemRecovery = result;
+      recoveryQueueDemandAt = Date.now();
       // Recovery consumes the same fenced Jobs as before, but cannot wait for
       // unrelated main-tick SQL to hand them to Agent/Finalize or settle them.
       const scheduler = await getQueryScheduler(recoveryDb.query);
       if (pipelineProducerActive(scheduler) || automaticCompletedMigrationRecoveryEnabled(scheduler)) {
         for (const name of [queuesByRole.agentBatch, queuesByRole.finalize]) {
-          if (result.requiredQueues.includes(name) && await queues[name].isPaused()) await queues[name].resume();
+          if (result.requiredQueues.includes(name)) await setPaused(name, false, 'migration_recovery_demand', [], scheduler);
         }
       }
       return result;
@@ -3251,6 +3265,14 @@ if (independentRecoveryEnabled) {
   backgroundLoops.start();
 }
 
+if (migrationBatchControlEnabled()) {
+  migrationQueueLoops = createControllerWorkLoops({
+    tasks: { reconcile: { intervalMs: 2000, run: () => migrationQueueControl.reconcile() } },
+    onError: ({ error }) => console.error(JSON.stringify({ event: 'migration_queue_control_failed', error: error.message })),
+  });
+  migrationQueueLoops.start();
+}
+
 controllerWakeup = createCoalescedWakeup(async () => {
   if (controllerLifecycle.isRunning() || controllerLifecycle.isShuttingDown()) return;
   immediateWakeRequested = false;
@@ -3272,6 +3294,10 @@ wakeSubscriber.on("error", (error) => {
   }));
 });
 wakeSubscriber.on("message", (channel, message) => {
+  if (channel === MIGRATION_QUEUE_WAKE) {
+    void migrationQueueLoops?.run('reconcile').catch(() => {});
+    return;
+  }
   if (channel !== DISCOVERY_PAGE_READY_CHANNEL) return;
   try {
     const payload = JSON.parse(message);
@@ -3289,7 +3315,7 @@ wakeSubscriber.on("message", (channel, message) => {
     }));
   }
 });
-await wakeSubscriber.subscribe(DISCOVERY_PAGE_READY_CHANNEL);
+await wakeSubscriber.subscribe(DISCOVERY_PAGE_READY_CHANNEL, MIGRATION_QUEUE_WAKE);
 await loop();
 timer = setInterval(loop, intervalMs);
 console.log(`controller started interval_ms=${intervalMs} tick_sample_ms=${tickSampleMs} wakeup_delay_ms=${wakeupDelayMs}`);
@@ -3297,6 +3323,7 @@ console.log(`controller started interval_ms=${intervalMs} tick_sample_ms=${tickS
 function shutdown(signal) {
   if (shutdownPromise) return shutdownPromise;
   console.log(`received ${signal}, shutting down controller`);
+  void migrationQueueLoops?.shutdown();
   void backgroundLoops?.shutdown();
   if (timer) {
     clearInterval(timer);

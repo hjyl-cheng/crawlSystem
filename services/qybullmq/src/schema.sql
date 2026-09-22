@@ -4195,3 +4195,6 @@ CREATE TABLE IF NOT EXISTS crawler.migration_settlement_cursors (
 );
 
 -- throughput-recovery-schema:end
+
+-- Queue control fencing survives transaction rollback and Controller takeover.
+CREATE SEQUENCE IF NOT EXISTS crawler.migration_queue_control_revision;

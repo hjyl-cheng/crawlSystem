@@ -47,3 +47,6 @@ CREATE INDEX IF NOT EXISTS idx_crawler_runs_detail_done_candidate_channel
 CREATE INDEX IF NOT EXISTS migration_control_items_batch_candidate_channel
   ON crawler.migration_control_items(batch_id,candidate_id,channel_id)
   WHERE candidate_id IS NOT NULL;
+
+-- Queue control fencing survives transaction rollback and Controller takeover.
+CREATE SEQUENCE IF NOT EXISTS crawler.migration_queue_control_revision;
