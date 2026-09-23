@@ -1,3 +1,4 @@
+import { boundedPostgresRead } from '../src/remoteNodes/boundedPostgresRead.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { generateKeyPairSync, randomBytes, randomUUID } from 'node:crypto';
@@ -49,6 +50,8 @@ import { createTransportSignals } from '../src/remoteNodes/transportSignals.js';
 
 const url = process.env.REMOTE_NODE_TEST_DATABASE_URL;
 const binary = process.env.REMOTE_NODE_ROTA_TEST_BINARY;
+if(process.env.REMOTE_INCREMENTAL_REQUIRE_INTEGRATION==='true' && (!url || !binary || !process.env.REMOTE_NATS_TEST_URL || !process.env.REMOTE_NODE_TEST_REDIS_PORT))
+  throw new Error('remote progress acceptance requires isolated PostgreSQL, Redis, NATS and Go relay; skipping is forbidden');
 const wholeModes = process.env.REMOTE_NATS_TEST_URL ? [false, true] : [false];
 const resolvedPolicy = resolveWorkerIdentityPolicy({ role: 'channel', policyId: 'qy-br-channel-anonymous-v1', expectedWorkloadScope: 'qy-production', environment: {} });
 
@@ -244,7 +247,7 @@ test('original Rota and API lifecycle carry one remote Plan across execution gen
       tt.after(async()=>{await supervisor?.stop();await queueEvents.close();await queue.obliterate({force:true});await queue.close();await guardPool.end();});
       supervisorArgs={store,channelStore,routes,youtubeSessions:sessions,activation,guardPool,connection:redis,prefix,allowedNodeIds:[nodeId],resolvedPolicy,wholeChannels,
         profileSecret:central.executions.profileSecret,rotaClient:rota.client,proxyBaseUrl:'http://unused-center.invalid:8000',proxyPassword:'fixture',intervalMs:50,
-        createApiFallback,createRuntime:args=>{central.executions.assertAdmission=async client=>{const ok=await args.assertAdmission(client);if(!ok){const e=[...supervisor.entries.values()][0];tt.diagnostic(JSON.stringify({admission:false,owned:e?.owned,closing:e?.closing,aborting:e?.aborting,redis:e?.redis?.status,rota:e?.rota.status(),entries:supervisor.entries.size}));}return ok;};central.assertAdmission=central.executions.assertAdmission;return central;},
+        createApiFallback,createRuntime:args=>{central.executions.assertOwnership=args.assertOwnership;central.executions.assertAdmission=async client=>{const ok=await args.assertAdmission(client);if(!ok){const e=[...supervisor.entries.values()][0];tt.diagnostic(JSON.stringify({admission:false,owned:e?.owned,closing:e?.closing,aborting:e?.aborting,redis:e?.redis?.status,rota:e?.rota.status(),entries:supervisor.entries.size}));}return ok;};central.assertAdmission=central.executions.assertAdmission;return central;},
         createRota:args=>{workerInstanceId=args.workerInstanceId;rota.workerInstanceId=workerInstanceId;return rota;},
         createProcessor:args=>createCenterIncrementalProcessor({...args,apiDelayMs:200}),report:event=>tt.diagnostic(JSON.stringify(event))};
       supervisor=new RemoteCenterExecutionSupervisor(supervisorArgs);if(startSupervisor)supervisor.start();
@@ -477,6 +480,62 @@ test('original Rota and API lifecycle carry one remote Plan across execution gen
     assert.equal(current.generation,2);assert.equal(current.lease_failures,0);assert.deepEqual(current.input.plan,f.plan);
     assert.equal((await f.query('SELECT count(*)::int AS n FROM crawler.contents WHERE channel_id=$1',[f.plan.channel_id])).rows[0].n,2);
     assert.equal((await f.query('SELECT count(*)::int AS n FROM crawler.youtube_api_detail_requests WHERE run_id=$1',[`incremental:${f.plan.plan_id}`])).rows[0].n,1);
+  });
+
+  for(const whole of wholeModes) await t.test(`watchdog cancels an active admission and resumes the same queue job (whole=${whole})`,{skip:!process.env.REMOTE_NODE_TEST_REDIS_PORT},async tt=>{
+    const f=await fixture(tt,{kind:'about',whole,supervised:true,startSupervisor:false});
+    f.central.admissionTimeoutMs=40;
+    f.supervisor.incrementalProgress={...f.supervisor.incrementalProgress,mode:'enforce',allowlist:[`${f.nodeId}/${f.slot}`]};
+    const prepare=f.central.executions.prepare.bind(f.central.executions);let first=true;
+    f.central.executions.prepare=async args=>{
+      const admission=await prepare(args);
+      if(first){
+        first=false;
+        await new Promise(resolve=>{
+          if(args.abortSignal.aborted)resolve();
+          else args.abortSignal.addEventListener('abort',resolve,{once:true});
+        });
+        args.abortSignal.throwIfAborted();
+      }
+      return admission;
+    };
+    const queued=await f.queue.add(f.job.name,f.plan,{jobId:f.job.id,attempts:2,backoff:100});
+    f.supervisor.start();
+    assert.equal((await queued.waitUntilFinished(f.queueEvents,20000)).status,'done');
+    assert.equal((await f.queue.getJob(queued.id)).attemptsStarted,2);
+    const attempts=(await f.query('SELECT status FROM crawler.channel_execution_attempts WHERE channel_id=$1 ORDER BY attempt_number',[f.plan.channel_id])).rows;
+    assert.deepEqual(attempts.map(a=>a.status),['aborted','success']);
+    assert.equal(f.visits.length,1);assert.equal(f.calls.filter(c=>c.event==='begin').length,2);
+    await eventually(()=>!f.supervisor.entries.get(`${f.nodeId}/${f.slot}`)?.progressRecovery);
+    assert.equal(f.central.executionSnapshot().executionPhase,'finished');
+  });
+
+  for(const whole of wholeModes) await t.test(`hung claim query settles the original attempt and retries the same Plan (whole=${whole})`,async tt=>{
+    const f=await fixture(tt,{kind:'about',whole});
+    const read=f.central.executions.read.bind(f.central.executions);
+    let injected=false,destroyed=0;
+    f.central.executions.read=(text,values,signal)=>{
+      if(injected || !text.startsWith('SELECT *,'))return read(text,values,signal);
+      injected=true;
+      const isolatedReadPool={connect:async()=>{
+        const client=await pool.connect();
+        return {query:(sql,args)=>sql.startsWith('SELECT *,')?new Promise(()=>{}):client.query(sql,args),
+          release:error=>{if(error)destroyed++;client.release(error);}};
+      }};
+      return boundedPostgresRead(isolatedReadPool,{text,values,signal,timeoutMs:50});
+    };
+    await assert.rejects(f.execute(),{code:'REMOTE_DB_READ_TIMEOUT'});
+    assert.equal(destroyed,1);
+    const stopped=(await f.query('SELECT * FROM remote_ingestion.tasks')).rows[0];
+    assert.equal(stopped.state,'failed');
+    const old=(await f.query('SELECT status,finished_at FROM crawler.channel_execution_attempts WHERE attempt_id=$1',[stopped.context.execution_attempt_id])).rows[0];
+    assert.equal(old.status,'failed');assert.ok(old.finished_at);
+    assert.equal(f.central.executionSnapshot().executionPhase,'finished');
+    f.job.attemptsMade=1;f.job.attemptsStarted=2;
+    assert.equal((await f.execute()).status,'done');
+    const current=(await f.query('SELECT * FROM remote_ingestion.tasks')).rows[0];
+    assert.equal(current.task_id,stopped.task_id);assert.deepEqual(current.input.plan,f.plan);
+    assert.equal(f.calls.filter(c=>c.event==='begin').length,2);
   });
 
   await t.test('cancelled Clock rolls back remote admission and the new original execution attempt',async tt=>{

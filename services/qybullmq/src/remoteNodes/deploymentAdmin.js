@@ -194,11 +194,13 @@ export function createRemoteDeploymentAdmin({store,routes,token,image,gatewayUrl
               WHERE t.target_node_id=$1 AND t.target_worker_slot=$2 AND t.state IN ('pending','leased') ORDER BY t.created_at DESC LIMIT 1`,[row.node_id,row.slot])).rows[0];
             row.task_state=current?.state;row.command_state=current?.stage_state==='received'?'received':'pending';
           }
+          const progress=execution?.executionSnapshot?.(row);
           workers.push({slot:row.slot,paused:paused(row),retiring:!!row.retirement_id,connected:row.connected===true,preparation:execution?.preparationState?.(row)??null,
-          executionPhase:row.task_state==='leased' && row.command_state==='pending' ? 'collecting'
-            : row.task_state==='leased' && row.command_state==='received' ? 'processing' : 'preparing',
+          ...(progress??{}),
+          executionPhase:progress?.executionPhase ?? (row.task_state==='leased' && row.command_state==='pending' ? 'collecting'
+            : row.task_state==='leased' && row.command_state==='received' ? 'processing' : 'preparing'),
           requested:!paused(row) && (desired?desired.has(row.slot):row.activation_requested),enabled:row.enabled,active:execution?.isProcessing(row)===true || row.unsettled===true,
-          processing:execution?.isProcessing(row)===true,awaitingRecovery:row.unsettled===true && execution?.isProcessing(row)!==true,
+          processing:execution?.isProcessing(row)===true,awaitingRecovery:['recovering','blocked'].includes(progress?.progressHealth) || (row.unsettled===true && execution?.isProcessing(row)!==true),
           readyForTasks:!paused(row) && row.connected===true && (desired?desired.has(row.slot):row.activation_requested) && row.activation_requested && row.enabled && row.accepting && row.node_state==='active'
             && typeof verify==='function' && await verify(client,row)===true});
         }

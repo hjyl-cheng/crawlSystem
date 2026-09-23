@@ -1,0 +1,4 @@
+# Append to the existing Dashboard project overlays; do not recreate collectors.
+services:
+  dashboard:
+    image: qy-allpachong/dashboard@sha256:f5be0357f10501c11c2afee16bcd9961afe619cdb143fb0f6fe6594b5760fdf1

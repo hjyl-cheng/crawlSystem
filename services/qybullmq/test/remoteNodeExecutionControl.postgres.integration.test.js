@@ -91,25 +91,25 @@ test('page-authorized nodes share the original queue; pause drains active work a
   for(const r of (await pool.query('SELECT * FROM remote_ingestion.worker_connections WHERE node_id=$1',[nodeId])).rows){
     await activation.heartbeat(nodeId,{...heartbeat,slot:r.slot,config_hash:r.config_hash});
   }
-  const count=async(allowedCount,expectedAllowedCount)=>admin.setExecution({nodeId,deploymentId,workerCount:3,allowedCount,expectedAllowedCount});
+  const count=async(installed,expectedRequested)=>admin.setExecution({nodeId,deploymentId,workerCount:installed||3,enabled:installed>0,expectedRequested});
   assert.equal((await admin.status({nodeId,deploymentId})).allowedCount,0);
   // A failed expansion can register extra slots before they are installed.
   // The verified original fleet must remain controllable in that state.
-  const resizedPaused=await admin.setExecution({nodeId,deploymentId,workerCount:1,allowedCount:1,expectedAllowedCount:1});
-  assert.equal(resizedPaused.allowedCount,0,'changing capacity preserves the pause switch');
-  assert.equal(resizedPaused.configuredCount,1);
+  const resizedPaused=await admin.setExecution({nodeId,deploymentId,workerCount:1,enabled:false,expectedRequested:false});
+  assert.equal(resizedPaused.allowedCount,0,'verified installed prefix remains paused');
+  assert.equal(resizedPaused.configuredCount,3,'center reports registered count; Dashboard overlays verified installed count');
   await control(true,false);
   assert.deepEqual((await admin.status({nodeId,deploymentId})).workers.filter(w=>w.requested).map(w=>w.slot),[slot]);
-  await admin.setExecution({nodeId,deploymentId,workerCount:1,allowedCount:0,expectedAllowedCount:1});
-  await count(2,0);await supervisor.tick();await until(async()=>(await admin.status({nodeId,deploymentId})).counts.ready===2);
+  await admin.setExecution({nodeId,deploymentId,workerCount:1,enabled:false,expectedRequested:true});
+  await count(2,false);await supervisor.tick();await until(async()=>(await admin.status({nodeId,deploymentId})).counts.ready===2);
   await until(async()=>await incrementalWorkerCapacity(queue)===2);
   const selected=(await admin.status({nodeId,deploymentId})).workers.filter(w=>w.requested).map(w=>w.slot);
-  await count(3,2);await supervisor.tick();await until(async()=>(await admin.status({nodeId,deploymentId})).counts.ready===3);
-  await count(1,3);await supervisor.tick();await until(async()=>(await admin.status({nodeId,deploymentId})).counts.draining===0);
+  await count(3,true);await supervisor.tick();await until(async()=>(await admin.status({nodeId,deploymentId})).counts.ready===3);
+  await count(1,true);await supervisor.tick();await until(async()=>(await admin.status({nodeId,deploymentId})).counts.draining===0);
   assert.equal((await admin.status({nodeId,deploymentId})).workers.find(w=>w.requested).slot,selected[0]);
   await until(async()=>await incrementalWorkerCapacity(queue)===1);
-  await assert.rejects(count(4,1),{code:'INVALID_EXECUTION_COUNT'});
-  await assert.rejects(count(0,3),{code:'EXECUTION_CONTROL_CHANGED'});
-  await count(0,1);await supervisor.tick();await until(()=>supervisor.entries.size===0);
+  await assert.rejects(count(4,true),{code:'WORKER_DEPLOYMENT_MISMATCH'});
+  await assert.rejects(count(0,false),{code:'EXECUTION_CONTROL_CHANGED'});
+  await count(0,true);await supervisor.tick();await until(()=>supervisor.entries.size===0);
   await supervisor.stop();make();await supervisor.tick();assert.equal(supervisor.entries.size,0);
 });

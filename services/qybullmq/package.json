@@ -15,6 +15,8 @@
     "test:remote-network": "node --test --test-concurrency=1 test/remoteChannelNetwork.postgres.integration.test.js",
     "test:remote-youtube": "node --test --test-concurrency=1 test/remoteYoutubeRuntime.test.js test/remoteChannelNetwork.postgres.integration.test.js",
     "test:remote-handoffs": "node --test --test-concurrency=1 test/remoteExecutionHandoff.postgres.integration.test.js",
+    "test:remote-progress": "node --test --test-concurrency=1 test/boundedPostgresRead.test.js test/remoteClaimDeadline.test.js test/remoteExecutionProgress.test.js test/remoteSupervisorIdleRecovery.test.js test/intakeSelection.test.js test/rotaSlotAdapter.test.js",
+    "test:remote-progress:docker": "REMOTE_INCREMENTAL_REQUIRE_INTEGRATION=true node scripts/testRemoteNatsDocker.mjs test/boundedPostgresRead.postgres.integration.test.js test/remoteExecutionHandoff.postgres.integration.test.js test/remoteCenterSupervisor.postgres.integration.test.js test/remoteIncrementalFence.postgres.integration.test.js test/remoteChannelNetwork.postgres.integration.test.js test/remoteDeploymentAdmin.postgres.integration.test.js",
     "test:remote-fence": "node --test --test-concurrency=1 test/remoteIncrementalFence.postgres.integration.test.js",
     "start": "node src/server.js",
     "worker": "node src/worker.js",

@@ -72,7 +72,7 @@ function executionPanel(node) {
     : state.adjusting ? '接单 Worker 正在调整'
     : counts.draining ? '正在调整，当前频道完成后待命'
     : allowed ? counts.ready ? '已开启接单' : '已开启接单，等待就绪' : '已开启接单，暂无 Worker';
-  return `<div class="nodes-execution"><div><strong>${label}${known && state.error ? '（上次状态）' : ''}</strong>${known ? `<small>已部署 ${counts.deployed} · 接单 Worker ${state.allowedCount??0} · 已连接 ${counts.connected}</small><small>采集 / 回传 ${counts.collecting ?? counts.running ?? counts.active} · 中心处理 / 派发 ${counts.processing ?? 0} · 等待恢复 ${counts.awaiting ?? 0} · 未就绪 ${counts.unready ?? 0} · 空闲 ${counts.idle} · 收尾 ${counts.finishing ?? counts.draining} · 待命 ${counts.standby} · 离线 ${counts.offline ?? 0}</small>` : ''}${known && state.error ? '<small>状态更新失败，正在重试；以上为上次读取结果。</small>' : ''}</div></div>`;
+  return `<div class="nodes-execution"><div><strong>${label}${known && state.error ? '（上次状态）' : ''}</strong>${known ? `<small>已部署 ${counts.deployed} · 接单 Worker ${state.allowedCount??0} · 已连接 ${counts.connected}</small><small>采集 / 回传 ${counts.collecting ?? counts.running ?? counts.active} · 中心处理 / 派发 ${counts.processing ?? 0} · 进度超时 ${counts.overdue ?? 0} · 恢复中 ${counts.recovering ?? 0} · 需处理 ${counts.blocked ?? 0} · 等待恢复 ${counts.awaiting ?? 0} · 未就绪 ${counts.unready ?? 0} · 空闲 ${counts.idle} · 收尾 ${counts.finishing ?? counts.draining} · 待命 ${counts.standby} · 离线 ${counts.offline ?? 0}</small>` : ''}${known && state.error ? '<small>状态更新失败，正在重试；以上为上次读取结果。</small>' : ''}</div></div>`;
 }
 function workerActions(node) {
   const state=executionStates.get(node.id);
@@ -163,8 +163,9 @@ function renderWorkerRemoval(node,state){
     const retry=pending&&removal.slot===w.slot&&!inProgress;
     const idle=w.connected&&!w.active;
     const disabled=busy||node.deployment.state!=='connected'||(!retry&&(!idle||pending));
-    const label=w.retiring?'正在移除':w.paused?'维护暂停':!w.connected?'状态未知':w.active?'执行 / 恢复中':w.requested?'空闲，可接任务':'空闲，待命';
-    return `<div class="nodes-worker-row"><span><strong>${escapeHtml(w.slot)}</strong><small>${label}</small></span><button type="button" class="nodes-button danger" data-remove-worker="${escapeHtml(w.slot)}" ${disabled?'disabled':''}>${retry?'重试删除':'删除'}</button></div>`;
+    const phases={admitting:'准备任务',awaiting_claim:'等待领取',binding:'建立连接',collecting:'采集中',receiving:'接收结果',applying:'写入结果',stopping:'停止并清理',recovering:'恢复中',blocked:'需处理',finished:'已结算'};
+    const label=w.progressHealth==='blocked'?'需处理':w.progressHealth==='overdue'?'进度超时':w.progressHealth==='recovering'?'恢复中':w.retiring?'正在移除':w.paused?'维护暂停':!w.connected?'状态未知':w.active?'执行 / 恢复中':w.requested?'空闲，可接任务':'空闲，待命';
+    return `<div class="nodes-worker-row"><span><strong>${escapeHtml(w.slot)}</strong><small>${label}</small>${w.active && w.executionPhase?`<small>${escapeHtml(phases[w.executionPhase]??w.executionPhase)}${Number.isFinite(w.progressAgeSeconds)?` · 距上次进展 ${Math.floor(w.progressAgeSeconds)} 秒`:''}</small>`:''}</span><button type="button" class="nodes-button danger" data-remove-worker="${escapeHtml(w.slot)}" ${disabled?'disabled':''}>${retry?'重试删除':'删除'}</button></div>`;
   }).join('')||'<p class="nodes-manager-help">暂无已部署的 Worker。</p>':'<p class="nodes-manager-help">正在读取 Worker 状态，暂时不能删除。</p>';
   $('worker-removal-form').hidden=!workerManager.removalSlot;
   $('worker-removal-title').textContent=`删除 ${workerManager.removalSlot??''}？`;

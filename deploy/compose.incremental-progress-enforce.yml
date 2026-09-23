@@ -1,0 +1,8 @@
+# Apply after the observe overlay and a controlled drain of the current center.
+# Only this validated slot receives additional supervisor cancellation.
+services:
+  remote-node-center:
+    environment:
+      REMOTE_NODE_EXECUTION_ADMISSION: dashboard
+      REMOTE_INCREMENTAL_PROGRESS_MODE: enforce
+      REMOTE_INCREMENTAL_PROGRESS_SLOTS: '["54a7cdd3-eb9c-4713-8d2f-21f4a5279de0/incremental-38"]'

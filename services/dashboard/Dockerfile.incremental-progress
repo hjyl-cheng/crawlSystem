@@ -1,0 +1,8 @@
+# The base already includes node management. Update its worker progress view
+# without rerunning the one-time node management installer.
+ARG QY_DASHBOARD_BASE_IMAGE
+FROM ${QY_DASHBOARD_BASE_IMAGE}
+WORKDIR /app
+COPY services/dashboard/src/serverNodesClient.js ./src/serverNodesClient.js
+ARG QY_SOURCE_SHA256
+LABEL qy.incremental-progress.source.sha256="${QY_SOURCE_SHA256}"

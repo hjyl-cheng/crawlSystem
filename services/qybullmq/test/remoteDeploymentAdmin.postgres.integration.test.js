@@ -63,11 +63,9 @@ test('Dashboard registration is atomic, encrypted, repeatable and supports addit
  assert.equal((await pool.query('SELECT max_leases FROM remote_ingestion.nodes WHERE node_id=$1',[nodeId])).rows[0].max_leases,150);
  await pool.query("UPDATE remote_ingestion.worker_connections SET connected_until=clock_timestamp()+interval '1 minute',accepting=true WHERE node_id=$1",[nodeId]);
  const control=createRemoteDeploymentAdmin({store,routes,image,token,gatewayUrl,execution:{allowsNode:()=>true,isProcessing:()=>false}});
- const set=(allowedCount,expectedAllowedCount)=>control.setExecution({nodeId,deploymentId,workerCount:150,allowedCount,expectedAllowedCount});
- assert.equal((await set(150,2)).allowedCount,0,'saving limit preserves the explicit pause');
+ await assert.rejects(control.setExecution({nodeId,deploymentId,workerCount:150,allowedCount:50,expectedAllowedCount:150}),{code:'EXECUTION_COUNT_CONTROL_REMOVED'});
  assert.equal((await control.setExecution({nodeId,deploymentId,workerCount:150,enabled:true,expectedRequested:false})).allowedCount,150);
- assert.equal((await set(50,150)).allowedCount,50);
- await assert.rejects(set(151,50),{code:'INVALID_EXECUTION_COUNT'});
- assert.equal((await set(0,50)).allowedCount,0);
+ await assert.rejects(control.setExecution({nodeId,deploymentId,workerCount:150,enabled:false,expectedRequested:false}),{code:'EXECUTION_CONTROL_CHANGED'});
+ assert.equal((await control.setExecution({nodeId,deploymentId,workerCount:150,enabled:false,expectedRequested:true})).allowedCount,0);
  assert.deepEqual((await pool.query('SELECT task_id,state,generation FROM remote_ingestion.tasks ORDER BY task_id')).rows,before);
 });

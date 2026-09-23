@@ -1,3 +1,4 @@
+import { incrementalProgressConfig } from '../src/remoteNodes/incrementalProgressConfig.js';
 // Explicit opt-in gateway and incremental execution entry. Never applies schema
 // or generates Clock plans. Queue consumers require a reviewed node allowlist.
 import pg from 'pg';
@@ -124,10 +125,17 @@ try{
     guardPool=new pg.Pool({connectionString:required('REMOTE_NODE_DATABASE_URL'),max:1,connectionTimeoutMillis:5000,
       application_name:'remote-node-supervisor-locks',options:`-c timezone=UTC -c publication.writer_version=${PUBLICATION_WRITER_VERSION}`});
     stage='supervisor_configuration';
+    const incrementalProgress=incrementalProgressConfig(process.env);
+    if(incrementalProgress.allowlist.length){
+      const known=await pool.query(`SELECT node_id::text||'/'||slot AS key FROM remote_ingestion.worker_connections
+        WHERE node_id::text||'/'||slot=ANY($1::text[]) AND mode='incremental_collect' AND retired_at IS NULL`,[incrementalProgress.allowlist]);
+      const registered=new Set(known.rows.map(row=>row.key));
+      if(incrementalProgress.allowlist.some(key=>!registered.has(key)))throw new Error('REMOTE_INCREMENTAL_PROGRESS_UNKNOWN_SLOT');
+    }
     supervisor=new RemoteCenterExecutionSupervisor({store,channelStore:channelPlans,routes,youtubeSessions,activation:workerConnections,guardPool,
       connection:{host:redisUrl.hostname,port:Number(redisUrl.port||6379),username:redisUrl.username?decodeURIComponent(redisUrl.username):undefined,
         password:redisUrl.password?decodeURIComponent(redisUrl.password):undefined,tls:redisUrl.protocol==='rediss:'?{}:undefined,maxRetriesPerRequest:null},
-      prefix:required('REMOTE_NODE_QUEUE_PREFIX'),allowedNodeIds,dashboardManaged,resolvedPolicy,profileSecret,createApiFallback,wholeChannels,loadWholeApiPolicy,
+      incrementalProgress,prefix:required('REMOTE_NODE_QUEUE_PREFIX'),allowedNodeIds,dashboardManaged,resolvedPolicy,profileSecret,createApiFallback,wholeChannels,loadWholeApiPolicy,
       rotaClient:new ProxyControlClient({controlUrl:required('ROTA_PROXY_CONTROL_URL'),token:controlToken}),
       proxyBaseUrl:'http://unused-center.invalid:8000',proxyPassword:'remote-transport-only',report:value=>console.log(JSON.stringify(value))});
   }

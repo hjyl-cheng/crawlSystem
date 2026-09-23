@@ -17,7 +17,7 @@ test('partial reduction distinguishes running, draining, standby and available W
   {requested:false,connected:true,enabled:false,active:false,readyForTasks:false},
  ]);
  assert.equal(state.allowedCount,1);assert.equal(state.draining,true);
- assert.deepEqual(state.counts,{deployed:3,connected:3,allowed:1,ready:1,active:2,running:1,draining:1,idle:0,standby:1,collecting:1,processing:0,awaiting:0,unready:0,finishing:1,offline:0});
+ assert.deepEqual(state.counts,{deployed:3,connected:3,allowed:1,ready:1,active:2,running:1,draining:1,idle:0,standby:1,collecting:1,processing:0,awaiting:0,unready:0,finishing:1,offline:0,overdue:0,recovering:0,blocked:0});
 });
 
 test('centrally pending results are not reported as active network collection',()=>{

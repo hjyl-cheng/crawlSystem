@@ -1,0 +1,359 @@
+增量 Worker 异常交接与无进展恢复——详细修改方案
+日期：2026-09-23
+状态：设计方案，尚未实施或部署。本文记录拟议接口、配置和验收要求，不能当作现有能力清单。
+范围：主节点 incremental-38、节点02 incremental-2 / incremental-6 所暴露的代理失败后重试交接卡住问题，以及同类执行的预防和恢复。
+
+一、目标与已知事实
+
+1. 修复目标
+   代理传输失败后，同一 Plan 能保留已完成 checkpoint，结束旧执行，进入合法的新执行；异常等待超过阶段期限时，进入可观察的受控恢复或隔离状态，不能持续数小时显示“就绪、执行中”而零产出。
+   保持一个频道同一时刻只有一个合法网络执行和业务写入所有者，保留原有 Plan、Run、Rota 预算、事件序列及审计历史。
+
+2. 本轮已经确认
+   - 三个任务最后的执行交接原因都是 FINGERPRINT_PROXY_TRANSPORT。
+   - 旧 network binding 已 retired；新 attempt 保持 running，传输 task 为 pending，领取身份和租约为空。
+   - BullMQ Job 仍 active 且有有效续锁；Dashboard 显示 processing=true、readyForTasks=true、awaitingRecovery=false。
+   - 三个远端容器运行中，旧 network.json 为 closed，无 whole-pending.json / pending.json 待上传文件。
+   - 中心 waitClaim 的 AbortSignal 只在循环边界检查。已用真实函数离线复现：查询 Promise 不返回时，signal 过期也不能使 waitClaim 退出。
+
+3. 尚未确认
+   - 三个生产执行当前究竟等待在数据库查询、连接获取、网络 RPC、执行清理，还是其他异步步骤。
+   - closed spool 是挂起的直接原因，还是旧执行结束后留下的结果。
+   - 是否存在共同的底层连接异常或已提交但应答丢失。
+   因而本文将“已证明的超时覆盖缺口”和“生产精确根因定位”分开验收，不能仅修复 waitClaim 就宣布三个生产案例的根因全部解决。
+
+4. 基础材料
+   reports/zero-incremental-workers-diagnosis-20260923.md
+   runtime/zero-worker-diagnosis-20260923/{snapshot.jsonl,followup.jsonl,remote-snapshot.jsonl}
+   runtime/zero-worker-diagnosis-20260923/waitclaim-repro.mjs
+   CONTEXT.md
+   docs/adr/0002-health-driven-slot-route-transitions.md
+
+二、实施范围及必须保持的约束
+
+1. 第一批修改增量中心的执行阶段、读取超时、受控取消、监督恢复及 Dashboard 展示。远端只在真实回归证明需要时修改恢复分支；远端阶段诊断上报可独立实施。
+2. 不将候选 position 冲突、WHOLE_CHANNEL_DETAIL_MISSING、全库性能优化、扩大 Worker 数量混入本次修复；它们分别验收。
+3. 默认不新增业务表或索引，不修改 generation 含义，不降低重试预算保护。
+4. 网络退休不能仅凭租约时间到期判断。需要对应 binding 的退休事实和 in_flight=0，或确认该尝试从未获得网络授权且不存在未决授权请求。
+5. 超时不代表数据库没有提交，也不代表网络已经停止。迟到成功、提交应答丢失和请求重放必须按原幂等标识查证。
+6. 不直接删除 BullMQ 锁、移动 active Job、清空 spool 或把 Plan 改为成功。不能通过停续锁来制造另一执行者接手。
+7. 新恢复逻辑按“具体 attempt + 监督所有权 + task/lease generation + Route Fence”约束，不允许旧定时器取消后续尝试。
+8. Rota 仍是路线切换和业务执行预算的唯一控制方；看门狗只提出取消当前尝试的请求，不直接更换代理或增加预算。
+
+三、修改前的最小定位工作
+
+1. 每个异常槽位输出一个脱敏执行快照：
+   node_id、slot、supervisor_id、job_id、plan_id、run_id、attempt_id、task_id；
+   transport_generation、route_generation、phase、phase_started_at；
+   last_progress_at、current_operation、operation_started_at；
+   cancellation_requested、cleanup_state、last_error_code；
+   连接池 total/idle/waiting 数量、当前操作类别。
+   不记录代理认证、Cookie、token、完整数据库 URL 或视频原始内容。
+
+2. 埋点放在关键 await 的入口和 finally：
+   pendingCountryHandoff → prepare → waitClaim → acquire/bind → executePlan；
+   stop → quiesce → finishAttempt → Rota complete/recovery；
+   远端 recoverWholeChannel → networkSession.recover → flush → claim。
+   阶段及 operation 必须区分；有“正在等待查询”才可判断是哪一条等待未返回。
+
+3. 先在隔离环境验证日志和故障注入。生产取证使用现有只读入口或标准镜像发布的可开关诊断；本轮未启用 Inspector，不将动态注入脚本作为生产定位的默认入口。
+4. 保存真实的交接先后顺序并建立 fixture：旧 attempt 结束时间、旧 binding 退休、新 attempt 提交、task 重新 pending、旧 claim 有/无、closed spool、后续 claim 与响应。
+5. 定位结果决定首个修复的优先分支。即便 SQL 不是这三次案例的根因，已复现的 waitClaim 超时缺口仍可独立修复，但不计作生产案例闭环。
+
+四、Module 职责与拟议 Interface
+
+1. RemoteManagedIncrementalRuntime：拥有单次远端尝试的阶段和进度记录。
+   文件：services/qybullmq/src/remoteNodes/managedIncrementalRuntime.js
+   在已有 handle 上维护私有 executionState，避免建立另一套调度器。
+   拟议只读 Interface：executionSnapshot()。
+   拟议取消 Interface：requestAbort(expectedAttemptId, reason)。
+   - 只有 expectedAttemptId 等于当前尝试时才设置本地取消请求。
+   - 返回 requested / already_requested / superseded / no_execution，不能返回“已安全停止”冒充清理完成。
+   - 使用本次 handle 的 AbortController，与 Rota abortSignal 合并，传递给可取消操作。
+   - 正常 execute 返回到最终清理完成之间仍保留 executionState；现有 this.active 的 finally 清空不能导致清理阶段不可观察。
+   - 一个 attempt 结束后清理 timer/listener；旧 timer 的 identity 与当前 handle 不匹配时不产生作用。
+
+2. RemoteChannelExecutionStore：拥有 task/attempt 的数据库事实及幂等收尾。
+   文件：services/qybullmq/src/remoteNodes/channelExecutionStore.js
+   - waitClaim 使用有截止时间的读取，不把数据库等待细节交给上层循环自行处理。
+   - stop/finish 按 task 主键、attempt 身份和监督权重新核验；重试结果可区分 stopped / already_terminal / superseded / ownership_lost。
+   - 准入提交不确定时，通过 work_key + attempt_id 查证已有事实，不能直接创建第二个 task。
+   - 阶段快照只供诊断和超时决策，不能替代这里的数据库 fence。
+
+3. 有界 PostgreSQL 读取 Module。
+   建议文件：services/qybullmq/src/remoteNodes/boundedPostgresRead.js
+   拟议 Interface：read({text, values, signal, deadline})。
+   封装借连接、剩余时间、事务级服务器限时、客户端截止、坏连接淘汰、迟到结果丢弃和资源回收。
+   先只用于 waitClaim/恢复查证等短读取；不将整套业务写事务批量替换，也不建立通用重试框架。
+   注入 pool 和计时依赖，测试与生产调用同一 Interface。
+
+4. RemoteCenterExecutionSupervisor：识别无进展，串行驱动该槽位恢复。
+   文件：services/qybullmq/src/remoteNodes/centerExecutionSupervisor.js
+   - 读取 executionSnapshot，按身份和阶段期限决定恢复，不依赖 processing=false。
+   - 一个 entry 同时只允许一个 recovery Promise；单槽位恢复不 await 阻塞整个 tick。
+   - 决定是否停止接新 Job，实际业务及网络结算仍调用已有 Store/Rota 路径。
+
+5. centerExecutionRecovery：统一“原所有者恢复”和“新监督者接管”需要的事实检查。
+   文件：services/qybullmq/src/remoteNodes/centerExecutionRecovery.js
+   提取可共用的 task/attempt/binding 检查，保留两种入口各自的所有权前置条件。
+   不在活跃原协程旁直接调用现有 recoverRemoteSlot；该函数目前用于新监督者接管前，不能未经约束扩大使用范围。
+
+五、执行阶段与时间规则
+
+1. 建议的诊断阶段（不是新增数据库业务状态）：
+   admitting       准入查证、准备 task/attempt；
+   awaiting_claim  task 已提交，等待远端领取；
+   binding         已领取，建立对应网络/YouTube session；
+   collecting      远端实际采集；
+   receiving       上传并等待中心持久回执；
+   applying        中心采用结果并写入领域状态；
+   stopping        原尝试已收到取消，正在停止网络及结算；
+   recovering      正在核验或重试原尝试清理；
+   blocked         安全条件无法证明，保持隔离并告警；
+   idle / finished 没有当前执行，或当前执行已结算。
+
+2. 什么算进展
+   - 完成准入提交、成功 claim、binding 激活、获得持久回执、领域提交、网络退休或 attempt 结算，算阶段进展。
+   - 心跳、BullMQ 续锁、重复轮询、重复收到相同 receipt，不重置进展时间。
+   - 同一阶段中的进展只在证据标识/序号推进时更新，不能每次执行回调都更新时间。
+   - 中心不能观察远端每条视频进展时标注 unknown；不把“没有可见细节”当作远端一定卡住。
+   - 当前进程的时限使用单调时钟；展示时间使用 UTC。重启后以持久事实重建，并重新核验，不能直接继承旧进程的单调时间值。
+
+3. 初始候选参数，实施前通过隔离负载及线上观察校准
+   awaiting_claim：保留现有 30 秒总期限；每次读库受剩余时间约束。
+   短读取总期限：最多 5 秒，连接获取目标最多 2 秒，均计入同一个剩余时间预算。
+   admitting：先以 30 秒作为候选总期限；服务器 statement_timeout / lock_timeout 继续约束单条 SQL。
+   stopping/recovering：保留现有 45 秒网络停止预算作为第一段期限；到期转 blocked 并告警，不伪造静止确认。
+   监督检查：最多每 5 秒检查一次现有 entry；不得每槽位每次全表扫描。
+   collecting/receiving/applying：第一批记录、告警并保留原执行期限；不先增加“30 秒没进展就中止所有长任务”的规则。
+   本轮自动恢复先覆盖 admitting/awaiting_claim 的已验证场景。网络采集及最终写入阶段的自动中止，需独立故障测试通过后再启用。
+
+4. 候选开关（新增后统一在中心启动配置解析并校验）
+   REMOTE_INCREMENTAL_PROGRESS_MODE = observe | enforce，默认 observe。
+   REMOTE_INCREMENTAL_CLAIM_TIMEOUT_MS = 30000。
+   REMOTE_INCREMENTAL_READ_TIMEOUT_MS = 5000。
+   REMOTE_INCREMENTAL_STOP_TIMEOUT_MS = 45000。
+   enforce 第一阶段使用明确的 node_id/slot 白名单；若实现新的白名单配置，使用结构化格式，拒绝未知 node/slot。
+   开关只控制是否开始新的自动恢复；已经开始的清理继续安全完成，不能关开关就恢复接新任务。
+
+六、读库与异步取消的具体实现要求
+
+1. 使用 pool.connect() 获取本次短操作独占的 client，记录借出/归还责任；client 已借出后才能执行操作。
+2. AbortSignal 触发或截止时间到达，必须让等待方在有限时间内得到结构化错误。区分：
+   REMOTE_DB_ACQUIRE_TIMEOUT、REMOTE_DB_READ_TIMEOUT、REMOTE_CLAIM_TIMEOUT、REMOTE_EXECUTION_ABORTED。
+3. 查询包含显式短只读事务时，BEGIN READ ONLY 与 SET LOCAL 必须在同一 client 上执行，COMMIT/ROLLBACK 也计入时限。
+   不使用 session 级 SET default_transaction_read_only=on；PgBouncer transaction pooling 会使后端设置污染其他业务连接。
+4. 服务器 statement_timeout 防止后端执行无限持续；客户端期限覆盖连接排队、网络黑洞和收不到应答。
+   不假设 pg@8.22 的 query 接受 AbortSignal 就能真正取消；按所用版本确认驱动能力并测试。
+5. 普通返回：事务结束后正常释放 client。
+   取消、协议状态未知、连接异常：将该 client 从池中销毁，不把仍可能带未决查询的连接放回正常池。
+   连接获取已超时但稍后才借到 client：识别迟到借出并立即安全归还/销毁，不再发业务 SQL。
+6. 若采用 Promise.race，只作为外层期限通知；必须同时实现底层资源清理、迟到 resolve/reject 的吸收、监听器移除。不能把竞争失败的查询遗留在后台继续持有池连接。
+7. 对普通只读 SELECT，迟到结果不得返回给已经取消的 attempt；旧查询结束后不能推动 binding 或继续执行。
+8. 写操作的提交不确定按既有身份回查，不以超时自动重试整段 prepare/finish；事务应答丢失时禁止回退已完成领域或生成重复 Observation。
+9. 先复用现有短事务能力。若故障测试证明业务池耗尽会阻断恢复，为中心短恢复事务增加最多 2 个连接的独立受限 pool；需核算现有实例和 PgBouncer 连接预算，不能因每个 Worker 都加一组连接而扩大问题。
+   不使用持有监督 advisory lock 的长连接运行可任意销毁的查询；关闭该连接会释放监督所有权。
+
+七、无进展后的受控恢复顺序
+
+1. 捕获恢复身份
+   记录 expected supervisor/entry identity、job_id、attempt_id、task_id、generation，以及检查到的 phase 和进展序号。
+   异步恢复实际开始前再次比较；已有新进展或新 attempt 时取消旧恢复决策。
+
+2. 停止该槽位接新 Job
+   在 supervisor 中设置局部 recoveryRequested，并暂停该槽位 BullMQ consumer 的新领取；不暂停整个队列，不修改用户持久接单意愿。
+   “停止接新 Job”与“允许原任务 heartbeat、回执、网络释放、查询旧执行状态”分开处理。
+   不能直接把所有 executionReady/worker heartbeat 改为 false，导致原执行清理所需请求也被拒绝。
+
+3. 通知原尝试取消
+   requestAbort 只针对匹配的 attempt，并传递可识别的 reason。
+   在 prepare 后、claim 后、binding 前、结果采用前再次检查取消状态及身份；取消与成功 claim 同时发生时，不能继续建立新网络。
+   closeEntry / RotaSlotAdapter.close 不是取消入口：现有 close 会 await activeJob，挂起 Job 可能让关闭也永久等待。
+
+4. 查证准入是否已提交
+   有 admission 时按 task_id + attempt_id 查询；没有 admission 但 prepare 应答不确定时，按 work_key + Rota task/attempt identity 回查。
+   已存在的新尝试不得重建第二份传输记录。未提交、已回滚、已被替代分别处理。
+
+5. 封住原 task 的后续执行
+   复用 stop 的幂等事务，在锁定 task 后重新核验 context.execution_attempt_id 和监督权。
+   pending/leased 才可按原语义终止传输；applied、received/API handoff、已经被替代的 task 必须进入对应事实分支。
+   stop 与并发 claim 使用相同 task 行锁：先 stop 则 claim 不能领取；先 claim 则后续必须核验是否已出现 binding，并执行完整清理。
+   仅因请求超时不得抹掉已经落库的成功结果。
+
+6. 确认网络静止和清理边界
+   不以 handle.inner 为 null 推断“没有网络”。需要检查精确 attempt 所属的所有 binding，以及尚未返回的 bind/grant 请求。
+   active binding 走已有 stop_requested / retire / release receipt；已 retired 还要核验 in_flight=0。
+   从未授权的 pending 尝试只有在确认无 binding、无迟到授权可能时才允许零网络收尾。
+   授权请求迟到仍需通过同一 task/attempt fence 拒绝；不能只依赖进程内标志。
+   清理失败或静止无法证明：进入 blocked，保留证据与恢复资格，拒绝新任务，展示明确原因。
+
+7. 结算 attempt 与队列
+   网络确认静止后调用原 finishAttempt 与 Rota Completion，沿原控制通道记录 observation、释放或切换路线。
+   同一逻辑 Plan/Run 保持身份；原重试次数和预算继续生效，不因本次恢复清零。
+   原处理函数正常抛出可分类错误或返回交接结果，再由 BullMQ 的既有重试逻辑处理。
+   只有业务真正终止时才调用终态 Observation writer；一次 attempt 超时不直接把所有 Plan 领域改成 failed。
+   预算耗尽按事实终止并告警；永久频道删除仍保持 removed。
+
+8. 恢复接单
+   必须同时满足：旧处理函数/未决回调已结束或被可靠隔离，原网络静止，task/attempt/Run 的交接事实可解释，监督 guard 仍归当前所有者。
+   再复核用户接单意愿、远端实例/relay identity、Rota route readiness，才恢复该槽位 consumer。
+   清理期限到达只能转 blocked，不能强制将 recoveryCompleted=true。
+
+9. 后续恢复与失败控制
+   每槽位同一 attempt 只允许一条恢复链；定时重试必须有退避，不重复扣业务预算。
+   普通依赖暂时不可用允许有界重试；所有权丢失立即停止当前恢复，交由合法新监督者。
+   从 blocked 到恢复仍走完整核验，不靠超时解除隔离。
+   全进程事件循环若卡死，同进程看门狗也不能运行；外部告警监测“中心进度与心跳均停滞”。首批不引入自动强杀全中心规则。
+
+八、远端 closed spool 与 claim 交接
+
+1. 修改候选文件：
+   services/qybullmq/src/remoteNodes/channelNetworkSession.js
+   services/qybullmq/src/remoteNodes/channelPlanExecutor.js
+   services/qybullmq/src/remoteNodes/nodeIncrementalRuntime.js
+   services/qybullmq/src/remoteNodes/natsClient.js
+
+2. closed 状态恢复必须保留既有区分：
+   旧 lease 仍有效且未结算：继续等待中心，不取得第二份网络执行权。
+   中心明确 STALE_LEASE / 已终态且已完成旧网络清理：只清理精确匹配的旧 network/claim 标记。
+   503、网络断开、查询超时：不能解释为旧任务已结束；保留文件，记录操作和重试原因。
+
+3. 文件删除前再次确认 task_id + generation + 对应 spool 内容没有被新执行替换；旧恢复回调不能删除新 claim/new network。
+4. 有未确认结果时继续先回执恢复；不得清空 whole journal 来解开接单。
+5. 每个恢复 RPC 和本地文件/代理清理步骤有操作级时限或可诊断状态；本地调用不支持可靠取消时进入隔离，不能并发启动第二次同类清理。
+6. 先对三个远端镜像做精确源码对比，再用该版本跑 fixture。当前只核对了中心四个关键文件摘要，不能假设远端与工作区完全一致。
+7. 若需要向中心新增远端阶段字段：
+   当前 worker heartbeat 对字段严格校验，不能直接给旧 payload 加字段。
+   采用受支持 runtime revision 的明确契约升级，先中心兼容、再远端灰度；状态上报缺失时显示 unknown。
+   若第一批中心信息已足够，暂不修改远端 heartbeat 协议。
+
+九、可观测性与 Dashboard
+
+1. 中心状态建议增加（均为新增展示字段，不改变现有 lease/fence 契约）：
+   progressHealth = healthy | overdue | recovering | blocked | unknown；
+   executionPhase、phaseStartedAt、lastProgressAt、progressAgeSeconds；
+   currentOperation、operationAgeSeconds、recoveryReason、recoveryAttempts；
+   acceptingNewJobs：中心是否允许该槽位开始下一份 Job。
+   这些值供诊断，业务是否完成仍以持久领域状态和事件为准。
+
+2. readyForTasks 当前参与远端协议，不能仅为 UI 好看重定义其含义。
+   正常等待当前任务 claim 时，不能因 processing=true 就关闭其领取资格。
+   UI 分开显示“在线”“任务阶段”“进度异常”“恢复中/需处理”；保留既有 readiness 兼容字段。
+
+3. 文件修改位置
+   services/qybullmq/src/remoteNodes/deploymentAdmin.js：汇总阶段与恢复快照，提供结构化原因。
+   services/dashboard/src/nodeRuntime/deploymentControlClient.js：透传兼容字段及超时错误。
+   services/dashboard/src/serverNodesRoutes.js：明确展示状态与传输错误语义。
+   services/dashboard/src/serverNodesClient.js：展示进度年龄、阶段和告警，不以 active/online 直接渲染“正常采集中”。
+
+4. 指标与日志
+   phase_duration、pending_claim_age、progress_overdue、recovery_started/succeeded/blocked、stale_abort_ignored；
+   pool_wait、query_timeout、late_query_discarded、connection_destroyed；
+   增量 succeeded/partial/failed、重试和业务预算耗尽数。
+   metrics 标签限制在节点、槽位、阶段、错误类别；job_id/plan_id/attempt_id 仅进入结构化日志，避免高基数指标。
+   状态变化立即记录；重复相同错误限频，但更新累计次数。错误不能再只剩 remote_center_queue_error 而没有 code/stage。
+
+十、测试矩阵与通过标准
+
+1. 单元与模块测试
+   A. 查询永不返回：在短测试期限内 waitClaim 拒绝，相关 client 不被复用；归还计数不重复。
+   B. 获取连接超时后迟到借出：连接被处理，无泄漏，无迟到 SQL。
+   C. 查询完成与取消同时发生：最多一个结果；取消后不会进入 bind。
+   D. watcher 已注册/尚未注册时取消、丢通知、信号早已 aborted：循环及时退出，计时器/listener 清理。
+   E. 旧 attempt 的 timer 在新 attempt 启动后触发：新尝试不受影响。
+   F. 心跳和续锁持续成功、业务进度不变：触发超时；真实阶段推进：不误触发。
+   G. processing=true 的 overdue 执行进入恢复；正常长抓取、API/Agent handoff、等待合格代理不得被同一规则误杀。
+   H. recovery 多次 tick 和重复 requestAbort：只有一条清理链。
+   I. close 永不返回：不阻塞其他槽位的 tick/心跳，异常槽位显示 blocked。
+
+2. PostgreSQL + Redis + Rota 集成测试
+   J. prepare 已提交但响应丢失：按业务键找到原 admission，不能创建第二任务或 attempt。
+   K. stop 与 claim 并发、stop 与 bind 并发：旧执行不能在停止后获得有效网络/写权限。
+   L. stop/finish COMMIT 响应丢失：幂等回查，不将已成功领域回退为失败。
+   M. 无 inner 但绑定已持久化：必须清理真实绑定后结算，不能报告假 in_flight=0。
+   N. 监督 advisory lock 丢失、新 attempt 已出现：旧恢复者不能修改新状态。
+   O. Rota Completion 暂时失败：原控制恢复可重试，没有提前释放路线和新任务并行。
+   P. 数据库不可用超过恢复期限：进入 blocked，恢复依赖后才能继续；无全槽位阻塞或恢复风暴。
+
+3. 真实整频道 NATS 路径
+   Q. 重放三个案例：FINGERPRINT_PROXY_TRANSPORT → 旧网络 retired → closed spool → 新 attempt/pending；覆盖旧 claim 有/无。
+   R. 领取应答丢失、旧 RPC 迟到、新 generation 已开始：不能删除新 spool、重用旧 lease 或重复应用结果。
+   S. 已收到完整/部分结果后中断：保留 receipt/journal/checkpoint，恢复后不丢视频、不重复 Observation。
+   T. 远端网络黑洞及后端响应延迟：中心/远端超时都有明确原因，最终受控恢复或隔离。
+   U. 协议旧新版本混跑：中心支持的 revision 正常工作；不支持的 revision 明确拒绝，不静默停滞。
+
+4. 首先扩展现有测试文件
+   test/remoteExecutionHandoff.postgres.integration.test.js
+   test/remoteCenterSupervisor.postgres.integration.test.js
+   test/remoteSupervisorIdleRecovery.test.js
+   test/remoteIncrementalFence.postgres.integration.test.js
+   test/remoteNodeIncrementalRuntime.test.js
+   test/wholeChannelRecovery.test.js
+   test/rotaSlotAdapter.test.js
+   为新有界读取 Module 添加故障/资源回收测试；对新执行进度 Interface 添加状态竞争测试。
+
+5. 环境要求
+   实际集成测试会清理数据，只允许显式隔离库、独立 Redis prefix、测试 Rota 和 NATS。
+   REMOTE_NODE_TEST_DATABASE_URL、REMOTE_NODE_ROTA_TEST_BINARY 以及整频道分支所需 REMOTE_NATS_TEST_URL/节点身份必须完整配置。
+   增加对“要求的 NATS 整频道测试被跳过”的验收检查，不能用 HTTP 分支通过或 skip 汇总冒充整条链路通过。
+
+6. 通过标准
+   - 原故障 fixture 在修改前可失败，在修改后达到恢复或明确隔离；单纯未抛异常不算通过。
+   - 等待领取阶段到期后，在检查周期内发起取消；依赖正常且网络可静止时，目标 120 秒内完成原尝试结算并允许合法后续执行。
+   - 无法证明静止时，同一目标窗口内明确进入 blocked 并告警；“120 秒内强制成功”不是要求。
+   - 所有延迟、掉线、重放用例都满足单一执行权、无重复业务应用、无已确认数据丢失。
+   - 其他 worker 吞吐、心跳和接单不被一个槽位的清理拖住。
+
+十一、实施批次、当前三个 Worker 的处置及发布
+
+批次 A：建立最小阶段快照、定位生产等待点、补齐原故障 fixture。
+   产物：明确的操作阶段与错误分类；原三个案例时序；observe 模式监控。
+   出口：有可复现输入和可验证的阶段超时信号；若尚不能复现精确挂起点，明确保留该未决项。
+
+批次 B：有界读库、单次尝试取消和阶段超时。
+   产物：waitClaim 不会无限等查询；迟到结果和连接资源处理正确；prepare/commit 不确定可查证。
+   出口：A–F、J–L 测试及相关现有回归通过。
+
+批次 C：监督者驱动受控恢复、blocked 状态、Dashboard 展示。
+   产物：processing=true 但无进展也能被识别；停止接新 Job 与原任务清理分开；不靠全中心重启恢复。
+   出口：完整恢复/所有权/网络静止矩阵通过。先 observe，再按单槽位白名单 enforce。
+
+批次 D：按复现结果决定远端修复及协议升级。
+   产物：closed/claim 的正确代次清理、错误原因可见；需要上报新字段时采用兼容 revision。
+   出口：整频道 NATS、SIGKILL/应答丢失/旧回调迟到回归通过。
+
+当前三个 Worker 的恢复操作必须另有执行清单，不能把本文当成已经执行恢复：
+   1) 重新采样三者最新 task/attempt/queue/binding/spool，既有快照仅作历史依据。
+   2) 保存证据，先选一个满足身份与网络静止检查的异常槽位。
+   3) 使用经过测试的单槽位取消/恢复入口，等待旧处理函数结算、原 Rota 尝试完成。
+   4) 确认合法后续任务完成、无重复应用，再处理其余两个。
+   5) 单独重启远端不能保证释放中心 active Job；若原中心协程无法退出，先明确可靠隔离与所有权转移路径，再设计受控维护，不能直接强制 remove active Job。
+
+发布要求：
+   - 从权威源码构建不可变镜像，不向运行容器复制改过的 src。
+   - 新阶段信息 observe 至少覆盖一次常见网络失败和重试交接；观察不足时延长，不凭低故障窗口认定有效。
+   - 单槽位 enforce 验证后按小批扩大；不同时更改代理策略、Worker 数量、数据库后台扫描频率。
+   - 比较同任务构成的 succeeded/partial/failed、重试、恢复时长、pending 最老年龄、CPU/连接池/DB 等待；保持原采集完整性。
+   - 自动清理参数、过去的维护事故和本次流程修复分别记录，不能相互混算收益。
+
+十二、回退与交付完成条件
+
+1. 回退触发
+   发现旧 attempt 写入新任务、重复应用、未静止就重派，立即停止扩大并关闭新的 enforce 触发。
+   大量正常执行被误判超时、跨槽位清理阻塞或连接泄漏，也应停止扩大并保留现场。
+2. 回退顺序
+   先关闭“开始新的自动恢复”，已进入 stopping/recovering 的任务继续按既有安全条件收尾或隔离。
+   保存新版本证据，排空/隔离受影响执行后回退镜像；保持业务库、队列和 spool 原样。
+   如果增加协议 revision，先保持中心兼容再回退远端；不能让仍运行的新远端连接到不支持它的旧中心。
+   原旧版本仍含无进展恢复缺口，回退只恢复兼容行为，必须保留异常告警和人工受控处置方案。
+3. 完成交付必须同时满足
+   - 有代码、测试和实际构建镜像记录，所有要求的集成分支真实执行而非跳过。
+   - 三个目标任务各有真实后续结果：成功、原预算内合法重试、按事实终止或明确隔离；不能统一刷成成功。
+   - 相同故障注入再次发生时能自动收敛，恢复没有产生重复执行/丢结果。
+   - 面板能区分在线、等待领取、正在采集、恢复中和需处理，不再长期以正常“执行中”掩盖无进展。
+   - 明确记录生产精确挂起点是否已查明；如果只完成通用韧性修复，不将其表述成全部根因已经证实。
+
+本次文件交付仅为方案细化与保存。没有执行上述源码修改、自动恢复、重试、重启或发布。
+
+
+后续执行记录（2026-09-23）：中心与 Dashboard 已上线，三个异常 Worker 已恢复实际任务产出；额外自动恢复目前仅对 node01/incremental-38 灰度启用。实施中确认三个旧远端均受过期 YouTube checkpoint 阻塞，已按批次 D 部署固定摘要修复并保留归档。详细时序、实际结果与未决项见 reports/incremental-worker-progress-rollout-20260923.md。

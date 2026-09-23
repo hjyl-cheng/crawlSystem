@@ -21,7 +21,7 @@ import { assertRemoteIncrementalBusinessFence } from './incrementalBusinessFence
 // Reuse the actual clock/Plan runner. Only YouTube requests cross the transport;
 // SQL, checkpoints, Agent, publication and API fallback stay on the center.
 export async function runRemoteIncrementalPlan({ channelStore, lease, assertBusinessFence,
-  createApiFallback = null, wholeChannels = null, loadWholeApiPolicy = null, pollMs = 100, signal = new AbortController().signal, apiReplayRequestId = null }) {
+  createApiFallback = null, wholeChannels = null, loadWholeApiPolicy = null, pollMs = 100, signal = new AbortController().signal, apiReplayRequestId = null, onProgress = () => {} }) {
   if (typeof assertBusinessFence !== 'function') throw new TypeError('transactional business fence required');
   if (process.env.YOUTUBEJS_VIDEO_API_BATCH_FALLBACK === 'true' && !createApiFallback) {
     throw new TypeError('central API fallback must be provided when enabled');
@@ -49,6 +49,7 @@ export async function runRemoteIncrementalPlan({ channelStore, lease, assertBusi
         const row = (await query(`SELECT state,payload_gzip FROM remote_ingestion.channel_commands
           WHERE command_id=$1`, [commandId])).rows[0];
         if (row.state === 'received') {
+          onProgress('receiving',`command:${commandId}`);
           const { value } = await decodeResult(row.payload_gzip);
           if (value.outcome === 'failure') throw fromChannelWire(value.error);
           return fromChannelWire(value.data);
@@ -62,7 +63,9 @@ export async function runRemoteIncrementalPlan({ channelStore, lease, assertBusi
   const request = async (operation, input, requestKey = 'once', requestSignal = signal) => {
     assertVideoApiNetworkAllowed();
     const commandId = await withTransaction((client) => channelStore.request(client, task, operation, input, requestKey));
-    return awaitCommand(commandId, requestSignal);
+    onProgress('collecting',operation);
+    const result=await awaitCommand(commandId, requestSignal);
+    onProgress('applying',operation);return result;
   };
   const runStore = new IncrementalRunStore({ withTransaction });
   const originalMarkDomain = runStore.markDomain.bind(runStore);
@@ -125,12 +128,14 @@ export async function runRemoteIncrementalPlan({ channelStore, lease, assertBusi
         return { commandId, input };
       }, { repeatableRead: true });
       let renewedAt = Date.now();
+      onProgress('collecting','whole_channel');
       await awaitCommand(prepared.commandId, signal, async () => {
         if (prepared.input.video && Date.now() - renewedAt > 30000) {
           await withTransaction(client => renewIncrementalVideoDispatchSnapshot(client, prepared.input.video));
           renewedAt = Date.now();
         }
       });
+      onProgress('applying','whole_channel');
       whole = await withTransaction(async client => {
         const received = await wholeChannels.result(client, prepared.commandId);
         const result = fromChannelWire(received.result);

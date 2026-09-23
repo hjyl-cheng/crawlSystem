@@ -10,10 +10,11 @@ export function selectIntakeWorkers(rows, count) {
 export function intakeStatus(workers) {
   const allowed = workers.filter(w => w.requested).length;
   const draining = workers.filter(w => !w.requested && (w.active || w.enabled)).length;
-  const phases={collecting:0,processing:0,awaiting:0,unready:0,idle:0,finishing:0,standby:0,offline:0};
+  const phases={collecting:0,processing:0,awaiting:0,unready:0,idle:0,finishing:0,standby:0,offline:0,overdue:0,recovering:0,blocked:0};
   for(const worker of workers){
     const processing=worker.processing??worker.active;
-    const phase=!worker.requested && (processing||worker.enabled) && !worker.awaitingRecovery ? 'finishing'
+    const phase=['overdue','recovering','blocked'].includes(worker.progressHealth) ? worker.progressHealth
+      : !worker.requested && (processing||worker.enabled) && !worker.awaitingRecovery ? 'finishing'
       : processing ? (worker.executionPhase && worker.executionPhase!=='collecting' ? 'processing' : 'collecting')
       : worker.awaitingRecovery || worker.active ? 'awaiting'
       : !worker.connected ? 'offline'

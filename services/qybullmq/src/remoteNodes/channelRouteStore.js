@@ -1,3 +1,4 @@
+import { boundedPostgresRead } from './boundedPostgresRead.js';
 import { createCipheriv, createDecipheriv, createHmac, randomBytes, randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { canonicalIncrementalJson } from '../incrementalPlan.js';
@@ -185,7 +186,7 @@ export class RemoteChannelRouteStore {
       signal?.throwIfAborted();
       const notification=this.channelStore.transportSignals?.watch(`binding:${uuid(bindingId)}`,{timeoutMs:5000,signal});
       try {
-        const row = (await this.store.pool.query('SELECT state,release_receipt FROM remote_ingestion.network_bindings WHERE binding_id=$1', [uuid(bindingId)])).rows[0];
+        const row = (await boundedPostgresRead(this.store.pool, {text:'SELECT state,release_receipt FROM remote_ingestion.network_bindings WHERE binding_id=$1', values:[uuid(bindingId)], signal})).rows[0];
         if (!row) fail('NETWORK_BINDING_MISSING');
         if (row.state === 'retired' && row.release_receipt?.in_flight === 0) return { active_managed_requests: 0 };
         if(notification)await notification.wait;else await delay(pollMs,null,{signal});

@@ -1,3 +1,5 @@
+import { ExecutionProgress } from './executionProgress.js';
+import { remoteDeadlineError } from './boundedPostgresRead.js';
 import { ChannelExecutionMetrics } from '../channelExecutionContext.js';
 import { failureDecisions } from '../channelExecutionRuntime.js';
 import { runRemoteIncrementalPlan } from './incrementalCoordinator.js';
@@ -11,26 +13,68 @@ import { createRemoteYoutubeCheckpointConsumer } from './youtubeProfileCheckpoin
 // This adapter replaces where requests run, never their retry/country policy.
 export class RemoteManagedIncrementalRuntime {
   constructor({ channelStore, routes, youtubeSessions, nodeId, slot, profileSecret,
-    createApiFallback = null, wholeChannels = null, loadWholeApiPolicy = null, assertAdmission = null, pollMs = 100, claimTimeoutMs = 30000, stopTimeoutMs = 45000 }) {
-    Object.assign(this, { channelStore, routes, youtubeSessions, nodeId, slot, createApiFallback, wholeChannels, loadWholeApiPolicy, assertAdmission, pollMs, claimTimeoutMs, stopTimeoutMs });
-    this.executions = new RemoteChannelExecutionStore({ channelStore, profileSecret, assertAdmission });
+    createApiFallback = null, wholeChannels = null, loadWholeApiPolicy = null, assertAdmission = null, assertOwnership = null, readTimeoutMs = 5000, admissionTimeoutMs = 30000, report = () => {}, pollMs = 100, claimTimeoutMs = 30000, stopTimeoutMs = 45000 }) {
+    Object.assign(this, { channelStore, routes, youtubeSessions, nodeId, slot, createApiFallback, wholeChannels, loadWholeApiPolicy, assertAdmission, pollMs, claimTimeoutMs, stopTimeoutMs, admissionTimeoutMs, report });
+    this.executions = new RemoteChannelExecutionStore({ channelStore, profileSecret, assertAdmission, assertOwnership, readTimeoutMs });
     this.checkpoints = createRemoteYoutubeCheckpointConsumer({ sessions: youtubeSessions, profileSecret });
-    this.active = null;
+    this.active = null;this.current = null;
+  }
+
+  executionSnapshot() {
+    const snapshot=this.current?.progress?.snapshot();
+    if(!snapshot)return null;
+    const pool=this.channelStore.store.pool;
+    return {...snapshot,planId:this.current.job?.data?.plan_id??null,runId:this.current.args.prepared?.businessRunId??null,
+      poolTotal:pool.totalCount??null,poolIdle:pool.idleCount??null,poolWaiting:pool.waitingCount??null};
+  }
+
+  stage(handle, phase, operation=null) {
+    handle.progress.move(phase,operation);
+    this.report({event:'remote_incremental_stage',node_id:this.nodeId,slot:this.slot,...handle.progress.snapshot()});
+  }
+
+  requestAbort(expectedAttemptId, reason='REMOTE_EXECUTION_OVERDUE') {
+    const handle=this.current;
+    if(!handle || handle.progress.phase==='finished')return 'no_execution';
+    if(handle.progress.attemptId!==expectedAttemptId)return 'superseded';
+    if(handle.controller.signal.aborted)return 'already_requested';
+    handle.progress.cancel(reason);handle.error??=remoteDeadlineError(reason);
+    handle.controller.abort(handle.error);
+    return 'requested';
   }
 
   async acquire(args) {
-    const handle = { args, admission: null, lease: null, inner: null, adapter: null,
+    const controller=new AbortController();
+    args={...args,abortSignal:AbortSignal.any([args.abortSignal,controller.signal])};
+    const handle = { args, controller, admission: null, lease: null, inner: null, adapter: null,
       error: null, quiescence: null, finished: false, job: null };
+    handle.progress=new ExecutionProgress({attemptId:`channel-attempt:${args.task.task_id}`,jobId:null,
+      claimTimeoutMs:this.claimTimeoutMs,stopTimeoutMs:this.stopTimeoutMs,admissionTimeoutMs:this.admissionTimeoutMs});
     handle.execute = async ({ job, attempt }, invoke) => {
-      if (this.active) throw new Error('REMOTE_CENTRAL_RUNTIME_BUSY');
-      this.active = handle; handle.job = job;
+      if (this.active || (this.current && this.current.progress.phase!=='finished')) throw new Error('REMOTE_CENTRAL_RUNTIME_BUSY');
+      this.active = handle; this.current=handle;handle.job = job;
+      handle.progress=new ExecutionProgress({attemptId:`channel-attempt:${args.task.task_id}`,jobId:job.id,
+        claimTimeoutMs:this.claimTimeoutMs,stopTimeoutMs:this.stopTimeoutMs,admissionTimeoutMs:this.admissionTimeoutMs});
+      this.stage(handle,'admitting','pending_country_handoff');
       try {
         args.abortSignal.throwIfAborted();
-        const country=await this.executions.pendingCountryHandoff(job);
+        const country=await this.executions.pendingCountryHandoff(job,{signal:args.abortSignal});
+        args.abortSignal.throwIfAborted();
         if(country)return {kind:'country_recheck',country};
+        this.stage(handle,'admitting','prepare');
         handle.admission = await this.executions.prepare({ ...args, job, nodeId: this.nodeId, slot: this.slot, resumeMode: attempt.resumeMode });
-        const signal = AbortSignal.any([args.abortSignal, AbortSignal.timeout(this.claimTimeoutMs)]);
-        handle.lease = await this.executions.waitClaim(handle.admission, { nodeId: this.nodeId, slot: this.slot, signal, pollMs: this.pollMs });
+        handle.progress.taskId=handle.admission.taskId;
+        args.abortSignal.throwIfAborted();
+        this.stage(handle,'awaiting_claim','wait_claim');
+        const claimController=new AbortController();
+        const claimTimer=setTimeout(()=>claimController.abort(remoteDeadlineError('REMOTE_CLAIM_TIMEOUT')),this.claimTimeoutMs);
+        const signal = AbortSignal.any([args.abortSignal, claimController.signal]);
+        try {
+          handle.lease = await this.executions.waitClaim(handle.admission, { nodeId: this.nodeId, slot: this.slot, signal, pollMs: this.pollMs });
+          signal.throwIfAborted();
+        } finally {clearTimeout(claimTimer);}
+        handle.progress.generation=handle.lease.generation;
+        this.stage(handle,'binding','acquire_binding');
         handle.adapter = createRemoteRotaChannelRuntime({ routes: this.routes, nodeId: this.nodeId, slot: this.slot,
           lease: handle.lease, stopTimeoutMs: this.stopTimeoutMs, youtubeSessions: this.youtubeSessions,
           youtubeSession: { profileGroup: handle.admission.profileGroup, attemptId: handle.admission.attemptId },
@@ -38,7 +82,7 @@ export class RemoteManagedIncrementalRuntime {
         handle.inner = await handle.adapter.acquire(args);
         return await handle.inner.execute({ job }, invoke);
       } catch (error) { handle.error ??= error; throw error; }
-      finally { this.active = null; }
+      finally { if(this.active===handle)this.active = null; }
     };
     return handle;
   }
@@ -48,6 +92,7 @@ export class RemoteManagedIncrementalRuntime {
     const handle = this.active;
     if (!handle?.lease) throw new Error('REMOTE_CENTRAL_EXECUTION_REQUIRED');
     try {
+      this.stage(handle,'collecting','execute_plan');
       return await runRemoteIncrementalPlan({ channelStore: this.channelStore, lease: handle.lease,
         assertBusinessFence: async (client,task)=>{
           if(this.assertAdmission && await this.assertAdmission(client,this.nodeId,this.slot)!==true) {
@@ -55,6 +100,7 @@ export class RemoteManagedIncrementalRuntime {
           }
           return assertRemoteIncrementalBusinessFence(client,task);
         }, createApiFallback: this.createApiFallback, wholeChannels: this.wholeChannels, loadWholeApiPolicy: this.loadWholeApiPolicy,
+        onProgress:(phase,operation)=>this.stage(handle,phase,operation),
         pollMs: this.pollMs, signal: handle.args.abortSignal });
     } catch (error) {
       handle.error = error;
@@ -69,18 +115,33 @@ export class RemoteManagedIncrementalRuntime {
 
   quiesce(handle) {
     if (!handle) return Promise.resolve({ active_managed_requests: 0 });
-    if (handle.quiescence) return handle.quiescence;
-    handle.quiescence = (async () => {
+    if (handle.finished) return Promise.resolve({active_managed_requests:0});
+    if(handle.quiescenceWait)return handle.quiescenceWait;
+    if (!handle.quiescence) {
+      this.stage(handle,'stopping','find_admission');
+      handle.quiescence = (async () => {
       handle.admission ??= handle.job ? await this.executions.find(handle.job, handle.args.task) : null;
-      if (!handle.admission) return { active_managed_requests: 0 };
-      // Also covers a lost admission/bind acknowledgement and cancellation
-      // while awaiting the remote claim. Only the original attempt is stopped.
+      let quiet={active_managed_requests:0};
+      if (!handle.admission) {handle.finished=true;this.stage(handle,'recovering','rota_completion');return quiet;}
+      handle.progress.taskId=handle.admission.taskId;
+      this.stage(handle,'stopping','stop_task');
+      // stop serializes with claim/bind/grant on the task row. Check persisted
+      // bindings even when acquire/bind never returned an inner handle.
       await this.executions.stop(handle.admission, handle.error);
-      const quiet = handle.inner ? await handle.adapter.quiesce(handle.inner) : { active_managed_requests: 0 };
+      this.stage(handle,'stopping','quiesce_network');
+      const bindings=await this.executions.bindings(handle.admission);
+      for(const binding of bindings) {
+        if(binding.state==='retired' && binding.release_receipt?.in_flight===0)continue;
+        await this.routes.requestStop(binding.binding_id);
+        await this.routes.waitQuiesced(binding.binding_id,{signal:AbortSignal.timeout(this.stopTimeoutMs)});
+      }
+      if(handle.inner)quiet=await handle.adapter.quiesce(handle.inner);
+      if(quiet?.active_managed_requests!==0)throw remoteDeadlineError('REMOTE_NETWORK_NOT_QUIESCED');
       handle.metrics = handle.inner?.youtubeCheckpoint?.metrics ?? new ChannelExecutionMetrics().snapshot();
       const aborted = handle.args.abortSignal.aborted;
       const countryHandoff = handle.error?.code === 'UPLOADS_COUNTRY_RECHECK';
       handle.decisions = failureDecisions(handle.metrics, aborted || countryHandoff ? null : handle.error);
+      this.stage(handle,'stopping','finish_attempt');
       await this.executions.finish(handle.admission, {
         status: aborted ? 'aborted' : handle.error && !countryHandoff ? 'failed' : 'success',
         error: countryHandoff ? null : handle.error,
@@ -89,11 +150,30 @@ export class RemoteManagedIncrementalRuntime {
           ...(handle.inner?.binding ? { remote_binding_id: handle.inner.binding.binding_id } : {}) },
       });
       handle.finished = true;
+      this.stage(handle,'recovering','rota_completion');
       return quiet;
-    })().catch(error => { handle.quiescence = null; throw error; });
-    return handle.quiescence;
+      })().catch(error => {
+        handle.quiescence=null;handle.quiescenceWait=null;handle.progress.recoveryReason=error.code??error.name;
+        this.stage(handle,'blocked',handle.progress.operation);throw error;
+      });
+    }
+    // Timing out the caller does not abandon or duplicate an uncertain write.
+    // Rota retains its finalization and retries this SAME cleanup promise until
+    // it settles. No new admission is allowed while finalization is pending.
+    handle.quiescenceWait=new Promise((resolve,reject)=>{
+      const timer=setTimeout(()=>{
+        handle.progress.recoveryReason='REMOTE_CLEANUP_TIMEOUT';
+        this.stage(handle,'blocked',handle.progress.operation);
+        reject(remoteDeadlineError('REMOTE_CLEANUP_TIMEOUT'));
+      },this.stopTimeoutMs);
+      handle.quiescence.then(value=>{clearTimeout(timer);handle.quiescenceWait=null;resolve(value);},error=>{clearTimeout(timer);handle.quiescenceWait=null;reject(error);});
+    });
+    return handle.quiescenceWait;
   }
 
-  checkpoint(handle) { return this.quiesce(handle); }
-  retire(handle) { return this.quiesce(handle); }
+  async checkpoint(handle) {
+    const result=await this.quiesce(handle);
+    this.stage(handle,'finished');return result;
+  }
+  retire(handle) { return this.checkpoint(handle); }
 }

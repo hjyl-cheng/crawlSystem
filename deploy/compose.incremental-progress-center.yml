@@ -1,0 +1,12 @@
+# Apply to the existing independent remote-center project after draining or
+# isolating current owners. This overlay never enables automatic cancellation.
+services:
+  remote-node-center:
+    image: qy-allpachong/remote-node-center@sha256:5afbcdbd16703eaae1611e96154216631c432c5e2819e287eebcb7923a990ff2
+    environment:
+      REMOTE_INCREMENTAL_PROGRESS_MODE: observe
+      REMOTE_INCREMENTAL_PROGRESS_SLOTS: '[]'
+      REMOTE_INCREMENTAL_CLAIM_TIMEOUT_MS: '30000'
+      REMOTE_INCREMENTAL_READ_TIMEOUT_MS: '5000'
+      REMOTE_INCREMENTAL_ADMISSION_TIMEOUT_MS: '30000'
+      REMOTE_INCREMENTAL_STOP_TIMEOUT_MS: '45000'
