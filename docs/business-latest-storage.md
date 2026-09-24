@@ -116,6 +116,55 @@ These are not safe to truncate: activation, auditing and reconciliation referenc
 them. This implementation stops full business snapshot duplication; it does not
 claim to bound every operational journal or reclaim existing disk allocation.
 
+### Bounded cleanup of superseded payloads
+
+`services/qybullmq/scripts/pruneBusinessSnapshotPayloads.mjs` is an operator tool,
+not part of the publisher or collection path. Its default is read-only. Supply a
+fixed JSON array of unique channel IDs using `SNAPSHOT_CLEANUP_CHANNELS_FILE` and
+the existing `BUSINESS_DATABASE_URL[_FILE]` secret mechanism. It verifies
+`EXPECTED_BUSINESS_DATABASE` against `publication.database_identity` and requires
+both latest storage and live/incremental Search. Writes additionally require
+`--apply` and `CONFIRM_SNAPSHOT_PAYLOAD_CLEANUP` equal to that database name.
+`--apply --rollback` exercises the actual deletion and verification without
+committing it. Save JSONL output to an operator audit file.
+
+The cleanup removes only old `content_snapshots`, `channel_metric_values`,
+`channel_profile_facts` and `channel_links` payloads for successfully adopted,
+currently visible channels. It retains:
+
+- every channel snapshot header, observation time and trend value;
+- the current payload and newest complete immutable payload for each channel;
+- any payload referenced by retained Search releases, classification claims or
+  runs, metric baselines, or source-time repair records;
+- crawler source data, content identities, publication revisions, batches and
+  delivery evidence.
+
+Thus old publication identifiers and all existing trend points remain resolvable,
+while their unneeded historical video/profile/metric copies can be removed. The
+retained immutable payload is comparison evidence; historical Search replay
+remains disabled in latest mode. Full historical details for a pruned snapshot
+are intentionally no longer available. No header is deleted and no artificial
+empty current payload is published.
+
+Each transaction locks at most ten channels using the publisher's ownership lock
+order, skips busy owners, rechecks references under snapshot row locks, and removes
+at most 100 old payload sets. Unknown incoming foreign keys reject the operation.
+Before committing, it compares current/retained payloads, all channel headers,
+live Search and trends. A mismatch, timeout or error rolls back the entire batch.
+The CLI repeats full batches and pauses 250 ms between transactions; skipped busy
+channels are reported for a later pass. Repeating a completed cleanup is harmless.
+No service restart or collection task mutation is involved.
+
+DELETE creates dead tuples until PostgreSQL vacuums them; it does not imply that
+the relation files or `df` usage immediately shrink. Do not run `VACUUM FULL` or a
+large table rewrite as part of this tool. Measure reuse and I/O first, and plan
+physical disk reclamation separately.
+
+`bash scripts/testBusinessSnapshotCleanup.sh` validates the tool against a new,
+disposable PostgreSQL 18 database, including real foreign keys, classification
+references, busy ownership, rollback after a partial DELETE, trend/current parity,
+and repeat execution. It does not use a production URL.
+
 ## Validation
 
 `scripts/testBusinessLatestStorage.sh` creates a dedicated temporary PostgreSQL 18
