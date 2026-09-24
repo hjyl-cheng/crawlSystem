@@ -999,7 +999,9 @@ services:
 
   business-publication-projector:
     <<: *qybullmq-image
+    image: ${BUSINESS_LATEST_PROJECTOR_IMAGE:-qy-allpachong/qybullmq:${QYBULLMQ_IMAGE_TAG:-${QY_IMAGE_TAG:-local}}}
     restart: unless-stopped
+    stop_grace_period: 5m
     depends_on:
       business-postgres:
         condition: service_healthy

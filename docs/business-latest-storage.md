@@ -48,12 +48,18 @@ immutable historical observation.
 
 ## Rollout sequence
 
-No command below has been run against production as part of implementation.
+These steps are the deployment procedure. The 2026-09-24 production rollout and
+validation results are recorded in `reports/business-latest-storage-rollout-20260924.md`.
 
 1. Build the new publisher and business API images. Install the additive schema
    using `manageBusinessLatestStorage.mjs install --apply`. This leaves the mode
    at `snapshots`, preserves existing data and grants the existing publisher the
    additional narrowly scoped writes. Role reprovisioning detects the new schema.
+   Run each statement in `businessLatestPublicationIndexes.sql` separately outside
+   a transaction. The two concurrent indexes avoid scanning delivered history or
+   sorting the full queue for every claim. Check `pg_index.indisvalid` after the
+   build; an interrupted concurrent build can leave an invalid index that must be
+   removed before retrying. Leave the existing historical indexes in place.
 2. Deploy and validate the business API reader changes while writes are still in
    snapshot mode. Check search, details, contacts, metrics and trend parity.
 3. Gracefully stop only the business publication projector, letting its current
@@ -61,7 +67,11 @@ No command below has been run against production as part of implementation.
    Read the current Search watermark. Run `enable --apply --reader-ready` with
    that exact watermark, actor/reason and expected database identity.
 4. Start the new projector with `BUSINESS_PUBLICATION_STORAGE_MODE=latest`.
-   Both Compose definitions expose this variable. A legacy writer is rejected by
+   Pin its dedicated `BUSINESS_LATEST_PROJECTOR_IMAGE`; both Compose definitions
+   honor it independently of collection Worker images. The optional
+   `deploy/compose.business-latest-storage.yml` also makes the cutover explicit.
+   Both definitions allow five minutes for graceful publication shutdown.
+   A legacy writer is rejected by
    database triggers after cutover; an unenabled latest writer fails startup.
 5. Verify delivered counts, pending work, sampled field parity and storage growth.
    Existing channels adopt latest records on their next publication. First

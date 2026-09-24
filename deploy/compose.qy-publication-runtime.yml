@@ -113,6 +113,8 @@ services:
 
   business-publication-projector:
     <<: *publication-runtime
+    image: ${BUSINESS_LATEST_PROJECTOR_IMAGE:-qy-allpachong/qybullmq:${QYBULLMQ_IMAGE_TAG}}
+    stop_grace_period: 5m
     command: ["node", "src/runBusinessPublicationProjector.js"]
     environment:
       NODE_ENV: production

@@ -1,0 +1,8 @@
+# Apply with compose.yml and compose.fresh-migration.yml after reader validation.
+# This only changes the business projector; collection services retain their images.
+services:
+  business-publication-projector:
+    image: ${BUSINESS_LATEST_PROJECTOR_IMAGE:?pin the verified latest-storage publisher image}
+    environment:
+      BUSINESS_PUBLICATION_STORAGE_MODE: latest
+    stop_grace_period: 5m
