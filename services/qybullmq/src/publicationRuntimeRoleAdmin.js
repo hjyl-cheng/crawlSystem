@@ -15,6 +15,17 @@ const TABLE_PRIVILEGES = Object.freeze([
   "TRIGGER",
 ]);
 
+const LATEST_PROJECTOR_TABLES = Object.freeze({
+  "publication.business_storage_state": Object.freeze(["SELECT"]),
+  "publication.latest_projection_state": Object.freeze(["SELECT", "INSERT", "UPDATE"]),
+  "publication.channel_metric_history": Object.freeze(["SELECT", "INSERT", "DELETE"]),
+  "public.channel_snapshots": Object.freeze(["SELECT", "INSERT", "UPDATE"]),
+  "public.content_snapshots": Object.freeze(["SELECT", "INSERT", "UPDATE"]),
+  "public.channel_links": Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]),
+  "public.channel_profile_facts": Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]),
+  "public.channel_metric_values": Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]),
+});
+
 const ROLE_SPECIFICATIONS = Object.freeze({
   source: Object.freeze([
     Object.freeze({
@@ -247,7 +258,7 @@ export function publicationRuntimeRoleConfig(environment = process.env) {
 }
 
 function canonicalSpecifications() {
-  return JSON.stringify(ROLE_SPECIFICATIONS);
+  return JSON.stringify({ base: ROLE_SPECIFICATIONS, latestProjectorTables: LATEST_PROJECTOR_TABLES });
 }
 
 export const PUBLICATION_RUNTIME_ROLE_SPEC_HASH = `sha256:${createHash("sha256")
@@ -454,6 +465,15 @@ async function inspectRole(client, specification) {
   };
 }
 
+async function databaseRoleSpecification(client, specification) {
+  if (specification.role !== "business_publication_projector") return specification;
+  const installed = (await client.query(
+    "SELECT to_regclass('publication.business_storage_state') IS NOT NULL AS ready",
+  )).rows[0]?.ready;
+  if (!installed) return specification;
+  return { ...specification, tables: { ...specification.tables, ...LATEST_PROJECTOR_TABLES } };
+}
+
 async function inspectSide(client, config, side) {
   const source = side === "source";
   const database = await databasePreflight(client, {
@@ -465,7 +485,7 @@ async function inspectSide(client, config, side) {
   });
   const roles = [];
   for (const specification of ROLE_SPECIFICATIONS[side]) {
-    roles.push(await inspectRole(client, specification));
+    roles.push(await inspectRole(client, await databaseRoleSpecification(client, specification)));
   }
   return { ...database, roles, ready: roles.every((role) => role.ready) };
 }
@@ -629,7 +649,7 @@ export class PublicationRuntimeRoleAdministrator {
       for (const specification of ROLE_SPECIFICATIONS.business) {
         await provisionRole(
           this.business,
-          specification,
+          await databaseRoleSpecification(this.business, specification),
           this.config.credentials[specification.role].password,
         );
       }

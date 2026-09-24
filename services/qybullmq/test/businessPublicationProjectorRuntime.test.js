@@ -5,6 +5,12 @@ import {
   businessPublicationProjectorRuntimeConfig,
 } from "../src/runBusinessPublicationProjector.js";
 
+test("storage mode rejects unknown values", () => {
+  assert.throws(() => businessPublicationProjectorRuntimeConfig({
+    BUSINESS_PUBLICATION_STORAGE_MODE: "typo",
+  }), /STORAGE_MODE/);
+});
+
 function businessPreflight(overrides = {}) {
   return {
     database_name: "business_test",

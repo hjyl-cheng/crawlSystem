@@ -405,6 +405,7 @@ async function businessRows(client, channelIds) {
        ON batch.batch_id=item.batch_id AND batch.status='published'
      LEFT JOIN public.channel_snapshots snapshot
        ON snapshot.id=item.snapshot_id AND snapshot.channel_id=item.channel_id
+      AND snapshot.import_batch_id=item.batch_id
      WHERE item.channel_id=ANY($1::text[])
      ORDER BY item.channel_id,item.projected_at,item.batch_id`,
     [channelIds],
@@ -420,6 +421,7 @@ async function businessRows(client, channelIds) {
        JOIN publication.projection_batch batch
          ON batch.batch_id=item.batch_id AND batch.status='published'
        WHERE item.channel_id=live.channel_id AND item.snapshot_id=live.snapshot_id
+         AND item.batch_id=live.watermark
        ORDER BY item.projected_at DESC,item.batch_id DESC
        LIMIT 1
      ) projected ON true

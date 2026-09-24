@@ -18,6 +18,8 @@ function integerSetting(environment, name, fallback, { minimum, maximum }) {
 }
 
 export function businessPublicationProjectorRuntimeConfig(environment = process.env) {
+  const storageMode = String(environment.BUSINESS_PUBLICATION_STORAGE_MODE || "snapshots").trim();
+  if (!["snapshots", "latest"].includes(storageMode)) throw new TypeError("invalid BUSINESS_PUBLICATION_STORAGE_MODE");
   const expectedDatabase = String(environment.EXPECTED_BUSINESS_DATABASE || "").trim();
   if (!expectedDatabase) throw new TypeError("EXPECTED_BUSINESS_DATABASE is required");
   const retrySeconds = integerSetting(
@@ -43,6 +45,7 @@ export function businessPublicationProjectorRuntimeConfig(environment = process.
   ).trim();
   if (!workerId) throw new TypeError("BUSINESS_PUBLICATION_PROJECTOR_ID is required");
   return {
+    storageMode,
     databaseUrl: environmentValue("BUSINESS_DATABASE_URL", { environment }),
     expectedDatabase,
     expectedRole: String(
@@ -139,6 +142,10 @@ export async function assertBusinessPublicationDatabase(pool, config) {
     throw new Error(
       `refusing to project unexpected, privileged, or unmigrated Business database: ${state.database_name}`,
     );
+  }
+  if (config.storageMode === "latest") {
+    const storage = (await pool.query(`SELECT mode FROM publication.business_storage_state WHERE singleton`)).rows[0];
+    if (storage?.mode !== "latest") throw new Error("BUSINESS_LATEST_STORAGE_NOT_ENABLED");
   }
 }
 

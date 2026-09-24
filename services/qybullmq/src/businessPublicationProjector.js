@@ -9,6 +9,7 @@ import {
   normalizeBusinessPublicationVersionVector,
 } from "./businessPublicationVersionState.js";
 import { observationFactsHash } from "./crawlObservationStore.js";
+import { assertLatestProjectionMode, assertLatestVersionOrder, writeLatestProjectionRows } from "./businessLatestProjection.js";
 
 const CLAIMABLE_STATUSES = Object.freeze(["pending", "retry_wait", "leased"]);
 
@@ -57,9 +58,10 @@ function errorText(error) {
   return `${code}: ${message}`.slice(0, 2000);
 }
 
-function semanticBatch({ streamId, versionVectors }) {
+function semanticBatch({ streamId, versionVectors, storageMode = "snapshots" }) {
   const semantic = {
     adapter_version: BUSINESS_PROJECTION_ADAPTER_VERSION,
+    ...(storageMode === "latest" ? { storage_mode: "latest-v1" } : {}),
     publication_stream_id: streamId,
     channels: Object.entries(versionVectors).map(([channelId, versionVector]) => ({
       channel_id: channelId,
@@ -131,6 +133,7 @@ async function loadPublishedVersionVectors(client, channelIds) {
        ON search.channel_id=target.channel_id
      LEFT JOIN publication.projection_batch_item item
        ON item.channel_id=search.channel_id AND item.snapshot_id=search.snapshot_id
+      AND item.batch_id=search.watermark
      LEFT JOIN publication.projection_batch batch
        ON batch.batch_id=item.batch_id AND batch.status='published'
      ORDER BY target.channel_id`,
@@ -180,6 +183,18 @@ function sameVersionVector(left, right) {
   return left != null
     && right != null
     && observationFactsHash(left) === observationFactsHash(right);
+}
+
+function coveredByLatestVector(pending, latest) {
+  return ["channel", "video", "agent"].every(domain => {
+    const before = pending?.[domain];
+    if (!before) return true;
+    const after = latest?.[domain];
+    return after && before.publication_stream_id === after.publication_stream_id
+      && (Number(before.sequence) < Number(after.sequence)
+        || (Number(before.sequence) === Number(after.sequence)
+          && before.revision_id === after.revision_id && before.result_hash === after.result_hash));
+  });
 }
 
 function earliestProjectionRows(projectionRows, channelIds) {
@@ -354,12 +369,13 @@ async function activeWatermark(client) {
   return result.rows[0]?.watermark ?? null;
 }
 
-function assembleProjections({ channelIds, current, previous, versionVectors, batchId, capturedAt }) {
+function assembleProjections({ channelIds, current, previous, versionVectors, batchId, capturedAt, storageMode }) {
   return channelIds.map((channelId) => buildBusinessPublicationProjection({
     channelId,
     batchId,
     versionVector: versionVectors[channelId],
     capturedAt,
+    storageMode,
     current: {
       channel: current.channels.get(channelId) ?? null,
       video: current.videos.get(channelId) ?? null,
@@ -432,7 +448,11 @@ async function insertIdentities(client, projections) {
        ON CONFLICT (video_id) DO UPDATE
        SET url=COALESCE(excluded.url,public.content_items.url),
            first_seen_at=LEAST(public.content_items.first_seen_at,excluded.first_seen_at),
-           last_seen_at=GREATEST(public.content_items.last_seen_at,excluded.last_seen_at)`,
+           last_seen_at=GREATEST(public.content_items.last_seen_at,excluded.last_seen_at)
+       WHERE (public.content_items.url,public.content_items.first_seen_at,public.content_items.last_seen_at)
+         IS DISTINCT FROM (COALESCE(excluded.url,public.content_items.url),
+           LEAST(public.content_items.first_seen_at,excluded.first_seen_at),
+           GREATEST(public.content_items.last_seen_at,excluded.last_seen_at))`,
       [JSON.stringify(contents)],
     );
   }
@@ -682,6 +702,7 @@ export async function projectBusinessPublicationChannels(client, channelIdsValue
   capturedAt = null,
   versionVectors: explicitVersionVectorsValue = null,
   historical = false,
+  storageMode = "snapshots",
 } = {}) {
   if (!client || typeof client.query !== "function") throw new TypeError("a PostgreSQL client is required");
   const channelIds = uniqueSorted(channelIdsValue);
@@ -690,6 +711,11 @@ export async function projectBusinessPublicationChannels(client, channelIdsValue
     throw new TypeError("historical Projection requires explicit Version Vectors without Outbox mutation");
   }
   const owners = await lockOwnership(client, channelIds, { lock });
+  if (!["snapshots", "latest"].includes(storageMode)) throw new TypeError("invalid business storage mode");
+  if (storageMode === "latest") {
+    if (historical || explicitVersionVectorsValue != null) throw new Error("BUSINESS_LATEST_HISTORICAL_REPLAY_DISABLED");
+    if (!lock) throw new Error("BUSINESS_LATEST_OWNERSHIP_LOCK_REQUIRED");
+  }
   if (markOutbox) {
     for (const owner of owners) {
       if (owner.projection_mode !== "online") {
@@ -704,7 +730,11 @@ export async function projectBusinessPublicationChannels(client, channelIdsValue
     : channelIds;
   if (requestedTargetIds.length === 0) return { outcome: "no_work", projected: 0, delivered: 0 };
   let requestedVersionVectors;
-  if (markOutbox) {
+  if (markOutbox && storageMode === "latest") {
+    // Ownership is locked, so activation cannot change Current or its cursors
+    // while we publish. Coalesce pending updates into this accepted latest state.
+    requestedVersionVectors = await loadVersionVectors(client, requestedTargetIds);
+  } else if (markOutbox) {
     requestedVersionVectors = Object.fromEntries(requestedTargetIds.map((channelId) => [
       channelId,
       normalizeBusinessPublicationVersionVector(
@@ -725,7 +755,9 @@ export async function projectBusinessPublicationChannels(client, channelIdsValue
     requestedVersionVectors = await loadVersionVectors(client, requestedTargetIds);
   }
   const deliverableRows = markOutbox
-    ? projectionRowsForVersionVectors(projectionRows, requestedVersionVectors)
+    ? storageMode === "latest"
+      ? projectionRows.filter(row => coveredByLatestVector(row.version_vector, requestedVersionVectors[row.channel_id]))
+      : projectionRowsForVersionVectors(projectionRows, requestedVersionVectors)
     : [];
   const targetOwners = owners.filter((owner) => requestedTargetIds.includes(owner.channel_id));
   const ownerStreamIds = [...new Set(
@@ -757,6 +789,10 @@ export async function projectBusinessPublicationChannels(client, channelIdsValue
     throw new Error("Projection Outbox must match the active Publication Stream");
   }
   await client.query("SELECT pg_advisory_xact_lock(hashtext('kol_demo:creator-search-publish'))");
+  if (storageMode === "latest") {
+    await assertLatestProjectionMode(client);
+    await assertLatestVersionOrder(client, requestedVersionVectors);
+  }
   const exactVectorMode = markOutbox || explicitVersionVectorsValue != null;
   let coveredIds;
   if (historical) {
@@ -812,8 +848,8 @@ export async function projectBusinessPublicationChannels(client, channelIdsValue
     channelId,
     requestedVersionVectors[channelId],
   ]));
-  const batch = semanticBatch({ streamId, versionVectors });
-  const reusable = await reusablePublishedBatch(client, {
+  const batch = semanticBatch({ streamId, versionVectors, storageMode });
+  const reusable = storageMode === "latest" ? null : await reusablePublishedBatch(client, {
     batch,
     streamId,
     versionVectors,
@@ -843,10 +879,10 @@ export async function projectBusinessPublicationChannels(client, channelIdsValue
       projections: reusable.items,
     };
   }
-  const current = exactVectorMode
+  const current = exactVectorMode && storageMode !== "latest"
     ? await loadBusinessPublicationVersionState(client, versionVectors)
     : await loadCurrent(client, targetIds);
-  const previous = exactVectorMode
+  const previous = exactVectorMode || storageMode === "latest"
     ? emptyPrevious(targetIds)
     : await loadPrevious(client, targetIds);
   const previousWatermark = await activeWatermark(client);
@@ -865,6 +901,7 @@ export async function projectBusinessPublicationChannels(client, channelIdsValue
     versionVectors,
     batchId: batch.batchId,
     capturedAt: projectionTime,
+    storageMode,
   });
   const batchRows = await insertBatch(client, {
     batch,
@@ -874,7 +911,12 @@ export async function projectBusinessPublicationChannels(client, channelIdsValue
     previousWatermark,
     capturedAt: projectionTime,
   });
-  await insertProjectionRows(client, projections);
+  if (storageMode === "latest") {
+    await insertIdentities(client, projections.filter(item => item.action === "upsert"));
+    await writeLatestProjectionRows(client, projections, batch.batchId);
+  } else {
+    await insertProjectionRows(client, projections);
+  }
   await publishBatch(client, {
     batchId: batch.batchId,
     upsertIds: batchRows.upsertIds,
@@ -1004,11 +1046,14 @@ export class PostgresBusinessPublicationProjector {
     maximumAttempts = 20,
     retrySeconds = 10,
     maximumRetrySeconds = 600,
+    storageMode = "snapshots",
   } = {}) {
     if (!pool || typeof pool.connect !== "function" || typeof pool.query !== "function") {
       throw new TypeError("a PostgreSQL Pool is required");
     }
     this.pool = pool;
+    if (!["snapshots", "latest"].includes(storageMode)) throw new TypeError("invalid business storage mode");
+    this.storageMode = storageMode;
     this.workerId = requiredText(workerId, "workerId");
     this.batchSize = integerOption(batchSize, 25, "batchSize", { minimum: 1, maximum: 250 });
     this.leaseSeconds = integerOption(leaseSeconds, 300, "leaseSeconds", { minimum: 30, maximum: 3600 });
@@ -1098,7 +1143,7 @@ export class PostgresBusinessPublicationProjector {
       await client.query("BEGIN");
       await client.query("SET LOCAL lock_timeout='10s'");
       await client.query("SET LOCAL statement_timeout='300s'");
-      const result = await projectBusinessPublicationChannels(client, channelIds);
+      const result = await projectBusinessPublicationChannels(client, channelIds, { storageMode: this.storageMode });
       if (
         result.publication_stream_id != null
           && String(result.publication_stream_id) !== claimedStreamId

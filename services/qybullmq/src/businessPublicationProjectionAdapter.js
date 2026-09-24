@@ -933,7 +933,11 @@ export function buildBusinessPublicationProjection(inputValue) {
     fail("projection_channel_missing", `Channel ${channelId} has no Current or active public snapshot`);
   }
 
-  const snapshotId = identifier("publication_snapshot", batchId, channelId);
+  const storageMode = input.storageMode ?? "snapshots";
+  if (!["snapshots", "latest"].includes(storageMode)) fail("projection_storage_invalid", storageMode);
+  const snapshotId = storageMode === "latest"
+    ? identifier("publication_current_snapshot", channelId)
+    : identifier("publication_snapshot", batchId, channelId);
   const snapshot = current.channel
     ? channelSnapshotFromCurrent({
       row: current.channel,

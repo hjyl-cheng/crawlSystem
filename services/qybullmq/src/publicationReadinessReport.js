@@ -131,7 +131,7 @@ WITH storage_state AS (
   SELECT content.channel_snapshot_id,count(*)::int AS content_count
   FROM public.content_snapshots content
   JOIN active_snapshots snapshot ON snapshot.id=content.channel_snapshot_id
-  WHERE content.is_canonical=true
+  WHERE content.is_canonical=true AND content.is_recent=true
   GROUP BY content.channel_snapshot_id
 )
 SELECT search.channel_id,
