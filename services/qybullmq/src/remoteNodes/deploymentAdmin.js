@@ -100,7 +100,7 @@ export function createRemoteDeploymentAdmin({store,routes,token,image,gatewayUrl
       });
       // Registration is durable before provisioning. A failed capacity request
       // can retry the same deployment without adding slots or issuing new IDs.
-      await capacity?.ensure();
+      await capacity?.ensure({nodeId:value.nodeId,operation:'prepare'});
       await natsProvisioning?.sync();
       // Wake the activation reconciler for an already-enabled node so newly
       // registered Workers join the desired set as soon as they heartbeat.
@@ -117,7 +117,7 @@ export function createRemoteDeploymentAdmin({store,routes,token,image,gatewayUrl
         || typeof value.enabled!=='boolean' || typeof value.expectedRequested!=='boolean'
         || !Number.isSafeInteger(value.workerCount) || value.workerCount<1)throw new RemoteProtocolError('INVALID_EXECUTION_CONTROL',400);
       uuid(value.nodeId);uuid(value.deploymentId);
-      if(value.enabled===true)await capacity?.ensure();
+      if(value.enabled===true)await capacity?.ensure({nodeId:value.nodeId,operation:'execution'});
       let control;
       await store.transaction(async client=>{
         await client.query('SELECT pg_advisory_xact_lock(hashtext($1))',[`remote-deploy:${value.nodeId}`]);

@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { canonicalIncrementalJson } from '../incrementalPlan.js';
 import { CHANNEL_PLAN_CAPABILITY, remoteChannelPlan, planFromTask, assertChannelOperation } from './channelPlanContract.js';
-import { decodeResult, hash, RemoteProtocolError, uuid } from './protocol.js';
+import { decodeResult, hash, RemoteProtocolError, staleLeaseError, uuid } from './protocol.js';
 
 export class RemoteChannelPlanStore {
   constructor({ store }) { this.store = store; }
@@ -20,14 +20,14 @@ export class RemoteChannelPlanStore {
   }
 
   async lock(client, lease, { coordinatorId = null, requireLive = true, allowHistoricalReceipt = false } = {}) {
-    const task = (await client.query(`SELECT *,lease_until>clock_timestamp() AS live,
+    const task = (await client.query(`SELECT *,clock_timestamp() AS observed_at,lease_until>clock_timestamp() AS live,
       coordinator_until>clock_timestamp() AS coordinated FROM remote_ingestion.tasks
       WHERE task_id=$1 FOR UPDATE`, [uuid(lease.task_id)])).rows[0];
     if (!task || (!allowHistoricalReceipt && (task.generation !== lease.generation || (lease.node_id && task.node_id !== lease.node_id)))) {
-      throw new RemoteProtocolError('STALE_LEASE');
+      throw staleLeaseError(task, lease, 'lock');
     }
     planFromTask(task);
-    if (requireLive && (task.state !== 'leased' || !task.live)) throw new RemoteProtocolError('STALE_LEASE');
+    if (requireLive && (task.state !== 'leased' || !task.live)) throw staleLeaseError(task, lease, 'lock');
     if (coordinatorId && (task.coordinator_id !== coordinatorId || !task.coordinated)) {
       throw new RemoteProtocolError('STALE_COORDINATOR');
     }
@@ -102,7 +102,7 @@ export class RemoteChannelPlanStore {
     return this.store.transaction(async (client) => {
       const task = await this.lock(client, { ...lease, node_id: nodeId }, { requireLive: false });
       if (task.state !== 'leased') return { status: task.state, commands: [] };
-      if (!task.live) throw new RemoteProtocolError('STALE_LEASE');
+      if (!task.live) throw staleLeaseError(task, {...lease,node_id:nodeId}, 'poll');
       const rows = (await client.query(`SELECT command_id,operation,input FROM remote_ingestion.channel_commands
         WHERE task_id=$1 AND generation=$2 AND state='pending' ORDER BY created_at,command_id LIMIT 8`,
       [lease.task_id, lease.generation])).rows;

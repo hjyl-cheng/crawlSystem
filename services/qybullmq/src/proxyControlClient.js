@@ -84,8 +84,8 @@ export class ProxyControlClient {
   capacity() {
     return this.#command("capacity", null, { method: "GET" });
   }
-  ensureCapacity(request) {
-    return this.#command("capacity/ensure", request);
+  ensureCapacity(request, options = {}) {
+    return this.#command("capacity/ensure", request, options);
   }
   businessRunBudget(businessRunId) {
     return this.#command(`business-runs/${encodeURIComponent(businessRunId).replaceAll("%3A", ":")}/budget`, null, { method: "GET" });
@@ -93,7 +93,7 @@ export class ProxyControlClient {
 
   async close() {}
 
-  async #command(path, payload, { method = "POST" } = {}) {
+  async #command(path, payload, { method = "POST", timeoutMs = this.timeoutMs, maxAttempts = this.maxAttempts } = {}) {
     if (!this.controlUrl) {
       throw new ProxyControlRequestError("Rota proxy control URL is not configured");
     }
@@ -102,9 +102,9 @@ export class ProxyControlClient {
     }
     const encoded = payload === null ? null : JSON.stringify(payload);
     let lastError = null;
-    for (let attempt = 1; attempt <= this.maxAttempts; attempt += 1) {
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
       let response = null;
       try {
         response = await this.fetchImpl(`${this.controlUrl}/${path}`, {
@@ -135,13 +135,13 @@ export class ProxyControlClient {
           const timedOut = controller.signal.aborted;
           lastError = new ProxyControlRequestError(
             timedOut ? "Rota proxy control request timed out" : "Rota proxy control request failed",
-            { retryable: true, cause: error },
+            { retryable: true, code: timedOut && path === "capacity/ensure" ? "CAPACITY_TIMEOUT" : null, cause: error },
           );
         }
       } finally {
         clearTimeout(timer);
       }
-      if (!lastError.retryable || attempt >= this.maxAttempts) throw lastError;
+      if (!lastError.retryable || attempt >= maxAttempts) throw lastError;
       await this.sleepImpl(retryDelayMs(response, attempt));
     }
     throw lastError;

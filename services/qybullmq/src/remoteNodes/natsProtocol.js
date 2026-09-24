@@ -20,5 +20,7 @@ export function decode(bytes){
   if(bytes.length>MAX_NATS_BYTES)throw new RemoteProtocolError('BODY_TOO_LARGE',413);
   try{return JSON.parse(Buffer.from(bytes).toString());}catch{throw new RemoteProtocolError('INVALID_JSON',400);}
 }
-export function failure(error){return {ok:false,status:error instanceof RemoteProtocolError?error.status:503,error:error instanceof RemoteProtocolError?error.code:'GATEWAY_UNAVAILABLE'};}
-export function unwrap(value){if(value?.ok!==true)throw new RemoteProtocolError(value?.error||'INVALID_GATEWAY_RESPONSE',value?.status||502);return value.value;}
+export function failure(error){return {ok:false,status:error instanceof RemoteProtocolError?error.status:503,error:error instanceof RemoteProtocolError?error.code:'GATEWAY_UNAVAILABLE',
+  ...(error instanceof RemoteProtocolError && error.code==='STALE_LEASE' && error.lease_evidence ? {lease_evidence:error.lease_evidence}: {})};}
+export function unwrap(value){if(value?.ok!==true){const error=new RemoteProtocolError(value?.error||'INVALID_GATEWAY_RESPONSE',value?.status||502);
+  if(error.code==='STALE_LEASE' && value.lease_evidence)error.lease_evidence=value.lease_evidence;throw error;}return value.value;}

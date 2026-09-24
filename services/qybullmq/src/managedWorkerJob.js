@@ -69,7 +69,7 @@ function failureCategory(node) {
   }
   if (SYSTEM_FAILURE_CODES.has(code)) return SYSTEM_FAILURE_CODES.get(code);
   const name = String(node?.name ?? "").trim();
-  if (name === "ProxyControlRequestError") return "proxy_control";
+  if (name === "ProxyControlRequestError" && node.retryable !== false) return "proxy_control";
   if (name === "RotaSlotContractError") return "route";
   if (name === "StaleChannelCandidateAttemptError") return "fence";
   if (name === "ChannelSnapshotDispatchConflictError") return "outbox";
@@ -103,6 +103,15 @@ export function classifyRetryableSystemFailure(error) {
 }
 
 export function retryableSystemFailureDecision(error) {
+  if (isStaleExecutionFailure(error)) {
+    return Object.freeze({ kind: 'stale_execution', retry_mode: 'none', terminal: true,
+      terminal_scope: 'execution', proxy_action: 'none', client_action: 'none',
+      evidence: classifyRetryableSystemFailure(error) });
+  }
+  if (isBusinessRunBudgetExhausted(error)) {
+    return Object.freeze({ kind: 'business_run_budget_exhausted', retry_mode: 'none', terminal: true,
+      terminal_scope: 'business_run', proxy_action: 'none', client_action: 'none', evidence: null });
+  }
   const evidence = classifyRetryableSystemFailure(error);
   if (!evidence) return null;
   return Object.freeze({
@@ -119,7 +128,8 @@ export function retryableSystemFailureDecision(error) {
 export function isStaleExecutionFailure(error) {
   return systemFailureNodes(error).some(node => (
     ["CANDIDATE_ATTEMPT_FENCE_STALE", "CONTENT_DETAIL_EXECUTION_FENCE_STALE",
-      "MIGRATION_RETRY_INTENT_FENCE_STALE", "FULL_CRAWL_BUSINESS_FENCE_STALE", "FULL_CRAWL_DETAIL_FENCE_STALE"].includes(node?.code)
+      "MIGRATION_RETRY_INTENT_FENCE_STALE", "FULL_CRAWL_BUSINESS_FENCE_STALE", "FULL_CRAWL_DETAIL_FENCE_STALE",
+      "INCREMENTAL_BUSINESS_FENCE_STALE", "REMOTE_EXECUTION_REPLACED"].includes(node?.code)
     || node?.name === "StaleChannelCandidateAttemptError"
   ));
 }
@@ -493,7 +503,8 @@ export async function processManagedWorkerJob({
   try {
     return await execute();
   } catch (error) {
-    if (job?.queueName === queuesByRole.channelCrawl && isBusinessRunBudgetExhausted(error)) {
+    if ([queuesByRole.channelCrawl, queuesByRole.channelIncremental].includes(job?.queueName)
+        && !isStaleExecutionFailure(error) && isBusinessRunBudgetExhausted(error)) {
       return terminateBusinessRun(job, error);
     }
     if (!(error instanceof RotaSlotDeferredError)) throw error;

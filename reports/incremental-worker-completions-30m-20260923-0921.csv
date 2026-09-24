@@ -1,0 +1,107 @@
+﻿node,node_id,worker,worker_id,completed,enabled,accepting,online
+增量主节点 node01,54a7cdd3-eb9c-4713-8d2f-21f4a5279de0,incremental-1,remote-54a7cdd3-eb9c-4713-8d2f-21f4a5279de0-incremental-1,0,False,False,
+增量主节点 node01,54a7cdd3-eb9c-4713-8d2f-21f4a5279de0,incremental-2,remote-54a7cdd3-eb9c-4713-8d2f-21f4a5279de0-incremental-2,0,False,False,
+增量主节点 node01,54a7cdd3-eb9c-4713-8d2f-21f4a5279de0,incremental-3,remote-54a7cdd3-eb9c-4713-8d2f-21f4a5279de0-incremental-3,50,True,True,True
+增量主节点 node01,54a7cdd3-eb9c-4713-8d2f-21f4a5279de0,incremental-4,remote-54a7cdd3-eb9c-4713-8d2f-21f4a5279de0-incremental-4,49,True,True,True
+增量主节点 node01,54a7cdd3-eb9c-4713-8d2f-21f4a5279de0,incremental-5,remote-54a7cdd3-eb9c-4713-8d2f-21f4a5279de0-incremental-5,43,True,True,True
+增量主节点 node01,54a7cdd3-eb9c-4713-8d2f-21f4a5279de0,incremental-6,remote-54a7cdd3-eb9c-4713-8d2f-21f4a5279de0-incremental-6,52,True,True,True
+增量主节点 node01,54a7cdd3-eb9c-4713-8d2f-21f4a5279de0,incremental-7,remote-54a7cdd3-eb9c-4713-8d2f-21f4a5279de0-incremental-7,54,True,True,True
+增量主节点 node01,54a7cdd3-eb9c-4713-8d2f-21f4a5279de0,incremental-8,remote-54a7cdd3-eb9c-4713-8d2f-21f4a5279de0-incremental-8,32,True,True,True
+增量主节点 node01,54a7cdd3-eb9c-4713-8d2f-21f4a5279de0,incremental-9,remote-54a7cdd3-eb9c-4713-8d2f-21f4a5279de0-incremental-9,51,True,True,True
+增量主节点 node01,54a7cdd3-eb9c-4713-8d2f-21f4a5279de0,incremental-10,remote-54a7cdd3-eb9c-4713-8d2f-21f4a5279de0-incremental-10,51,True,True,True
+增量主节点 node01,54a7cdd3-eb9c-4713-8d2f-21f4a5279de0,incremental-11,remote-54a7cdd3-eb9c-4713-8d2f-21f4a5279de0-incremental-11,27,True,True,True
+增量主节点 node01,54a7cdd3-eb9c-4713-8d2f-21f4a5279de0,incremental-12,remote-54a7cdd3-eb9c-4713-8d2f-21f4a5279de0-incremental-12,38,True,True,True
+增量主节点 node01,54a7cdd3-eb9c-4713-8d2f-21f4a5279de0,incremental-13,remote-54a7cdd3-eb9c-4713-8d2f-21f4a5279de0-incremental-13,37,True,True,True
+增量主节点 node01,54a7cdd3-eb9c-4713-8d2f-21f4a5279de0,incremental-14,remote-54a7cdd3-eb9c-4713-8d2f-21f4a5279de0-incremental-14,57,True,True,True
+增量主节点 node01,54a7cdd3-eb9c-4713-8d2f-21f4a5279de0,incremental-15,remote-54a7cdd3-eb9c-4713-8d2f-21f4a5279de0-incremental-15,54,True,True,True
+增量主节点 node01,54a7cdd3-eb9c-4713-8d2f-21f4a5279de0,incremental-16,remote-54a7cdd3-eb9c-4713-8d2f-21f4a5279de0-incremental-16,48,True,True,True
+增量主节点 node01,54a7cdd3-eb9c-4713-8d2f-21f4a5279de0,incremental-17,remote-54a7cdd3-eb9c-4713-8d2f-21f4a5279de0-incremental-17,28,True,True,True
+增量主节点 node01,54a7cdd3-eb9c-4713-8d2f-21f4a5279de0,incremental-18,remote-54a7cdd3-eb9c-4713-8d2f-21f4a5279de0-incremental-18,43,True,True,True
+增量主节点 node01,54a7cdd3-eb9c-4713-8d2f-21f4a5279de0,incremental-19,remote-54a7cdd3-eb9c-4713-8d2f-21f4a5279de0-incremental-19,42,True,True,True
+增量主节点 node01,54a7cdd3-eb9c-4713-8d2f-21f4a5279de0,incremental-20,remote-54a7cdd3-eb9c-4713-8d2f-21f4a5279de0-incremental-20,51,True,True,True
+增量主节点 node01,54a7cdd3-eb9c-4713-8d2f-21f4a5279de0,incremental-21,remote-54a7cdd3-eb9c-4713-8d2f-21f4a5279de0-incremental-21,31,True,True,True
+增量主节点 node01,54a7cdd3-eb9c-4713-8d2f-21f4a5279de0,incremental-22,remote-54a7cdd3-eb9c-4713-8d2f-21f4a5279de0-incremental-22,58,True,True,True
+增量主节点 node01,54a7cdd3-eb9c-4713-8d2f-21f4a5279de0,incremental-23,remote-54a7cdd3-eb9c-4713-8d2f-21f4a5279de0-incremental-23,42,True,True,True
+增量主节点 node01,54a7cdd3-eb9c-4713-8d2f-21f4a5279de0,incremental-24,remote-54a7cdd3-eb9c-4713-8d2f-21f4a5279de0-incremental-24,43,True,True,True
+增量主节点 node01,54a7cdd3-eb9c-4713-8d2f-21f4a5279de0,incremental-25,remote-54a7cdd3-eb9c-4713-8d2f-21f4a5279de0-incremental-25,39,True,True,True
+增量主节点 node01,54a7cdd3-eb9c-4713-8d2f-21f4a5279de0,incremental-26,remote-54a7cdd3-eb9c-4713-8d2f-21f4a5279de0-incremental-26,47,True,True,True
+增量主节点 node01,54a7cdd3-eb9c-4713-8d2f-21f4a5279de0,incremental-27,remote-54a7cdd3-eb9c-4713-8d2f-21f4a5279de0-incremental-27,31,True,True,True
+增量主节点 node01,54a7cdd3-eb9c-4713-8d2f-21f4a5279de0,incremental-28,remote-54a7cdd3-eb9c-4713-8d2f-21f4a5279de0-incremental-28,36,True,True,True
+增量主节点 node01,54a7cdd3-eb9c-4713-8d2f-21f4a5279de0,incremental-29,remote-54a7cdd3-eb9c-4713-8d2f-21f4a5279de0-incremental-29,48,True,True,True
+增量主节点 node01,54a7cdd3-eb9c-4713-8d2f-21f4a5279de0,incremental-30,remote-54a7cdd3-eb9c-4713-8d2f-21f4a5279de0-incremental-30,57,True,True,True
+增量主节点 node01,54a7cdd3-eb9c-4713-8d2f-21f4a5279de0,incremental-31,remote-54a7cdd3-eb9c-4713-8d2f-21f4a5279de0-incremental-31,33,True,True,True
+增量主节点 node01,54a7cdd3-eb9c-4713-8d2f-21f4a5279de0,incremental-32,remote-54a7cdd3-eb9c-4713-8d2f-21f4a5279de0-incremental-32,51,True,True,True
+增量主节点 node01,54a7cdd3-eb9c-4713-8d2f-21f4a5279de0,incremental-33,remote-54a7cdd3-eb9c-4713-8d2f-21f4a5279de0-incremental-33,40,True,True,True
+增量主节点 node01,54a7cdd3-eb9c-4713-8d2f-21f4a5279de0,incremental-34,remote-54a7cdd3-eb9c-4713-8d2f-21f4a5279de0-incremental-34,54,True,True,True
+增量主节点 node01,54a7cdd3-eb9c-4713-8d2f-21f4a5279de0,incremental-35,remote-54a7cdd3-eb9c-4713-8d2f-21f4a5279de0-incremental-35,50,True,True,True
+增量主节点 node01,54a7cdd3-eb9c-4713-8d2f-21f4a5279de0,incremental-36,remote-54a7cdd3-eb9c-4713-8d2f-21f4a5279de0-incremental-36,47,True,True,True
+增量主节点 node01,54a7cdd3-eb9c-4713-8d2f-21f4a5279de0,incremental-37,remote-54a7cdd3-eb9c-4713-8d2f-21f4a5279de0-incremental-37,52,True,True,True
+增量主节点 node01,54a7cdd3-eb9c-4713-8d2f-21f4a5279de0,incremental-38,remote-54a7cdd3-eb9c-4713-8d2f-21f4a5279de0-incremental-38,0,True,True,True
+增量主节点 node01,54a7cdd3-eb9c-4713-8d2f-21f4a5279de0,incremental-39,remote-54a7cdd3-eb9c-4713-8d2f-21f4a5279de0-incremental-39,43,True,True,True
+增量主节点 node01,54a7cdd3-eb9c-4713-8d2f-21f4a5279de0,incremental-40,remote-54a7cdd3-eb9c-4713-8d2f-21f4a5279de0-incremental-40,47,True,True,True
+增量主节点 node01,54a7cdd3-eb9c-4713-8d2f-21f4a5279de0,incremental-41,remote-54a7cdd3-eb9c-4713-8d2f-21f4a5279de0-incremental-41,29,True,True,True
+增量主节点 node01,54a7cdd3-eb9c-4713-8d2f-21f4a5279de0,incremental-42,remote-54a7cdd3-eb9c-4713-8d2f-21f4a5279de0-incremental-42,57,True,True,True
+增量主节点 node01,54a7cdd3-eb9c-4713-8d2f-21f4a5279de0,incremental-43,remote-54a7cdd3-eb9c-4713-8d2f-21f4a5279de0-incremental-43,42,True,True,True
+增量主节点 node01,54a7cdd3-eb9c-4713-8d2f-21f4a5279de0,incremental-44,remote-54a7cdd3-eb9c-4713-8d2f-21f4a5279de0-incremental-44,40,True,True,True
+增量主节点 node01,54a7cdd3-eb9c-4713-8d2f-21f4a5279de0,incremental-45,remote-54a7cdd3-eb9c-4713-8d2f-21f4a5279de0-incremental-45,43,True,True,True
+增量主节点 node01,54a7cdd3-eb9c-4713-8d2f-21f4a5279de0,incremental-46,remote-54a7cdd3-eb9c-4713-8d2f-21f4a5279de0-incremental-46,0,False,False,
+增量主节点 node01,54a7cdd3-eb9c-4713-8d2f-21f4a5279de0,incremental-47,remote-54a7cdd3-eb9c-4713-8d2f-21f4a5279de0-incremental-47,31,True,True,True
+增量主节点 node01,54a7cdd3-eb9c-4713-8d2f-21f4a5279de0,incremental-48,remote-54a7cdd3-eb9c-4713-8d2f-21f4a5279de0-incremental-48,41,True,True,True
+增量主节点 node01,54a7cdd3-eb9c-4713-8d2f-21f4a5279de0,incremental-49,remote-54a7cdd3-eb9c-4713-8d2f-21f4a5279de0-incremental-49,43,True,True,True
+增量主节点 node01,54a7cdd3-eb9c-4713-8d2f-21f4a5279de0,incremental-50,remote-54a7cdd3-eb9c-4713-8d2f-21f4a5279de0-incremental-50,53,True,True,True
+增量主节点 node01,54a7cdd3-eb9c-4713-8d2f-21f4a5279de0,incremental-51,remote-54a7cdd3-eb9c-4713-8d2f-21f4a5279de0-incremental-51,0,False,False,
+增量节点02,0e108078-200a-4df0-9a58-a28abc97a692,incremental-1,remote-0e108078-200a-4df0-9a58-a28abc97a692-incremental-1,29,True,True,True
+增量节点02,0e108078-200a-4df0-9a58-a28abc97a692,incremental-2,remote-0e108078-200a-4df0-9a58-a28abc97a692-incremental-2,0,True,True,True
+增量节点02,0e108078-200a-4df0-9a58-a28abc97a692,incremental-3,remote-0e108078-200a-4df0-9a58-a28abc97a692-incremental-3,40,True,True,True
+增量节点02,0e108078-200a-4df0-9a58-a28abc97a692,incremental-4,remote-0e108078-200a-4df0-9a58-a28abc97a692-incremental-4,52,True,True,True
+增量节点02,0e108078-200a-4df0-9a58-a28abc97a692,incremental-5,remote-0e108078-200a-4df0-9a58-a28abc97a692-incremental-5,0,False,False,
+增量节点02,0e108078-200a-4df0-9a58-a28abc97a692,incremental-6,remote-0e108078-200a-4df0-9a58-a28abc97a692-incremental-6,0,True,True,True
+增量节点02,0e108078-200a-4df0-9a58-a28abc97a692,incremental-7,remote-0e108078-200a-4df0-9a58-a28abc97a692-incremental-7,55,True,True,True
+增量节点02,0e108078-200a-4df0-9a58-a28abc97a692,incremental-8,remote-0e108078-200a-4df0-9a58-a28abc97a692-incremental-8,57,True,True,True
+增量节点02,0e108078-200a-4df0-9a58-a28abc97a692,incremental-9,remote-0e108078-200a-4df0-9a58-a28abc97a692-incremental-9,51,True,True,True
+增量节点02,0e108078-200a-4df0-9a58-a28abc97a692,incremental-10,remote-0e108078-200a-4df0-9a58-a28abc97a692-incremental-10,0,False,False,
+增量节点02,0e108078-200a-4df0-9a58-a28abc97a692,incremental-11,remote-0e108078-200a-4df0-9a58-a28abc97a692-incremental-11,0,False,False,
+增量节点02,0e108078-200a-4df0-9a58-a28abc97a692,incremental-12,remote-0e108078-200a-4df0-9a58-a28abc97a692-incremental-12,0,False,False,
+增量节点02,0e108078-200a-4df0-9a58-a28abc97a692,incremental-13,remote-0e108078-200a-4df0-9a58-a28abc97a692-incremental-13,0,False,False,
+增量节点02,0e108078-200a-4df0-9a58-a28abc97a692,incremental-14,remote-0e108078-200a-4df0-9a58-a28abc97a692-incremental-14,0,False,False,
+增量节点02,0e108078-200a-4df0-9a58-a28abc97a692,incremental-15,remote-0e108078-200a-4df0-9a58-a28abc97a692-incremental-15,0,False,False,
+备用节点,4dd3a5b8-b128-49a6-867f-81264e9acee4,incremental-1,remote-4dd3a5b8-b128-49a6-867f-81264e9acee4-incremental-1,0,False,True,True
+备用节点,4dd3a5b8-b128-49a6-867f-81264e9acee4,incremental-2,remote-4dd3a5b8-b128-49a6-867f-81264e9acee4-incremental-2,0,False,True,True
+备用节点,4dd3a5b8-b128-49a6-867f-81264e9acee4,incremental-3,remote-4dd3a5b8-b128-49a6-867f-81264e9acee4-incremental-3,0,False,True,True
+备用节点,4dd3a5b8-b128-49a6-867f-81264e9acee4,incremental-4,remote-4dd3a5b8-b128-49a6-867f-81264e9acee4-incremental-4,0,False,True,True
+备用节点,4dd3a5b8-b128-49a6-867f-81264e9acee4,incremental-5,remote-4dd3a5b8-b128-49a6-867f-81264e9acee4-incremental-5,0,False,True,True
+备用节点,4dd3a5b8-b128-49a6-867f-81264e9acee4,incremental-6,remote-4dd3a5b8-b128-49a6-867f-81264e9acee4-incremental-6,0,False,True,True
+备用节点,4dd3a5b8-b128-49a6-867f-81264e9acee4,incremental-7,remote-4dd3a5b8-b128-49a6-867f-81264e9acee4-incremental-7,0,False,True,True
+备用节点,4dd3a5b8-b128-49a6-867f-81264e9acee4,incremental-8,remote-4dd3a5b8-b128-49a6-867f-81264e9acee4-incremental-8,0,False,True,True
+备用节点,4dd3a5b8-b128-49a6-867f-81264e9acee4,incremental-9,remote-4dd3a5b8-b128-49a6-867f-81264e9acee4-incremental-9,0,False,True,True
+备用节点,4dd3a5b8-b128-49a6-867f-81264e9acee4,incremental-10,remote-4dd3a5b8-b128-49a6-867f-81264e9acee4-incremental-10,0,False,True,True
+备用节点,4dd3a5b8-b128-49a6-867f-81264e9acee4,incremental-11,remote-4dd3a5b8-b128-49a6-867f-81264e9acee4-incremental-11,0,False,True,True
+备用节点,4dd3a5b8-b128-49a6-867f-81264e9acee4,incremental-12,remote-4dd3a5b8-b128-49a6-867f-81264e9acee4-incremental-12,0,False,True,True
+备用节点,4dd3a5b8-b128-49a6-867f-81264e9acee4,incremental-13,remote-4dd3a5b8-b128-49a6-867f-81264e9acee4-incremental-13,0,False,True,True
+备用节点,4dd3a5b8-b128-49a6-867f-81264e9acee4,incremental-14,remote-4dd3a5b8-b128-49a6-867f-81264e9acee4-incremental-14,0,False,True,True
+备用节点,4dd3a5b8-b128-49a6-867f-81264e9acee4,incremental-15,remote-4dd3a5b8-b128-49a6-867f-81264e9acee4-incremental-15,0,False,True,True
+备用节点,4dd3a5b8-b128-49a6-867f-81264e9acee4,incremental-16,remote-4dd3a5b8-b128-49a6-867f-81264e9acee4-incremental-16,0,False,True,True
+备用节点,4dd3a5b8-b128-49a6-867f-81264e9acee4,incremental-17,remote-4dd3a5b8-b128-49a6-867f-81264e9acee4-incremental-17,0,False,True,True
+备用节点,4dd3a5b8-b128-49a6-867f-81264e9acee4,incremental-18,remote-4dd3a5b8-b128-49a6-867f-81264e9acee4-incremental-18,0,False,True,True
+备用节点,4dd3a5b8-b128-49a6-867f-81264e9acee4,incremental-19,remote-4dd3a5b8-b128-49a6-867f-81264e9acee4-incremental-19,0,False,True,True
+备用节点,4dd3a5b8-b128-49a6-867f-81264e9acee4,incremental-20,remote-4dd3a5b8-b128-49a6-867f-81264e9acee4-incremental-20,0,False,True,True
+本地增量,local,qy-newcrawler-fresh-worker-incremental-1,qy-newcrawler-fresh-worker-incremental-1,0,False,False,True
+本地增量,local,qy-newcrawler-fresh-worker-incremental-2,qy-newcrawler-fresh-worker-incremental-2,0,False,False,True
+本地增量,local,qy-newcrawler-fresh-worker-incremental-3,qy-newcrawler-fresh-worker-incremental-3,0,False,False,True
+本地增量,local,qy-newcrawler-fresh-worker-incremental-4,qy-newcrawler-fresh-worker-incremental-4,0,False,False,True
+本地增量,local,qy-newcrawler-fresh-worker-incremental-5,qy-newcrawler-fresh-worker-incremental-5,0,False,False,True
+本地增量,local,qy-newcrawler-fresh-worker-incremental-6,qy-newcrawler-fresh-worker-incremental-6,0,False,False,True
+本地增量,local,qy-newcrawler-fresh-worker-incremental-7,qy-newcrawler-fresh-worker-incremental-7,0,False,False,True
+本地增量,local,qy-newcrawler-fresh-worker-incremental-8,qy-newcrawler-fresh-worker-incremental-8,0,False,False,True
+本地增量,local,qy-newcrawler-fresh-worker-incremental-9,qy-newcrawler-fresh-worker-incremental-9,0,False,False,True
+本地增量,local,qy-newcrawler-fresh-worker-incremental-10,qy-newcrawler-fresh-worker-incremental-10,0,False,False,True
+本地增量,local,qy-newcrawler-fresh-worker-incremental-11,qy-newcrawler-fresh-worker-incremental-11,0,False,False,True
+本地增量,local,qy-newcrawler-fresh-worker-incremental-12,qy-newcrawler-fresh-worker-incremental-12,0,False,False,True
+本地增量,local,qy-newcrawler-fresh-worker-incremental-13,qy-newcrawler-fresh-worker-incremental-13,0,False,False,True
+本地增量,local,qy-newcrawler-fresh-worker-incremental-14,qy-newcrawler-fresh-worker-incremental-14,0,False,False,True
+本地增量,local,qy-newcrawler-fresh-worker-incremental-15,qy-newcrawler-fresh-worker-incremental-15,0,False,False,True
+本地增量,local,qy-newcrawler-fresh-worker-incremental-16,qy-newcrawler-fresh-worker-incremental-16,0,False,False,True
+本地增量,local,qy-newcrawler-fresh-worker-incremental-17,qy-newcrawler-fresh-worker-incremental-17,0,False,False,True
+本地增量,local,qy-newcrawler-fresh-worker-incremental-18,qy-newcrawler-fresh-worker-incremental-18,0,False,False,True
+本地增量,local,qy-newcrawler-fresh-worker-incremental-19,qy-newcrawler-fresh-worker-incremental-19,0,False,False,True
+本地增量,local,qy-newcrawler-fresh-worker-incremental-20,qy-newcrawler-fresh-worker-incremental-20,0,False,False,True

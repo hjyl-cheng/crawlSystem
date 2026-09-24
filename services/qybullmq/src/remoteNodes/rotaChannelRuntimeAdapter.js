@@ -1,17 +1,18 @@
 import { withUploadsCountryExecution } from '../youtubeUploadsCountry.js';
+import { createBindingQuiescence } from './bindingQuiescence.js';
 
 // Fits the existing RotaSlotAdapter's runtime seam. That adapter continues to
 // own claim/renew, BeginTask, observations, retry budgets and CompleteTask.
 // The browser runs on the node. Optional session adapters freeze the original
 // central profile and consume its checkpoint after actual network retirement.
 export function createRemoteRotaChannelRuntime({ routes, nodeId, lease, slot, stopTimeoutMs = 45000,
-  youtubeSessions = null, youtubeSession = null, youtubeCheckpointConsumer = null }) {
+  youtubeSessions = null, youtubeSession = null, youtubeCheckpointConsumer = null, quiesceBinding = null }) {
   if (Boolean(youtubeSessions) !== Boolean(youtubeSession)) throw new TypeError('central YouTube profile and session store required together');
   const quiesce = async handle => {
     handle.binding ??= await routes.bindingForExecution(nodeId, lease, slot);
     if (!handle.binding) return { active_managed_requests: 0 };
-    await routes.requestStop(handle.binding.binding_id);
-    const result = await routes.waitQuiesced(handle.binding.binding_id, { signal: AbortSignal.timeout(stopTimeoutMs) });
+    handle.quiesceBinding ??= quiesceBinding ?? createBindingQuiescence({routes,timeoutMs:stopTimeoutMs});
+    const result = await handle.quiesceBinding(handle.binding.binding_id);
     if (youtubeSessions) handle.youtubeCheckpoint = await youtubeSessions.result(handle.binding.binding_id);
     if (youtubeCheckpointConsumer) await youtubeCheckpointConsumer.apply(handle.binding.binding_id);
     return result;

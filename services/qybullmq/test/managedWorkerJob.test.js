@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { applyFailureRetryDecision, queuesByRole } from "../src/queues.js";
 import { FingerprintGatewayError } from "../src/fingerprintGateway.js";
+import { ProxyControlRequestError } from "../src/proxyControlClient.js";
+import { describeChannelCandidateWorkerFailure } from "../src/channelCandidateWorkerLifecycle.js";
 import { ProxyIdentityChangedError } from "../src/channelExecutionContext.js";
 import {
   RotaBusinessRunBudgetExhaustedError,
@@ -29,6 +31,28 @@ function channelJob() {
     data: { candidate_id: 1, run_id: "run-01" },
   };
 }
+
+test("incremental exhaustion with a real control cause terminates instead of system retry", async () => {
+  const error = new RotaBusinessRunBudgetExhaustedError(new ProxyControlRequestError(
+    'proxy control business run budget exhausted', { code: 'BUSINESS_RUN_BUDGET_EXHAUSTED', status: 409, retryable: false },
+  ));
+  const failure = describeChannelCandidateWorkerFailure(error);
+  assert.equal(failure.failureDecision.retry_mode, 'none');
+  assert.equal(failure.failureDecision.terminal_scope, 'business_run');
+  let terminated = 0;
+  await processManagedWorkerJob({ job: { ...channelJob(), queueName: queuesByRole.channelIncremental },
+    execute: async () => { throw error; },
+    terminateBusinessRun: async () => { terminated++; },
+    deferForSlotPause: async () => assert.fail('budget is not slot deferral'),
+  });
+  assert.equal(terminated, 1);
+});
+
+test("a stale execution cannot terminate its replacement through a nested budget error", () => {
+  const error = Object.assign(new Error('replaced'), { code: 'INCREMENTAL_BUSINESS_FENCE_STALE',
+    cause: new RotaBusinessRunBudgetExhaustedError() });
+  assert.equal(retryableSystemFailureDecision(error).terminal_scope, 'execution');
+});
 
 test("an Execution budget error consumes the current BullMQ attempt", async () => {
   const expected = new RotaExecutionBudgetExhaustedError();

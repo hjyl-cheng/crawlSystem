@@ -9,6 +9,9 @@ import base64
 import http.cookiejar
 import json
 import signal
+import time
+import re
+from urllib.parse import urlsplit
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -128,6 +131,30 @@ def transport_failure_kind(error: RequestException) -> str:
     return "upstream_transient"
 
 
+def transport_diagnostics(error: RequestException, url: str, elapsed_ms: int) -> dict:
+    # Only fixed signatures leave the gateway. Arbitrary exception strings can
+    # contain proxy credentials, headers or target query parameters.
+    message = str(error).lower()
+    signatures = {
+        "ssl_error_syscall": "SSL_ERROR_SYSCALL",
+        "ssl_error_ssl": "SSL_ERROR_SSL",
+        "connection reset": "connection_reset",
+        "unexpected eof": "unexpected_eof",
+        "certificate verify failed": "certificate_verification_failed",
+        "connect tunnel failed": "proxy_tunnel_failed",
+        "connection refused": "connection_refused",
+        "timed out": "timeout",
+    }
+    signature = next((value for key, value in signatures.items() if key in message), "unclassified")
+    path = urlsplit(url).path
+    endpoint = {"/youtubei/v1/player": "player", "/youtubei/v1/next": "next",
+                "/youtubei/v1/browse": "browse", "/watch": "watch"}.get(path, "other")
+    tunnel = re.search(r"connect tunnel failed,\s*response\s+(\d{3})\b", message)
+    return {"signature": signature, "stage": "tls_handshake" if curl_error_code(error) == 35 else "unknown",
+            "endpoint": endpoint, "elapsed_ms": max(0, elapsed_ms),
+            "proxy_status": int(tunnel.group(1)) if tunnel else None}
+
+
 def valid_target_http_status(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and 200 <= value <= 599
 
@@ -199,6 +226,7 @@ class Gateway:
         body = await request.read()
         async with profile.semaphore:
             active_session = profile.session
+            started = time.monotonic()
             try:
                 response = await active_session.request(
                     method,
@@ -219,6 +247,7 @@ class Gateway:
                         "curl_code": curl_error_code(error),
                         "failure_kind": transport_failure_kind(error),
                         "session_reset": session_reset,
+                        "transport_diagnostics": transport_diagnostics(error, url, round((time.monotonic() - started) * 1000)),
                     },
                     status=502,
                 )

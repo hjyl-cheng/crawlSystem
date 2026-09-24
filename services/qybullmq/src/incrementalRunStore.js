@@ -3,6 +3,7 @@ import {
   incrementalRunId,
   validateIncrementalPlan,
 } from "./incrementalPlan.js";
+import { exhaustedBusinessRunError } from './businessRunBudgetRecovery.js';
 
 const DOMAINS = new Set(["about", "video", "agent"]);
 
@@ -99,9 +100,10 @@ export class IncrementalRunStore {
       }
 
       const existing = await client.query(
-        `SELECT * FROM crawler.channel_runs
-         WHERE plan_id=$1
-         FOR UPDATE`,
+        `SELECT run.*,(SELECT binding.terminal_reason FROM crawler.business_run_bindings binding
+           WHERE binding.business_run_id=run.run_id AND binding.status='terminal') AS binding_terminal_reason
+         FROM crawler.channel_runs run WHERE plan_id=$1
+         FOR UPDATE OF run`,
         [plan.plan_id],
       );
       const row = existing.rows[0];
@@ -114,6 +116,11 @@ export class IncrementalRunStore {
           || stored.plan_payload_hash !== planHash) {
         throw new IncrementalPlanConflict(plan.plan_id);
       }
+      if (stored.proxy_control?.status === 'business_run_budget_exhausted'
+          || row.binding_terminal_reason === 'proxy_control_business_run_budget_exhausted') {
+        throw exhaustedBusinessRunError({ run_id: runId, replay: true });
+      }
+      if (row.binding_terminal_reason) throw new IncrementalPlanConflict(plan.plan_id);
       if (["done", "waiting_agent"].includes(row.status)) {
         return { created: false, resumed: false, terminal: true, run: row };
       }

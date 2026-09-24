@@ -5,6 +5,7 @@ import {
 import { recordCrawlerObservation } from "./crawlObservationStore.js";
 import { validateIncrementalJob } from "./incrementalPlan.js";
 import { isVideoExecutionRecoveryPending } from "./videoExecutionRecovery.js";
+import { isStaleExecutionFailure } from './managedWorkerJob.js';
 
 const DOMAIN_ORDER = ["about", "video", "agent"];
 const COMPLETED_STATES = new Set(["complete", "partial", "queued"]);
@@ -58,11 +59,17 @@ export async function recordIncrementalTerminalFailure({
   recordGeneric = recordCrawlerObservation,
   markRemoved = markChannelRemoved,
   crawlerVersion = String(process.env.CRAWLER_VERSION || "qy-v16"),
+  terminalKey = null,
+  domainOverride = null,
+  failureKindOverride = null,
 }) {
   // A superseded execution no longer owns the Plan. The outer queue failure
   // callback must not publish a failed Observation for its replacement.
-  if (error?.code === "CONTENT_DETAIL_EXECUTION_FENCE_STALE") {
+  if (isStaleExecutionFailure(error)) {
     return { recorded: false, reason: "execution_superseded" };
+  }
+  if (error?.business_run_terminal && !terminalKey) {
+    return { recorded: false, reason: 'business_run_already_settled' };
   }
   if (isVideoExecutionRecoveryPending(error)) {
     return { recorded: false, reason: "execution_recovery_pending" };
@@ -76,7 +83,7 @@ export async function recordIncrementalTerminalFailure({
   if (typeof withTransaction !== "function") throw new TypeError("withTransaction is required");
 
   const plan = validateIncrementalJob(job);
-  const failureKind = terminalChannel?.failure_kind ?? classifyIncrementalFailure(error);
+  const failureKind = failureKindOverride ?? terminalChannel?.failure_kind ?? classifyIncrementalFailure(error);
   const removedReason = terminalChannel?.removed_reason ?? null;
   const message = String(error?.message || error || "incremental job failed").slice(0, 2000);
   return withTransaction(async (client) => {
@@ -89,13 +96,17 @@ export async function recordIncrementalTerminalFailure({
     );
     const run = rows.rows[0];
     if (!run) return { recorded: false, reason: "run_not_found" };
-    const domain = failedDomain(plan, run);
+    const domain = domainOverride ?? failedDomain(plan, run);
+    if (domainOverride && (!DOMAIN_ORDER.includes(domain) || !plan.task_mask[domain])) {
+      throw new TypeError('terminal domain must belong to the Plan');
+    }
     if (!domain) return { recorded: false, reason: "no_failed_domain" };
 
     // An operator can resume the same Plan after its former terminal failure.
     // Keep those failures as separate observations; replaying one attempt must
     // reuse its committed timestamp so the generic writer's hash stays stable.
-    const idempotencyKey = `terminal-failure:${domain}:${run.run_id}:attempt:${attemptCount}`;
+    const idempotencyKey = terminalKey ? `terminal-failure:${domain}:${run.run_id}:${terminalKey}`
+      : `terminal-failure:${domain}:${run.run_id}:attempt:${attemptCount}`;
     const existing = await client.query(
       `SELECT observed_at FROM crawler.crawl_observation_keys WHERE idempotency_key=$1`,
       [idempotencyKey],

@@ -1,7 +1,7 @@
 import { currentVideoFallbackBudget } from '../videoDetailApiFallback.js';
 import { requestVideoApiDetail } from '../videoApiBatchRequests.js';
 import { createIncrementalVideoDispatchSnapshot, adoptIncrementalVideoDispatchResult, renewIncrementalVideoDispatchSnapshot, releaseUnadoptedIncrementalVideoSnapshot } from '../incrementalYoutubeJsVideo.js';
-import { AsyncLocalStorage } from 'node:async_hooks';
+import { createIncrementalTransactionScope } from './incrementalTransactionScope.js';
 import { setTimeout as delay } from 'node:timers/promises';
 import { IncrementalChannelRunner, incrementalDomainResult } from '../incrementalChannelRunner.js';
 import { IncrementalRunStore } from '../incrementalRunStore.js';
@@ -32,7 +32,7 @@ export async function runRemoteIncrementalPlan({ channelStore, lease, assertBusi
   if (terminal) return { ok: true, duplicate: true, terminal: true, ...task.applied_result };
   lease = { task_id: task.task_id, generation: task.generation };
   const plan = planFromTask(task);
-  const scope = new AsyncLocalStorage();
+  const scope = createIncrementalTransactionScope();
   const withTransaction = async (action) => {
     signal.throwIfAborted();
     if (scope.getStore()) return action(scope.getStore());
@@ -247,9 +247,7 @@ export async function runRemoteIncrementalPlan({ channelStore, lease, assertBusi
     }).catch(() => {});
     throw error;
   } finally {
-    // This storage is per Plan, unlike the process-wide execution context.
-    // Node keeps enabled storages in its async hook list until disable();
-    // retaining one per completed channel makes every later Promise slower.
+    // Invalidate this Plan's scope without affecting concurrent Plans.
     scope.disable();
   }
 }

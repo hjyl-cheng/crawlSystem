@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { PUBLICATION_WRITER_VERSION } from '../publicationWriterVersion.js';
-import { decodeResult, generation, hash, RemoteProtocolError, uuid } from './protocol.js';
+import { decodeResult, generation, hash, RemoteProtocolError, staleLeaseError, uuid } from './protocol.js';
 import { FULL_CRAWL_WORKLOAD } from './collectingWorkload.js';
 
 const conflict = (code) => { throw new RemoteProtocolError(code); };
@@ -26,21 +26,21 @@ export class RemoteNodeStore {
     }
   }
 
-  async transactionAttempt(action, { repeatableRead = false } = {}) {
+  async transactionAttempt(action, { repeatableRead = false, operation = 'transaction' } = {}) {
     const client = await this.pool.connect();
+    const observed=this.pool.centerPerformance?.beginTransaction(client,this.pool.centerPerformancePoolName,operation);
     try {
       await client.query(repeatableRead ? 'BEGIN ISOLATION LEVEL REPEATABLE READ' : 'BEGIN');
-      await client.query("SELECT set_config('publication.writer_version',$1,true)",[PUBLICATION_WRITER_VERSION]);
-      await client.query("SET LOCAL synchronous_commit = on");
-      await client.query("SET LOCAL statement_timeout = '15s'");
-      await client.query("SET LOCAL lock_timeout = '3s'");
+      await client.query(`SELECT set_config('publication.writer_version',$1,true),
+        set_config('synchronous_commit','on',true),set_config('statement_timeout','15s',true),
+        set_config('lock_timeout','3s',true)`,[PUBLICATION_WRITER_VERSION]);
       const result = await action(client);
       await client.query('COMMIT');
       return result;
     } catch (error) {
       await client.query('ROLLBACK').catch(() => {});
       throw error;
-    } finally { client.release(); }
+    } finally { observed?.();client.release(); }
   }
 
   // Central-only administration. These methods have no public HTTP route.
@@ -209,7 +209,12 @@ export class RemoteNodeStore {
       WHERE task_id=$1 AND node_id=$2 AND generation=$3 AND state='leased' AND lease_until>clock_timestamp()
         AND capability<>'youtube.full-crawl.v1'
       RETURNING lease_until`, [taskId, nodeId, attempt, this.leaseSeconds])).rows[0];
-    if (!row) conflict('STALE_LEASE');
+    if (!row) {
+      const task = (await this.pool.query(`SELECT generation,node_id,state,lease_until,
+        lease_until>clock_timestamp() AS live,clock_timestamp() AS observed_at
+        FROM remote_ingestion.tasks WHERE task_id=$1`, [taskId])).rows[0];
+      throw staleLeaseError(task, {task_id:taskId,node_id:nodeId,generation:attempt}, 'heartbeat');
+    }
     return row;
   }
 

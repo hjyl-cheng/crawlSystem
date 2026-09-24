@@ -1450,6 +1450,18 @@ test("Video metrics mode excludes repeated sign-in with only a view count", asyn
   assert.deepEqual(calls, ["WEB", "IOS"]);
 });
 
+test('explicit copyright removal settles the video without exhausting alternate clients', async () => {
+  let calls = 0;
+  const result = await fetchYoutubeJsVideoInfoWithTerminalFallback({async getInfo() {
+    calls++;
+    return {playability_status:{status:'UNPLAYABLE',reason:'It was removed following a copyright removal request by comeso GmbH'}};
+  }}, 'KaZNqwEr0as', {contentTypeSignals:()=>({})});
+  assert.equal(result.kind,'terminal');
+  assert.equal(result.detail.playability_reason_code,'copyright_removed');
+  assert.equal(result.detail.access_status,'unavailable');
+  assert.equal(calls,1);
+});
+
 test("Video Detail does not run a terminal probe for an unrelated request failure", async () => {
   const original = new Error("socket connection reset by peer");
   let probeCalls = 0;

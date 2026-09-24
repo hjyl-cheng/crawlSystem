@@ -6,6 +6,17 @@ import {
   FingerprintGateway,
   FingerprintGatewayError,
 } from "../src/fingerprintGateway.js";
+import { toChannelWire, fromChannelWire } from '../src/remoteNodes/channelWire.js';
+import { decideYoutubeFailure } from '../src/youtubeFailurePolicy.js';
+
+test('bounded transport diagnostics survive the remote error and decision path', () => {
+  const error = new FingerprintGatewayError({gatewayStatus:502,payload:{failure_kind:'proxy_transport',curl_code:56,
+    transport_diagnostics:{signature:'proxy_tunnel_failed',endpoint:'browse',elapsed_ms:123,proxy_status:502,secret:'must-not-propagate'}}});
+  const decision = decideYoutubeFailure({error:fromChannelWire(toChannelWire(error))});
+  assert.equal(decision.evidence.transport_diagnostics.proxy_status,502);
+  assert.equal(decision.evidence.transport_diagnostics.signature,'proxy_tunnel_failed');
+  assert.equal(decision.evidence.transport_diagnostics.secret,undefined);
+});
 
 test("fingerprint gateway metadata survives an HTTP-header round trip", () => {
   const value = { url: "https://www.youtube.com/?q=ola", headers: { accept: "application/json" } };

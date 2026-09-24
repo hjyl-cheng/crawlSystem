@@ -135,7 +135,9 @@ export function serverNodesRoutes({ store, layout, onboarding = null, runtime = 
       if(installedCount(node)<1)return res.status(400).json({error:'请先部署至少一个 Worker'});
       res.set('Cache-Control','no-store').json(installedStatus(node,await executionControl.setExecution({nodeId:node.id,deploymentId:node.deployment.deploymentId,
         workerCount:installedCount(node),enabled:input.enabled,expectedRequested:input.expectedRequested})));
-    }catch(error){res.status(error.statusCode??503).json({error:error.statusCode?error.message:'中心接任务控制暂时不可用，请稍后重试'});}
+    }catch(error){res.status(error.statusCode??503).json({error:error.statusCode?error.message:'中心接任务控制暂时不可用，请稍后重试',
+      ...(error.code==='REMOTE_NETWORK_CAPACITY_UNAVAILABLE'?{code:error.code,...(error.reason?{reason:error.reason}:{})}:{}),
+      ...(error.code==='EXECUTION_RESULT_UNKNOWN'?{code:error.code}:{})});}
   });
   router.delete("/api/server-nodes/:id", async (req, res, next) => {
     try {

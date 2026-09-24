@@ -51,7 +51,7 @@ const DEFAULT_TIMEOUT_MS = Math.max(1000, Number(process.env.YOUTUBEJS_TIMEOUT_M
 const MAX_TAB_PAGES = Math.max(1, Number(process.env.YOUTUBEJS_MAX_TAB_PAGES || 20));
 const TERMINAL_DETAIL_PROBE_CLIENT = "IOS";
 const VIDEO_DETAIL_CLIENTS = Object.freeze(["WEB", "IOS"]);
-const EXPLICIT_TERMINAL_REASON_CODES = new Set(["private", "uploader_removed"]);
+const EXPLICIT_TERMINAL_REASON_CODES = new Set(["private", "uploader_removed", "copyright_removed"]);
 
 let runtime = null;
 let runtimePromise = null;

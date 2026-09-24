@@ -1,0 +1,7 @@
+# Apply last to the existing remote-center compose stack after draining work.
+# Changes center code and sampled metrics only; preserves worker/pool capacity.
+services:
+  remote-node-center:
+    image: qy-allpachong/remote-node-center:incremental-repeat-fix-20260924-b
+    environment:
+      REMOTE_CENTER_PERFORMANCE_METRICS: 'true'

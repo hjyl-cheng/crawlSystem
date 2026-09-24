@@ -54,6 +54,36 @@ test("Video identity and Recent summaries contain no per-Video metric history", 
   assert.equal(sampling.payload.selected_count, 0);
 });
 
+test("Discovery with a terminal list end and detail failures remains partial", () => {
+  const discovery = discoveryBaseline({
+    identityCount: 1,
+    entries: [{
+      video_id: "video-1",
+      content_type: "video",
+      first_published_at: "2026-07-20T00:00:00Z",
+      first_published_at_precision: "second",
+    }],
+    scanProof: {
+      selected_count: 1,
+      pages: 1,
+      parse_gap_count: 0,
+      terminal_condition: "list_end",
+      stop_reason: "list_end",
+      inspected_count: 1,
+      requested_limit: 30,
+      content_max_age_days: 90,
+      scan_policy_version: "v1",
+      detail_success_count: 0,
+      detail_failure_count: 1,
+      coverage: { qualified_count: 0, excluded_count: 0, age_boundary_crossed: false },
+    },
+  });
+
+  assert.equal(discovery.outcome, "partial");
+  assert.equal(discovery.payload.stop_reason, "list_end");
+  assert.equal(discovery.payload.detail_failure_count, 1);
+});
+
 test("Agent baseline is derived only from Current metrics and normalizes an invalid ratio", () => {
   const baseline = agentBaseline({
     status: "success",

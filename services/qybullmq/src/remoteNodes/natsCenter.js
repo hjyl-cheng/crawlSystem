@@ -97,7 +97,10 @@ export async function startRemoteNatsCenter({url,user='center',password,tls,allo
         const value=decode(msg.data);if(value?.version!==1||!value.params||typeof value.params!=='object')throw new RemoteProtocolError('INVALID_REQUEST',400);
         if(await (['heartbeat','node_heartbeat','full_heartbeat'].includes(operation)?heartbeatStore:store).authenticate(value.token)!==nodeId)throw new RemoteProtocolError('UNAUTHORIZED',401);
         msg.respond(encode({ok:true,value:await calls[operation](nodeId,value.params)}));
-      }catch(error){msg.respond(encode(failure(error)));}finally{release?.();}
+      }catch(error){
+        if(error.code==='STALE_LEASE' && error.lease_evidence)report({event:'remote_stale_lease',...error.lease_evidence});
+        msg.respond(encode(failure(error)));
+      }finally{release?.();}
     }
     subscription=nc.subscribe('qy.remote.rpc.*.*',{queue:'remote-api',callback:(error,msg)=>{
       if(error||closing)return;const p=rpc(msg);active.add(p);p.finally(()=>active.delete(p)).catch(()=>{});

@@ -3,7 +3,7 @@ import test from "node:test";
 import {
   ensureAutomaticPublicationOnboarding,
   PublicationChannelOnboardingConflict,
-  reconcileAutomaticPublicationBacklog,
+  loadAutomaticPublicationCandidates,
   reconcilePublicationAfterFullCrawl,
 } from "../src/publicationChannelOnboarding.js";
 import { completePublicationOperationalFixture } from "./support/publicationOperationalFixtures.js";
@@ -547,28 +547,16 @@ test("automatic onboarding excludes a dead-letter Recovery Stream from new Chann
   assert.equal(client.calls.filter((call) => call.sql.includes("online-routes")).length, 1);
 });
 
-test("the compensation scan is bounded and does nothing before an online route exists", async () => {
+test("the compensation prefilter bounds channel input and leaves delivery authorization to the writer", async () => {
   const calls = [];
-  const result = await reconcileAutomaticPublicationBacklog({
-    limit: 17,
-    query: async (sql, params) => {
-      calls.push({ sql: String(sql), params });
-      return { rows: [] };
-    },
-    withTransaction: async () => {
-      throw new Error("transaction must not run for an empty backlog");
-    },
-  });
-
-  assert.deepEqual(result, {
-    scanned: 0,
-    registered: 0,
-    reconciled: 0,
-    skipped: 0,
-    failed: 0,
-    failures: [],
-  });
-  assert.deepEqual(calls[0].params, [17]);
+  const result = await loadAutomaticPublicationCandidates(async (sql, params) => {
+    calls.push({ sql: String(sql), params });
+    return { rows: [] };
+  }, ['UCone','UCtwo']);
+  assert.deepEqual(result.rows, []);
+  assert.deepEqual(calls[0].params, [['UCone','UCtwo'], ['dead_letter_recovery']]);
+  assert.match(calls[0].sql, /WITH scan_channels AS MATERIALIZED/);
+  assert.match(calls[0].sql, /channel_id=ANY/);
   assert.match(calls[0].sql, /promotion_candidate\.accepted_at>=stream\.capture_enabled_at/);
   assert.match(calls[0].sql, /channel\.registry_promotion_candidate_id/);
   assert.match(calls[0].sql, /channel\.registry_promotion_run_id/);
@@ -581,6 +569,7 @@ test("the compensation scan is bounded and does nothing before an online route e
   assert.match(calls[0].sql, /channel\.status='active'/);
   assert.match(calls[0].sql, /channel\.agent_status='done'/);
   assert.doesNotMatch(calls[0].sql, /channel\.latest_run_id AS run_id/);
-  assert.match(calls[0].sql, /ORDER BY promotion_candidate\.accepted_at/);
-  assert.match(calls[0].sql, /delivery\.mode<>'online'/);
+  assert.match(calls[0].sql, /ORDER BY channel\.channel_id/);
+  assert.doesNotMatch(calls[0].sql, /channel_delivery_state/);
+  assert.match(calls[0].sql, /stream_role/);
 });

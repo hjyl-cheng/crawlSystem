@@ -112,7 +112,7 @@ export class RemoteChannelExecutionStore {
       const registered = (await client.query('SELECT rota_worker_id FROM remote_ingestion.network_slots WHERE node_id=$1 AND slot=$2', [nodeId, slot])).rows[0];
       if (registered?.rota_worker_id !== assignment.worker_id) fail('NETWORK_SLOT_CONFLICT');
       return { taskId: transport.task_id, attemptId, profileGroup, executionOptions, plan: contract.plan };
-    });
+    },{operation:'admission'});
   }
 
   async waitClaim(admission, { nodeId, slot, signal, pollMs = 100 }) {
@@ -152,7 +152,7 @@ export class RemoteChannelExecutionStore {
       await client.query(`UPDATE remote_ingestion.tasks SET state='failed',last_error=$2,
         coordinator_until=NULL WHERE task_id=$1`,
       [admission.taskId, String(error?.code || 'REMOTE_EXECUTION_STOPPED').slice(0,300)]);
-    });
+    },{operation:'stop'});
   }
 
   async bindings(admission) {
@@ -178,6 +178,6 @@ export class RemoteChannelExecutionStore {
       const newer = await client.query('SELECT 1 FROM crawler.channel_execution_attempts WHERE business_run_id=$1 AND workload_scope=$2 AND attempt_number>$3 LIMIT 1', [attempt.business_run_id, attempt.workload_scope, attempt.attempt_number]);
       if (newer.rowCount) fail('REMOTE_EXECUTION_REPLACED');
       await this.profiles(client).finishAttempt(admission.attemptId, { status, error, result });
-    });
+    },{operation:'finish'});
   }
 }

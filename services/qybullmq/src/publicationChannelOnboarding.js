@@ -1,3 +1,4 @@
+import { claimChannelScan, scanTransaction, finishChannelScan, releaseChannelScan, scanPageSize } from './backgroundReconciliationScan.js';
 import {
   inspectPublicationInitialPackage,
   reconcilePublication,
@@ -662,20 +663,19 @@ export async function reconcilePublicationAfterFullCrawl(clientValue, inputValue
   return { ...publication, onboarding };
 }
 
-export async function reconcileAutomaticPublicationBacklog({
-  query,
-  withTransaction,
-  limit = 25,
-} = {}) {
-  if (typeof query !== "function" || typeof withTransaction !== "function") {
-    throw new TypeError("query and withTransaction are required");
-  }
-  const batchLimit = positiveInteger(limit, 25, "limit");
-  const candidates = await query(
+export async function loadAutomaticPublicationCandidates(query, channelIds) {
+  scanPageSize(channelIds.length);
+  // This is only a cheap prefilter. The existing publication transaction checks
+  // online routes, ownership and the complete Initial Package again per channel.
+  return query(
     `/* publication-auto-onboarding:backlog */
+     WITH scan_channels AS MATERIALIZED (
+       SELECT channel_id,registry_promotion_run_id,registry_promotion_candidate_id,latest_run_id,status,agent_status
+       FROM crawler.channels WHERE channel_id=ANY($1::text[])
+     )
      SELECT channel.channel_id,channel.registry_promotion_run_id AS run_id,
             current_finalized.finalized_at AS publication_as_of
-     FROM crawler.channels AS channel
+     FROM scan_channels AS channel
      JOIN crawler.channel_candidates AS promotion_candidate
        ON promotion_candidate.candidate_id=channel.registry_promotion_candidate_id
       AND promotion_candidate.channel_id=channel.channel_id
@@ -715,55 +715,45 @@ export async function reconcileAutomaticPublicationBacklog({
          FROM publication.stream AS stream
          WHERE stream.status='active' AND stream.capture_enabled_at IS NOT NULL
            AND promotion_candidate.accepted_at>=stream.capture_enabled_at
-           AND EXISTS (
-             SELECT 1
-             FROM publication.channel_delivery_state AS delivery
-             JOIN publication.channel_stream_state AS route_owner
-               ON route_owner.publication_stream_id=delivery.publication_stream_id
-              AND route_owner.channel_id=delivery.channel_id
-             WHERE delivery.publication_stream_id=stream.publication_stream_id
-               AND route_owner.status='owned' AND delivery.mode='online'
-           )
-           AND NOT EXISTS (
-             SELECT 1
-             FROM publication.channel_delivery_state AS delivery
-             JOIN publication.channel_stream_state AS route_owner
-               ON route_owner.publication_stream_id=delivery.publication_stream_id
-              AND route_owner.channel_id=delivery.channel_id
-             WHERE delivery.publication_stream_id=stream.publication_stream_id
-               AND route_owner.status='owned' AND delivery.mode<>'online'
-           )
+           AND NOT (COALESCE(stream.source_identity_json->>'stream_role','')=ANY($2::text[]))
        )
-     ORDER BY promotion_candidate.accepted_at,channel.channel_id
-     LIMIT $1`,
-    [batchLimit],
+     ORDER BY channel.channel_id`,
+    [channelIds, [...NON_AUTOMATIC_STREAM_ROLES]],
   );
-  const summary = {
-    scanned: candidates.rows.length,
-    registered: 0,
-    reconciled: 0,
-    skipped: 0,
-    failed: 0,
-    failures: [],
-  };
-  for (const row of candidates.rows) {
-    try {
-      const result = await withTransaction((client) => reconcilePublicationAfterFullCrawl(client, {
-        channelId: row.channel_id,
-        runId: row.run_id,
-        asOf: row.publication_as_of,
-        revisionType: "incremental",
-      }));
-      if (result.onboarding?.status === "registered") summary.registered += 1;
-      if (result.status === "not_owned") summary.skipped += 1;
-      else summary.reconciled += 1;
-    } catch (error) {
-      summary.failed += 1;
-      summary.failures.push({
-        channel_id: String(row.channel_id),
-        error: String(error?.message || error).slice(0, 1000),
-      });
+}
+
+export async function reconcileAutomaticPublicationBacklog({
+  query, withTransaction, limit = 25, pageSize = 200, roundPauseMs = 60000,
+} = {}) {
+  if (typeof query !== 'function' || typeof withTransaction !== 'function') throw new TypeError('query and withTransaction are required');
+  const batchLimit = positiveInteger(limit, 25, 'limit');
+  const options = { withTransaction, scope: 'publication-onboarding', pageSize, roundPauseMs };
+  const claim = await claimChannelScan(options);
+  const summary = { examined: 0, scanned: 0, registered: 0, reconciled: 0, skipped: 0, failed: 0, failures: [], wrapped: false };
+  if (!claim) return { ...summary, busy: true };
+  try {
+    summary.examined = claim.ids.length;
+    const candidates = claim.ids.length ? await loadAutomaticPublicationCandidates(query, claim.ids) : { rows: [] };
+    const selected = candidates.rows.slice(0, batchLimit);
+    summary.scanned = selected.length;
+    for (const row of selected) {
+      try {
+        const result = await scanTransaction(options, claim, client => reconcilePublicationAfterFullCrawl(client, {
+            channelId: row.channel_id, runId: row.run_id, asOf: row.publication_as_of, revisionType: 'incremental',
+          }), row.channel_id);
+        if (result.onboarding?.status === 'registered') summary.registered += 1;
+        if (result.status === 'not_owned') summary.skipped += 1;
+        else summary.reconciled += 1;
+      } catch (error) {
+        // Successful preceding candidates committed their cursor atomically.
+        // Never advance past the failed candidate; a restarted process retries it.
+        summary.failed += 1;
+        summary.failures.push({ channel_id: String(row.channel_id), error: String(error?.message || error).slice(0, 1000) });
+        return summary;
+      }
     }
-  }
-  return summary;
+    const after = candidates.rows.length > selected.length ? selected.at(-1).channel_id : claim.ids.at(-1) ?? claim.after_channel_id;
+    Object.assign(summary, await finishChannelScan(options, claim, after));
+    return summary;
+  } finally { await releaseChannelScan(options, claim); }
 }

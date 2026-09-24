@@ -1,4 +1,6 @@
 import { ExecutionProgress } from './executionProgress.js';
+import { performance } from 'node:perf_hooks';
+import { createBindingQuiescence } from './bindingQuiescence.js';
 import { remoteDeadlineError } from './boundedPostgresRead.js';
 import { ChannelExecutionMetrics } from '../channelExecutionContext.js';
 import { failureDecisions } from '../channelExecutionRuntime.js';
@@ -29,6 +31,12 @@ export class RemoteManagedIncrementalRuntime {
   }
 
   stage(handle, phase, operation=null) {
+    const metrics=this.channelStore.store.pool.centerPerformance;
+    if(metrics?.enabled){
+      const now=performance.now();
+      if(handle.metricStage)metrics.record(`stage.${handle.metricStage.phase}.ms`,now-handle.metricStage.at);
+      handle.metricStage={phase,at:now};
+    }
     handle.progress.move(phase,operation);
     this.report({event:'remote_incremental_stage',node_id:this.nodeId,slot:this.slot,...handle.progress.snapshot()});
   }
@@ -48,6 +56,7 @@ export class RemoteManagedIncrementalRuntime {
     args={...args,abortSignal:AbortSignal.any([args.abortSignal,controller.signal])};
     const handle = { args, controller, admission: null, lease: null, inner: null, adapter: null,
       error: null, quiescence: null, finished: false, job: null };
+    handle.quiesceBinding=createBindingQuiescence({routes:this.routes,timeoutMs:this.stopTimeoutMs});
     handle.progress=new ExecutionProgress({attemptId:`channel-attempt:${args.task.task_id}`,jobId:null,
       claimTimeoutMs:this.claimTimeoutMs,stopTimeoutMs:this.stopTimeoutMs,admissionTimeoutMs:this.admissionTimeoutMs});
     handle.execute = async ({ job, attempt }, invoke) => {
@@ -76,6 +85,7 @@ export class RemoteManagedIncrementalRuntime {
         handle.progress.generation=handle.lease.generation;
         this.stage(handle,'binding','acquire_binding');
         handle.adapter = createRemoteRotaChannelRuntime({ routes: this.routes, nodeId: this.nodeId, slot: this.slot,
+          quiesceBinding:handle.quiesceBinding,
           lease: handle.lease, stopTimeoutMs: this.stopTimeoutMs, youtubeSessions: this.youtubeSessions,
           youtubeSession: { profileGroup: handle.admission.profileGroup, attemptId: handle.admission.attemptId },
           youtubeCheckpointConsumer: this.checkpoints });
@@ -132,8 +142,7 @@ export class RemoteManagedIncrementalRuntime {
       const bindings=await this.executions.bindings(handle.admission);
       for(const binding of bindings) {
         if(binding.state==='retired' && binding.release_receipt?.in_flight===0)continue;
-        await this.routes.requestStop(binding.binding_id);
-        await this.routes.waitQuiesced(binding.binding_id,{signal:AbortSignal.timeout(this.stopTimeoutMs)});
+        await handle.quiesceBinding(binding.binding_id);
       }
       if(handle.inner)quiet=await handle.adapter.quiesce(handle.inner);
       if(quiet?.active_managed_requests!==0)throw remoteDeadlineError('REMOTE_NETWORK_NOT_QUIESCED');

@@ -13,6 +13,19 @@ export function createDeploymentControlClient({url,token,fetchImpl=fetch}){
       for await(const chunk of response.body){size+=chunk.length;if(size>512*1024)throw new Error();chunks.push(chunk);}
       const result=JSON.parse(Buffer.concat(chunks).toString());
       if(!response.ok){
+        const capacityReasons={
+          RESOURCE_SYNC_DEFERRED:'资源准备繁忙，本次启动未成功，请稍后重试。',
+          CAPACITY_TIMEOUT:'资源准备超时，本次启动未成功，请稍后重试。',
+          CAPACITY_SERVICE_UNAVAILABLE:'资源服务暂时不可用，本次启动未成功，请稍后重试。',
+          CAPACITY_AUTH_FAILED:'资源服务授权失败，本次启动未成功，请联系管理员检查配置。',
+          CAPACITY_INVALID_REQUEST:'资源准备参数无效，本次启动未成功，请联系管理员检查配置。',
+          CAPACITY_INVALID_RESPONSE:'资源准备结果校验失败，本次启动未成功，请稍后重试。',
+        };
+        const reason=Object.hasOwn(capacityReasons,result.reason)?result.reason:undefined;
+        if(operation==='execution' && result.error==='REMOTE_NETWORK_CAPACITY_UNAVAILABLE'){
+          throw Object.assign(new Error(capacityReasons[reason]??'网络资源准备未完成，本次启动未成功，请稍后重试。'),
+            {statusCode:503,code:result.error,...(reason?{reason}:{})});
+        }
         const messages={WORKER_STATE_UNKNOWN:'Worker 状态无法确认，暂时不能删除',WORKER_NOT_IDLE:'该 Worker 有执行中或待恢复的任务，不能删除',
           WORKER_RETIREMENT_WAIT:'正在停止接单并释放执行资源，请稍候',
           WORKER_RETIREMENT_CONFLICT:'Worker 删除尚未完成或操作已变化，请刷新后重试',
@@ -29,7 +42,9 @@ export function createDeploymentControlClient({url,token,fetchImpl=fetch}){
         throw new Error();
       }
       return result;
-    }catch(error){if(error.statusCode)throw error;throw new Error('中心部署控制请求失败，请核实中心接入服务和部署配置');}
+    }catch(error){if(error.statusCode)throw error;
+      if(operation==='execution')throw Object.assign(new Error('操作结果暂未确认，请刷新接任务状态。'),{statusCode:503,code:'EXECUTION_RESULT_UNKNOWN'});
+      throw new Error('中心部署控制请求失败，请核实中心接入服务和部署配置');}
   }
   return {retire:value=>request('retire',value),setExecution:value=>request('execution',value),prepare:plan=>request('prepare',{nodeId:plan.nodeId,deploymentId:plan.deploymentId,image:plan.image,files:plan.files}),
     status:plan=>request('status',{nodeId:plan.nodeId,deploymentId:plan.deploymentId})};

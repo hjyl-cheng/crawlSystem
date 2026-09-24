@@ -1,4 +1,5 @@
 import { createServer } from 'node:http';
+import { CAPACITY_FAILURE_REASONS } from './deploymentCapacity.js';
 import { createRequestAdmission } from './requestAdmission.js';
 import { MAX_GZIP_BYTES, RemoteProtocolError, uuid } from './protocol.js';
 
@@ -119,7 +120,11 @@ export function createRemoteNodeGateway({ store, channelPlans = null, routes = n
         send(503,{error:'REMOTE_CONTROL_BUSY'});return;
       }
       send(error instanceof RemoteProtocolError ? error.status : 503,
-        { error: error instanceof RemoteProtocolError ? error.code : 'GATEWAY_UNAVAILABLE' });
+        { error: error instanceof RemoteProtocolError ? error.code : 'GATEWAY_UNAVAILABLE',
+          ...(error instanceof RemoteProtocolError && error.code==='STALE_LEASE' && error.lease_evidence
+            ? {lease_evidence:error.lease_evidence} : {}),
+          ...(error instanceof RemoteProtocolError && error.code==='REMOTE_NETWORK_CAPACITY_UNAVAILABLE' && CAPACITY_FAILURE_REASONS.has(error.reason)
+            ? {reason:error.reason,attempts:error.attempts} : {}) });
     } finally { release?.(); response.removeListener('close', onClose); }
   });
   server.admissionStats = () => Object.fromEntries(Object.entries(admission).map(([name, lane]) => [name, lane.snapshot()]));

@@ -6,6 +6,7 @@ import (
 	"github.com/alpkeskin/rota/core/internal/database"
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestOnlineCapacityPreservesActiveRouteAndSurvivesRestart(t *testing.T) {
@@ -47,7 +48,14 @@ func TestOnlineCapacityPreservesActiveRouteAndSurvivesRestart(t *testing.T) {
 		wg.Add(1)
 		go func(n int) {
 			defer wg.Done()
-			_, e := m.EnsureCapacity(ctx, EnsureCapacityRequest{Role: RoleChannel, MinimumSlots: n})
+			var e error
+			for attempt := 0; attempt < 20; attempt++ {
+				_, e = m.EnsureCapacity(ctx, EnsureCapacityRequest{Role: RoleChannel, MinimumSlots: n})
+				if !errors.Is(e, ErrResourceSyncDeferred) {
+					break
+				}
+				time.Sleep(100 * time.Millisecond)
+			}
 			errs <- e
 		}(n)
 	}

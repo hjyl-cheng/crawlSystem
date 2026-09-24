@@ -23,16 +23,30 @@ export class BusinessRunBudgetRecoveryError extends Error {
 }
 
 export function isBusinessRunBudgetExhausted(error) {
-  for (let current = error; current; current = current?.cause) {
+  const pending = [error];
+  const seen = new Set();
+  while (pending.length) {
+    const current = pending.pop();
+    if (!current || seen.has(current)) continue;
+    seen.add(current);
     const code = text(current?.code)?.toUpperCase();
     const reason = text(current?.reason)?.toLowerCase();
     if (code === "BUSINESS_RUN_BUDGET_EXHAUSTED"
         || code === "BUSINESS_RUN_BUDGET"
         || reason === "business_run_budget_exhausted"
         || reason === "business_run_budget") return true;
-    if (current?.cause === current) break;
+    if (current.cause) pending.push(current.cause);
+    if (Array.isArray(current.errors)) pending.push(...current.errors);
   }
   return false;
+}
+
+export function exhaustedBusinessRunError(recorded = null) {
+  const error = new UnrecoverableError('Rota Business Run budget exhausted; terminal state recorded');
+  error.code = 'BUSINESS_RUN_BUDGET_EXHAUSTED';
+  error.business_run_terminal = true;
+  error.recovery = recorded;
+  return error;
 }
 
 export async function recordBusinessRunBudgetExhaustion(client, job, {

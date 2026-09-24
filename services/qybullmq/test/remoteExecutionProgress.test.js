@@ -6,6 +6,7 @@ import {RemoteCenterExecutionSupervisor} from '../src/remoteNodes/centerExecutio
 import {ExecutionProgress} from '../src/remoteNodes/executionProgress.js';
 import {incrementalProgressConfig} from '../src/remoteNodes/incrementalProgressConfig.js';
 import {intakeStatus} from '../src/remoteNodes/intakeSelection.js';
+import {createRemoteRotaChannelRuntime} from '../src/remoteNodes/rotaChannelRuntimeAdapter.js';
 
 const deferred=()=>{let resolve;const promise=new Promise(r=>{resolve=r;});return {promise,resolve};};
 async function runtimeFixture({prepare,stop,bindings=async()=>[],stopTimeoutMs=25}={}) {
@@ -62,6 +63,38 @@ test('network retirement failure never finishes the attempt',async()=>{
   f.runtime.requestAbort('channel-attempt:rota-task');await f.executing;
   await assert.rejects(f.runtime.quiesce(f.handle),/network not quiet/);
   assert.equal(f.calls.includes('finish'),false);assert.equal(f.runtime.executionSnapshot().progressHealth,'blocked');
+});
+test('managed cleanup and its real adapter stop each persisted binding once while still applying checkpoint',async()=>{
+  const bindings=[{binding_id:'inner',state:'active'},{binding_id:'uncertain',state:'active'}];
+  const f=await runtimeFixture({bindings:async()=>bindings,stopTimeoutMs:1000});
+  f.runtime.requestAbort('channel-attempt:rota-task');await f.executing;
+  const stops=[],waits=[];let checkpoints=0;
+  f.runtime.routes.requestStop=async id=>stops.push(id);
+  f.runtime.routes.waitQuiesced=async id=>{waits.push(id);return {active_managed_requests:0};};
+  f.handle.adapter=createRemoteRotaChannelRuntime({routes:f.runtime.routes,nodeId:'node',lease:{task_id:'task',generation:1},slot:'slot',
+    quiesceBinding:f.handle.quiesceBinding,youtubeSessions:{result:async()=>({metrics:{requests:2}})},youtubeSession:{},
+    youtubeCheckpointConsumer:{apply:async()=>{checkpoints++;}}});
+  f.handle.inner={binding:bindings[0]};
+  await f.runtime.quiesce(f.handle);await f.runtime.quiesce(f.handle);
+  assert.deepEqual(stops,['inner','uncertain']);assert.deepEqual(waits,['inner','uncertain']);
+  assert.equal(checkpoints,1);assert.equal(f.calls.filter(x=>x==='finish').length,1);
+});
+test('uncertain bind response is recovered without duplicate stop, and failed checkpoint retries only checkpoint',async()=>{
+  const binding={binding_id:'persisted',state:'active'};
+  const f=await runtimeFixture({bindings:async()=>[binding],stopTimeoutMs:1000});
+  f.runtime.requestAbort('channel-attempt:rota-task');await f.executing;
+  let stops=0,waits=0,checkpoints=0;
+  f.runtime.routes.requestStop=async()=>{stops++;};
+  f.runtime.routes.waitQuiesced=async()=>{waits++;return {active_managed_requests:0};};
+  f.runtime.routes.bindingForExecution=async()=>binding;
+  f.handle.adapter=createRemoteRotaChannelRuntime({routes:f.runtime.routes,nodeId:'node',lease:{task_id:'task',generation:1},slot:'slot',
+    quiesceBinding:f.handle.quiesceBinding,youtubeSessions:{result:async()=>null},youtubeSession:{},
+    youtubeCheckpointConsumer:{apply:async()=>{if(++checkpoints===1)throw new Error('checkpoint unavailable');}}});
+  f.handle.inner={binding:null};
+  await assert.rejects(f.runtime.quiesce(f.handle),/checkpoint unavailable/);
+  assert.equal(f.calls.includes('finish'),false);
+  await f.runtime.quiesce(f.handle);
+  assert.equal(stops,1);assert.equal(waits,1);assert.equal(checkpoints,2);assert.equal(f.handle.finished,true);
 });
 test('progress uses monotonic stage time; long collection is not automatically aborted',()=>{
   let now=0;const p=new ExecutionProgress({attemptId:'a',claimTimeoutMs:30,stopTimeoutMs:45,now:()=>now});

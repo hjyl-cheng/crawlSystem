@@ -23,6 +23,7 @@ let closeRuntimeOnSuccess = false;
 const observations = new Map();
 const executionStates = new Map();
 const executionActions = new Set();
+const executionUnknown = new Set();
 const isReady = node => node?.provisioning?.state === "ready";
 const isRunning = node => node?.provisioning?.state === "running" && Date.parse(node.provisioning.deadline) > Date.now();
 const runtimeRunning = node => node?.runtime?.state === "running" && Date.parse(node.runtime.deadline) > Date.now();
@@ -41,7 +42,7 @@ async function request(path, options = {}, expectRegistry = true) {
   const response = await fetch(path, { ...options, headers: { "Accept": "application/json", ...options.headers }, signal: AbortSignal.timeout(options.method === "DELETE" ? 240000 : 15000) });
   if (response.redirected || !response.headers.get("content-type")?.includes("application/json")) throw new Error("读取失败或登录已过期，请刷新页面后重试");
   const result = await response.json();
-  if (!response.ok) throw new Error(result.error || "保存失败，请稍后重试");
+  if (!response.ok) throw Object.assign(new Error(result.error || "保存失败，请稍后重试"),{code:result.code,status:response.status});
   if (expectRegistry && (!Number.isInteger(result.version) || !Array.isArray(result.nodes))) throw new Error("服务器列表格式异常，请稍后刷新");
   return result;
 }
@@ -67,7 +68,7 @@ function executionPanel(node) {
   const state = executionStates.get(node.id), known = state?.counts;
   const counts = state?.counts, allowed = counts?.deployed ?? state?.configuredCount ?? state?.allowedCount ?? 0;
   const intakeEnabled=state?.intakeEnabled??state?.requested??false;
-  const label = !known ? state?.error ? '接任务状态暂不可用' : '正在读取接任务状态'
+  const label = executionUnknown.has(node.id) ? '操作结果待确认，正在刷新状态' : !known ? state?.error ? '接任务状态暂不可用' : '正在读取接任务状态'
     : !intakeEnabled ? counts.draining?'已暂停接单，已有任务继续收尾':'已暂停接单'
     : state.adjusting ? '接单 Worker 正在调整'
     : counts.draining ? '正在调整，当前频道完成后待命'
@@ -79,7 +80,7 @@ function workerActions(node) {
   const enabled=node.localIntake || (isReady(node) && node.runtime?.state==='ready');
   const installed=installedCount(node),pause=state?.intakeEnabled??state?.requested??false,busy=executionActions.has(node.id);
   const toggle=installed?`<button type="button" class="nodes-button" data-toggle-intake="${escapeHtml(node.id)}" title="${pause?'停止接新任务，已领取频道继续收尾':`允许全部 ${installed} 个已部署 Worker 接任务`}"
-    ${busy||!state||state.error||!state.executionAvailable?'disabled':''}>${busy?'正在切换…':pause?'暂停接任务':'开始接任务'}</button>`:'';
+    ${busy||executionUnknown.has(node.id)||!state||state.error||!state.executionAvailable?'disabled':''}>${busy?(pause?'正在暂停接单…':'正在准备接单…'):pause?'暂停接任务':'开始接任务'}</button>`:'';
   return `<button type="button" class="nodes-button primary" data-manage="${escapeHtml(node.id)}" ${enabled?'':'disabled'}>${node.localIntake || installed>0 || node.deployment?'管理 Worker':'部署 Worker'}</button>${toggle}`;
 }
 function deploymentNotice(node) {
@@ -202,9 +203,18 @@ async function toggleIntake(id){
   executionActions.add(id);render();
   try{
     const result=await request(`/api/server-nodes/${encodeURIComponent(id)}/execution`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({version:registry.version,enabled:!pause,expectedRequested:pause})},false);
-    executionStates.set(id,result);announce(pause?'已暂停接新任务，已有任务继续收尾。':'已开启接单，全部已部署 Worker 将参与采集。');
+    executionStates.set(id,result);announce(pause?'已暂停接新任务，已有任务继续收尾。':result.counts?.ready?'已开启接单。':'已开启接单，Worker 正在准备。');
   }
-  catch(error){announce(error.message,true);}
+  catch(error){
+    if(error.code==='EXECUTION_RESULT_UNKNOWN'||!error.status){
+      executionUnknown.add(id);announce('操作结果暂未确认，正在刷新状态。',true);
+      try {
+        const current=await request(`/api/server-nodes/${encodeURIComponent(id)}/execution`,{},false);
+        executionStates.set(id,current);executionUnknown.delete(id);
+        announce((current.intakeEnabled??current.requested)?'已确认当前接单已开启，Worker 状态见节点卡片。':'已确认当前接单已暂停。');
+      }catch{announce('操作结果仍待确认，请稍后刷新状态。',true);}
+    }else announce(error.message,true);
+  }
   finally{executionActions.delete(id);render();}
   void refresh(true);
 }
@@ -262,7 +272,10 @@ async function refresh(quiet = false) {
       try { observations.set(node.id, await request(`/api/server-nodes/${encodeURIComponent(node.id)}/monitoring`, {}, false)); }
       catch { const last = observations.get(node.id); observations.set(node.id, { ...last, online: false }); }
     }), ...registry.nodes.filter(node => node.deployment || node.localIntake).map(async node => {
-      try { executionStates.set(node.id, await request(`/api/server-nodes/${encodeURIComponent(node.id)}/execution`, {}, false)); }
+      try {
+        executionStates.set(node.id, await request(`/api/server-nodes/${encodeURIComponent(node.id)}/execution`, {}, false));
+        if(executionUnknown.delete(node.id))announce('已刷新接任务状态，请查看节点卡片。');
+      }
       catch { executionStates.set(node.id, { ...executionStates.get(node.id), error:true }); }
     })]);
     // Avoid replacing an open card menu during a background refresh.

@@ -27,7 +27,11 @@ export function createRemoteNodeClient({ url, token, allowLoopbackHttp = false, 
     let data;
     try { data = JSON.parse(Buffer.concat(chunks).toString('utf8')); }
     catch { throw new RemoteProtocolError('INVALID_GATEWAY_RESPONSE', 502); }
-    if (!response.ok) throw new RemoteProtocolError(data.error || 'GATEWAY_ERROR', response.status);
+    if (!response.ok) {
+      const error = new RemoteProtocolError(data.error || 'GATEWAY_ERROR', response.status);
+      if(error.code==='STALE_LEASE' && data.lease_evidence)error.lease_evidence=data.lease_evidence;
+      throw error;
+    }
     return data;
   };
   return {

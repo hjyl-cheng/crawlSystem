@@ -103,6 +103,18 @@ export class FingerprintGatewayError extends Error {
       source: "fingerprint_gateway",
       target_url: targetUrl ? String(targetUrl) : null,
       client: null,
+      ...(payload.transport_diagnostics ? { transport_diagnostics: {
+        signature: ['SSL_ERROR_SYSCALL','SSL_ERROR_SSL','connection_reset','unexpected_eof',
+          'certificate_verification_failed','proxy_tunnel_failed','connection_refused','timeout'].includes(payload.transport_diagnostics.signature)
+          ? payload.transport_diagnostics.signature : 'unclassified',
+        stage: payload.transport_diagnostics.stage === 'tls_handshake' ? 'tls_handshake' : 'unknown',
+        endpoint: ['player','next','browse','watch'].includes(payload.transport_diagnostics.endpoint) ? payload.transport_diagnostics.endpoint : 'other',
+        elapsed_ms: Math.max(0,Math.min(3600000,Number(payload.transport_diagnostics.elapsed_ms)||0)),
+        curl_code: curlCode, session_reset: this.sessionReset,
+        proxy_status: Number.isInteger(payload.transport_diagnostics.proxy_status)
+          && payload.transport_diagnostics.proxy_status >= 100 && payload.transport_diagnostics.proxy_status <= 599
+          ? payload.transport_diagnostics.proxy_status : null,
+      } } : {}),
     };
   }
 }

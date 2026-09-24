@@ -1,6 +1,6 @@
 // Preserve error classification and partial evidence for the existing central retry/API policy.
 const ERROR_FIELDS = ['code', 'native_code', 'failureKind', 'failure_kind', 'source', 'status', 'statusCode',
-  'targetStatusRaw', 'target_status_raw', 'youtube_failure_evidence', 'partial_detail',
+  'targetStatusRaw', 'target_status_raw', 'youtube_failure_evidence', 'partial_detail', 'lease_evidence',
   'playability_kind', 'playability_retry_mode', 'playability_reason_code', 'surface',
   'missing_fields', 'field', 'retry_mode', 'requestId', 'country', 'reason', 'reason_code',
   'required_surface', 'video_id', 'youtube_collection_failure', 'youtube_client_attempts', 'body', 'context'];

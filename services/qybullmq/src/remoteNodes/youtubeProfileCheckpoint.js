@@ -49,7 +49,7 @@ export function createRemoteYoutubeCheckpointConsumer({ sessions, profileSecret 
         await client.query('UPDATE remote_ingestion.youtube_sessions SET profile_applied_at=clock_timestamp() WHERE binding_id=$1', [bindingId]);
         return { applied: true, replay: false };
       };
-      return transactionClient ? apply(transactionClient) : store.transaction(apply);
+      return transactionClient ? apply(transactionClient) : store.transaction(apply,{operation:'checkpoint'});
     },
   };
 }

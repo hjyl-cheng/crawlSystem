@@ -15,6 +15,22 @@ export class RemoteProtocolError extends Error {
   }
 }
 
+// Server-side rejection evidence, never an authorization to reuse a lease.
+export function staleLeaseError(task, lease, operation) {
+  const error = new RemoteProtocolError('STALE_LEASE');
+  error.lease_evidence = {
+    operation, task_id: lease.task_id, requested_generation: lease.generation,
+    current_generation: task?.generation ?? null,
+    requested_owner: lease.node_id ?? null, current_owner: task?.node_id ?? null,
+    state: task?.state ?? null, lease_until: task?.lease_until ?? null,
+    observed_at: task?.observed_at ?? null,
+    reason: !task ? 'task_missing' : task.generation !== lease.generation ? 'generation_changed'
+      : lease.node_id && task.node_id !== lease.node_id ? 'owner_changed'
+      : task.state !== 'leased' ? 'task_not_leased' : task.live === false ? 'lease_expired' : 'lease_rejected',
+  };
+  return error;
+}
+
 export function uuid(value) {
   if (typeof value !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)) {
     throw new RemoteProtocolError('INVALID_ID', 400);

@@ -1,3 +1,4 @@
+import { reconcileTerminalFinalizedRunPage } from './terminalRunReconciliation.js';
 import { createMigrationQueueControl, createMigrationPressureReader, MIGRATION_QUEUE_WAKE } from './migrationQueueControl.js';
 import { postponeSecondaryFinalize } from "./finalizeDeferral.js";
 import { sampleMigrationThroughput } from "./migrationThroughput.js";
@@ -100,9 +101,7 @@ import {
 } from "./finalizeRecoveryPolicy.js";
 import { reconcileAutomaticPublicationBacklog } from "./publicationChannelOnboarding.js";
 import {
-  FINALIZABLE_CHANNEL_STATUSES,
   representedFinalizeRunIds,
-  SUCCESSFUL_PUBLICATION_FINALIZE_STATUSES,
 } from "./finalizePolicy.js";
 import {
   getQueryScheduler,
@@ -276,6 +275,7 @@ const publicationOnboardingIntervalMs = intEnv(
   15000,
   3600000,
 );
+const publicationOnboardingScanIntervalMs = intEnv("PUBLICATION_ONBOARDING_SCAN_INTERVAL_MS", 2000, 1000, 60000);
 const publicationOnboardingBatchSize = intEnv("PUBLICATION_ONBOARDING_RECONCILE_BATCH_SIZE", 25, 1, 1000);
 const contentEnrichDispatchEnabled = booleanEnv("CONTENT_ENRICH_DISPATCH_ENABLED", false);
 const contentEnrichQueueHighWater = intEnv("CONTENT_ENRICH_QUEUE_HIGH_WATER", 50, 1, 10_000);
@@ -731,32 +731,9 @@ function hasQueueBacklog(stats, queueName) {
 }
 
 async function reconcileTerminalFinalizedRunStates(actions, pipelineCycleId) {
-  const rows = await query(
-    `UPDATE crawler.channel_runs run
-     SET status='done',detail_status='done',finished_at=COALESCE(run.finished_at,now()),updated_at=now()
-     FROM crawler.channels channel,crawler.finalized_profiles finalized
-     WHERE channel.latest_run_id=run.run_id
-       AND channel.status=ANY($2::text[])
-       AND finalized.channel_id=channel.channel_id
-       AND finalized.run_id=run.run_id
-       AND finalized.status=ANY($3::text[])
-       AND ($1::text IS NULL OR run.result_json->>'pipeline_cycle_id'=$1::text)
-       AND (run.status<>'done' OR run.detail_status<>'done' OR run.finished_at IS NULL)
-     RETURNING run.run_id,run.channel_id`,
-    [
-      pipelineCycleId,
-      FINALIZABLE_CHANNEL_STATUSES,
-      SUCCESSFUL_PUBLICATION_FINALIZE_STATUSES,
-    ],
-  );
-  if (rows.rows.length > 0) {
-    actions.push({
-      action: "reconcile-terminal-finalized-runs",
-      count: rows.rows.length,
-      run_ids: rows.rows.slice(0, 20).map((row) => row.run_id),
-    });
-  }
-  return rows.rows.length;
+  const result = await reconcileTerminalFinalizedRunPage({ query, withTransaction, pipelineCycleId });
+  if (result.updated > 0) actions.push({ action: 'reconcile-terminal-finalized-runs', count: result.updated, run_ids: result.run_ids.slice(0, 20) });
+  return result;
 }
 
 async function refreshDispatchValidationState(dispatchBatchId) {
@@ -2296,7 +2273,8 @@ async function maybeCompleteAutomaticPipeline(actions, queryScheduler) {
   if (!queryScheduler.pipeline_cycle_id) return false;
   const freshStats = await getQueueStats(queues);
   if (hasQueryPipelineQueueBacklog(freshStats)) return false;
-  await reconcileTerminalFinalizedRunStates(actions, queryScheduler.pipeline_cycle_id);
+  const terminalAudit = await reconcileTerminalFinalizedRunStates(actions, queryScheduler.pipeline_cycle_id);
+  if (!terminalAudit.wrapped) return false;
   const fullRepair = await loadFullRepairCompletionState(query, queryScheduler.pipeline_cycle_id);
   if (fullRepair && !fullRepair.complete) {
     actions.push({ action: "wait-full-repair-targets", ...fullRepair });
@@ -2777,14 +2755,15 @@ async function cleanupRecoveredFailedJobs(actions, now = Date.now()) {
 }
 
 async function maybeReconcileAutomaticPublicationOnboarding(actions, now = Date.now()) {
-  if (now - lastPublicationOnboardingAt < publicationOnboardingIntervalMs) return;
+  if (now - lastPublicationOnboardingAt < publicationOnboardingScanIntervalMs) return;
   lastPublicationOnboardingAt = now;
   const summary = await reconcileAutomaticPublicationBacklog({
     query,
     withTransaction,
     limit: publicationOnboardingBatchSize,
+    roundPauseMs: publicationOnboardingIntervalMs,
   });
-  if (summary.scanned > 0 || summary.failed > 0) {
+  if (summary.examined > 0 || summary.wrapped || summary.failed > 0) {
     actions.push({ action: "reconcile-publication-channel-onboarding", ...summary });
   }
 }
@@ -2900,7 +2879,7 @@ async function tick() {
   }
   await reconcileIncrementalAgentQueue(actions);
   await maybeCreateIncrementalAgentBatch(actions);
-  await maybeReconcileAutomaticPublicationOnboarding(actions);
+  if (!independentRecoveryEnabled) await maybeReconcileAutomaticPublicationOnboarding(actions);
   if (pipelineProducerActive(queryScheduler) && channelCandidateDispatchEnabled) {
     await reconcileChannelCandidateQueue(actions, queryScheduler.pipeline_cycle_id);
   }
@@ -3176,10 +3155,10 @@ await ensureDefaultAgentConfig();
 process.on("SIGTERM", () => shutdown("SIGTERM"));
 process.on("SIGINT", () => shutdown("SIGINT"));
 if (independentRecoveryEnabled) {
-  const requiredTables = ['finalize_recovery_scan', 'finalize_recovery_requests', 'migration_settlement_cursors', 'migration_throughput_samples'];
+  const requiredTables = ['background_reconciliation_scans', 'finalize_recovery_scan', 'finalize_recovery_requests', 'migration_settlement_cursors', 'migration_throughput_samples'];
   for (const table of requiredTables) {
     if (!(await query("SELECT to_regclass($1) AS name", [`crawler.${table}`])).rows[0].name) {
-      throw new Error(`Apply throughputRecoverySchema.sql before enabling Controller throughput: missing ${table}`);
+      throw new Error(`Apply ${table === "background_reconciliation_scans" ? "backgroundReconciliationSchema.sql" : "throughputRecoverySchema.sql"} before enabling Controller throughput: missing ${table}`);
     }
   }
   const database = (name, options) => {
@@ -3191,6 +3170,8 @@ if (independentRecoveryEnabled) {
   const maintenance = database("migration-settlement", { statementTimeoutMs: 30000 });
   const api = database("video-api");
   const scanDb = database("finalize-scan");
+  const onboardingDb = database("publication-onboarding");
+  const terminalDb = database("terminal-runs");
   const changeDb = database("finalize-changes");
   const metricsDb = database("migration-metrics", { statementTimeoutMs: 30000 });
   const agentDb = database("agent-dispatch", { statementTimeoutMs: 15000 });
@@ -3207,6 +3188,10 @@ if (independentRecoveryEnabled) {
   const channelQueue = queues[queuesByRole.channelCrawl];
   const finalizeQueue = queues[queuesByRole.finalize];
   const tasks = {
+    publication_onboarding: { intervalMs: publicationOnboardingScanIntervalMs, run: () => reconcileAutomaticPublicationBacklog({
+      ...onboardingDb, limit: publicationOnboardingBatchSize, roundPauseMs: publicationOnboardingIntervalMs,
+    }) },
+    terminal_runs: { intervalMs: 2000, run: () => reconcileTerminalFinalizedRunPage({ ...terminalDb, roundPauseMs: 3600000 }) },
     migration_system_recovery: { intervalMs: 2000, run: async () => {
       const result = await migrationRecovery.reconcileAvailable({ limit: 100 });
       latestMigrationSystemRecovery = result;

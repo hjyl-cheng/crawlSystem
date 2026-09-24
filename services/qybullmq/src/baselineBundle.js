@@ -134,8 +134,10 @@ export function discoveryBaseline({ identityCount = 0, entries = [], scanProof =
   const proofItems = safeCount(proof?.selected_count);
   const proofPages = safeCount(proof?.pages);
   const proofParseGaps = safeCount(proof?.parse_gap_count);
+  const proofDetailFailures = safeCount(proof?.detail_failure_count);
   const proofTerminal = text(proof?.terminal_condition);
   const proofComplete = proofParseGaps === 0
+    && proofDetailFailures === 0
     && [
       "qualified_item_limit",
       "age_boundary_crossed",

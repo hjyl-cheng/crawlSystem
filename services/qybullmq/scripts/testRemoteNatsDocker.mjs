@@ -27,10 +27,35 @@ http {map $http_upgrade $connection_upgrade {default upgrade; '' close;} upstrea
   cfg.services.proxy={image:'nginx:1.29-alpine',ports:[`127.0.0.1:${port}:443`],volumes:[`${root}/nginx.conf:/etc/nginx/nginx.conf:ro`,`${root}/tls:/tls:ro`]};
   await writeFile(join(root,'compose.json'),JSON.stringify(cfg));
  }
+ if(process.env.REMOTE_NATS_TEST_PGBOUNCER==='true'){
+  await writeFile(join(root,'pgbouncer.ini'),`[databases]
+remote_node_ingestion_test = host=postgres port=5432 dbname=remote_node_ingestion_test
+[pgbouncer]
+listen_addr = 0.0.0.0
+listen_port = 5432
+auth_type = plain
+auth_file = /etc/pgbouncer/userlist.txt
+pool_mode = transaction
+default_pool_size = 12
+max_client_conn = 100
+ignore_startup_parameters = extra_float_digits,options
+`);
+  await writeFile(join(root,'userlist.txt'),'"test" "isolated-only"\n');
+  const cfg=JSON.parse(await readFile(join(root,'compose.json'),'utf8'));
+  cfg.services.pgbouncer={image:'edoburu/pgbouncer@sha256:4c1ca296ef525f108f5d3552cc337c0c09587cf8dae7f0067fd93349e47dc1cd',
+    ports:['127.0.0.1::5432'],volumes:[`${root}/pgbouncer.ini:/etc/pgbouncer/pgbouncer.ini:ro`,`${root}/userlist.txt:/etc/pgbouncer/userlist.txt:ro`],mem_limit:'128m',cpus:1};
+  await writeFile(join(root,'compose.json'),JSON.stringify(cfg));
+ }
  docker(['up','-d','--wait']);
  const address=docker(['port','postgres','5432']).trim();if(!/^127\.0\.0\.1:\d+$/.test(address))throw Error('Expected loopback database');
  const redisAddress=docker(['port','redis','6379']).trim();
  const env={...process.env,DATABASE_URL:`postgresql://test:isolated-only@${address}/remote_node_ingestion_test`,REMOTE_NODE_TEST_REDIS_PORT:redisAddress.split(':')[1],LOCAL_INTAKE_TEST_DATABASE_URL:`postgresql://test:isolated-only@${address}/remote_node_ingestion_test`,LOCAL_INTAKE_TEST_REDIS_URL:`redis://:remote-center-fixture-only@${redisAddress}`,REMOTE_NATS_TEST_AUTH_FILE:join(root,'auth/users.conf'),REMOTE_NODE_TEST_DATABASE_URL:`postgresql://test:isolated-only@${address}/remote_node_ingestion_test`,REMOTE_NATS_TEST_URL:process.env.REMOTE_NATS_TEST_WSS==='true'?`wss://127.0.0.1:${port}/node-messages`:`tls://127.0.0.1:${port}`,REMOTE_NATS_TEST_CA:join(root,'cert.pem'),REMOTE_NATS_TEST_NODE_ID:nodeId,REMOTE_NATS_TEST_TOKEN:token,REMOTE_NATS_TEST_PASSWORD:password,REMOTE_NATS_TEST_LOCAL_PASSWORD:'c'.repeat(64)};
+ if(process.env.REMOTE_NATS_TEST_PGBOUNCER==='true'){
+  const pooled=docker(['port','pgbouncer','5432']).trim();if(!/^127\.0\.0\.1:\d+$/.test(pooled))throw Error('Expected loopback transaction pool');
+  env.REMOTE_NODE_TEST_TRANSACTION_DATABASE_URL=`postgresql://test:isolated-only@${pooled}/remote_node_ingestion_test`;
+  docker(['exec','-T','postgres','psql','-U','test','-d','postgres','-c','CREATE DATABASE remote_stop_test']);
+  env.REMOTE_STOP_TEST_DATABASE_URL=`postgresql://test:isolated-only@${address}/remote_stop_test`;
+ }
  const files=process.argv.slice(2);if(!files.length)files.push('test/remoteNats.postgres.integration.test.js','test/remoteIncrementalFence.postgres.integration.test.js','test/remoteControlNotifications.postgres.integration.test.js','test/remoteCenterEntry.integration.test.js','test/localIncrementalIntake.postgres.redis.integration.test.js');
  await new Promise((resolve,reject)=>{const child=spawn(process.execPath,['--test','--test-concurrency=1',...files],{env,stdio:'inherit',timeout:testTimeout});child.once('error',reject);child.once('exit',code=>code===0?resolve():reject(Error(`NATS integration failed: ${code}`)));});
 }catch(error){console.error(docker(['logs','--tail','40','broker']));throw error;}finally{try{docker(['down','-v','--remove-orphans']);}finally{await rm(root,{recursive:true,force:true});}}

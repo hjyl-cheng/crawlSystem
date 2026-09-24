@@ -53,6 +53,7 @@ import { IncrementalAgentBacklog } from "./incrementalAgentBacklog.js";
 import { IncrementalChannelRunner } from "./incrementalChannelRunner.js";
 import { IncrementalRunStore } from "./incrementalRunStore.js";
 import { recordIncrementalTerminalFailure } from "./incrementalTerminalFailure.js";
+import { terminateExhaustedIncrementalRun } from './incrementalBudgetRecovery.js';
 import {
   getCrawlSettingsV2,
   processAgentBatchV2,
@@ -1629,7 +1630,9 @@ async function processJobWithOwnership(job, token) {
         }),
       }),
       terminateBusinessRun: (currentJob, error) => (
-        terminateExhaustedBusinessRun(withTransaction, currentJob, error)
+        currentJob.queueName === queuesByRole.channelIncremental
+          ? terminateExhaustedIncrementalRun(withTransaction, currentJob, error)
+          : terminateExhaustedBusinessRun(withTransaction, currentJob, error)
       ),
       deferForSlotPause: deferJobForSlotPause,
       defaultDelayMs: proxySlotPollMs,

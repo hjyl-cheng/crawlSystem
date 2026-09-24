@@ -1117,6 +1117,9 @@ class VideoDiscoveryPayload:
             if disposition_ledger is not None
             else []
         )
+        # A validated ledger can resolve failed details as terminal exclusions.
+        # Legacy scan proofs have only a failure count to establish incompleteness.
+        details_settled = disposition_ledger is not None or failures == 0
         complete = stop_reason in {
             "anchor_matched",
             "anchor_dates_exhausted",
@@ -1125,7 +1128,7 @@ class VideoDiscoveryPayload:
             "qualified_item_limit",
             "age_boundary_crossed",
             "candidate_limit_processed",
-        } and parse_gaps == 0 and effective_unresolved_count == 0 and not blocking_deferred_video_ids
+        } and parse_gaps == 0 and details_settled and effective_unresolved_count == 0 and not blocking_deferred_video_ids
         if outcome not in {"complete", "partial"} or (outcome == "complete") != complete:
             raise EventValidationError("Discovery outcome disagrees with scan coverage")
         empty_uploads = None

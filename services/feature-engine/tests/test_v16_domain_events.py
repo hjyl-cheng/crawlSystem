@@ -453,6 +453,51 @@ class V16DomainEventTests(unittest.TestCase):
         self.assertEqual(parsed.payload.discovery.disposition_ledger["stored_count"], 1)
         self.assertEqual(parsed.as_pending_payload()["payload"], source["payload"])
 
+    def test_accepts_complete_discovery_with_terminally_excluded_recheck_failure(self) -> None:
+        discovery = discovery_payload()
+        discovery.update(
+            {
+                "discovered_count": 1,
+                "silent_drop_count": 0,
+                "silent_drop_video_ids": [],
+                "dispositions": [
+                    {
+                        "video_id": "new-video",
+                        "kind": "stored",
+                        "reason_code": "content_stored",
+                        "retry_class": None,
+                    }
+                ],
+                "recheck_dispositions": [],
+                "stored_count": 1,
+                "deferred_count": 0,
+                "terminal_excluded_count": 0,
+                "unresolved_count": 0,
+                "unresolved_video_ids": [],
+                "recheck_deferred_video_ids": [],
+                "recheck_deferred_count": 0,
+                "pending_deferred_video_ids": [],
+                "pending_deferred_count": 0,
+                "blocking_deferred_video_ids": [],
+                "recheck_stored_count": 0,
+                "recheck_terminal_excluded_count": 0,
+            }
+        )
+        discovery["detail_failure_count"] = 1
+        discovery["recheck_dispositions"] = [{
+            "video_id": "upcoming-video",
+            "kind": "terminal_excluded",
+            "reason_code": "upcoming_live",
+            "retry_class": "low_frequency_access_recheck",
+        }]
+        discovery["recheck_terminal_excluded_count"] = 1
+        source = event("video", video_payload(discovery=discovery))
+
+        parsed = CrawlerObservationRecorded.from_mapping(source)
+
+        self.assertEqual(parsed.payload.discovery.disposition_ledger["stored_count"], 1)
+        self.assertEqual(parsed.as_pending_payload()["payload"], source["payload"])
+
     def test_rejects_inconsistent_incremental_video_disposition_counts(self) -> None:
         discovery = discovery_payload()
         discovery.update(
@@ -589,6 +634,39 @@ class V16DomainEventTests(unittest.TestCase):
             parsed.payload.discovery.disposition_ledger["recheck_deferred_count"],
             1,
         )
+
+    def test_accepts_legacy_partial_list_end_with_detail_failure(self) -> None:
+        discovery = discovery_payload()
+        discovery.update(
+            {
+                "items": 1,
+                "anchor_matched": False,
+                "stop_reason": "list_end",
+                "first_seen": [],
+                "first_seen_count": 0,
+                "detail_success_count": 0,
+                "detail_failure_count": 1,
+                "inspected_count": 1,
+                "requested_limit": 30,
+                "content_max_age_days": 90,
+                "scan_policy_version": "v1",
+                "terminal_condition": "list_end",
+                "qualified_count": 0,
+                "excluded_count": 0,
+                "age_boundary_crossed": False,
+            }
+        )
+
+        parsed = CrawlerObservationRecorded.from_mapping(
+            event(
+                "video",
+                video_payload(discovery=discovery, discovery_outcome="partial"),
+                outcome="partial",
+            )
+        )
+
+        self.assertEqual(parsed.payload.discovery.stop_reason, "list_end")
+        self.assertEqual(parsed.payload.discovery.detail_failure_count, 1)
 
     def test_rejects_complete_discovery_with_persisted_blocking_deferred_video(self) -> None:
         discovery = discovery_payload()

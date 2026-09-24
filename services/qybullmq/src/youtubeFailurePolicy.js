@@ -66,6 +66,7 @@ function structuredFailure(error, nodeEvidence) {
       failure_kind: matchedKind,
       code: kindFromCode ? code : null,
       source: nonEmptyText(nodeEvidence.source),
+      ...(nodeEvidence.transport_diagnostics ? { transport_diagnostics: nodeEvidence.transport_diagnostics } : {}),
     }),
   });
 }
@@ -199,6 +200,7 @@ function youtubeFailureNodeEvidence(error, overrides = {}) {
     target_url: nonEmptyText(overrides.targetUrl ?? overrides.target_url)
       ?? nonEmptyText(embedded.target_url),
     client: nonEmptyText(overrides.client) ?? nonEmptyText(embedded.client),
+    transport_diagnostics: embedded.transport_diagnostics ?? null,
   };
 }
 

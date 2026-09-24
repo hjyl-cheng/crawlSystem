@@ -10,7 +10,7 @@ import { ProxyBusinessRunPreparer } from '../proxyBusinessRun.js';
 import { executeManagedWorkerAttempt } from '../managedWorkerExecution.js';
 import { processManagedWorkerJob, isStaleExecutionFailure } from '../managedWorkerJob.js';
 import { deferJobForSlotPause } from '../channelJobDeferral.js';
-import { terminateExhaustedBusinessRun } from '../businessRunBudgetRecovery.js';
+import { terminateExhaustedIncrementalRun } from '../incrementalBudgetRecovery.js';
 import { gateVideoApiJob, runVideoApiResumable, isVideoApiHandoff, assertVideoApiNetworkAllowed } from '../videoApiContinuation.js';
 import { executeIncrementalYoutubeJsVideo, fetchIncrementalYoutubeJsVideoDetail } from '../incrementalYoutubeJsVideo.js';
 import { describeChannelCandidateWorkerFailure } from '../channelCandidateWorkerLifecycle.js';
@@ -75,7 +75,7 @@ export function createCenterIncrementalProcessor({ channelStore, runtime, rota, 
           execute:()=>rota.executeJob(job,{prepare:()=>preparer.prepareChannel(remotePlanJob(job)),
             executeAttempt:(prepared,attempt)=>executeManagedWorkerAttempt({job,prepared,attempt,
               execute:()=>runtime.executePlan(),persistRetryableCheckpoint:async()=>true})}),
-          terminateBusinessRun:(current,error)=>terminateExhaustedBusinessRun(withTransaction,current,error),
+          terminateBusinessRun:(current,error)=>terminateExhaustedIncrementalRun(withTransaction,current,error),
           deferForSlotPause:deferJobForSlotPause});
       const result = await runVideoExecutionResumable({job,token,execute:()=>runVideoApiResumable({job,token,execute,executeReplay:()=>replay(job),delayMs:apiDelayMs})});
       await event(job,'completed',{...result,remote_node_id:runtime.nodeId,remote_slot:runtime.slot,duration_ms:Date.now()-started});
@@ -93,6 +93,7 @@ export function createCenterIncrementalProcessor({ channelStore, runtime, rota, 
         attempts:Number(job.attemptsMade??0)+1,maxAttempts:Number(job.opts?.attempts??1),
         permanent:failure.permanentFailure || !!failure.terminalChannel,withTransaction});
       await event(job,'failed',{youtube_failure_decision:failure.failureDecision,
+        ...(error.lease_evidence ? {lease_evidence:error.lease_evidence} : {}),
         remote_node_id:runtime.nodeId,remote_slot:runtime.slot},failure.message);
       report({event:'remote_incremental_failed',node_id:runtime.nodeId,slot:runtime.slot,job_id:job.id,code:error.code??error.name});
       throw error;
