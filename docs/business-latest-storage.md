@@ -139,6 +139,21 @@ currently visible channels. It retains:
 - crawler source data, content identities, publication revisions, batches and
   delivery evidence.
 
+The optional `--include-legacy-current` also admits currently visible channels
+whose current snapshot is still immutable and which have no latest-state row.
+This does not re-crawl or republish them. It requires active, online ownership,
+keeps the visible snapshot and its newest preceding immutable snapshot, and
+excludes any snapshot newer than the visible one or created since the latest
+storage cutover. A removed or inconsistent latest-state row is never treated as
+a legacy channel. Adoption into latest storage continues on the next normal
+publication. The default remains adopted channels only.
+
+Each fixed manifest is limited to **20,000 channels**. Split larger inventories
+into numbered manifests and validate one completed manifest before starting the
+next. This operator batch limit does not increase transaction size: the ten-channel
+and 100-payload limits below still apply. Already completed manifests can be
+repeated safely; busy channels must be recorded and revisited separately.
+
 Thus old publication identifiers and all existing trend points remain resolvable,
 while their unneeded historical video/profile/metric copies can be removed. The
 retained immutable payload is comparison evidence; historical Search replay

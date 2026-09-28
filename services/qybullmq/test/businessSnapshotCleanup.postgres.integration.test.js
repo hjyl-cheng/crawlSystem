@@ -129,3 +129,119 @@ test('pruning preserves current, fallback, references, trends and receipts; skip
     await blocker.end(); await client.end();
   }
 });
+
+test('explicit legacy-current cleanup preserves visible/fallback/newer data and supports later latest adoption', {
+  skip: !url, timeout: 120000,
+}, async () => {
+  const parsed = new URL(url);
+  assert.equal(parsed.hostname, '127.0.0.1'); assert.match(parsed.pathname, /_test$/);
+  const database = parsed.pathname.slice(1);
+  const client = new pg.Client({ connectionString: url });
+  const blocker = new pg.Client({ connectionString: url });
+  await client.connect(); await blocker.connect();
+  const input = JSON.parse(JSON.stringify(completeInput())
+    .replaceAll('UCprojectionAdapterFixture', 'UCcleanupLegacyCurrentFixture')
+    .replaceAll('video-fixture-1', 'cleanup-legacy-video'));
+  const channelId = input.channelId;
+  const tables = ['channel_snapshots', 'content_snapshots', 'channel_metric_values', 'channel_profile_facts', 'channel_links'];
+  const config = { database, channelIds: [channelId], includeLegacyCurrent: true };
+  try {
+    await client.query('BEGIN');
+    await client.query(await readFile(new URL('../src/businessLatestStorageSchema.sql', import.meta.url), 'utf8'));
+    await client.query("UPDATE publication.creator_search_storage_state SET read_mode='live',write_mode='incremental'");
+    await client.query("UPDATE publication.business_storage_state SET mode='latest',activated_at='2026-09-01'");
+    await assertLatestProjectionMode(client);
+    const streamId = randomUUID();
+    await client.query(`INSERT INTO publication.stream(publication_stream_id,source_deployment_key,source_identity_json,
+      registered_by,registered_reason,status_changed_by,status_reason) VALUES($1,'cleanup-legacy-test','{}','test','test','test','test')`, [streamId]);
+    await client.query(`INSERT INTO publication.channel_ownership(channel_id,active_publication_stream_id,projection_mode,
+      state_changed_by,state_reason) VALUES($1,$2,'online','test','test')`, [channelId, streamId]);
+    await client.query('INSERT INTO public.channels(channel_id) VALUES($1)', [channelId]);
+    const seed = async p => {
+      await client.query(`INSERT INTO public.import_batches(id,source_file,source_sha256,captured_at,raw_payload,status)
+        VALUES($1,'cleanup-test',$2,$3,'{}','published')`,
+      [p.snapshot.import_batch_id, createHash('sha256').update(p.snapshot.id).digest('hex'), p.snapshot.captured_at]);
+      for (const row of p.contentItems) await client.query(`INSERT INTO public.content_items
+        (video_id,channel_id,url,first_seen_at,last_seen_at) VALUES($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING`,
+      [row.video_id, row.channel_id, row.url, row.first_seen_at, row.last_seen_at]);
+    };
+    const legacy = [];
+    for (let i = 1; i <= 9; i++) {
+      input.batchId = `cleanup-legacy-current-${i}`;
+      input.capturedAt = `2026-08-${String(i).padStart(2, '0')}T00:00:00Z`;
+      input.current.channel.source_observed_at = input.capturedAt;
+      const p = buildBusinessPublicationProjection({ ...input, storageMode: 'snapshots' });
+      await seed(p);
+      for (const [table, rows] of [['channel_snapshots', [p.snapshot]], ['content_snapshots', p.contents],
+        ['channel_metric_values', p.metrics], ['channel_profile_facts', p.facts], ['channel_links', p.links]]) {
+        await client.query(`INSERT INTO public.${table} SELECT (jsonb_populate_record(NULL::public.${table},v)).*
+          FROM jsonb_array_elements($1::jsonb) v`, [JSON.stringify(rows)]);
+      }
+      legacy.push(p);
+      if (i === 6) await client.query('SELECT public.refresh_creator_search_release_v9($1,$2,ARRAY[]::text[])',
+        [input.batchId, [channelId]]);
+    }
+    // Search deliberately points to Aug 6. Aug 5 is the fallback; Aug 7–9
+    // must survive even though they are not current and predate the cutover.
+    await client.query('INSERT INTO public.creator_search_current SELECT * FROM public.creator_search_live WHERE channel_id=$1', [channelId]);
+    await client.query('UPDATE public.creator_search_current SET snapshot_id=$1 WHERE channel_id=$2', [legacy[0].snapshot.id, channelId]);
+    await client.query(`UPDATE public.channel_metric_values SET baseline_snapshot_id=$1
+      WHERE channel_snapshot_id=$2 AND metric_key='content_count'`, [legacy[1].snapshot.id, legacy[5].snapshot.id]);
+    await client.query('COMMIT');
+    const fingerprint = async () => {
+      const result = {};
+      for (const table of tables) result[table] = (await client.query(`SELECT md5(string_agg(to_jsonb(row)::text,'' ORDER BY id)) AS hash
+        FROM public.${table} row WHERE channel_id=$1`, [channelId])).rows[0].hash;
+      return result;
+    };
+    const before = await fingerprint();
+    assert.equal((await pruneSnapshotPayloadBatch(client, { ...config, includeLegacyCurrent: false })).snapshots.length, 0);
+    const dry = await pruneSnapshotPayloadBatch(client, config);
+    assert.deepEqual(dry.snapshots.map(row => row.id).sort(), [legacy[2], legacy[3]].map(p => p.snapshot.id).sort());
+    assert.ok(dry.snapshots.every(row => row.retained_legacy_id === legacy[4].snapshot.id));
+    await pruneSnapshotPayloadBatch(client, { ...config, apply: true, rollback: true });
+    assert.deepEqual(await fingerprint(), before);
+    await blocker.query('BEGIN');
+    await blocker.query('SELECT channel_id FROM publication.channel_ownership WHERE channel_id=$1 FOR UPDATE', [channelId]);
+    assert.deepEqual((await pruneSnapshotPayloadBatch(client, { ...config, apply: true })).skipped, [channelId]);
+    await blocker.query('ROLLBACK');
+    await client.query("UPDATE publication.channel_ownership SET status='cutover_pending' WHERE channel_id=$1", [channelId]);
+    assert.equal((await pruneSnapshotPayloadBatch(client, config)).snapshots.length, 0);
+    await client.query("UPDATE publication.channel_ownership SET status='active' WHERE channel_id=$1", [channelId]);
+    // A removed or inconsistent latest state never falls back to legacy cleanup.
+    await client.query(`INSERT INTO publication.latest_projection_state
+      (channel_id,snapshot_id,batch_id,version_vector,projection_hash,is_removed)
+      VALUES($1,NULL,'removed','{}','test',true)`, [channelId]);
+    assert.equal((await pruneSnapshotPayloadBatch(client, config)).snapshots.length, 0);
+    await client.query(`UPDATE publication.latest_projection_state SET is_removed=false,snapshot_id='missing' WHERE channel_id=$1`, [channelId]);
+    assert.equal((await pruneSnapshotPayloadBatch(client, config)).snapshots.length, 0);
+    await client.query('DELETE FROM publication.latest_projection_state WHERE channel_id=$1', [channelId]);
+    const failed = { query: (sql, args) => {
+      if (sql.startsWith('DELETE FROM public.channel_profile_facts')) throw new Error('legacy cleanup interrupted');
+      return client.query(sql, args);
+    } };
+    await assert.rejects(pruneSnapshotPayloadBatch(failed, { ...config, apply: true }), /legacy cleanup interrupted/);
+    assert.deepEqual(await fingerprint(), before);
+    const done = await pruneSnapshotPayloadBatch(client, { ...config, apply: true });
+    assert.deepEqual(done.counts, dry.counts);
+    assert.equal((await fingerprint()).channel_snapshots, before.channel_snapshots);
+    assert.equal((await pruneSnapshotPayloadBatch(client, { ...config, apply: true })).snapshots.length, 0);
+    assert.equal(Number((await client.query('SELECT count(*) FROM public.content_snapshots WHERE channel_id=$1', [channelId])).rows[0].count), 7);
+    // Reusing accepted source data can still publish the next latest record;
+    // neither the business reader nor latest writer needs pruned old payloads.
+    await client.query('BEGIN'); await assertLatestProjectionMode(client);
+    input.batchId = 'cleanup-adopt-after-prune'; input.capturedAt = '2026-09-02T00:00:00Z';
+    input.current.channel.source_observed_at = input.capturedAt;
+    const current = buildBusinessPublicationProjection({ ...input, storageMode: 'latest' });
+    await seed(current); await writeLatestProjectionRows(client, [current], input.batchId);
+    await client.query('SELECT public.refresh_creator_search_release_v9($1,$2,ARRAY[]::text[])', [input.batchId, [channelId]]);
+    await client.query('COMMIT');
+    assert.equal((await client.query('SELECT snapshot_id FROM public.creator_search_live WHERE channel_id=$1', [channelId])).rows[0].snapshot_id, current.snapshot.id);
+    await pruneSnapshotPayloadBatch(client, { ...config, apply: true });
+    assert.equal(Number((await client.query('SELECT count(*) FROM public.content_snapshots WHERE channel_snapshot_id=$1', [current.snapshot.id])).rows[0].count), 1);
+    assert.equal(Number((await client.query('SELECT count(*) FROM public.content_snapshots WHERE channel_snapshot_id=$1', [legacy[8].snapshot.id])).rows[0].count), 1);
+  } finally {
+    await blocker.query('ROLLBACK').catch(() => {}); await client.query('ROLLBACK').catch(() => {});
+    await blocker.end(); await client.end();
+  }
+});

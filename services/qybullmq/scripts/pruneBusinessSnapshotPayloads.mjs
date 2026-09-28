@@ -7,24 +7,33 @@ const PAYLOAD_TABLES = ['content_snapshots', 'channel_metric_values', 'channel_p
 
 // Keep snapshot headers: historical About observations and publication receipts
 // still refer to them. Only redundant, superseded payloads are eligible here.
-export async function inspectSnapshotPayloads(client, channelIds) {
+export async function inspectSnapshotPayloads(client, channelIds, { includeLegacyCurrent = false } = {}) {
   return (await client.query(`WITH target AS MATERIALIZED (
-      SELECT state.channel_id,state.snapshot_id,
+      SELECT live.channel_id,live.snapshot_id,current.captured_at AS current_captured_at,
         (SELECT id FROM public.channel_snapshots old
-         WHERE old.channel_id=state.channel_id AND old.id NOT LIKE 'publication_current_snapshot_%'
+         WHERE old.channel_id=live.channel_id AND old.id<>live.snapshot_id
+           AND old.id NOT LIKE 'publication_current_snapshot_%'
+           AND old.captured_at<=current.captured_at
          ORDER BY captured_at DESC,id DESC LIMIT 1) AS retained_legacy_id
-      FROM publication.latest_projection_state state
-      JOIN public.creator_search_live live ON live.channel_id=state.channel_id
-        AND live.snapshot_id=state.snapshot_id AND live.watermark=state.batch_id
-      JOIN public.channel_snapshots current ON current.id=state.snapshot_id
-        AND current.channel_id=state.channel_id
-      WHERE state.channel_id=ANY($1::text[]) AND NOT state.is_removed
-        AND state.snapshot_id LIKE 'publication_current_snapshot_%'
+      FROM public.creator_search_live live
+      JOIN public.channel_snapshots current ON current.id=live.snapshot_id
+        AND current.channel_id=live.channel_id
+      JOIN publication.channel_ownership owner ON owner.channel_id=live.channel_id
+        AND owner.status='active' AND owner.projection_mode='online'
+      LEFT JOIN publication.latest_projection_state state ON state.channel_id=live.channel_id
+      WHERE live.channel_id=ANY($1::text[]) AND (
+        (NOT state.is_removed AND state.snapshot_id=live.snapshot_id
+          AND state.batch_id=live.watermark
+          AND state.snapshot_id LIKE 'publication_current_snapshot_%')
+        OR ($2::boolean AND state.channel_id IS NULL
+          AND live.snapshot_id NOT LIKE 'publication_current_snapshot_%')
+      )
     )
     SELECT s.id,s.channel_id,target.snapshot_id AS current_id,target.retained_legacy_id
     FROM target JOIN public.channel_snapshots s ON s.channel_id=target.channel_id
     WHERE s.id<>target.snapshot_id AND s.id<>target.retained_legacy_id
       AND s.id NOT LIKE 'publication_current_snapshot_%'
+      AND s.captured_at<=target.current_captured_at
       AND s.captured_at<(SELECT activated_at FROM publication.business_storage_state WHERE singleton)
       AND NOT EXISTS (SELECT 1 FROM public.creator_search_live WHERE snapshot_id=s.id)
       AND NOT EXISTS (SELECT 1 FROM public.creator_search_current WHERE snapshot_id=s.id)
@@ -33,7 +42,7 @@ export async function inspectSnapshotPayloads(client, channelIds) {
       AND NOT EXISTS (SELECT 1 FROM public.creator_classification_runs WHERE channel_snapshot_id=s.id)
       AND NOT EXISTS (SELECT 1 FROM public.channel_metric_values WHERE baseline_snapshot_id=s.id)
       AND (${PAYLOAD_TABLES.map(table => `EXISTS (SELECT 1 FROM public.${table} WHERE channel_snapshot_id=s.id)`).join(' OR ')})
-    ORDER BY s.channel_id,s.captured_at,s.id`, [channelIds])).rows;
+    ORDER BY s.channel_id,s.captured_at,s.id`, [channelIds, includeLegacyCurrent])).rows;
 }
 
 async function assertDatabase(client, database) {
@@ -77,7 +86,9 @@ async function protectedSignature(client, channelIds, ids) {
   return JSON.stringify(result);
 }
 
-export async function pruneSnapshotPayloadBatch(client, { database, channelIds, apply = false, rollback = false }) {
+export async function pruneSnapshotPayloadBatch(client, {
+  database, channelIds, apply = false, rollback = false, includeLegacyCurrent = false,
+}) {
   if (!database || !Array.isArray(channelIds) || channelIds.length > 10 || !channelIds.length) {
     throw new Error('database and 1–10 channel IDs are required');
   }
@@ -91,13 +102,13 @@ export async function pruneSnapshotPayloadBatch(client, { database, channelIds, 
       locked = (await client.query(`SELECT channel_id FROM publication.channel_ownership
         WHERE channel_id=ANY($1::text[]) ORDER BY channel_id FOR UPDATE SKIP LOCKED`, [channelIds])).rows.map(row => row.channel_id);
     }
-    let candidates = await inspectSnapshotPayloads(client, locked);
+    let candidates = await inspectSnapshotPayloads(client, locked, { includeLegacyCurrent });
     if (apply) candidates = candidates.slice(0, 100);
     if (apply && candidates.length) {
       // Block new evidence references, then recheck references on a fresh snapshot.
       await client.query(`SELECT id FROM public.channel_snapshots WHERE id=ANY($1::text[])
         ORDER BY id FOR UPDATE`, [candidates.map(row => row.id)]);
-      const fresh = new Set((await inspectSnapshotPayloads(client, locked)).map(row => row.id));
+      const fresh = new Set((await inspectSnapshotPayloads(client, locked, { includeLegacyCurrent })).map(row => row.id));
       candidates = candidates.filter(row => fresh.has(row.id));
     }
     const ids = candidates.map(row => row.id);
@@ -135,6 +146,7 @@ async function main() {
   const database = process.env.EXPECTED_BUSINESS_DATABASE;
   const manifestPath = process.env.SNAPSHOT_CLEANUP_CHANNELS_FILE;
   const apply = process.argv.includes('--apply');
+  const includeLegacyCurrent = process.argv.includes('--include-legacy-current');
   if (!database || !manifestPath) throw new Error('EXPECTED_BUSINESS_DATABASE and SNAPSHOT_CLEANUP_CHANNELS_FILE are required');
   if (apply && process.env.CONFIRM_SNAPSHOT_PAYLOAD_CLEANUP !== database) {
     throw new Error('apply requires matching CONFIRM_SNAPSHOT_PAYLOAD_CLEANUP');
@@ -143,6 +155,7 @@ async function main() {
   if (!Array.isArray(channels) || channels.some(id => typeof id !== 'string' || !id.trim()) || new Set(channels).size !== channels.length) {
     throw new Error('manifest must be a unique array of channel IDs');
   }
+  if (channels.length > 20000) throw new Error('a cleanup manifest may contain at most 20,000 channels');
   const client = new pg.Client({ connectionString: environmentValue('BUSINESS_DATABASE_URL'), application_name: 'business-snapshot-payload-cleanup' });
   const totals = { snapshots: 0, counts: Object.fromEntries(PAYLOAD_TABLES.map(table => [table, 0])), skipped: [] };
   try {
@@ -150,7 +163,7 @@ async function main() {
     for (let offset = 0; offset < channels.length; offset += 10) {
       const started = Date.now();
       const batch = await pruneSnapshotPayloadBatch(client, { database, channelIds: channels.slice(offset, offset + 10), apply,
-        rollback: process.argv.includes('--rollback') });
+        rollback: process.argv.includes('--rollback'), includeLegacyCurrent });
       totals.snapshots += batch.snapshots.length;
       totals.skipped.push(...batch.skipped);
       for (const table of PAYLOAD_TABLES) totals.counts[table] += batch.counts[table];
