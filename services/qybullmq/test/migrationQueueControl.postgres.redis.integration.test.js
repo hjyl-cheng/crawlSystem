@@ -5,6 +5,9 @@ import pg from 'pg';
 import { Queue, Worker } from 'bullmq';
 import { createMigrationQueueControl, migrationQueueNames, applyFencedQueueState } from '../src/migrationQueueControl.js';
 import { createControllerWorkLoops } from '../src/controllerWorkLoops.js';
+import express from 'express';
+import { controlledMigrationGuard } from '../src/controlledMigrationGuard.js';
+import { installOperatorQueueRoutes } from '../src/operatorQueueRoutes.js';
 
 const url = process.env.MIGRATION_QUEUE_TEST_DATABASE_URL;
 const port = Number(process.env.MIGRATION_QUEUE_TEST_REDIS_PORT);
@@ -31,8 +34,9 @@ test('migration queue state survives stale ticks, interrupted control and indepe
     CREATE SEQUENCE IF NOT EXISTS crawler.migration_queue_control_revision;
     TRUNCATE crawler.settings,crawler.migration_control_batches,crawler.youtube_api_detail_requests;`);
   let ready = 10, recovery = [], fail = false;
+  const discoveryPressure = { discoverReady: 2, channelBacklog: 0, agentBacklog: 0, dataApiBacklog: 0 };
   const control = createMigrationQueueControl({ withTransaction: tx, queues,
-    loadPressure: async () => { if (fail) throw new Error('temporary outage'); return { at: Date.now(), channelReady: ready, detailReady: ready, detailBacklog: 0 }; },
+    loadPressure: async () => { if (fail) throw new Error('temporary outage'); return { at: Date.now(), channelReady: ready, detailReady: ready, detailBacklog: 0, ...discoveryPressure }; },
     recoveryQueues: () => recovery });
   const state = async (status, schedulerStatus = 'finishing', id = 'new') => tx(async c => {
     await c.query(`INSERT INTO crawler.settings VALUES('query_scheduler',$1,now()) ON CONFLICT(setting_key)
@@ -41,6 +45,81 @@ test('migration queue state survives stale ticks, interrupted control and indepe
       DO UPDATE SET status=$2,version=crawler.migration_control_batches.version+1`, [id, status]);
   });
   const crawl = queues['youtube-channel-crawl'], agent = queues['youtube-agent-batch'];
+  await t.test('browser discovery resume survives reconciliation while channel crawl stays manually paused', async () => {
+    await state('completed', 'stopped'); await control.reconcile();
+    await control.setOperatorPaused(crawl.name, true);
+    const discover = queues['youtube-discover-page'];
+    const app = express();
+    app.use(controlledMigrationGuard({ CONTROLLED_MIGRATION_ONLY: 'true' }));
+    installOperatorQueueRoutes(app, { basePath: '/queues', control });
+    app.use((error, _req, res, _next) => res.status(error.statusCode || 500).json({ error: error.message }));
+    const server = app.listen(0, '127.0.0.1');
+    await new Promise(r => server.once('listening', r));
+    const endpoint = `http://127.0.0.1:${server.address().port}/queues/api/queues/${discover.name}`;
+    try {
+      const response = await fetch(`${endpoint}/resume`, { method: 'PUT' });
+      assert.equal(response.status, 200);
+      assert.equal((await response.json()).pending, true);
+      for (let i = 0; i < 3; i++) await control.reconcile();
+      assert.equal(await discover.isPaused(), false);
+      assert.equal(await crawl.isPaused(), true);
+      const restarted = createMigrationQueueControl({ withTransaction: tx, queues,
+        loadPressure: async () => ({ at: Date.now(), channelReady: 10, detailReady: 10, detailBacklog: 0, ...discoveryPressure }) });
+      await restarted.reconcile(); assert.equal(await discover.isPaused(), false);
+      discoveryPressure.channelBacklog = 101;
+      await control.reconcile(); assert.equal(await discover.isPaused(), true);
+      discoveryPressure.channelBacklog = 0;
+      await control.reconcile(); assert.equal(await discover.isPaused(), false);
+      assert.equal((await fetch(`${endpoint}/pause`, { method: 'PUT' })).status, 200);
+      await control.reconcile(); assert.equal(await discover.isPaused(), true);
+      await state('running');
+      assert.equal((await fetch(`${endpoint}/resume`, { method: 'PUT' })).status, 409);
+      assert.equal(await discover.isPaused(), true);
+      await state('completed', 'stopped');
+      await control.setOperatorPaused(crawl.name, false); await control.reconcile();
+    } finally { await new Promise(r => server.close(r)); }
+  });
+  await t.test('browser pause route passes canary guard and survives the next automatic tick', async () => {
+    await state('completed', 'stopped'); await control.reconcile();
+    const app = express();
+    app.use(controlledMigrationGuard({ CONTROLLED_MIGRATION_ONLY: 'true' }));
+    installOperatorQueueRoutes(app, { basePath: '/queues', control });
+    app.use((_req, res) => res.sendStatus(404));
+    const server = app.listen(0, '127.0.0.1');
+    await new Promise(r => server.once('listening', r));
+    const endpoint = `http://127.0.0.1:${server.address().port}/queues/api/queues/${crawl.name}`;
+    try {
+      const response = await fetch(`${endpoint}/pause`, { method: 'PUT' });
+      assert.equal(response.status, 200);
+      assert.deepEqual(await response.json(), { paused: true });
+      await control.reconcile();
+      assert.equal(await crawl.isPaused(), true);
+      assert.equal((await fetch(`${endpoint}/empty`, { method: 'PUT' })).status, 423);
+      assert.equal((await fetch(`${endpoint}/resume`, { method: 'PUT' })).status, 200);
+      await control.reconcile();
+      assert.equal(await crawl.isPaused(), false);
+    } finally { await new Promise(r => server.close(r)); }
+  });
+  await t.test('operator crawl pause survives reconciliation and restart; resume respects pressure', async () => {
+    await state('completed', 'stopped');
+    await control.reconcile();
+    await control.setOperatorPaused(crawl.name, true);
+    assert.equal(await crawl.isPaused(), true);
+    await control.reconcile();
+    const restarted = createMigrationQueueControl({ withTransaction: tx, queues,
+      loadPressure: async () => ({ at: Date.now(), channelReady: ready, detailReady: 10, detailBacklog: 0 }) });
+    const result = await restarted.reconcile();
+    assert.equal(result.queues[crawl.name].reason, 'operator_paused');
+    assert.equal(await crawl.isPaused(), true);
+    assert.equal(await agent.isPaused(), false);
+    ready = 0;
+    await restarted.setOperatorPaused(crawl.name, false);
+    await restarted.reconcile();
+    assert.equal(await crawl.isPaused(), true);
+    ready = 10;
+    await restarted.reconcile();
+    assert.equal(await crawl.isPaused(), false);
+  });
   await t.test('production controller late stopped decision cannot undo new batch recovery', async () => {
     const source = await readFile(new URL('../src/controller.js', import.meta.url), 'utf8');
     const body = source.slice(source.indexOf('async function setPaused('), source.indexOf('\nfunction hasQueueBacklog'));

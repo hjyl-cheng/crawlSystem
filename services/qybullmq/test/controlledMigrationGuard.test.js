@@ -8,6 +8,11 @@ test('controlled mode allows batch pause/resume/stop but rejects unrelated write
  try{for(const [method,path,status] of [
   ['POST','/api/migration/batches/migration-example/pause',200],['POST','/api/migration/batches/migration-example/resume',200],['POST','/api/migration/batches/migration-example/stop',200],
   ['POST','/api/migration/channels/batch',200],['POST','/api/migration/system-retries/example/retry',200],['GET','/api/migration/batches',200],
+  ['PUT','/queues/api/queues/youtube-channel-crawl/pause',200],['PUT','/queues/api/queues/youtube-channel-crawl/resume',200],
+  ['PUT','/queues/api/queues/youtube-discover-page/pause',200],['PUT','/queues/api/queues/youtube-discover-page/resume',200],
+  ['PUT','/queues/api/queues/youtube-discover-page/empty',423],['PUT','/queues/api/queues/youtube-discover-page/retry/failed',423],
+  ['PUT','/queues/api/queues/youtube-channel-crawl/empty',423],['PUT','/queues/api/queues/pause',423],
+  ['PUT','/queues/api/queues/youtube-agent-batch/pause',423],['POST','/queues/api/queues/youtube-channel-crawl/pause',423],
   ['POST','/api/migration/batches/example/delete',423],['DELETE','/api/migration/batches/example/stop',423],['POST','/api/queues/clear',423]
  ])assert.equal((await fetch(`http://127.0.0.1:${server.address().port}${path}`,{method})).status,status,`${method} ${path}`);
  }finally{await new Promise(r=>server.close(r))}

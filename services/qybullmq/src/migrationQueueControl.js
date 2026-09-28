@@ -2,6 +2,7 @@ import { createRequire } from 'node:module';
 import { normalizeQueryScheduler } from './queryScheduler.js';
 import { ProxyControlClient } from './proxyControlClient.js';
 import { normalizeRotaCapacity } from './rotaCapacity.js';
+import { operatorQueueNames, operatorDiscoveryState } from './operatorQueuePolicy.js';
 
 const require = createRequire(import.meta.url);
 // Reuse the installed BullMQ script, including its priority/delay markers.
@@ -38,7 +39,8 @@ export async function applyFencedQueueState(queue, { paused, revision, reason })
 }
 
 export function migrationQueuePolicy({ scheduler, batch, pressure, recoveryQueues = [], apiEnabled = true,
-  apiDemand = false, inlineDetails = true, detailHigh = 100, detailLow = 40, channelPaused = false }) {
+  apiDemand = false, inlineDetails = true, detailHigh = 100, detailLow = 40, channelPaused = false,
+  discoveryEnabled = false, discoveryPaused = true, env = {} }) {
   const active = ['preparing', 'running', 'pausing', 'stopping'].includes(batch.status)
     && !['paused', 'stopped'].includes(scheduler.status);
   // Completion stops producers; consumers remain open and wait for work.
@@ -48,7 +50,8 @@ export function migrationQueuePolicy({ scheduler, batch, pressure, recoveryQueue
   const consumersEnabled = active || completedIdle;
   const result = {};
   const set = (name, paused, reason) => { result[name] = { paused, reason }; };
-  set('youtube-discover-page', true, 'controlled_migration');
+  result['youtube-discover-page'] = operatorDiscoveryState({ enabled: discoveryEnabled, completedIdle,
+    pressure, paused: discoveryPaused, env });
   const crawl = 'youtube-channel-crawl';
   if (!consumersEnabled) set(crawl, true, `migration_${batch.status}`);
   else if (!Number.isFinite(pressure.channelReady)) set(crawl, true, 'proxy_capacity_unavailable');
@@ -68,16 +71,20 @@ export function migrationQueuePolicy({ scheduler, batch, pressure, recoveryQueue
 
 export function createMigrationPressureReader({ catalog, queues, env = process.env }) {
   const rota = new ProxyControlClient({ timeoutMs: 1500, maxAttempts: 1 });
+  const backlog = name => bounded(queues[name].getJobCounts('waiting', 'active', 'delayed', 'prioritized', 'paused'))
+    .then(counts => Object.values(counts).reduce((a, b) => a + b, 0));
   return async () => {
     const at = Date.now();
     const inline = env.YOUTUBE_CHANNEL_INLINE_DETAILS !== 'false';
-    const [capacity, detail] = await Promise.all([
+    const [capacity, detail, channel, agent, dataApi] = await Promise.all([
       rota.capacity().then(value => normalizeRotaCapacity(value, { catalog })).catch(() => null),
-      inline ? 0 : bounded(queues['youtube-content-detail'].getJobCounts('waiting', 'active', 'delayed', 'prioritized', 'paused'))
-        .then(counts => Object.values(counts).reduce((a, b) => a + b, 0)),
+      inline ? 0 : backlog('youtube-content-detail'),
+      backlog('youtube-channel-crawl'), backlog('youtube-agent-batch'), backlog('youtube-data-api-batch'),
     ]);
     return { at, channelReady: capacity?.roles?.channel?.ready ?? null,
-      detailReady: capacity?.roles?.detail?.ready ?? null, detailBacklog: detail };
+      detailReady: capacity?.roles?.detail?.ready ?? null, detailBacklog: detail,
+      discoverReady: capacity?.roles?.discover?.ready ?? null,
+      channelBacklog: channel, agentBacklog: agent, dataApiBacklog: dataApi };
   };
 }
 
@@ -95,7 +102,39 @@ export function createMigrationQueueControl({ withTransaction, queues, loadPress
     return { scheduler, batch };
   };
   const revision = async client => (await client.query("SELECT nextval('crawler.migration_queue_control_revision')::text AS revision")).rows[0].revision;
+  const operatorPauses = async client => (await client.query(
+    "SELECT value_json FROM crawler.settings WHERE setting_key='migration_operator_queue_pauses'",
+  )).rows[0]?.value_json ?? {};
   return {
+    async setOperatorPaused(queueName, paused) {
+      if (!operatorQueueNames.includes(queueName) || typeof paused !== 'boolean') throw new Error('INVALID_OPERATOR_QUEUE_CONTROL');
+      // Share the reconciler's scheduler lock and Redis revision fence, so a
+      // previously calculated automatic resume cannot overwrite this intent.
+      const managed = await withTransaction(async client => {
+        const { scheduler, batch } = await snapshot(client);
+        if (queueName === 'youtube-discover-page' && !paused && batch
+          && !(batch.status === 'completed' && scheduler.status === 'stopped' && scheduler.stop_reason === 'pipeline_complete')) {
+          throw Object.assign(new Error('当前迁移或调度状态不允许恢复发现队列，请先完成迁移；恢复队列不会启动 Query 调度。'), { statusCode: 409 });
+        }
+        const pauses = await operatorPauses(client);
+        if (paused || queueName === 'youtube-discover-page') pauses[queueName] = paused;
+        else delete pauses[queueName];
+        await client.query(`INSERT INTO crawler.settings(setting_key,value_json)
+          VALUES('migration_operator_queue_pauses',$1::jsonb) ON CONFLICT(setting_key)
+          DO UPDATE SET value_json=EXCLUDED.value_json,updated_at=now()`, [JSON.stringify(pauses)]);
+        if (paused || !batch) {
+          const changed = await applyFencedQueueState(queues[queueName], {
+            paused, revision: await revision(client), reason: paused ? 'operator_paused' : 'operator_resumed',
+          });
+          if (changed < 0 || await bounded(queues[queueName].isPaused()) !== paused) throw new Error('QUEUE_CONTROL_NOT_APPLIED');
+        }
+        return Boolean(batch);
+      });
+      await this.request();
+      // Only the controller has capacity credentials. It applies a released hold
+      // on the next wake/tick, retaining all migration and capacity constraints.
+      return { paused: await bounded(queues[queueName].isPaused()), ...(!paused && managed ? { pending: true } : {}) };
+    },
     async reconcile() {
       const pressure = await loadPressure();
       return withTransaction(async client => {
@@ -106,9 +145,15 @@ export function createMigrationQueueControl({ withTransaction, queues, loadPress
         const apiEnabled = (api?.fallback_mode ?? env.YOUTUBE_DATA_API_FALLBACK_MODE) !== 'disabled';
         const queuedApi = await bounded(queues['youtube-data-api-batch'].getJobCounts('waiting', 'active', 'paused', 'prioritized', 'delayed'));
         const apiDemand = apiEnabled && (Object.values(queuedApi).some(count => count > 0) || (await client.query("SELECT EXISTS(SELECT 1 FROM crawler.youtube_api_detail_requests WHERE status='pending') AS pending")).rows[0].pending);
+        const pauses = await operatorPauses(client);
         const plan = migrationQueuePolicy({ scheduler, batch, pressure, recoveryQueues: recoveryQueues(), apiEnabled, apiDemand,
+          discoveryEnabled: pauses['youtube-discover-page'] === false, env,
+          discoveryPaused: await bounded(queues['youtube-discover-page'].isPaused()),
           inlineDetails: env.YOUTUBE_CHANNEL_INLINE_DETAILS !== 'false', detailHigh: Number(env.CHANNEL_PAUSE_DETAIL_BACKLOG || 100),
           detailLow: Number(env.CHANNEL_RESUME_DETAIL_BACKLOG || 40), channelPaused: await bounded(queues['youtube-channel-crawl'].isPaused()) });
+        for (const name of Object.keys(plan)) {
+          if (pauses[name] === true) plan[name] = { paused: true, reason: 'operator_paused' };
+        }
         const version = await revision(client);
         const actions = [];
         for (const [name, state] of Object.entries(plan)) {
@@ -135,6 +180,10 @@ export function createMigrationQueueControl({ withTransaction, queues, loadPress
         if (!expectedScheduler || JSON.stringify(scheduler) !== JSON.stringify(normalizeQueryScheduler(expectedScheduler))) {
           report({ event: 'queue_control_stale_decision', queue: queueName, reason });
           return;
+        }
+        if ((await operatorPauses(client))[queueName] === true) {
+          paused = true;
+          reason = 'operator_paused';
         }
         const changed = await applyFencedQueueState(queues[queueName], { paused, reason, revision: await revision(client) });
         if (changed > 0) actions.push({ action: paused ? 'pause' : 'resume', queue: queueName, reason });

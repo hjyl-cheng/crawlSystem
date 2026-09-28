@@ -1,4 +1,5 @@
 import { createMigrationQueueControl } from './migrationQueueControl.js';
+import { installOperatorQueueRoutes } from './operatorQueueRoutes.js';
 import { createControllerDatabase } from './controllerDatabase.js';
 import { createMigrationProgressReader } from "./migrationThroughput.js";
 import { controlledMigrationGuard } from './controlledMigrationGuard.js';
@@ -100,6 +101,7 @@ app.disable("x-powered-by");
 app.use(express.json({ limit: "2mb" }));
 app.use(morgan("combined"));
 app.use(controlledMigrationGuard());
+installOperatorQueueRoutes(app, { basePath, control: migrationQueueControl });
 
 const asyncRoute = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 
