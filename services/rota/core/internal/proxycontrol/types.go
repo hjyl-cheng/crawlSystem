@@ -100,6 +100,8 @@ type Options struct {
 	MinReserveCount                  int
 	FailureCooldown                  time.Duration
 	NetworkCooldown                  time.Duration
+	RepeatedFailureWindow            time.Duration
+	MaxRepeatedFailureCooldown       time.Duration
 	MaxRouteSwitchesPerExecution     int
 	MaxNetworkAttemptsPerBusinessRun int
 	IdentityPolicies                 map[string]IdentityPolicy

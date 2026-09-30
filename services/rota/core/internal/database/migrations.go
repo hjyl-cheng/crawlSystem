@@ -1714,6 +1714,13 @@ var migrations = []Migration{
 		);`,
 		Down: `DROP TABLE IF EXISTS proxy_control_capacity_targets;`,
 	},
+	{
+		Version:     1016,
+		Description: "Record the last successful slot Task per proxy",
+		Up: `ALTER TABLE proxies
+			ADD COLUMN IF NOT EXISTS last_task_success_at TIMESTAMPTZ;`,
+		Down: `ALTER TABLE proxies DROP COLUMN IF EXISTS last_task_success_at;`,
+	},
 }
 
 // Migrate runs all pending migrations

@@ -67,6 +67,10 @@ type ProxyControlConfig struct {
 	MinReserveCount     int
 	FailureCooldownMin  int
 	NetworkCooldownMin  int
+	// Repeated Task Observation failures since a proxy's last successful Task
+	// double its cooldown inside this window, up to the maximum cooldown.
+	RepeatedFailureWindowHours    int
+	RepeatedFailureMaxCooldownMin int
 }
 
 // PeriodicHealthCheckConfig configures the bounded background health-check
@@ -148,6 +152,12 @@ func Load() (*Config, error) {
 			MinReserveCount:     getEnvAsInt("ROTA_PROXY_MIN_RESERVE_COUNT", 3),
 			FailureCooldownMin:  getEnvAsInt("ROTA_PROXY_FAILURE_COOLDOWN_MINUTES", 30),
 			NetworkCooldownMin:  getEnvAsInt("ROTA_PROXY_NETWORK_COOLDOWN_MINUTES", 5),
+			RepeatedFailureWindowHours: getEnvAsInt(
+				"ROTA_PROXY_REPEATED_FAILURE_WINDOW_HOURS", 24,
+			),
+			RepeatedFailureMaxCooldownMin: getEnvAsInt(
+				"ROTA_PROXY_REPEATED_FAILURE_MAX_COOLDOWN_MINUTES", 240,
+			),
 		},
 		PeriodicHealthCheck: PeriodicHealthCheckConfig{
 			Enabled:         getEnvAsBool("ROTA_PERIODIC_HEALTH_CHECK_ENABLED", true),
@@ -241,6 +251,12 @@ func (c *Config) Validate() error {
 		}
 		if c.ProxyControl.NetworkCooldownMin < 1 || c.ProxyControl.NetworkCooldownMin > 1440 {
 			return fmt.Errorf("ROTA_PROXY_NETWORK_COOLDOWN_MINUTES must be between 1 and 1440")
+		}
+		if c.ProxyControl.RepeatedFailureWindowHours < 1 || c.ProxyControl.RepeatedFailureWindowHours > 168 {
+			return fmt.Errorf("ROTA_PROXY_REPEATED_FAILURE_WINDOW_HOURS must be between 1 and 168")
+		}
+		if c.ProxyControl.RepeatedFailureMaxCooldownMin < 1 || c.ProxyControl.RepeatedFailureMaxCooldownMin > 1440 {
+			return fmt.Errorf("ROTA_PROXY_REPEATED_FAILURE_MAX_COOLDOWN_MINUTES must be between 1 and 1440")
 		}
 	}
 

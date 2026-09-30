@@ -125,6 +125,12 @@ func New(
 	if options.NetworkCooldown <= 0 {
 		options.NetworkCooldown = 5 * time.Minute
 	}
+	if options.RepeatedFailureWindow <= 0 {
+		options.RepeatedFailureWindow = 24 * time.Hour
+	}
+	if options.MaxRepeatedFailureCooldown <= 0 {
+		options.MaxRepeatedFailureCooldown = 4 * time.Hour
+	}
 	if options.MaxRouteSwitchesPerExecution <= 0 {
 		options.MaxRouteSwitchesPerExecution = 2
 	}

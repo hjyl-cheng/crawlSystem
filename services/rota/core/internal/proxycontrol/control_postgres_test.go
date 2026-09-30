@@ -1569,6 +1569,7 @@ CREATE TABLE proxies (
   youtube_failure_score DOUBLE PRECISION NOT NULL DEFAULT 0,
   last_youtube_success TIMESTAMPTZ,
   last_youtube_failure TIMESTAMPTZ,
+	last_task_success_at TIMESTAMPTZ,
 	country_code TEXT,
 	country_verified_at TIMESTAMPTZ,
 	egress_identity_mode TEXT NOT NULL DEFAULT 'static',

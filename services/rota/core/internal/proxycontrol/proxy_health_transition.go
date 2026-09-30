@@ -11,6 +11,24 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
+const taskObservationQuarantineEvent = "task_observation_quarantine"
+
+// repeatedFailureCooldown doubles the base cooldown for each prior failure,
+// never shortening the base and never exceeding a positive maximum.
+func repeatedFailureCooldown(base time.Duration, priorFailures int, maximum time.Duration) time.Duration {
+	cooldown := base
+	for range max(priorFailures, 0) {
+		if maximum > 0 && cooldown >= maximum {
+			break
+		}
+		cooldown *= 2
+	}
+	if maximum > 0 && cooldown > maximum {
+		cooldown = max(maximum, base)
+	}
+	return cooldown
+}
+
 func (m *Manager) quarantineProxy(
 	ctx context.Context,
 	tx pgx.Tx,
@@ -25,6 +43,24 @@ func (m *Manager) quarantineProxy(
 	}
 	if cooldown <= 0 {
 		cooldown = 5 * time.Minute
+	}
+	if eventKind == taskObservationQuarantineEvent {
+		// One passing health probe does not show that a flaky proxy can finish
+		// a Task. Only a successful Task resets the repeated-failure count.
+		var priorFailures int
+		if err := tx.QueryRow(ctx, `
+			SELECT COUNT(*)
+			FROM proxy_lifecycle_events e
+			JOIN proxies p ON p.id=e.proxy_id
+			WHERE e.proxy_id=$1 AND e.event_kind=$2
+			  AND e.occurred_at > GREATEST(
+			    COALESCE(p.last_task_success_at,'-infinity'::timestamptz),
+			    NOW()-($3::bigint * interval '1 millisecond')
+			  )
+		`, proxyID, eventKind, m.options.RepeatedFailureWindow.Milliseconds()).Scan(&priorFailures); err != nil {
+			return fmt.Errorf("count repeated failures for proxy %d: %w", proxyID, err)
+		}
+		cooldown = repeatedFailureCooldown(cooldown, priorFailures, m.options.MaxRepeatedFailureCooldown)
 	}
 	nextCheck := time.Now().UTC().Add(cooldown)
 	reason = strings.TrimSpace(reason)

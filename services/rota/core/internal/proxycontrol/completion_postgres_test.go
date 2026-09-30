@@ -193,6 +193,20 @@ func TestCompleteTaskKeepsHealthyRouteAndIsIdempotent(t *testing.T) {
 			currentProxyID, routeGeneration, observationCount,
 		)
 	}
+	assertProxyTaskSuccessRecorded(t, pool, proxyID, true)
+}
+
+func assertProxyTaskSuccessRecorded(t *testing.T, pool *pgxpool.Pool, proxyID int, want bool) {
+	t.Helper()
+	var recorded bool
+	if err := pool.QueryRow(context.Background(), `
+		SELECT last_task_success_at IS NOT NULL FROM proxies WHERE id=$1
+	`, proxyID).Scan(&recorded); err != nil {
+		t.Fatalf("load proxy %d task success: %v", proxyID, err)
+	}
+	if recorded != want {
+		t.Fatalf("proxy %d task success recorded = %t, want %t", proxyID, recorded, want)
+	}
 }
 
 func TestCompleteTaskReservesOnlyPolicyEligibleWarmStandbyAfterChallenge(t *testing.T) {
@@ -709,6 +723,8 @@ func TestCompleteTaskRetriesDataPlaneActivationAndDoesNotLeakActionIntoNextTask(
 	if pendingAction != "" || pendingIncident != "" {
 		t.Fatalf("replacement action was not consumed: action=%q incident=%q", pendingAction, pendingIncident)
 	}
+	assertProxyTaskSuccessRecorded(t, pool, currentID, false)
+	assertProxyTaskSuccessRecorded(t, pool, warmStandbyID, true)
 }
 
 func assertProxyQuarantinedAfterSlotReplacement(

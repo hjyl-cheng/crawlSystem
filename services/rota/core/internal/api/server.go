@@ -159,6 +159,12 @@ func New(
 			MinReserveCount:      cfg.ProxyControl.MinReserveCount,
 			FailureCooldown:      time.Duration(cfg.ProxyControl.FailureCooldownMin) * time.Minute,
 			NetworkCooldown:      time.Duration(cfg.ProxyControl.NetworkCooldownMin) * time.Minute,
+			RepeatedFailureWindow: time.Duration(
+				cfg.ProxyControl.RepeatedFailureWindowHours,
+			) * time.Hour,
+			MaxRepeatedFailureCooldown: time.Duration(
+				cfg.ProxyControl.RepeatedFailureMaxCooldownMin,
+			) * time.Minute,
 			IdentityPolicies:     identityPolicies,
 		},
 		log,

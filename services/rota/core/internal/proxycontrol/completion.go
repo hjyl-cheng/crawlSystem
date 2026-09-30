@@ -198,10 +198,20 @@ func (m *Manager) CompleteTask(ctx context.Context, request CompleteTaskRequest)
 			if err := m.quarantineProxy(
 				ctx, tx, *state.proxyID, failureKind,
 				"slot task observation required route replacement",
-				"task_observation_quarantine",
+				taskObservationQuarantineEvent,
 			); err != nil {
 				return CompleteTaskResult{}, err
 			}
+		}
+	}
+	routeQuarantined := state.pendingAction != "" && state.pendingAction != PendingActionNone && !countryRecheck
+	if request.Outcome == TaskOutcomeSuccess && state.proxyID != nil && !routeQuarantined {
+		// Task success, not a health probe, is the evidence that resets
+		// repeated-failure cooldown escalation for this proxy.
+		if _, err := tx.Exec(ctx, `
+			UPDATE proxies SET last_task_success_at=NOW() WHERE id=$1
+		`, *state.proxyID); err != nil {
+			return CompleteTaskResult{}, fmt.Errorf("record proxy task success: %w", err)
 		}
 	}
 	encodedResult, err := json.Marshal(result)
