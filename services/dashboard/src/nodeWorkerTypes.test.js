@@ -86,3 +86,36 @@ test('an incremental registration rejects a different or missing requested worke
     expectedInstalledCount: 0 }), { statusCode: 400 });
   assert.equal((await store.load()).version, 0);
 });
+
+test('a node whose Workers were all removed can switch type and deploy it under the same deployment identity', async () => {
+  const id = 'b18d8455-7881-43be-ae52-18cfcf160514', deploymentId = 'c18d8455-7881-43be-ae52-18cfcf160514';
+  const retired = { state: 'connected', mode: 'incremental_collect', deploymentId, image: 'registry.example/incremental@sha256:' + 'a'.repeat(64),
+    appliedCount: 0, desiredCount: 0, slots: [], allocationSlots: [], slotSequence: 20 };
+  const node = { ...input, ...ready, id, workerRole: 'incremental', deployment: retired };
+  for (const blocked of [{ deployment: { ...retired, appliedCount: 1, desiredCount: 1, slots: ['incremental-1'] } },
+    { workerRemoval: { state: 'failed', slot: 'incremental-1' } }]) {
+    const { store } = registryFixture([{ ...node, ...blocked }]);
+    await assert.rejects(store.save({ id, version: 0, node: { ...input, workerRole: 'discover' } }), { statusCode: 409 });
+  }
+  const { store } = registryFixture([node]);
+  const saved = await store.save({ id, version: 0, node: { ...input, workerRole: 'discover' } });
+  const retyped = saved.nodes[0];
+  assert.equal(retyped.workerRole, 'discover');
+  assert.equal(retyped.deployment.deploymentId, deploymentId, 'deployment history is kept');
+  const plan = buildNodeCollectDeployment({ node: { ...retyped, workers: [{ role: 'discover', count: 1 }] }, deploymentId,
+    image: 'registry.example/discover@sha256:' + 'd'.repeat(64), gatewayUrl: 'https://center.example', natsUrl: 'tls://center.example:4222' });
+  assert.deepEqual(plan.slots, ['discover-1']);
+  assert.equal(plan.mode, 'discover_collect');
+  const started = await store.beginWorkerDeployment({ id, version: saved.version, operationId: 'op-1', plan, count: 1 });
+  const deployment = started.nodes[0].deployment;
+  assert.deepEqual([deployment.mode, deployment.deploymentId, deployment.image, deployment.slots, deployment.appliedCount],
+    ['discover_collect', deploymentId, plan.image, ['discover-1'], 0]);
+
+  // A deployment with installed Workers still cannot change type or image.
+  const live = registryFixture([{ ...node, workerRole: 'discover', deployment: { ...retired, appliedCount: 1, desiredCount: 1, slots: ['incremental-1'] } }]);
+  await assert.rejects(live.store.beginWorkerDeployment({ id, version: 0, operationId: 'op-2', plan, count: 1 }), { statusCode: 409 });
+  const moved = registryFixture([node]);
+  await moved.store.save({ id, version: 0, node: { ...input, workerRole: 'discover' } });
+  await assert.rejects(moved.store.beginWorkerDeployment({ id, version: 1, operationId: 'op-3', plan: { ...plan, deploymentId: 'd18d8455-7881-43be-ae52-18cfcf160514' }, count: 1 }),
+    { statusCode: 409 }, 'a retyped node keeps its deployment identity');
+});

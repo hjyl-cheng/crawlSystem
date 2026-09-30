@@ -1,7 +1,7 @@
 -- Additive; inactive until a center explicitly supplies WholeChannelStore.
 ALTER TABLE remote_ingestion.channel_commands DROP CONSTRAINT IF EXISTS channel_commands_operation_check;
 ALTER TABLE remote_ingestion.channel_commands ADD CONSTRAINT channel_commands_operation_check
-  CHECK (operation IN ('open_channel','scan_uploads','video_detail','collect_channel'));
+  CHECK (operation IN ('open_channel','scan_uploads','video_detail','collect_channel','collect_search_page'));
 CREATE TABLE IF NOT EXISTS remote_ingestion.whole_channel_inputs (
   command_id uuid PRIMARY KEY REFERENCES remote_ingestion.channel_commands(command_id) ON DELETE CASCADE,
   task_id uuid NOT NULL REFERENCES remote_ingestion.tasks(task_id) ON DELETE CASCADE,

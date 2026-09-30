@@ -86,6 +86,7 @@ import {
   selectPublicationEvidence,
 } from "./publicationTimeEvidence.js";
 import { query, withTransaction } from "./db.js";
+import { createCrawlSettingsLoader } from "./crawlSettings.js";
 import {
   claimDataApiBatchExecution,
   dataApiBatchExecutionFence,
@@ -111,10 +112,7 @@ import {
   parserContractDetails,
   ParserContractError,
 } from "./localizedParsing.js";
-import {
-  normalizeDetailConcurrency,
-  processWithOrderedPrefetch,
-} from "./detailConcurrency.js";
+import { processWithOrderedPrefetch } from "./detailConcurrency.js";
 import {
   classifiedOnlyResolutionAction,
   contentDetailFailureError,
@@ -280,12 +278,7 @@ const localOfflineProfileExecutor = new LocalOfflineProfileExecutor({
 });
 const language = process.env.YOUTUBE_CONTROL_LANGUAGE || process.env.YOUTUBE_LANGUAGE || "en";
 const country = process.env.YOUTUBE_COUNTRY || "BR";
-const defaultMinSubscribers = Number(process.env.MIN_SUBSCRIBER_COUNT || 1000);
-const defaultContentLimit = Number(process.env.YOUTUBE_CHANNEL_CONTENT_LIMIT || 30);
-const defaultContentMaxAgeDays = Number(process.env.YOUTUBE_CONTENT_MAX_AGE_DAYS || 90);
-const defaultDetailConcurrency = normalizeDetailConcurrency(process.env.YOUTUBE_DETAIL_CONCURRENCY, 2);
 const channelInlineDetails = String(process.env.YOUTUBE_CHANNEL_INLINE_DETAILS || "true").trim().toLowerCase() !== "false";
-let crawlSettingsCache = { expiresAt: 0, value: null };
 let agentLlmSettingsCache = { expiresAt: 0, key: null, value: null };
 
 function intValue(value, fallback, min, max) {
@@ -561,37 +554,7 @@ function normalChannelUrl(channel) {
     ?? `https://www.youtube.com/channel/${channel.channel_id}`;
 }
 
-export async function getCrawlSettingsV2() {
-  const now = Date.now();
-  if (crawlSettingsCache.value && crawlSettingsCache.expiresAt > now) return crawlSettingsCache.value;
-  const fallback = {
-    minSubscriberCount: intValue(defaultMinSubscribers, 1000, 0, 1_000_000_000),
-    discoverStopMinQualifiedRatio: 1 / 3,
-    channelContentLimit: intValue(defaultContentLimit, 30, 1, 100),
-    contentMaxAgeDays: intValue(defaultContentMaxAgeDays, 90, 0, 3650),
-    detailMaxAttempts: intValue(process.env.YOUTUBE_DETAIL_MAX_ATTEMPTS, 3, 1, 10),
-    detailConcurrency: defaultDetailConcurrency,
-    publishedAtRequiredPrecision: "date_only",
-  };
-  try {
-    const rows = await query("SELECT value_json FROM crawler.settings WHERE setting_key = 'crawl' LIMIT 1");
-    const value = rows.rows[0]?.value_json ?? {};
-    const settings = {
-      minSubscriberCount: intValue(value.min_subscriber_count, fallback.minSubscriberCount, 0, 1_000_000_000),
-      discoverStopMinQualifiedRatio: numberValue(value.discover_stop_min_qualified_ratio, fallback.discoverStopMinQualifiedRatio, 0, 1),
-      channelContentLimit: intValue(value.channel_content_limit, fallback.channelContentLimit, 1, 100),
-      contentMaxAgeDays: intValue(value.content_max_age_days, fallback.contentMaxAgeDays, 0, 3650),
-      detailMaxAttempts: intValue(value.detail_max_attempts, fallback.detailMaxAttempts, 1, 10),
-      detailConcurrency: normalizeDetailConcurrency(value.detail_concurrency, fallback.detailConcurrency),
-      publishedAtRequiredPrecision: "date_only",
-    };
-    crawlSettingsCache = { expiresAt: now + 30000, value: settings };
-    return settings;
-  } catch {
-    crawlSettingsCache = { expiresAt: now + 30000, value: fallback };
-    return fallback;
-  }
-}
+export const getCrawlSettingsV2 = createCrawlSettingsLoader({ query });
 
 export const getYoutubeApiSettingsV2 = createYoutubeApiSettingsLoader({ query });
 

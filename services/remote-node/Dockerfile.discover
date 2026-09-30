@@ -1,0 +1,17 @@
+# Reuse the already verified node relay runtime, then replace the application
+# and entrypoint. Discover sends plain search requests through the granted
+# route; it needs no browser, profile or fingerprint process.
+ARG COLLECT_RUNTIME_IMAGE
+FROM ${COLLECT_RUNTIME_IMAGE}
+WORKDIR /app
+COPY services/qybullmq/src ./src
+COPY services/qybullmq/scripts/runRemoteNodeDiscover.mjs ./scripts/
+ARG QY_VCS_REF=uncommitted
+LABEL org.opencontainers.image.title="qy-remote-node-discover" \
+      org.opencontainers.image.revision="${QY_VCS_REF}" \
+      qy.remote.mode="discover_collect" \
+      qy.remote.capability="youtube.discover-page.v1" \
+      qy.remote.runtimes="youtube-search-discover-v1"
+USER 1000:1000
+HEALTHCHECK NONE
+CMD ["node","scripts/runRemoteNodeDiscover.mjs"]

@@ -20,12 +20,16 @@ def run(args):
                           capture_output=True, check=True, timeout=60).stdout.decode()
 
 
+MODES = {'incremental': 'incremental_collect', 'full-crawl': 'full_crawl_collect', 'discover': 'discover_collect'}
+
+
 def remove(value, root_path=Path('/etc/qy-node/runtime')):
     require(set(value) == {'nodeId', 'deploymentId', 'slot', 'operationId'})
     node, deployment, slot, operation = (value[k] for k in ['nodeId', 'deploymentId', 'slot', 'operationId'])
     for identifier in [node, deployment, operation]:
         require(str(uuid.UUID(identifier)) == identifier)
-    require(re.fullmatch(r'(?:incremental|full-crawl)-[1-9][0-9]*', slot))
+    require(re.fullmatch(r'(?:incremental|full-crawl|discover)-[1-9][0-9]*', slot))
+    mode = MODES[slot.rsplit('-', 1)[0]]
     require((root_path / 'node-id').read_text().strip() == node)
     root = root_path / 'deployments' / deployment
     for parent in [root, *root.parents]:
@@ -44,7 +48,7 @@ def remove(value, root_path=Path('/etc/qy-node/runtime')):
         container = json.loads(run(['inspect', ids[0]]))[0]
         labels = container['Config']['Labels']
         require(all(labels.get(k) == v for k, v in {'qy.node.id': node, 'qy.node.slot': slot,
-                    'qy.deployment.id': deployment, 'qy.remote.mode': 'full_crawl_collect' if slot.startswith('full-crawl-') else 'incremental_collect'}.items()))
+                    'qy.deployment.id': deployment, 'qy.remote.mode': mode}.items()))
         require(slot in compose['services'])
         run(['stop', '--timeout', '20', ids[0]])
         run(['rm', ids[0]])  # No volume deletion; no command touches the spool.

@@ -1,5 +1,5 @@
 import { RemoteProtocolError, uuid } from './protocol.js';
-import { collectingWorkload, collectingSlotValid, FULL_CRAWL_WORKLOAD } from './collectingWorkload.js';
+import { collectingWorkload, collectingSlotValid, dedicatedWorkloadForCapability, DISCOVER_WORKLOAD, FULL_CRAWL_WORKLOAD } from './collectingWorkload.js';
 
 export const REMOTE_RUNTIME_REVISION = 'youtubejs-incremental-v1';
 export const WHOLE_CHANNEL_RUNTIME_REVISION = 'youtubejs-incremental-whole-v1';
@@ -11,11 +11,13 @@ const hashValid = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(va
 // gated claims, never these administrative methods. Activation also requires a
 // live central execution supervisor, supplied as a transactional readiness check.
 export class RemoteWorkerActivationStore {
-  constructor({ store, verifyExecution = null, fullCrawlExecution = null, ttlSeconds = 45 }) {
+  constructor({ store, verifyExecution = null, fullCrawlExecution = null, discoverExecution = null, ttlSeconds = 45 }) {
     if (!Number.isInteger(ttlSeconds) || ttlSeconds < 15 || ttlSeconds > 120) throw new TypeError('invalid connection TTL');
-    if (fullCrawlExecution !== null && (typeof fullCrawlExecution?.verifyExecution !== 'function'
-      || typeof fullCrawlExecution?.assertTask !== 'function')) throw new TypeError('full-crawl readiness and task fence required');
-    Object.assign(this, { store, verifyExecution, fullCrawlExecution, ttlSeconds });
+    for (const [name, execution] of [['full-crawl', fullCrawlExecution], ['discover', discoverExecution]]) {
+      if (execution !== null && (typeof execution?.verifyExecution !== 'function'
+        || typeof execution?.assertTask !== 'function')) throw new TypeError(`${name} readiness and task fence required`);
+    }
+    Object.assign(this, { store, verifyExecution, fullCrawlExecution, discoverExecution, ttlSeconds });
   }
 
   async register({ nodeId, slot, deploymentId, configHash, role = 'incremental', mode = 'incremental_collect' }) {
@@ -50,14 +52,20 @@ export class RemoteWorkerActivationStore {
 
   assertCapability(node,workload) {
     const capabilities=node?.capabilities ?? [];
-    if (workload.role==='fullcrawl'
+    if (workload.role!=='incremental'
       ? capabilities.length!==1 || capabilities[0]!==workload.capability
-      : capabilities.includes(FULL_CRAWL_WORKLOAD.capability)) fail('WORKER_NODE_CAPABILITY_MISMATCH');
+      : capabilities.some(capability=>dedicatedWorkloadForCapability(capability))) fail('WORKER_NODE_CAPABILITY_MISMATCH');
+  }
+
+  dedicatedExecution(mode) {
+    return mode===FULL_CRAWL_WORKLOAD.mode ? this.fullCrawlExecution
+      : mode===DISCOVER_WORKLOAD.mode ? this.discoverExecution : null;
   }
 
   verifier(mode) {
-    return mode===FULL_CRAWL_WORKLOAD.mode
-      ? this.fullCrawlExecution?.verifyExecution?.bind(this.fullCrawlExecution) : this.verifyExecution;
+    const execution=this.dedicatedExecution(mode);
+    return mode===FULL_CRAWL_WORKLOAD.mode || mode===DISCOVER_WORKLOAD.mode
+      ? execution?.verifyExecution?.bind(execution) : this.verifyExecution;
   }
 
   matches(row,value) {
@@ -81,7 +89,7 @@ export class RemoteWorkerActivationStore {
           WHERE node_id=$1 AND worker_slot=$2 AND state='leased') OR EXISTS(SELECT 1 FROM remote_ingestion.network_bindings
           WHERE node_id=$1 AND slot=$2 AND state<>'retired') OR ($3 AND EXISTS(SELECT 1 FROM remote_ingestion.tasks
           WHERE target_node_id=$1 AND target_worker_slot=$2 AND state IN ('pending','leased','received')))`,
-        [nodeId,value.slot,workload.role==='fullcrawl'])).rowCount;
+        [nodeId,value.slot,workload.role!=='incremental'])).rowCount;
         if(busy)fail('WORKER_PREVIOUS_EXECUTION_UNSETTLED');
       }
       const seen=(await client.query(`UPDATE remote_ingestion.worker_connections SET instance_id=$3,relay_boot_id=$4,
@@ -144,10 +152,11 @@ export class RemoteWorkerActivationStore {
       const verify=this.verifier(row.mode);
       return {allowNew:row.enabled && row.accepting && typeof verify==='function'
         && await verify(client,row)===true,
-        ...(workload.role==='fullcrawl' ? {capability:workload.capability,assertTask:async (connection,task)=>{
-          if(!this.fullCrawlExecution)fail('CENTRAL_EXECUTION_NOT_CONFIGURED');
+        ...(workload.role!=='incremental' ? {capability:workload.capability,assertTask:async (connection,task)=>{
+          const execution=this.dedicatedExecution(workload.mode);
+          if(!execution)fail('CENTRAL_EXECUTION_NOT_CONFIGURED');
           if(task.target_node_id!==nodeId || task.target_worker_slot!==row.slot)fail('WORKER_TASK_TARGET_MISMATCH');
-          await this.fullCrawlExecution.assertTask(connection,task,row);
+          await execution.assertTask(connection,task,row);
         }} : {})};
     }});
   }

@@ -52,9 +52,11 @@ export async function createRemoteNatsClient({url,token,nodeId,slot,allowLoopbac
     claim:async(claimId,workerSlot=null,connection=null)=>(await request('claim',{claim_id:claimId,...(workerSlot?{slot:workerSlot}:{}),...(connection?{connection}:{})})).lease,
     heartbeat:lease=>request('heartbeat',{task_id:lease.task_id,generation:lease.generation}),
     pollCommands:lease=>request('commands',{task_id:lease.task_id,generation:lease.generation}),
+    discoverPoll:lease=>request('discover_commands',{task_id:lease.task_id,generation:lease.generation}),
     wholeChannelInput:(lease,commandId,part)=>request('whole_channel_input',{task_id:lease.task_id,generation:lease.generation,command_id:commandId,part}),
     uploadWholeChannel:(lease,bytes)=>upload('whole_channel_result',lease.task_id,bytes),
     uploadCommand:(lease,bytes)=>upload('channel_result',lease.task_id,bytes),
+    uploadDiscover:(lease,bytes)=>upload('discover_result',lease.task_id,bytes),
     upload:(taskId,bytes)=>upload('work_result',taskId,bytes),
     receipt:batchId=>request('receipt',{batch_id:batchId}),
   };

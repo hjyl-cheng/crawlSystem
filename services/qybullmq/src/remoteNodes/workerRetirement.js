@@ -1,4 +1,5 @@
 import {fullCrawlSlotUnsettled} from './fullCrawlCenterRecovery.js';
+import {remoteDiscoverSlotUnsettled} from './discoverRecovery.js';
 import {RemoteProtocolError,uuid} from './protocol.js';
 import {remoteSlotUnsettled,supervisionLockKey} from './centerExecutionRecovery.js';
 
@@ -6,10 +7,10 @@ const fail=code=>{throw new RemoteProtocolError(code,409);};
 
 // Two durable phases fence intake before the trusted installer touches Docker.
 // Historical tasks, network identities and credentials are never reused/deleted.
-export function createWorkerRetirement({store,execution,fullCrawlExecution=null}) {
+export function createWorkerRetirement({store,execution,fullCrawlExecution=null,discoverExecution=null}) {
   return async function retire(value) {
     if(!value || Object.keys(value).some(k=>!['nodeId','deploymentId','slot','operationId','phase'].includes(k))
-      || !/^(?:incremental|full-crawl)-[1-9][0-9]*$/.test(value.slot??'') || !['reserve','ready','finish'].includes(value.phase))
+      || !/^(?:incremental|full-crawl|discover)-[1-9][0-9]*$/.test(value.slot??'') || !['reserve','ready','finish'].includes(value.phase))
       throw new RemoteProtocolError('INVALID_WORKER_RETIREMENT',400);
     uuid(value.nodeId);uuid(value.deploymentId);uuid(value.operationId);
     return store.transaction(async client=>{
@@ -25,8 +26,8 @@ export function createWorkerRetirement({store,execution,fullCrawlExecution=null}
       if(row.retired_at)return {nodeId:value.nodeId,deploymentId:value.deploymentId,slot:value.slot,operationId:value.operationId,removed:true};
       if(value.phase!=='reserve' && row.retirement_id!==value.operationId)fail('WORKER_RETIREMENT_CONFLICT');
       if(!row.retirement_id && (!row.alive || !row.accepting))fail('WORKER_STATE_UNKNOWN');
-      const selectedExecution=row.mode==='full_crawl_collect'?fullCrawlExecution:execution;
-      const unsettled=row.mode==='full_crawl_collect'?fullCrawlSlotUnsettled:remoteSlotUnsettled;
+      const selectedExecution=row.mode==='full_crawl_collect'?fullCrawlExecution:row.mode==='discover_collect'?discoverExecution:execution;
+      const unsettled=row.mode==='full_crawl_collect'?fullCrawlSlotUnsettled:row.mode==='discover_collect'?remoteDiscoverSlotUnsettled:remoteSlotUnsettled;
       if(typeof selectedExecution?.isProcessing!=='function')fail('WORKER_STATE_UNKNOWN');
       const busy=selectedExecution?.isProcessing(row)===true || await unsettled(client,row)
         || (row.mode!=='full_crawl_collect' && (await client.query(`SELECT 1 FROM remote_ingestion.tasks WHERE

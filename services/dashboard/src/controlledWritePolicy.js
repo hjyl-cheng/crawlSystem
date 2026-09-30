@@ -6,6 +6,11 @@ export function allowDashboardRequestDuringControlledMigration(method, path) {
   if (String(path || "").startsWith("/migration-channels")) {
     return true;
   }
+  // Explicit Query controls retain the route's migration and scheduler fences.
+  if (normalizedMethod === "POST"
+      && /^\/queries\/scheduler\/(?:draft|start|resume|pause|stop)$/.test(String(path))) {
+    return true;
+  }
   // Registration and explicit bootstrap stay separate from crawler deployment.
   if (normalizedMethod === "POST" && path === "/api/server-nodes") return true;
   // Bootstrap affects only a manually registered execution node, never queues.

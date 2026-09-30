@@ -72,6 +72,14 @@ def pull_image(image, registry):
             run(['docker', '--config', config_dir, 'pull', image], 1800)
 
 
+# Worker role, slot prefix and spool mount per collecting mode.
+PROFILES = {
+    'incremental_collect': ('incremental', 'incremental', '/var/lib/qy-node/spool'),
+    'full_crawl_collect': ('fullcrawl', 'full-crawl', '/var/lib/qy-node/full-spool'),
+    'discover_collect': ('discover', 'discover', '/var/lib/qy-node/discover-spool'),
+}
+
+
 def deploy(bundle_file, step):
     require(step in ['files', 'pull', 'start', 'verify'])
     bundle_path = Path(bundle_file)
@@ -81,10 +89,10 @@ def deploy(bundle_file, step):
     node, deployment = plan['nodeId'], plan['deploymentId']
     require(re.fullmatch(r'[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}', node))
     require(re.fullmatch(r'[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}', deployment))
-    require(plan['mode'] in ['incremental_collect', 'full_crawl_collect'] and type(plan['count']) is int and plan['count'] >= 1)
-    full = plan['mode'] == 'full_crawl_collect'
-    role, prefix = ('fullcrawl', 'full-crawl') if full else ('incremental', 'incremental')
-    require(not full or (plan.get('natsUrl') and not plan.get('wholeChannel')))
+    require(plan['mode'] in PROFILES and type(plan['count']) is int and plan['count'] >= 1)
+    role, prefix, spool_target = PROFILES[plan['mode']]
+    dedicated = plan['mode'] != 'incremental_collect'
+    require(not dedicated or (plan.get('natsUrl') and not plan.get('wholeChannel')))
     require(type(plan.get('wholeChannel', False)) is bool)
     require(not plan.get('wholeChannel') or plan.get('natsUrl'))
     require(re.fullmatch(r'[a-z0-9][a-z0-9./:_-]*@sha256:[a-f0-9]{64}', plan['image']))
@@ -120,7 +128,7 @@ def deploy(bundle_file, step):
                     ('/run/secrets/node-token', str(root / 'node-token'), True),
                     ('/run/secrets/relay-token', str(root / (slot + '.relay-token')), True),
                     ('/run/secrets/route-public.pem', str(root / 'route-public.pem'), True),
-                    ('/var/lib/qy-node/full-spool' if full else '/var/lib/qy-node/spool', '/var/lib/qy-node/spool/' + slot, False)}
+                    (spool_target, '/var/lib/qy-node/spool/' + slot, False)}
         require(len(service['volumes']) == len(expected))
         require({(m['target'], m['source'], m['read_only']) for m in service['volumes']} == expected)
         require(all(m['type'] == 'bind' and m['bind'] == {'create_host_path':False} for m in service['volumes']))

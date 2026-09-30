@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "node-full-crawl": "node scripts/runRemoteNodeFullCrawl.mjs",
+    "node-discover": "node scripts/runRemoteNodeDiscover.mjs",
     "node-connection": "node scripts/runRemoteNodeConnection.mjs",
     "test:remote-connections": "node --test --test-concurrency=1 test/remoteWorkerConnection.test.js test/remoteWorkerConnection.postgres.integration.test.js test/remoteNodeProtocol.test.js",
     "test:remote-connections:docker": "node scripts/testRemoteNodeConnectionDocker.mjs",

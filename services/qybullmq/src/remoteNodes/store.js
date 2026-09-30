@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { PUBLICATION_WRITER_VERSION } from '../publicationWriterVersion.js';
 import { decodeResult, generation, hash, RemoteProtocolError, staleLeaseError, uuid } from './protocol.js';
-import { FULL_CRAWL_WORKLOAD } from './collectingWorkload.js';
+import { dedicatedWorkloadForCapability } from './collectingWorkload.js';
 
 const conflict = (code) => { throw new RemoteProtocolError(code); };
 
@@ -122,9 +122,11 @@ export class RemoteNodeStore {
       const node = (await client.query(`SELECT * FROM remote_ingestion.nodes WHERE node_id=$1 ${slot === null ? 'FOR NO KEY UPDATE' : 'FOR SHARE'}`, [nodeId])).rows[0];
       if (!node || node.state === 'disabled') throw new RemoteProtocolError('UNAUTHORIZED', 401);
       const permission = authorize ? await authorize(client,node) : { allowNew: true };
+      // A dedicated workload's task is claimable only by its own connection,
+      // which supplies the task verifier. Node capability alone is not enough.
       const capabilities = node.capabilities.filter(capability => (
         (!permission.capability || capability === permission.capability)
-        && (capability !== FULL_CRAWL_WORKLOAD.capability
+        && (!dedicatedWorkloadForCapability(capability)
           || (permission.capability === capability && typeof permission.assertTask === 'function'))
       ));
       if (node.slot_claims_required && slot === null) conflict('WORKER_SLOT_REQUIRED');
@@ -139,7 +141,7 @@ export class RemoteNodeStore {
           conflict('CLAIM_EXPIRED');
         }
         if (!capabilities.includes(previous.capability)) conflict('WORKER_TASK_CAPABILITY_MISMATCH');
-        if (previous.capability === FULL_CRAWL_WORKLOAD.capability) await permission.assertTask(client,previous);
+        if (dedicatedWorkloadForCapability(previous.capability)) await permission.assertTask(client,previous);
         return this.lease(previous);
       }
       if (node.state !== 'active' || !permission.allowNew) return null;
@@ -179,9 +181,9 @@ export class RemoteNodeStore {
         ORDER BY (node_id=$2 AND worker_slot=$3 AND state='leased') DESC NULLS LAST,created_at,task_id
         LIMIT 1 FOR UPDATE SKIP LOCKED`, [capabilities, nodeId, slot])).rows[0];
       if (!row) return null;
-      // Full Crawl supplies its own locked candidate/run/attempt fence. Neither
-      // a node capability nor the incremental verifier can waive that check.
-      if (row.capability === FULL_CRAWL_WORKLOAD.capability) await permission.assertTask(client,row);
+      // Full Crawl and Discover supply their own locked fence. Neither a node
+      // capability nor the incremental verifier can waive that check.
+      if (dedicatedWorkloadForCapability(row.capability)) await permission.assertTask(client,row);
       // A new ownership generation after an API handoff is not a failed execution.
       const leaseFailures = row.lease_failures + (row.state === 'leased' ? 1 : 0);
       if (leaseFailures >= this.maxExecutions) {
@@ -225,7 +227,8 @@ export class RemoteNodeStore {
       const task = (await client.query(`SELECT *,lease_until>clock_timestamp() AS alive
         FROM remote_ingestion.tasks WHERE task_id=$1 FOR UPDATE`, [taskId])).rows[0];
       if (task?.capability === 'youtube.incremental.plan.v1') conflict('CHANNEL_PLAN_REQUIRES_CENTRAL_COMPLETION');
-      if (task?.capability === FULL_CRAWL_WORKLOAD.capability) conflict('FULL_CRAWL_REQUIRES_CENTRAL_COMPLETION');
+      if (task?.capability === 'youtube.full-crawl.v1') conflict('FULL_CRAWL_REQUIRES_CENTRAL_COMPLETION');
+      if (task?.capability === 'youtube.discover-page.v1') conflict('DISCOVER_REQUIRES_CENTRAL_COMPLETION');
       const old = (await client.query('SELECT * FROM remote_ingestion.receipts WHERE batch_id=$1', [value.batch_id])).rows[0];
       if (old) {
         if (old.node_id !== nodeId || old.task_id !== taskId || old.generation !== value.generation || old.sha256 !== sha256) {

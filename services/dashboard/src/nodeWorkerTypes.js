@@ -1,17 +1,34 @@
 // Shared by registration, deployment validation and the browser. Adding a type
 // makes it selectable; deployment still requires its own implemented executor.
 export const nodeWorkerTypes = Object.freeze({
-  incremental: Object.freeze({ label: '增量抓取', queue: 'youtube-channel-incremental', selectable: true, deployable: true }),
-  fullcrawl: Object.freeze({ label: '全量抓取', queue: 'youtube-channel-crawl', selectable: true, deployable: true }),
-  discover: Object.freeze({ label: 'Query / 发现', queue: 'youtube-discover-page', selectable: false, deployable: false }),
+  incremental: Object.freeze({ label: '增量抓取', queue: 'youtube-channel-incremental', selectable: true, deployable: true,
+    mode: 'incremental_collect', slotPrefix: 'incremental' }),
+  fullcrawl: Object.freeze({ label: '全量抓取', queue: 'youtube-channel-crawl', selectable: true, deployable: true,
+    mode: 'full_crawl_collect', slotPrefix: 'full-crawl' }),
+  discover: Object.freeze({ label: 'Query / 发现', queue: 'youtube-discover-page', selectable: true, deployable: true,
+    mode: 'discover_collect', slotPrefix: 'discover' }),
   query_quality: Object.freeze({ label: 'Query 质量评估', queue: 'youtube-query-quality', selectable: false, deployable: false }),
 });
+
+export const workerSlotPattern = /^(?:incremental|full-crawl|discover)-[1-9][0-9]*$/;
+
+export function nodeWorkerRoleForMode(mode) {
+  return Object.keys(nodeWorkerTypes).find(role => nodeWorkerTypes[role].mode === mode) ?? null;
+}
+
+// Every Worker of this deployment was removed. Its identity, credentials and
+// history remain, but it no longer fixes the node's function type.
+export function deploymentRetired(deployment) {
+  return deployment?.state === 'connected' && deployment.appliedCount === 0 && deployment.desiredCount === 0
+    && (deployment.slots ?? []).length === 0;
+}
 
 export function nodeWorkerRole(node) {
   if (node?.workerRole !== undefined) return node.workerRole;
   // Existing deployments use the incremental runtime. Preserve old saved plans
   // when they name a single role; empty registrations default to incremental.
-  if (node?.deployment?.mode === 'full_crawl_collect') return 'fullcrawl';
+  if (node?.deployment?.mode && node.deployment.mode !== 'incremental_collect'
+    && nodeWorkerRoleForMode(node.deployment.mode)) return nodeWorkerRoleForMode(node.deployment.mode);
   if (node?.deployment || node?.localIntake) return 'incremental';
   return node?.workers?.length === 1 ? node.workers[0].role : 'incremental';
 }

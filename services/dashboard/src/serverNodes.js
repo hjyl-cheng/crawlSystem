@@ -1,7 +1,7 @@
 import {deploymentSlots} from './nodeRuntime/workerSlots.js';
 import { randomUUID } from "node:crypto";
 import { isIP } from "node:net";
-import { nodeWorkerTypes, nodeWorkerRole, assertNodeWorkerDeployment } from './nodeWorkerTypes.js';
+import { nodeWorkerTypes, nodeWorkerRole, assertNodeWorkerDeployment, deploymentRetired } from './nodeWorkerTypes.js';
 
 const settingKey = "dashboard_server_nodes_v1";
 export const workerRoles = Object.freeze(Object.fromEntries(
@@ -118,8 +118,10 @@ export function createServerNodeStore(query) {
     const existing = previous.nodes.find(item => item.id === id);
     // Old clients omit the new metadata field when editing an existing node.
     if (existing && node.workerRole === undefined) normalized = { ...normalized, workerRole: nodeWorkerRole(existing) };
-    if (existing?.deployment && normalized.workerRole !== nodeWorkerRole(existing)) {
-      throw invalid('已有 Worker 部署记录，不能通过编辑服务器切换功能类型', 409);
+    if (existing?.deployment && normalized.workerRole !== nodeWorkerRole(existing)
+      && (!deploymentRetired(existing.deployment)
+        || (existing.workerRemoval && !['completed','rejected'].includes(existing.workerRemoval.state)))) {
+      throw invalid('已有 Worker 部署记录，请先删除全部 Worker 再切换功能类型', 409);
     }
     assertNotDeleting(existing);
     if (existing?.provisioning?.state === "running" || existing?.runtime?.state === "running" || existing?.deployment?.state === 'running') throw invalid("服务器正在初始化、准备环境或部署，请完成后再编辑", 409);
@@ -293,10 +295,13 @@ export function createServerNodeStore(query) {
       if(node.kind!=='execution' || !nodeReady(node) || node.runtime?.state!=='ready')throw invalid('请先完成节点初始化和运行环境准备',409);
       assertNodeWorkerDeployment(node);
       const role=nodeWorkerRole(node);
-      if(plan.mode!==(role==='fullcrawl'?'full_crawl_collect':'incremental_collect'))throw invalid('部署类型不匹配',409);
+      if(plan.mode!==nodeWorkerTypes[role]?.mode)throw invalid('部署类型不匹配',409);
       const prior=node.deployment;
       if(prior?.state==='running' && (!Number.isFinite(Date.parse(prior.deadline)) || Date.parse(prior.deadline)>Date.now()))throw invalid('Worker 正在部署，请勿重复提交',409);
-      if(prior && (prior.mode!==plan.mode || prior.deploymentId!==plan.deploymentId || prior.image!==plan.image
+      // After every Worker was removed, the same deployment identity may start
+      // the node's new function type with its own image.
+      const retyped=prior?.mode!==plan.mode && deploymentRetired(prior);
+      if(prior && (retyped ? prior.deploymentId!==plan.deploymentId : prior.mode!==plan.mode || prior.deploymentId!==plan.deploymentId || prior.image!==plan.image
         || plan.count<(prior.state==='failed'?prior.appliedCount:prior.desiredCount)))throw invalid('缩容、更换镜像或替换部署需要先完成停止派发和任务收尾，当前入口仅支持首次部署、重试及增加数量',409);
       if(count!==undefined){
         integer(count,'部署数量',1,Number.MAX_SAFE_INTEGER);

@@ -1,0 +1,20 @@
+import { runNodeDiscover, checkNodeDiscoverHealth } from '../src/remoteNodes/discoverNode.js';
+
+if(process.argv[2]==='--healthcheck'){
+  try{await checkNodeDiscoverHealth();}catch{process.exitCode=1;}
+}else if(process.argv.length!==2){process.exitCode=64;}
+else{
+  const abort=new AbortController();
+  process.once('SIGTERM',()=>abort.abort());process.once('SIGINT',()=>abort.abort());
+  try{
+    let previous;
+    await runNodeDiscover({signal:abort.signal,onStatus(status){
+      if(previous!==status.state)console.log(JSON.stringify({event:'remote_node_discover',...status}));
+      previous=status.state;
+    }});
+  }catch(error){
+    const code=String(error?.code||error?.message||error?.name||'UNKNOWN');
+    console.error(JSON.stringify({event:'remote_node_discover_failed',
+      code:/^[A-Z][A-Z0-9_]{0,79}$/.test(code)?code:'NODE_EXECUTION_FAILED'}));process.exitCode=1;
+  }
+}

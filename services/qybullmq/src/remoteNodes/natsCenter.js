@@ -5,10 +5,11 @@ import {RESULT_STREAM,RESULT_CONSUMER,natsEndpoint,resultEnvelope,encode,decode,
 import {RemoteProtocolError,uuid} from './protocol.js';
 import {forwardLocalIntakeSignals} from './localIntakeSignals.js';
 import {startFullCrawlNatsResults} from './fullCrawlNatsResults.js';
+import {DISCOVER_PAGE_CAPABILITY} from './discoverPageContract.js';
 import {setTimeout as delay} from 'node:timers/promises';
 
 export async function startRemoteNatsCenter({url,user='center',password,tls,allowLoopback=false,store,channelPlans,wholeChannels=null,resultWholeChannels=wholeChannels,routes,youtubeSessions,workerConnections,
-  signals,fullCrawls=null,heartbeatStore=store,heartbeatConnections=workerConnections,resultStore=store,resultChannelPlans=channelPlans,resultConcurrency=8,rpcConcurrency=32,heartbeatConcurrency=16,maxPending=1024,resultMaxBytes=1024*1024*1024,replicas=1,report=()=>{}}){
+  signals,fullCrawls=null,discoverPages=null,discoverRoutes=null,resultDiscoverPages=discoverPages,heartbeatStore=store,heartbeatConnections=workerConnections,resultStore=store,resultChannelPlans=channelPlans,resultConcurrency=8,rpcConcurrency=32,heartbeatConcurrency=16,maxPending=1024,resultMaxBytes=1024*1024*1024,replicas=1,report=()=>{}}){
   for(const value of [resultConcurrency,rpcConcurrency,heartbeatConcurrency,maxPending,resultMaxBytes,replicas])if(!Number.isSafeInteger(value)||value<1)throw new TypeError('positive NATS capacity required');
   if(typeof signals?.watch!=='function')throw new TypeError('committed SQL notifications required for NATS transport');
   const nc=await connect({servers:natsEndpoint(url,{allowLoopback}),user,pass:password,tls,maxReconnectAttempts:-1,reconnectTimeWait:1000,reconnectJitter:500});
@@ -55,12 +56,18 @@ export async function startRemoteNatsCenter({url,user='center',password,tls,allo
       }
     }
     const full=()=>{if(!fullCrawls)throw new RemoteProtocolError('FULL_CRAWL_DISABLED',409);return fullCrawls;};
+    const discover=()=>{if(!discoverPages)throw new RemoteProtocolError('DISCOVER_DISABLED',409);return discoverPages;};
     const service=async(p,name,fallback)=>{
-      if(!fullCrawls)return fallback;
+      if(!fullCrawls && !discoverPages)return fallback;
       const taskId=p?.task_id??p?.request?.task_id;
       if(!taskId)return fallback;
       const row=(await store.pool.query('SELECT capability FROM remote_ingestion.tasks WHERE task_id=$1',[uuid(taskId)])).rows[0];
-      return row?.capability==='youtube.full-crawl.v1'?full()[name]:fallback;
+      if(row?.capability===DISCOVER_PAGE_CAPABILITY){
+        // Discover has routes only; it never opens a YouTube browser session.
+        if(name!=='routes'||!discoverRoutes)throw new RemoteProtocolError('DISCOVER_SERVICE_UNAVAILABLE',409);
+        return discoverRoutes;
+      }
+      return fullCrawls&&row?.capability==='youtube.full-crawl.v1'?full()[name]:fallback;
     };
     const calls={
       full_commands:(id,p)=>readAfterHint(`task:${uuid(p.task_id)}`,()=>full().poll(id,p),v=>v.status!=='leased'||v.commands.length>0),
@@ -81,6 +88,7 @@ export async function startRemoteNatsCenter({url,user='center',password,tls,allo
         return workerConnections?workerConnections.claim(id,p):store.claim(id,uuid(p.claim_id),p.slot??null);
       },Boolean)}),
       commands:(id,p)=>readAfterHint(`task:${uuid(p.task_id)}`,()=>channelPlans.poll(id,{task_id:p.task_id,generation:p.generation}),v=>v.status!=='leased'||v.commands.length>0),
+      discover_commands:(id,p)=>readAfterHint(`task:${uuid(p.task_id)}`,()=>discover().poll(id,{task_id:p.task_id,generation:p.generation}),v=>v.status!=='leased'||v.commands.length>0),
       receipt:(id,p)=>store.receipt(id,uuid(p.batch_id)),
       result_receipt:(id,p)=>{
         if(!/^[a-f0-9]{64}$/.test(p.receiptId))throw new RemoteProtocolError('INVALID_ID',400);
@@ -92,7 +100,7 @@ export async function startRemoteNatsCenter({url,user='center',password,tls,allo
       try{
         const parts=msg.subject.split('.');const nodeId=uuid(parts[3]),operation=parts[4];
         if(parts.length!==5||!Object.hasOwn(calls,operation))throw new RemoteProtocolError('NOT_FOUND',404);
-        const lane=['commands','full_commands','claim','result_receipt'].includes(operation)?waits:['heartbeat','node_heartbeat','full_heartbeat'].includes(operation)?heartbeats:normal;
+        const lane=['commands','discover_commands','full_commands','claim','result_receipt'].includes(operation)?waits:['heartbeat','node_heartbeat','full_heartbeat'].includes(operation)?heartbeats:normal;
         release=await lane.acquire();
         const value=decode(msg.data);if(value?.version!==1||!value.params||typeof value.params!=='object')throw new RemoteProtocolError('INVALID_REQUEST',400);
         if(await (['heartbeat','node_heartbeat','full_heartbeat'].includes(operation)?heartbeatStore:store).authenticate(value.token)!==nodeId)throw new RemoteProtocolError('UNAUTHORIZED',401);
@@ -119,7 +127,9 @@ export async function startRemoteNatsCenter({url,user='center',password,tls,allo
         try{
           if(await resultStore.authenticate(value.token)!==nodeId)throw new RemoteProtocolError('UNAUTHORIZED',401);
           if(value.operation==='whole_channel_result'&&!resultWholeChannels)throw new RemoteProtocolError('WHOLE_CHANNEL_DISABLED',409);
-          const receipt=value.operation==='whole_channel_result'?await resultWholeChannels.receive(nodeId,{task_id:value.taskId},bytes)
+          if(value.operation==='discover_result'&&!resultDiscoverPages)throw new RemoteProtocolError('DISCOVER_DISABLED',409);
+          const receipt=value.operation==='discover_result'?await resultDiscoverPages.receive(nodeId,{task_id:value.taskId},bytes)
+            :value.operation==='whole_channel_result'?await resultWholeChannels.receive(nodeId,{task_id:value.taskId},bytes)
             :value.operation==='channel_result'?await resultChannelPlans.receive(nodeId,{task_id:value.taskId},bytes):await resultStore.receive(nodeId,value.taskId,bytes);
           response={ok:true,value:receipt};
         }catch(error){response=failure(error);if(response.status>=500)throw error;}

@@ -1320,32 +1320,54 @@ export async function fetchVideoOwnerSearchInitial(query, { language = DEFAULT_L
   return fetchSearchInitial(query, { language, country, filterParam: VIDEO_OWNER_FILTER_PARAM });
 }
 
-export async function fetchPopularThisYearVideoSearchInitial(
-  query,
-  { language = DEFAULT_LANGUAGE, country = DEFAULT_COUNTRY } = {},
-) {
-  return fetchSearchInitial(query, {
-    language,
-    country,
-    filterParam: VIDEO_POPULARITY_THIS_YEAR_FILTER_PARAM,
-  });
+// A Discover page makes exactly one YouTube request. Building, sending and
+// parsing it are separate so a remote node can send the request while the
+// center keeps parsing and every database decision.
+export function discoverSearchPageRequest({
+  kind,
+  queryText,
+  language = DEFAULT_LANGUAGE,
+  country = DEFAULT_COUNTRY,
+  ytConfig = null,
+  continuation = null,
+}) {
+  if (kind === "initial") {
+    return {
+      kind,
+      url: buildYoutubeSearchUrl(queryText, language, country, VIDEO_POPULARITY_THIS_YEAR_FILTER_PARAM),
+      init: { language },
+    };
+  }
+  if (kind === "continuation") {
+    if (!ytConfig?.apiKey) throw new Error("youtube innertube api key missing");
+    return {
+      kind,
+      url: `https://www.youtube.com/youtubei/v1/search?key=${encodeURIComponent(ytConfig.apiKey)}`,
+      init: {
+        method: "POST",
+        language,
+        headers: {
+          "content-type": "application/json",
+          "x-youtube-client-name": String(ytConfig.clientName ?? "1"),
+          "x-youtube-client-version": String(ytConfig.clientVersion ?? "2.20260706.00.00"),
+        },
+        body: JSON.stringify({ context: ytConfig.context, continuation }),
+      },
+    };
+  }
+  throw new Error(`unknown Discover page kind: ${kind}`);
 }
 
-export async function fetchSearchContinuation(ytConfig, continuation, { language = DEFAULT_LANGUAGE } = {}) {
-  if (!ytConfig?.apiKey) throw new Error("youtube innertube api key missing");
-  const response = await youtubeFetch(`https://www.youtube.com/youtubei/v1/search?key=${encodeURIComponent(ytConfig.apiKey)}`, {
-    method: "POST",
-    language,
-    headers: {
-      "content-type": "application/json",
-      "x-youtube-client-name": String(ytConfig.clientName ?? "1"),
-      "x-youtube-client-version": String(ytConfig.clientVersion ?? "2.20260706.00.00"),
-    },
-    body: JSON.stringify({
-      context: ytConfig.context,
-      continuation,
-    }),
-  });
+export async function requestDiscoverSearchPage(input) {
+  const request = discoverSearchPageRequest(input);
+  if (request.kind === "initial") {
+    const { text, status } = await youtubeText(request.url, request.init);
+    return {
+      kind: request.kind, url: request.url, status,
+      rawText: text, rawContentType: "text/html; charset=utf-8",
+    };
+  }
+  const response = await youtubeFetch(request.url, request.init);
   const text = await response.text();
   if (!response.ok) throw youtubeRequestError(`youtube search continuation failed ${response.status}: ${text.slice(0, 240)}`, {
     status: response.status,
@@ -1353,7 +1375,47 @@ export async function fetchSearchContinuation(ytConfig, continuation, { language
     source: "youtube_search_continuation",
     targetUrl: response.url,
   });
-  return { rawText: text, rawContentType: "application/json; charset=utf-8", initialData: JSON.parse(text), ytConfig };
+  return {
+    kind: request.kind, url: response.url, status: response.status,
+    rawText: text, rawContentType: "application/json; charset=utf-8",
+  };
+}
+
+export function parseDiscoverSearchPage(page, { ytConfig = null } = {}) {
+  if (page?.kind === "initial") {
+    return {
+      url: page.url,
+      rawText: page.rawText,
+      rawContentType: page.rawContentType,
+      initialData: extractYtInitialData(page.rawText),
+      ytConfig: extractYtConfig(page.rawText),
+    };
+  }
+  if (page?.kind === "continuation") {
+    return {
+      rawText: page.rawText,
+      rawContentType: page.rawContentType,
+      initialData: JSON.parse(page.rawText),
+      ytConfig,
+    };
+  }
+  throw new Error(`unknown Discover page kind: ${page?.kind}`);
+}
+
+export async function fetchPopularThisYearVideoSearchInitial(
+  query,
+  { language = DEFAULT_LANGUAGE, country = DEFAULT_COUNTRY } = {},
+) {
+  return parseDiscoverSearchPage(await requestDiscoverSearchPage({
+    kind: "initial", queryText: query, language, country,
+  }));
+}
+
+export async function fetchSearchContinuation(ytConfig, continuation, { language = DEFAULT_LANGUAGE } = {}) {
+  return parseDiscoverSearchPage(
+    await requestDiscoverSearchPage({ kind: "continuation", ytConfig, continuation, language }),
+    { ytConfig },
+  );
 }
 
 export function extractChannelCandidates(root, queryText = "", queryId = null, locale = DEFAULT_LANGUAGE) {

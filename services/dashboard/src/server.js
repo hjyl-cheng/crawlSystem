@@ -1,6 +1,7 @@
 import {statisticsClientScript} from './statisticsClient.js';
 import {createStatisticsCache} from './statisticsCache.js';
 import {migrationBatchPanel} from "./migrationBatchPanel.js";
+import {CANDIDATE_STATUSES,CANDIDATE_STATUS_LABELS,candidateFilters,loadCandidateList,loadCandidateStatistics,readCandidatesWithin} from "./candidateChannels.js";
 import { createServerNodeStore } from "./serverNodes.js";
 import { nodeDeletionFromEnv } from './serverNodeDeletion.js';
 import { nodeRuntimeFromEnv } from './serverNodeRuntime.js';
@@ -2210,6 +2211,7 @@ function layout({ title, active, body, mainClass = "" }) {
     ["/queries", "Query 词库", "queries"],
     ["/daily-clocks", "每日 Clock", "daily-clocks"],
     ["/channels", "频道列表", "channels"],
+    ["/candidates", "候选频道", "candidates"],
     ["/migration-channels", "迁移频道列表", "migration-channels"],
     ["/server-nodes", "服务器节点", "server-nodes"],
   ];
@@ -3777,6 +3779,84 @@ ${statisticsPanel('/api/channels/statistics',{q:filters.search,channel_status:fi
   });
 }
 
+function candidateMetricCards(stats) {
+  const s=stats.byStatus;
+  return `<section class="grid grid-4">
+  <div class="metric metric-blue"><div><div class="metric-label">候选总数</div><div class="metric-value">${fmtInt(stats.all)}</div></div><div class="metric-foot">当前筛选 ${fmtInt(stats.total)} 条</div></div>
+  <div class="metric"><div><div class="metric-label">待全量验证</div><div class="metric-value">${fmtInt(stats.pending)}</div></div><div class="metric-foot">待验证 ${fmtInt(s.discovered)} · 排队 ${fmtInt(s.queued)} · 验证中 ${fmtInt(s.validating)}</div></div>
+  <div class="metric"><div><div class="metric-label">已入库</div><div class="metric-value">${fmtInt(s.accepted)}</div></div><div class="metric-foot">已在库 ${fmtInt(s.existing)}</div></div>
+  <div class="metric"><div><div class="metric-label">不符合 / 失败</div><div class="metric-value">${fmtInt(s.rejected+s.failed)}</div></div><div class="metric-foot">不符合 ${fmtInt(s.rejected)} · 验证失败 ${fmtInt(s.failed)}</div></div>
+</section>`;
+}
+
+function candidateListPage(data) {
+  const { filters, candidates, batches } = data;
+  const params=offset=>{
+    const value=new URLSearchParams();
+    for(const [key,field] of [["batch","batch"],["status","status"],["q","search"],["from","from"],["to","to"]])if(filters[field])value.set(key,filters[field]);
+    value.set("limit",String(filters.limit));if(offset!==undefined)value.set("offset",String(offset));return value;
+  };
+  const batchOptions=[...batches];
+  if(filters.batch&&!batchOptions.some(b=>b.dispatch_batch_id===filters.batch))batchOptions.unshift({dispatch_batch_id:filters.batch});
+  const rows=candidates.map(c=>{
+    const subscribers=c.search_subscriber_count!=null?fmtInt(c.search_subscriber_count):c.search_subscriber_count_text?h(c.search_subscriber_count_text):'<span class="muted">搜索未提供</span>';
+    const reason=c.reject_reason||c.error_message;
+    return `<tr>
+      <td>${channelIdentityCell(c)}</td>
+      <td><span class="pill ${statusClass(c.status)}">${h(CANDIDATE_STATUS_LABELS[c.status]||c.status)}</span>${reason?`<div class="note">${h(reason)}</div>`:""}</td>
+      <td>${subscribers}</td>
+      <td>${h(c.query_text||"-")}<div class="note">第 ${h(c.page_no??"-")} 页 · 排名 ${h(c.rank_position??"-")}</div></td>
+      <td class="mono">${h(c.dispatch_batch_id)}</td>
+      <td class="mono">${timeText(c.created_at)}</td>
+      <td class="mono">${timeText(c.validation_finished_at||c.accepted_at)}</td>
+    </tr>`;
+  }).join("");
+  return layout({
+    title: "候选频道",
+    active: "candidates",
+    body: `
+<div class="topbar">
+  <div>
+    <div class="eyebrow">Query Discovery</div>
+    <h1>候选频道</h1>
+    <div class="sub">Query 找频道流程发现的频道。已在库和订阅数明确不达标的频道在发现时排除，其余经全量 channel-snapshot 验证后入库。来源：<span class="mono">crawler.channel_candidates</span>（source = youtube_search_discovery）。</div>
+  </div>
+  <div class="toolbar"><a class="btn" href="/candidates?${h(params().toString())}">刷新</a></div>
+</div>
+${data.error ? `<div class="alert alert-bad">${h(data.error)}</div>` : ""}
+
+${statisticsPanel('/api/candidates/statistics',{batch:filters.batch,q:filters.search,from:filters.from,to:filters.to,status:filters.status})}
+
+<section class="table-panel mt">
+  <div class="table-tools">
+    <div class="panel-head">
+      <div><h2>候选列表</h2><div class="note">按发现时间倒序；时间为北京时间</div></div>
+      <div class="toolbar">
+        ${filters.offset>0?`<a class="btn small-btn" href="/candidates?${h(params(Math.max(0,filters.offset-filters.limit)).toString())}">上一页</a>`:""}
+        ${data.hasNext?`<a class="btn small-btn" href="/candidates?${h(params(filters.offset+filters.limit).toString())}">下一页</a>`:""}
+      </div>
+    </div>
+    <form method="get" action="/candidates" class="filters">
+      <div class="field"><label>批次</label><select name="batch"><option value="">全部 Query 批次</option>${batchOptions.map(b=>`<option value="${h(b.dispatch_batch_id)}" ${filters.batch===b.dispatch_batch_id?"selected":""}>${h(b.dispatch_batch_id)}${b.started_at?` · ${h(timeText(b.started_at))}`:""}${b.status?` · ${h(b.status)}`:""}</option>`).join("")}</select></div>
+      <div class="field"><label>状态</label><select name="status"><option value="">全部</option>${CANDIDATE_STATUSES.map(s=>`<option value="${h(s)}" ${filters.status===s?"selected":""}>${h(CANDIDATE_STATUS_LABELS[s])}</option>`).join("")}</select></div>
+      <div class="field"><label>Query / 频道</label><input name="q" value="${h(filters.search)}" placeholder="query / channel / handle / title"></div>
+      <div class="field"><label>发现日期从</label><input name="from" type="date" value="${h(filters.from)}"></div>
+      <div class="field"><label>至</label><input name="to" type="date" value="${h(filters.to)}"></div>
+      <div class="field"><label>每页</label><input name="limit" type="number" min="1" max="500" value="${h(filters.limit)}"></div>
+      <input type="hidden" name="offset" value="0">
+      <button class="btn" type="submit">筛选</button>
+    </form>
+  </div>
+  <div class="table-scroll">
+    <table>
+      <thead><tr><th>频道</th><th>状态</th><th>搜索订阅数</th><th>来源 Query</th><th>批次</th><th>发现时间</th><th>验证完成</th></tr></thead>
+      <tbody>${rows||'<tr><td colspan="7" class="muted">没有符合条件的候选频道</td></tr>'}</tbody>
+    </table>
+  </div>
+</section>`,
+  });
+}
+
 function publicationComparisonStatus(status) {
   if (status === "matched") return { label: "完全一致", className: "good" };
   if (status === "pending") return { label: "投递中", className: "warn" };
@@ -4854,6 +4934,28 @@ app.get("/channels", async (req, res, next) => {
   try {
     res.type("html").send(channelListPage(await channelListData(req)));
   } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/candidates/statistics',async(req,res)=>{
+  res.set('Cache-Control','no-store');
+  try {
+    const stats=await loadCandidateStatistics({readStatistics,cache:statisticsCache,filters:candidateFilters(req.query)});
+    res.json({html:candidateMetricCards(stats),generatedAt:stats.generatedAt,stale:stats.stale});
+  }catch(error){
+    console.error('candidate statistics read failed',error?.message||String(error));
+    res.status(503).json({error:'统计暂不可用，列表仍可浏览'});
+  }
+});
+
+app.get("/candidates", async (req, res, next) => {
+  const filters=candidateFilters(req.query);
+  try {
+    const data=await loadCandidateList({read:(sql,args)=>readCandidatesWithin(pool,sql,args),filters});
+    res.type("html").send(candidateListPage({...data,filters}));
+  } catch (error) {
+    if (error?.code === "57014") return res.type("html").send(candidateListPage({filters,batches:[],candidates:[],hasNext:false,error:"候选列表查询超时，请缩小批次或时间范围后重试"}));
     next(error);
   }
 });

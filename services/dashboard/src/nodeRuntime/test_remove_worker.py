@@ -14,6 +14,9 @@ class RemoveWorkerTest(unittest.TestCase):
     def test_full_crawl_preserves_evidence(self):
         self.check_removal("full-crawl", "full_crawl_collect")
 
+    def test_discover_preserves_evidence(self):
+        self.check_removal("discover", "discover_collect")
+
     def test_removes_only_selected_container_preserves_files_and_retries(self):
         self.check_removal("incremental", "incremental_collect")
 

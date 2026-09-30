@@ -44,6 +44,7 @@ import {
 } from "./managedJobIntentStore.js";
 import { dispatchManagedQueryQualityBatch } from "./managedJobApi.js";
 import { loadIdentityPolicyCatalog } from "./identityPolicyCatalog.js";
+import { resolveDiscoverQueryLocale } from "./discoverQueryLocale.js";
 import { scoreQueryBatch } from "./queryQuality.js";
 import { closeQueues, createQueues, getQueueStats, queueNames, queuesByRole, safeJobId } from "./queues.js";
 
@@ -614,8 +615,7 @@ app.post("/api/discover/seed-due", async (req, res) => {
     const prepared = await managedJobIntentStore.prepareDiscoverPage({
       queryId: row.query_id,
       queryText: row.query_text,
-      language: row.language,
-      country: row.country,
+      ...resolveDiscoverQueryLocale(row, managedJobIntentStore.policies),
       category: row.category,
       pageNo,
       pageId,

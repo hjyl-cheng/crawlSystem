@@ -30,7 +30,7 @@ export class RemoteCenterExecutionSupervisor {
     incrementalProgress=incrementalProgressConfig(),mode='incremental_collect',createRuntime=null,createProcessor=null,recoverSlot=null,settleHandoffs=null,slotUnsettled=null}) {
     const workload=collectingWorkload(mode);
     if(!workload)throw new TypeError('unknown collecting workload');
-    if(mode==='full_crawl_collect' && ([createRuntime,createProcessor,recoverSlot,slotUnsettled].some(fn=>typeof fn!=='function')||(settleHandoffs!==false&&typeof settleHandoffs!=='function')))throw new TypeError('explicit full-crawl runtime, processor and recovery required');
+    if(mode!=='incremental_collect' && ([createRuntime,createProcessor,recoverSlot,slotUnsettled].some(fn=>typeof fn!=='function')||(settleHandoffs!==false&&typeof settleHandoffs!=='function')))throw new TypeError('explicit full-crawl runtime, processor and recovery required');
     createRuntime??=args=>new RemoteManagedIncrementalRuntime(args);createProcessor??=createCenterIncrementalProcessor;
     recoverSlot??=recoverRemoteSlot;settleHandoffs??=settleTerminalRemoteHandoffs;slotUnsettled??=remoteSlotUnsettled;
     Object.assign(this,{workload,recoverSlot,settleHandoffs,slotUnsettled,incrementalProgress});
@@ -178,7 +178,7 @@ export class RemoteCenterExecutionSupervisor {
           return !!current?.alive && !this.isWorkerPaused(current) && !current.retirement_id && current.enabled && same(entry.row,current) && await this.verifyExecution(client,current);
         }});
       entry.runtime=runtime;
-      entry.rota=this.createRota({client:this.rotaClient,role:'channel',workerId:row.rota_worker_id,workerInstanceId:entry.supervisorId,
+      entry.rota=this.createRota({client:this.rotaClient,role:this.workload.rotaRole,workerId:row.rota_worker_id,workerInstanceId:entry.supervisorId,
         resolvedPolicy:this.resolvedPolicy,proxyBaseUrl:this.proxyBaseUrl,proxyPassword:this.proxyPassword,identityRuntime:runtime});
       const process=this.createProcessor({channelStore:this.channelStore,runtime,rota:entry.rota,resolvedPolicy:this.resolvedPolicy,
         createApiFallback:this.createApiFallback,ready:()=>this.ready(entry),report:this.report});
@@ -188,7 +188,12 @@ export class RemoteCenterExecutionSupervisor {
       },{connection:this.connection,prefix:this.prefix,
         concurrency:1,autorun:false,name:intakeWorkerName('remote',`${row.node_id}-${row.slot}`)});
       entry.worker.on('error',()=>this.report({event:'remote_center_queue_error',node_id:row.node_id,slot:row.slot}));
-      entry.worker.on('failed',(job,error)=>this.report({event:'remote_center_job_failed',node_id:row.node_id,slot:row.slot,job_id:job?.id,code:error?.code??error?.name}));
+      entry.worker.on('failed',(job,error)=>{
+        this.report({event:'remote_center_job_failed',node_id:row.node_id,slot:row.slot,job_id:job?.id,code:error?.code??error?.name});
+        // Workloads that settle terminal business state on BullMQ failure (as
+        // the local worker's failed handler does) expose it on the processor.
+        void process.recordFailed?.(job,error);
+      });
       stage='queue';
       await entry.worker.waitUntilReady();
       // BullMQ waitUntilReady returns its blocking dequeue connection. That

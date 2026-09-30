@@ -1,14 +1,15 @@
-import {nodeWorkerRole} from '../nodeWorkerTypes.js';
+import {nodeWorkerRole,nodeWorkerRoleForMode,nodeWorkerTypes} from '../nodeWorkerTypes.js';
 
-export const workerSlotPrefix = node => nodeWorkerRole(node)==='fullcrawl'?'full-crawl':'incremental';
+export const workerSlotPrefix = node => nodeWorkerTypes[nodeWorkerRole(node)]?.slotPrefix??'incremental';
 
 export function deploymentSlots(deployment) {
-  const prefix=deployment?.mode==='full_crawl_collect'?'full-crawl':'incremental';
+  const prefix=nodeWorkerTypes[nodeWorkerRoleForMode(deployment?.mode)]?.slotPrefix??'incremental';
   return deployment?.slots??Array.from({length:deployment?.appliedCount??0},(_,i)=>`${prefix}-${i+1}`);
 }
 
 export function plannedWorkerSlots(node,count) {
-  const prior=node.deployment;
+  // A retired deployment of another function type numbers its new Workers from 1.
+  const prior=node.deployment?.mode===nodeWorkerTypes[nodeWorkerRole(node)]?.mode?node.deployment:null;
   const prefix=workerSlotPrefix(node);
   const pattern=new RegExp(`^${prefix}-[1-9][0-9]*$`);
   const slots=[...(prior?.allocationSlots??deploymentSlots(prior))];

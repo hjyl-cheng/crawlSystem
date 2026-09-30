@@ -368,3 +368,18 @@ test("failure selection returns one complete cause node", () => {
   assert.equal(evidence.source, "youtubejs_player");
   assert.equal(evidence.target_url, "https://www.youtube.com/youtubei/v1/player");
 });
+
+test("a proxy that refuses the HTTPS tunnel is a proxy transport failure, locally and after the remote wire", async () => {
+  const { retryableRotaFailure } = await import("../src/managedWorkerExecution.js");
+  const { fromChannelWire, toChannelWire } = await import("../src/remoteNodes/channelWire.js");
+  // The chain undici's fetch raises when the proxy answers CONNECT with a non-200 status.
+  const tunnel = Object.assign(new Error("Proxy response (502) !== 200 when HTTP Tunneling"), { code: "UND_ERR_ABORTED" });
+  const refused = new TypeError("fetch failed", { cause: new Error("Request was cancelled.", { cause: tunnel }) });
+  for (const error of [refused, fromChannelWire(toChannelWire(refused))]) {
+    assert.equal(selectYoutubeFailure({ error }).decision.kind, "proxy_transport");
+    assert.deepEqual(retryableRotaFailure(error), { observation: "proxy_transport", source: "youtube_managed_request" });
+  }
+  assert.equal(decideYoutubeFailure({ error: new Error("Proxy response (403) !== 200 when HTTP Tunneling") }).kind, "proxy_transport");
+  // An ordinary network failure without proxy evidence keeps its previous classification.
+  assert.notEqual(selectYoutubeFailure({ error: new TypeError("fetch failed", { cause: new Error("other side closed") }) }).decision.kind, "proxy_transport");
+});

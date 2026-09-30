@@ -4,12 +4,13 @@ import {randomUUID} from 'node:crypto';
 import {once} from 'node:events';
 import express from 'express';
 import pg from 'pg';
+import {nodeWorkerTypes} from './nodeWorkerTypes.js';
 import {createServerNodeStore} from './serverNodes.js';
 import {createNodeWorkerDeployment} from './serverNodeWorkerDeployment.js';
 import {serverNodesRoutes} from './serverNodesRoutes.js';
 import {allowDashboardRequestDuringControlledMigration} from './controlledWritePolicy.js';
 const url=process.env.SERVER_NODES_TEST_DATABASE_URL;
-for(const role of ['incremental','fullcrawl'])test('page deployment freezes saved count, persists progress, retries and expands without changing old workers',{skip:!url},async t=>{
+for(const role of ['incremental','fullcrawl','discover'])test('page deployment freezes saved count, persists progress, retries and expands without changing old workers',{skip:!url},async t=>{
  assert.equal(new URL(url).pathname,'/server_nodes_dashboard_test');
  const pool=new pg.Pool({connectionString:url});let server;t.after(async()=>{if(server)await new Promise(resolve=>{server.close(resolve);server.closeAllConnections();});await pool.end();});
  assert.equal((await pool.query('SELECT current_database() AS name')).rows[0].name,'server_nodes_dashboard_test');
@@ -32,15 +33,15 @@ for(const role of ['incremental','fullcrawl'])test('page deployment freezes save
    if(changeDuringDeployment)allowedCount=1;
  },close(){}};
  const image='registry.example/collect@sha256:'+'a'.repeat(64);const gatewayUrl='https://center.example';
- const deployment=createNodeWorkerDeployment({store,center,ssh,image,fullCrawlImage:image,fullCrawlDeploymentEnabled:true,gatewayUrl,natsUrl:'tls://messages.example:4222',pollMs:1,waitMs:50,registryCredentials:async()=>({server:'registry.example',username:'node-pull',password:'c'.repeat(64)})});
+ const deployment=createNodeWorkerDeployment({store,center,ssh,image,fullCrawlImage:image,fullCrawlDeploymentEnabled:true,discoverImage:image,discoverDeploymentEnabled:true,gatewayUrl,natsUrl:'tls://messages.example:4222',pollMs:1,waitMs:50,registryCredentials:async()=>({server:'registry.example',username:'node-pull',password:'c'.repeat(64)})});
  const app=express();app.use(express.json());app.use((req,res,next)=>allowDashboardRequestDuringControlledMigration(req.method,req.path)?next():res.sendStatus(423));
- app.use(serverNodesRoutes({store,layout:({body})=>body,workerDeployment:deployment,deploymentEnvironment:{SERVER_NODE_COLLECT_IMAGE:image,SERVER_NODE_FULL_CRAWL_IMAGE:image,SERVER_NODE_FULL_CRAWL_DEPLOYMENT_ENABLED:'true',SERVER_NODE_GATEWAY_URL:gatewayUrl,SERVER_NODE_NATS_URL:'tls://messages.example:4222'}}));
+ app.use(serverNodesRoutes({store,layout:({body})=>body,workerDeployment:deployment,deploymentEnvironment:{SERVER_NODE_COLLECT_IMAGE:image,SERVER_NODE_FULL_CRAWL_IMAGE:image,SERVER_NODE_FULL_CRAWL_DEPLOYMENT_ENABLED:'true',SERVER_NODE_DISCOVER_IMAGE:image,SERVER_NODE_DISCOVER_DEPLOYMENT_ENABLED:'true',SERVER_NODE_GATEWAY_URL:gatewayUrl,SERVER_NODE_NATS_URL:'tls://messages.example:4222'}}));
  server=app.listen(0,'127.0.0.1');await once(server,'listening');const base=`http://127.0.0.1:${server.address().port}/api/server-nodes/${node.id}`;
  const post=body=>fetch(base+'/deploy-workers',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
  assert.equal((await post({version:1,image:'unsafe'})).status,400);assert.equal(begins,0);
  const listed=await (await fetch(base.slice(0,base.lastIndexOf('/')))).json();
- assert.equal(listed.capabilities.fullCrawlDeployment,true);
- const preview=await (await fetch(base+'/worker-deployment')).json();assert.equal(preview.mode,role==='fullcrawl'?'full_crawl_collect':'incremental_collect');assert.equal(preview.memoryLimitMiB,768);assert.equal(begins,0);
+ assert.equal(listed.capabilities.fullCrawlDeployment,true);assert.equal(listed.capabilities.discoverDeployment,true);
+ const preview=await (await fetch(base+'/worker-deployment')).json();assert.equal(preview.mode,nodeWorkerTypes[role].mode);assert.equal(preview.memoryLimitMiB,768);assert.equal(begins,0);
  assert.equal((await post({version:0,password:'fixture-password'})).status,409);assert.equal(begins,0);
  assert.equal((await post({version:1,password:'fixture-password'})).status,202);await deployment.waitForIdle();
  let registry=await store.load();assert.ok(Date.parse(registry.nodes[0].deployment.deadline)-Date.parse(registry.nodes[0].deployment.startedAt)>=40*60000,'deployment deadline must cover the 30-minute image pull plus startup and connection checks');assert.equal(registry.nodes[0].deployment.state,'failed');assert.equal(registry.nodes[0].deployment.steps.pull,'failed');
@@ -50,7 +51,7 @@ for(const role of ['incremental','fullcrawl'])test('page deployment freezes save
  const values=Object.fromEntries(['name','host','port','username','kind','notes','sshAlias','workers'].map(k=>[k,node[k]]));
  registry=await store.save({id:node.id,version:registry.version,node:{...values,workers:[{role,count:2}]}});
  assert.equal((await post({version:registry.version,password:'fixture-password'})).status,202);await deployment.waitForIdle();
- registry=await store.load();assert.equal(registry.nodes[0].deployment.appliedCount,2);assert.equal(plans[0].files[`${role==='fullcrawl'?'full-crawl':'incremental'}-1.json`],plans.at(-1).files[`${role==='fullcrawl'?'full-crawl':'incremental'}-1.json`]);
+ registry=await store.load();assert.equal(registry.nodes[0].deployment.appliedCount,2);assert.equal(plans[0].files[`${nodeWorkerTypes[role].slotPrefix}-1.json`],plans.at(-1).files[`${nodeWorkerTypes[role].slotPrefix}-1.json`]);
  registry=await store.save({id:node.id,version:registry.version,node:values});
  const calls=begins;assert.equal((await post({version:registry.version,password:'fixture-password'})).status,409);assert.equal(begins,calls);
  assert.equal((await store.deletionCheck(node.id)).allowed,false);
@@ -108,5 +109,5 @@ for(const role of ['incremental','fullcrawl'])test('page deployment freezes save
  assert.equal((await post({version:registry.version,additionalCount:29,role,expectedInstalledCount:21,syncIntake:true,expectedAllowedCount:21,password:'fixture-password'})).status,202);
  await deployment.waitForIdle();registry=await store.load();
  assert.equal(registry.nodes[0].deployment.appliedCount,50);assert.equal(allowedCount,1);
- assert.equal(plans.at(-1).files[`${role==='fullcrawl'?'full-crawl':'incremental'}-1.json`],plans[0].files[`${role==='fullcrawl'?'full-crawl':'incremental'}-1.json`]);
+ assert.equal(plans.at(-1).files[`${nodeWorkerTypes[role].slotPrefix}-1.json`],plans[0].files[`${nodeWorkerTypes[role].slotPrefix}-1.json`]);
 });

@@ -1,4 +1,4 @@
-import { nodeWorkerTypes, nodeWorkerRole, nodeWorkerType, workerTypeDescription } from '/assets/node-worker-types.js';
+import { nodeWorkerTypes, nodeWorkerRole, nodeWorkerType, workerTypeDescription, deploymentRetired } from '/assets/node-worker-types.js';
 
 const $ = id => document.getElementById(id);
 const escapeHtml = value => String(value ?? "").replace(/[&<>"']/g, char => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[char]));
@@ -16,6 +16,7 @@ let initializeId = null;
 let closeInitializationOnSuccess = false;
 let workerDeploymentAvailable = false;
 let fullCrawlDeploymentAvailable = false;
+let discoverDeploymentAvailable = false;
 let workerRemovalAvailable = false;
 let runtimeAvailable = false;
 let runtimeId = null;
@@ -110,8 +111,9 @@ function renderWorkerManager() {
   const state=executionStates.get(node.id),counts=state?.counts,known=!!counts&&!state.error;
   const d=node.deployment,removing=node.workerRemoval&&!['completed','rejected'].includes(node.workerRemoval.state),running=deploymentRunning(node),busy=!!$('node-worker-manager').dataset.saving||!!removing;
   const installed=installedCount(node);
-  const full=nodeWorkerRole(node)==='fullcrawl';
-  const workerType=nodeWorkerType(node),deployable=workerType?.deployable===true&&(!full||fullCrawlDeploymentAvailable);
+  const role=nodeWorkerRole(node),dedicatedAvailable={fullcrawl:fullCrawlDeploymentAvailable,discover:discoverDeploymentAvailable};
+  const dedicated=Object.hasOwn(dedicatedAvailable,role);
+  const workerType=nodeWorkerType(node),deployable=workerType?.deployable===true&&(!dedicated||dedicatedAvailable[role]);
   const workerLabel=workerType?.label??'未知类型';
   $('worker-manager-name').textContent=node.name;
   $('worker-manager-summary').innerHTML=executionPanel(node);
@@ -128,12 +130,12 @@ function renderWorkerManager() {
   $('worker-deployment-count').disabled=busy||running||!deployable;
   $('worker-deployment-role').disabled=true;
   $('worker-deployment-password-field').hidden=running||!deployable;
-  $('worker-deployment-impact').textContent=!deployable?(full?'全量节点部署尚未开放。':workerTypeDescription(workerType)):running?`正在部署至 ${d.desiredCount} 个。已确认部署 ${installed} 个，进度会自动更新。`
+  $('worker-deployment-impact').textContent=!deployable?(dedicated?`${workerLabel}节点部署尚未开放。`:workerTypeDescription(workerType)):running?`正在部署至 ${d.desiredCount} 个。已确认部署 ${installed} 个，进度会自动更新。`
     :valid?`已有 ${workerManager.expectedInstalledCount} 个${workerLabel} Worker ＋ 本次新增 ${additional} 个 ＝ 新增后共 ${target} 个。节点开启接单后全部 Worker 自动参与。`
     :'请输入有效的新增数量（正整数）。';
   const memoryRequired=(target*256+1536)/1024,memoryTotal=observations.get(node.id)?.metrics?.memoryTotalGiB;
   $('worker-deployment-memory').textContent=valid&&deployable
-    ?full?`每个全量 Worker 内存上限 768 MiB，${target} 个合计上限 ${(target*768/1024).toFixed(2)} GiB；每个 Worker 采集暂存上限 256 MiB。请按实际内存和磁盘余量安排数量。`:`内存参考：按每个 Worker 256 MiB ＋ 系统预留 1.5 GiB 估算，${target} 个约需 ${memoryRequired.toFixed(2)} GiB。${Number.isFinite(memoryTotal)?` 本机总内存约 ${Number(memoryTotal).toFixed(2)} GiB。`:''}仅供参考，不限制新增数量，请按实际运行情况自行安排。`:'';
+    ?dedicated?`每个${workerLabel} Worker 内存上限 768 MiB，${target} 个合计上限 ${(target*768/1024).toFixed(2)} GiB；每个 Worker 采集暂存上限 256 MiB。请按实际内存和磁盘余量安排数量。`:`内存参考：按每个 Worker 256 MiB ＋ 系统预留 1.5 GiB 估算，${target} 个约需 ${memoryRequired.toFixed(2)} GiB。${Number.isFinite(memoryTotal)?` 本机总内存约 ${Number(memoryTotal).toFixed(2)} GiB。`:''}仅供参考，不限制新增数量，请按实际运行情况自行安排。`:'';
   $('worker-deployment-save').disabled=busy||running||!workerDeploymentAvailable||node.runtime?.state!=='ready'||!valid||!deployable;
   $('worker-deployment-save').textContent=!deployable?'远程部署暂未开放':running?'正在新增…':`新增 ${Number.isInteger(additional)&&additional>0?additional:'—'} 个${workerLabel} Worker`;
   $('worker-allowed-label').textContent=known?`已部署 ${installed} 个 · ${(state.intakeEnabled??state.requested)?'全部参与接单':'当前暂停接单'}`:'等待接单状态';
@@ -158,7 +160,7 @@ function renderWorkerRemoval(node,state){
   const busy=!!$('node-worker-manager').dataset.saving||deploymentRunning(node)||inProgress;
   $('worker-removal-status').textContent=removal?inProgress?`正在核实并删除 ${removal.slot}，可以关闭窗口等待。`
     :removal.state==='completed'?`${removal.slot} 已删除。`:removal.error||'上次删除中断，可重试继续。':'';
-  const installedSlots=new Set(node.deployment?.slots??Array.from({length:installedCount(node)},(_,i)=>`${nodeWorkerRole(node)==='fullcrawl'?'full-crawl':'incremental'}-${i+1}`));
+  const installedSlots=new Set(node.deployment?.slots??Array.from({length:installedCount(node)},(_,i)=>`${nodeWorkerType(node)?.slotPrefix??'incremental'}-${i+1}`));
   const rows=known?[...(state.workers??[])].filter(w=>installedSlots.has(w.slot)).sort((a,b)=>a.slot.localeCompare(b.slot,'en',{numeric:true})):[];
   $('worker-removal-list').innerHTML=known?rows.map(w=>{
     const retry=pending&&removal.slot===w.slot&&!inProgress;
@@ -261,6 +263,7 @@ async function refresh(quiet = false) {
     runtimeAvailable = registry.capabilities?.runtime === true;
     workerDeploymentAvailable = registry.capabilities?.workerDeployment === true;
     fullCrawlDeploymentAvailable = registry.capabilities?.fullCrawlDeployment === true;
+    discoverDeploymentAvailable = registry.capabilities?.discoverDeployment === true;
     workerRemovalAvailable = registry.capabilities?.workerRemoval === true;
     if (!quiet) announce("");
     render();
@@ -318,9 +321,10 @@ function openEditor(node = null) {
 function updateEditorWorkerType() {
   const form=$('node-form'),role=form.elements.workerRole.value;
   $('node-worker-role-field').hidden=form.elements.kind.value!=='execution';
-  form.elements.workerRole.disabled=!!editor?.node?.deployment;
-  $('node-worker-role-help').textContent=editor?.node?.deployment
-    ? '已有 Worker 部署记录，功能类型固定。'
+  const locked=!!editor?.node?.deployment && !deploymentRetired(editor.node.deployment);
+  form.elements.workerRole.disabled=locked;
+  $('node-worker-role-help').textContent=locked
+    ? '已有 Worker 部署记录，功能类型固定；删除全部 Worker 后可切换。'
     : workerTypeDescription(nodeWorkerTypes[role]);
 }
 $('node-worker-role').addEventListener('change',updateEditorWorkerType);

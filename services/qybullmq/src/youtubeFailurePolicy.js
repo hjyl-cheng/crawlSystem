@@ -296,7 +296,8 @@ function decideYoutubeFailureBranch({
     return decision("content_terminal", { retryMode: "none", terminal: true, status: httpStatus });
   }
 
-  const explicitProxyTransport = /proxyerror|proxy[_ ]unavailable|proxy connection|tunnel connection|socks(?:4|5)? connection|proxy authentication|\b407\b/i
+  // undici reports a refused CONNECT as "Proxy response (502) !== 200 when HTTP Tunneling".
+  const explicitProxyTransport = /proxyerror|proxy[_ ]unavailable|proxy connection|tunnel connection|socks(?:4|5)? connection|proxy authentication|\b407\b|proxy response \(\d{3}\) !== 200 when http tunneling/i
     .test(text);
   const ambiguousTlsTransport = /wrong[_ ]version[_ ]number|ssl routines/i.test(text);
   const proxyTransport = explicitProxyTransport

@@ -81,6 +81,7 @@ import {
   PostgresMigrationRetryIntentRepository,
 } from "./migrationRetryIntent.js";
 import { ManagedPolicyUnavailableError } from "./managedJobIntents.js";
+import { resolveDiscoverQueryLocale } from "./discoverQueryLocale.js";
 import { settleCompletedMigrationBatch } from "./migrationBatchCompletion.js";
 import { dispatchFinalizeForRun } from "./finalizeDispatch.js";
 import {
@@ -1719,8 +1720,7 @@ async function enqueueResumableDiscoveryPages(scheduler, limit, actions) {
     const result = await enqueueDiscoverPage({
       queryId: row.query_id,
       queryText: row.query_text,
-      language: row.language,
-      country: row.country,
+      ...resolveDiscoverQueryLocale(row, managedIdentityPolicies),
       category: row.category,
       pageNo: nextPageNo,
       pageId: nextPageId,
@@ -1976,19 +1976,27 @@ async function enqueueDueQueryStarts(scheduler, limit, actions) {
     const pageNo = 1;
     const discoveryRunId = `query:${row.query_id}:run:${Date.now()}:${nanoid(8)}`;
     const pageId = discoveryPageId(discoveryRunId, pageNo);
-    const result = await enqueueDiscoverPage({
-      queryId: row.query_id,
-      queryText: row.query_text,
-      language: row.language,
-      country: row.country,
-      category: row.category,
-      pageNo,
-      pageId,
-      discoveryRunId,
-      pipelineCycleId: scheduler.pipeline_cycle_id,
-      dispatchBatchId: scheduler.pipeline_cycle_id,
-      priority: row.priority,
-    });
+    const locale = resolveDiscoverQueryLocale(row, managedIdentityPolicies);
+    let result;
+    try {
+      result = await enqueueDiscoverPage({
+        queryId: row.query_id,
+        queryText: row.query_text,
+        ...locale,
+        category: row.category,
+        pageNo,
+        pageId,
+        discoveryRunId,
+        pipelineCycleId: scheduler.pipeline_cycle_id,
+        dispatchBatchId: scheduler.pipeline_cycle_id,
+        priority: row.priority,
+      });
+    } catch (error) {
+      // One Query without a usable Identity Policy must not stop the tick.
+      if (!(error instanceof ManagedPolicyUnavailableError) && !/^(language|country) is required$/.test(error?.message)) throw error;
+      actions.push({ action: "defer-discovery-query-locale", query_id: row.query_id, language: locale.language, country: locale.country });
+      continue;
+    }
     if (result.created) {
       await addDispatchQuery(scheduler.pipeline_cycle_id, row.query_id);
       created += 1;

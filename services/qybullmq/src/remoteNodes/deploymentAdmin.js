@@ -1,6 +1,6 @@
 import {randomBytes,createPublicKey,timingSafeEqual} from 'node:crypto';
 import {parseWorkerConfig} from './workerConfig.js';
-import {collectingWorkload,FULL_CRAWL_WORKLOAD} from './collectingWorkload.js';
+import {collectingWorkload,DISCOVER_WORKLOAD,FULL_CRAWL_WORKLOAD} from './collectingWorkload.js';
 import {fullCrawlSlotUnsettled} from './fullCrawlCenterRecovery.js';
 import {hash,RemoteProtocolError,uuid} from './protocol.js';
 import {selectIntakeWorkers,intakeStatus} from './intakeSelection.js';
@@ -12,23 +12,26 @@ const fail=code=>{throw new RemoteProtocolError(code);};
 // A separate center credential authorizes Dashboard deployment. Node tokens can
 // neither enroll nodes nor enable Workers. Credentials are recoverable only by
 // the center, encrypted with the route store's existing authenticated cipher.
-export function createRemoteDeploymentAdmin({store,routes,token,image,gatewayUrl,activation=null,execution=null,capacity=null,localIntake=null,natsProvisioning=null,fullCrawl=null}){
+export function createRemoteDeploymentAdmin({store,routes,token,image,gatewayUrl,activation=null,execution=null,capacity=null,localIntake=null,natsProvisioning=null,fullCrawl=null,discover=null}){
   if(typeof token!=='string' || token.length<32 || !/^[a-z0-9][a-z0-9./:_-]*@sha256:[a-f0-9]{64}$/.test(image))throw new TypeError('fixed deployment image and admin token required');
   if(fullCrawl&&(!/^[a-z0-9][a-z0-9./:_-]*@sha256:[a-f0-9]{64}$/.test(fullCrawl.image)||fullCrawl.image===image))throw new TypeError('dedicated fixed full-crawl image required');
-  const executionFor=row=>row.mode===FULL_CRAWL_WORKLOAD.mode?fullCrawl?.execution:execution;
-  const activationFor=row=>row.mode===FULL_CRAWL_WORKLOAD.mode?fullCrawl?.activation:activation;
+  if(discover&&(!/^[a-z0-9][a-z0-9./:_-]*@sha256:[a-f0-9]{64}$/.test(discover.image)||[image,fullCrawl?.image].includes(discover.image)))throw new TypeError('dedicated fixed discover image required');
+  const dedicated=row=>row.mode===FULL_CRAWL_WORKLOAD.mode?fullCrawl:row.mode===DISCOVER_WORKLOAD.mode?discover:null;
+  const executionFor=row=>row.mode===FULL_CRAWL_WORKLOAD.mode||row.mode===DISCOVER_WORKLOAD.mode?dedicated(row)?.execution:execution;
+  const activationFor=row=>row.mode===FULL_CRAWL_WORKLOAD.mode||row.mode===DISCOVER_WORKLOAD.mode?dedicated(row)?.activation:activation;
+  const slotPatterns={incremental:/^incremental-[1-9][0-9]*\.json$/,fullcrawl:/^full-crawl-[1-9][0-9]*\.json$/,discover:/^discover-[1-9][0-9]*\.json$/};
   const paused=row=>executionFor(row)?.isWorkerPaused?.(row)===true;
   const endpoint=new URL(gatewayUrl);if(endpoint.protocol!=='https:' || endpoint.username || endpoint.password || endpoint.search || endpoint.hash)throw new TypeError('HTTPS gateway required');
   const publicKey=createPublicKey(routes.privateKey).export({type:'spki',format:'pem'});
   return {
-    retire:createWorkerRetirement({store,execution,fullCrawlExecution:fullCrawl?.execution}),
+    retire:createWorkerRetirement({store,execution,fullCrawlExecution:fullCrawl?.execution,discoverExecution:discover?.execution}),
     authenticate(value){const bytes=Buffer.from(value??'');const secret=Buffer.from(token);if(bytes.length!==secret.length || !timingSafeEqual(bytes,secret))throw new RemoteProtocolError('UNAUTHORIZED',401);},
     async prepare(value){
-      if(!value || Object.keys(value).some(key=>!['nodeId','deploymentId','image','files'].includes(key)) || ![image,fullCrawl?.image].filter(Boolean).includes(value.image)
+      if(!value || Object.keys(value).some(key=>!['nodeId','deploymentId','image','files'].includes(key)) || ![image,fullCrawl?.image,discover?.image].filter(Boolean).includes(value.image)
         || !value.files || typeof value.files!=='object' || Array.isArray(value.files))throw new RemoteProtocolError('INVALID_DEPLOYMENT',400);
       uuid(value.nodeId);uuid(value.deploymentId);
-      const workload=collectingWorkload(value.image===image?'incremental_collect':FULL_CRAWL_WORKLOAD.mode);
-      const slotPattern=workload.role==='fullcrawl'?/^full-crawl-[1-9][0-9]*\.json$/:/^incremental-[1-9][0-9]*\.json$/;
+      const workload=collectingWorkload(value.image===image?'incremental_collect':value.image===fullCrawl?.image?FULL_CRAWL_WORKLOAD.mode:DISCOVER_WORKLOAD.mode);
+      const slotPattern=slotPatterns[workload.role];
       const names=Object.keys(value.files);if(names.length<1)throw new RemoteProtocolError('INVALID_DEPLOYMENT',400);
       const configs=names.map(name=>{
         if(!slotPattern.test(name))throw new RemoteProtocolError('INVALID_DEPLOYMENT',400);
@@ -210,7 +213,7 @@ export function createRemoteDeploymentAdmin({store,routes,token,image,gatewayUrl
       });
       // Network inspection must not hold a business database transaction open.
       if(result.workers.some(w=>w.preparation==='waiting_network')){
-        const owner=result.workers[0]?.slot.startsWith('full-crawl-')?fullCrawl?.execution:execution;
+        const owner=result.workers[0]?.slot.startsWith('full-crawl-')?fullCrawl?.execution:result.workers[0]?.slot.startsWith('discover-')?discover?.execution:execution;
         result.networkCapacity=await owner?.networkCapacity?.()??null;
       }
       return result;

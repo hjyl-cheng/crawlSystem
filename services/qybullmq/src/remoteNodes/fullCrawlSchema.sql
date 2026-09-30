@@ -1,18 +1,24 @@
 -- P2 isolated schema draft. Apply explicitly after the existing remote schemas.
 -- No startup/production migration imports this file. Existing tasks retain the
 -- only transport lease; these tables store full-crawl execution evidence.
+-- Shared workload constraints: keep identical in every schema file that
+-- defines them, so re-applying any one never narrows another workload.
 ALTER TABLE remote_ingestion.worker_connections
   DROP CONSTRAINT IF EXISTS worker_connections_role_check,
-  ADD CONSTRAINT worker_connections_role_check CHECK (role IN ('incremental','fullcrawl'));
+  ADD CONSTRAINT worker_connections_role_check CHECK (role IN ('incremental','fullcrawl','discover'));
 ALTER TABLE remote_ingestion.worker_connections
   DROP CONSTRAINT IF EXISTS worker_connections_mode_check,
-  ADD CONSTRAINT worker_connections_mode_check CHECK (mode IN ('connect_only','incremental_collect','full_crawl_collect'));
+  ADD CONSTRAINT worker_connections_mode_check
+    CHECK (mode IN ('connect_only','incremental_collect','full_crawl_collect','discover_collect'));
 ALTER TABLE remote_ingestion.worker_connections
   DROP CONSTRAINT IF EXISTS worker_connections_workload_check,
   ADD CONSTRAINT worker_connections_workload_check CHECK (
-    (role='incremental' AND mode IN ('connect_only','incremental_collect') AND slot NOT LIKE 'full-crawl-%')
+    (role='incremental' AND mode IN ('connect_only','incremental_collect')
+      AND slot NOT LIKE 'full-crawl-%' AND slot NOT LIKE 'discover-%')
     OR (role='fullcrawl' AND mode='full_crawl_collect' AND slot ~ '^full-crawl-[1-9][0-9]*$'
       AND (runtime_revision IS NULL OR runtime_revision='youtubejs-full-crawl-v1'))
+    OR (role='discover' AND mode='discover_collect' AND slot ~ '^discover-[1-9][0-9]*$'
+      AND (runtime_revision IS NULL OR runtime_revision='youtube-search-discover-v1'))
   );
 
 CREATE TABLE IF NOT EXISTS remote_ingestion.full_crawl_executions (
